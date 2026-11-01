@@ -25,7 +25,9 @@
 use std::sync::{Arc, RwLock};
 
 use super::terraforged::{java_max, java_min, lerp, map, round};
-use super::terraforged_engine::{Cell, Levels, TerrainProperties};
+use super::terraforged_engine::{
+    Cell, ControlPoints, Levels, Terrain, TerrainProperties, TerrainRegistry, WorldControlPoints,
+};
 
 /// Engine's `FilterSettings.Smoothing` (defaults: one iteration, radius 1.8, rate 0.9). Engine's
 /// `@Range` limits (iterations and radius 0 to 5, rate 0 to 1) are only enforced by its settings UI,
@@ -272,6 +274,83 @@ fn java_cell_raw(map: &impl Filterable, x: i32, z: i32) -> Option<&Cell> {
     usize::try_from(index)
         .ok()
         .and_then(|index| map.backing().get(index))
+}
+
+/// Engine's `BeachDetect` filter: turns a coast cell (`isCoast`: coast, beach, or a terrain
+/// delegating to one) whose continent edge is below the beach control point into the world's
+/// beach terrain when the squared height gradient across the cells 8 blocks to the east and west
+/// and to the north and south is below 0.275. A neighbour that is absent or outside the map
+/// (`Tile.getCellRaw`'s `Cell.empty()`) is replaced by the cell itself and shortens the distance
+/// from 17 by 8. Engine's unused `grad2` field is not kept.
+#[derive(Clone, Debug)]
+pub struct BeachDetect {
+    transition: ControlPoints,
+    beach: Terrain,
+}
+
+impl BeachDetect {
+    const RADIUS: i32 = 8;
+    const DIAMETER: i32 = 17;
+
+    /// `new BeachDetect(context)`: `points` is `context.settings.world.controlPoints` (validated by
+    /// `ControlPoints`, which falls back to the defaults); `terrains` is the world's registry, whose
+    /// built-in `beach` the filter assigns.
+    pub fn new(points: WorldControlPoints, terrains: &TerrainRegistry) -> Self {
+        Self {
+            transition: ControlPoints::new(points),
+            beach: terrains.get_by_id(4),
+        }
+    }
+
+    /// `apply(map, seedX, seedZ, iterations)`: one pass over every cell, row by row (Engine's
+    /// `Filter.iterate`); the seeds and the iteration count are unused, as in Engine.
+    pub fn apply(&self, map: &mut impl Filterable, _seed_x: i32, _seed_z: i32, _iterations: i32) {
+        let total = map.total_size();
+        for z in 0..total {
+            for x in 0..total {
+                let cell = map
+                    .cell_raw(x, z)
+                    .expect("filter coordinates are in bounds");
+                // `!(a && b)`, not `edge >= beach`: a NaN edge fails Engine's `<` test.
+                if !(cell.terrain.is_coast() && cell.continent_edge < self.transition.beach) {
+                    continue;
+                }
+                // Java `int` arithmetic: `dz - 8` and so on, then `z * total + x`.
+                let (cx, cz) = (x as i32, z as i32);
+                let north = java_cell_raw(map, cx, cz.wrapping_sub(Self::RADIUS));
+                let south = java_cell_raw(map, cx, cz.wrapping_add(Self::RADIUS));
+                let east = java_cell_raw(map, cx.wrapping_add(Self::RADIUS), cz);
+                let west = java_cell_raw(map, cx.wrapping_sub(Self::RADIUS), cz);
+                let gradient_x = Self::gradient(east, west, cell);
+                let gradient_z = Self::gradient(north, south, cell);
+                if gradient_x * gradient_x + gradient_z * gradient_z < 0.275 {
+                    map.cell_raw_mut(x, z)
+                        .expect("filter coordinates are in bounds")
+                        .terrain = self.beach.clone();
+                }
+            }
+        }
+    }
+
+    /// `grad(a, b, def)`.
+    fn gradient(first: Option<&Cell>, second: Option<&Cell>, default: &Cell) -> f32 {
+        let mut distance = Self::DIAMETER;
+        let first = match first {
+            Some(cell) if !cell.is_absent() => cell,
+            _ => {
+                distance -= Self::RADIUS;
+                default
+            }
+        };
+        let second = match second {
+            Some(cell) if !cell.is_absent() => cell,
+            _ => {
+                distance -= Self::RADIUS;
+                default
+            }
+        };
+        (first.value - second.value) / distance as f32
+    }
 }
 
 /// Engine's `WorldErosion<T>`: a lazily built value shared between threads, rebuilt by `factory`
