@@ -250,3 +250,10 @@ file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_river_nodes"
 source = "river_nodes.rs"
 visibility = "pub"
+
+[[module]]
+id = "continent_carver"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_continent_carver"
+source = "continent_carver.rs"
+visibility = "pub"
