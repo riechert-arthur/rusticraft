@@ -2798,7 +2798,7 @@ fn java_pi2() -> f32 {
 
 const COS_OFFSET: f32 = f32::from_bits(0x3fc9_0ff9);
 
-fn sin_lookup(radians: f32) -> f32 {
+pub fn sin_lookup(radians: f32) -> f32 {
     const SIN_COUNT: f32 = 4096.0;
     const SIN_MASK: i32 = 4095;
     let radians_full = java_pi2();
@@ -2810,6 +2810,10 @@ fn sin_lookup(radians: f32) -> f32 {
         let angle = (index as f32 + 0.5) / SIN_COUNT * radians_full;
         f64::from(angle).sin() as f32
     }
+}
+
+pub fn cos_lookup(radians: f32) -> f32 {
+    sin_lookup(radians + COS_OFFSET)
 }
 
 #[cfg(test)]
