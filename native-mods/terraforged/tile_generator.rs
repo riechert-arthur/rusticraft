@@ -27,7 +27,7 @@ use super::{
     terraforged_engine::{Cell, TerrainRegistry},
     terraforged_filters::WorldFilters,
     terraforged_river::{Rivermap, current_time_millis},
-    terraforged_tile::{BatchChunk, Tile},
+    terraforged_tile::{BatchChunk, ChunkReader, GenChunk, Tile},
 };
 use std::sync::Arc;
 
@@ -503,8 +503,8 @@ where
 /// is generated once (on [`ThreadPool::NONE`], on the first `get`'s thread). The tasks own the
 /// generator through an `Arc` (Engine's `CallableTile` keeps a reference to it).
 ///
-/// Not ported: `TileProvider.getChunk` and the generator's dispose listener (`onDispose`, which
-/// removes a disposed tile's entry), later layers. Expiry drops a tile without closing it (Engine's
+/// [`Self::get_chunk`] is `TileProvider.getChunk`. Not ported: the generator's dispose listener
+/// (`onDispose`, which removes a disposed tile's entry), a later layer. Expiry drops a tile without closing it (Engine's
 /// sweep does not close either); Engine's `Tile.close`, run by `Cache.remove`, hands the tile's
 /// cells back to `TileResources` pools, which are not ported: here the cells are freed when the
 /// last holder of the entry drops it.
@@ -609,6 +609,24 @@ where
         self.get_tile_if_present(Tile::region_id_for(region_x, region_z))
     }
 
+    /// `getChunk(chunkX, chunkZ)`: `getTile(chunkToRegion(chunkX), chunkToRegion(chunkZ))`, which
+    /// stamps the region's entry and waits for (or, on [`ThreadPool::NONE`], runs) its tile, then
+    /// that tile's `getChunk(chunkX, chunkZ)` ([`Tile::chunk`]). `None` where Engine throws a
+    /// `NullPointerException`: the tile has no chunk in that slot (every tile the generator makes
+    /// fills all its slots, so this does not happen here). Panics where [`Tile::chunk`] does.
+    pub fn get_chunk(&self, chunk_x: i32, chunk_z: i32) -> Option<CachedChunk> {
+        let region_x = self.chunk_to_region(chunk_x);
+        let region_z = self.chunk_to_region(chunk_z);
+        let tile = self.get_tile_at(region_x, region_z);
+        let chunk = tile.call().chunk(chunk_x, chunk_z)?.chunk();
+        Some(CachedChunk {
+            tile,
+            chunk_x,
+            chunk_z,
+            chunk,
+        })
+    }
+
     /// `computeCacheEntry(id)`: `CacheEntry.computeAsync(generator.getTile(regionX, regionZ),
     /// threadPool)`; the task is `CallableTile`'s, [`TileGenerator::generate_region`].
     fn compute_cache_entry(&self, id: i64) -> CacheEntry<'static, Tile> {
@@ -619,6 +637,36 @@ where
             &self.thread_pool,
             self.clock,
         )
+    }
+}
+
+/// The `ChunkReader` [`TileCache::get_chunk`] returns: Engine's `GenChunk` is an inner class of its
+/// `Tile`, so the reader keeps the tile alive after the cache drops it; this one holds the
+/// tile's cache entry. [`Self::reader`] reads it as [`Tile::chunk`]'s [`ChunkReader`] does
+/// (`getCell`, `iterate`, `visit` with Engine's swapped bounds), without stamping the entry, as
+/// Engine's reads do not. Engine's `open`/`close` count belongs to tile disposal, not ported.
+pub struct CachedChunk {
+    tile: Arc<CacheEntry<'static, Tile>>,
+    chunk_x: i32,
+    chunk_z: i32,
+    chunk: GenChunk,
+}
+
+impl CachedChunk {
+    /// The chunk's position (`getChunkX`, `getBlockX`...).
+    pub const fn chunk(&self) -> GenChunk {
+        self.chunk
+    }
+
+    /// The tile the chunk is in.
+    pub fn tile(&self) -> &Tile {
+        self.tile.call()
+    }
+
+    /// The chunk's [`ChunkReader`].
+    pub fn reader(&self) -> ChunkReader<'_> {
+        let chunk = self.tile().chunk(self.chunk_x, self.chunk_z);
+        chunk.expect("a cached tile keeps its chunks")
     }
 }
 
@@ -792,6 +840,15 @@ mod tests {
 
     /// Every backing cell's fields, NaNs folded as Java's `floatToIntBits`.
     fn fold_tile(tile: &Tile) -> i64 {
+        let total = tile.block_size().total;
+        let cells = (0..total).flat_map(|z| (0..total).map(move |x| (x, z)));
+        cells.fold(17, |f, (x, z)| {
+            fold_cell(f, tile.raw_cell(x, z).expect("backing cell"))
+        })
+    }
+
+    /// One cell into `fold`, as the oracles' `fold`/`mixCell`.
+    fn fold_cell(mut f: i64, cell: &Cell) -> i64 {
         let bits = |value: f32| {
             if value.is_nan() {
                 0x7fc0_0000
@@ -799,30 +856,25 @@ mod tests {
                 value.to_bits() as i32
             }
         };
-        let mut f = 17_i64;
-        let total = tile.block_size().total;
-        let cells = (0..total).flat_map(|z| (0..total).map(move |x| (x, z)));
-        for cell in cells.map(|(x, z)| tile.raw_cell(x, z).expect("backing cell")) {
-            for value in [
-                cell.value,
-                cell.erosion,
-                cell.sediment,
-                cell.gradient,
-                cell.moisture,
-                cell.temperature,
-                cell.continent_edge,
-                cell.river_mask,
-            ] {
-                f = fold(f, bits(value));
-            }
-            for value in [
-                cell.continent_x,
-                cell.continent_z,
-                i32::from(cell.erosion_mask),
-                cell.terrain.id(),
-            ] {
-                f = fold(f, value);
-            }
+        for value in [
+            cell.value,
+            cell.erosion,
+            cell.sediment,
+            cell.gradient,
+            cell.moisture,
+            cell.temperature,
+            cell.continent_edge,
+            cell.river_mask,
+        ] {
+            f = fold(f, bits(value));
+        }
+        for value in [
+            cell.continent_x,
+            cell.continent_z,
+            i32::from(cell.erosion_mask),
+            cell.terrain.id(),
+        ] {
+            f = fold(f, value);
         }
         f
     }
@@ -1458,7 +1510,166 @@ mod tests {
         let (lookups, sum) = batched.generator().heightmap().take_sum();
         let cells = fold_tile(tile.call());
         out += &format!("q3 TileGeneratorBatched {lookups} {sum:x} {cells:x}\n");
+        let hc = TileCache::with_clock(Arc::clone(&none), ThreadPool::NONE, tile_cache_clock);
+        let chunks = [
+            (-3, 5),
+            (0, 0),
+            (-1, -1),
+            (3, -4),
+            (5, -11),
+            (-2, 4),
+            (-4, 4),
+            (7, 7),
+            (-9, -9),
+            (i32::MIN, i32::MAX),
+            (i32::MAX, i32::MIN),
+            (-100_001, 77_777),
+        ];
+        for (cx, cz) in chunks {
+            out += &format!("h {}\n", chunk_line(&hc, cx, cz));
+        }
+        let (a, b) = (readable(&hc, -2, 2), readable(&pc, -7, 9));
+        out += &format!("h0 {a} {b}\n");
+        let entry = hc.get(Tile::region_id_for(-2, 2)).unwrap();
+        set_clock(5);
+        entry.get();
+        set_clock(6);
+        let reader = hc.get_chunk(-3, 5).unwrap();
+        let stamped = entry.timestamp() != 5;
+        set_clock(5);
+        entry.get();
+        set_clock(7);
+        let cells = read_cells(&reader);
+        reader.reader().cell(3, 4);
+        visit(&reader, [0, 0, 15, 15]);
+        let unstamped = entry.timestamp() == 5;
+        set_clock(i64::MAX);
+        let swept = hc.cache.run();
+        let gone = hc.get(Tile::region_id_for(-2, 2)).is_none();
+        let kept = read_cells(&reader) == cells;
+        set_clock(0);
+        none.generator().heightmap().take();
+        let fresh = hc.get_chunk(-3, 5).unwrap();
+        let new = !std::ptr::eq(fresh.tile(), reader.tile());
+        let lookups = none.generator().heightmap().take().0;
+        out += &format!(
+            "h1 {stamped} {unstamped} {swept} {gone} {kept} {new} {new} {lookups} {}\n",
+            read_cells(&fresh)
+        );
+        out += &format!("h2 {}\n", chunk_line(&pc, -6, 13));
+        out += &format!("h3 {}\n", concurrent_chunks(&pc, -20, 31));
         assert_eq!(out, TILE_CACHE_ORACLE);
+    }
+
+    /// `chunkLine`: `<cx> <cz> <rx> <rz> <lookups> <slot> <chunkX> <chunkZ> <blockX> <blockZ> <cells>
+    /// <visits...>` of `getChunk(cx, cz)`; the slot is the chunk array index the reader was made at.
+    fn chunk_line(cache: &TileCache<FillHeightmap, WorldFilters>, cx: i32, cz: i32) -> String {
+        cache.generator.generator().heightmap().take();
+        let reader = cache
+            .get_chunk(cx, cz)
+            .expect("a generated tile fills every chunk");
+        let (rx, rz) = (cache.chunk_to_region(cx), cache.chunk_to_region(cz));
+        let lookups = cache.generator.generator().heightmap().take().0;
+        let (tile, chunk) = (reader.tile(), reader.chunk());
+        let (total, border) = (tile.chunk_size().total, tile.offset_chunks());
+        let slot_x = chunk
+            .chunk_x()
+            .wrapping_sub(tile.chunk_x())
+            .wrapping_add(border);
+        let slot_z = chunk
+            .chunk_z()
+            .wrapping_sub(tile.chunk_z())
+            .wrapping_add(border);
+        let slot = slot_z.wrapping_mul(total).wrapping_add(slot_x);
+        assert_eq!((tile.region_x(), tile.region_z()), (rx, rz));
+        let mut line = format!(
+            "{cx} {cz} {rx} {rz} {lookups} {slot} {} {} {} {} {}",
+            chunk.chunk_x(),
+            chunk.chunk_z(),
+            chunk.block_x(),
+            chunk.block_z(),
+            read_cells(&reader)
+        );
+        for rect in [
+            [-3, 2, 20, 9],
+            [4, 4, 9, 12],
+            [0, 0, 15, 15],
+            [10, -5, 30, 15],
+            [2, 1, 8, 15],
+            [-40, -40, -1, 30],
+        ] {
+            line += &format!(" {}", visit(&reader, rect));
+        }
+        line
+    }
+
+    /// `readCells`: the reader's `iterate`, each cell with its `dx`, `dz`.
+    fn read_cells(chunk: &CachedChunk) -> String {
+        let mut f = 17;
+        chunk.reader().iterate(|cell, dx, dz| {
+            f = fold(fold(fold_cell(f, cell), dx), dz);
+        });
+        format!("{f:x}")
+    }
+
+    /// `visit`: `<count>:<fold>` of a rectangle relative to the chunk's block position.
+    fn visit(chunk: &CachedChunk, [a, b, c, d]: [i32; 4]) -> String {
+        let (mut f, mut n) = (17, 0);
+        let (bx, bz) = (chunk.chunk().block_x(), chunk.chunk().block_z());
+        let (min_x, min_z) = (bx.wrapping_add(a), bz.wrapping_add(b));
+        let (max_x, max_z) = (bx.wrapping_add(c), bz.wrapping_add(d));
+        chunk
+            .reader()
+            .visit(min_x, min_z, max_x, max_z, |cell, x, z| {
+                n += 1;
+                f = fold(fold(fold_cell(f, cell), x), z);
+            });
+        format!("{n}:{f:x}")
+    }
+
+    /// `readable`: `<found>/<all>` readers of `getChunk` over 8x8 chunks around a region's first.
+    fn readable(cache: &TileCache<FillHeightmap, WorldFilters>, rx: i32, rz: i32) -> String {
+        let mut size = 1;
+        while cache.chunk_to_region(size) == 0 {
+            size += 1;
+        }
+        let (mut found, mut all) = (0, 0);
+        for cz in rz * size - 4..rz * size + 4 {
+            for cx in rx * size - 4..rx * size + 4 {
+                all += 1;
+                found += i32::from(cache.get_chunk(cx, cz).is_some());
+            }
+        }
+        format!("{found}/{all}")
+    }
+
+    /// `concurrentChunks`: eight threads `getChunk(cx, cz)` at once: `<all the same reader>
+    /// <lookups> <stage sum> <cells>`.
+    fn concurrent_chunks(
+        cache: &TileCache<FillHeightmap, WorldFilters>,
+        cx: i32,
+        cz: i32,
+    ) -> String {
+        let heightmap = cache.generator.generator().heightmap();
+        heightmap.take_sum();
+        let barrier = std::sync::Barrier::new(8);
+        let chunks: Vec<_> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        cache.get_chunk(cx, cz).unwrap()
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        let position = |c: &CachedChunk| (c.chunk().chunk_x(), c.chunk().chunk_z());
+        let same = chunks
+            .iter()
+            .all(|c| Arc::ptr_eq(&c.tile, &chunks[0].tile) && position(c) == position(&chunks[0]));
+        let (lookups, sum) = heightmap.take_sum();
+        format!("{same} {lookups} {sum:x} {}", read_cells(&chunks[0]))
     }
 
     /// The cache Engine's `TileCache` builds: 256 entries (the oldest insertion evicted first) and a
@@ -1533,6 +1744,22 @@ q0 true true 326 e3c4cdf7c5eefaee -7 9 6f363908c2b37e18 true
 q1 true 326 aeeb33bba750cb4e 3 -4 3fbc3560bca57054
 q2 true 176 31575308f8b822c 456ad7f1ef76153
 q3 TileGeneratorBatched 140 ff293731a98fd032 2afe9d3c12774c0d
+h -3 5 -2 2 256 10 -3 5 -48 80 1c76c64b231b9e88 0:11 0:11 0:11 0:11 0:11 0:11
+h 0 0 0 0 137 5 0 0 0 0 1d7a4fc94372f4f3 140:c2dbedd345e8183d 54:d6d30be6fd75be10 256:1d7a4fc94372f4f3 96:ee4e876d7c3113ca 112:ecea6c7669397c65 0:11
+h -1 -1 -1 -1 137 10 -1 -1 -16 -16 6be14b265241aadb 140:c5a5ec4b81a05cb2 54:be1b3ad93938522d 256:495ddf5e1c7faadb 96:cb50889885577e47 112:ddaae38a911726b6 0:11
+h 3 -4 1 -2 260 6 3 -4 48 -64 52db9415eb863fe 0:11 0:11 0:11 0:11 0:11 0:11
+h 5 -11 2 -6 137 10 5 -11 80 -176 a46094caeb856d86 0:11 0:11 0:11 0:11 0:11 0:11
+h -2 4 -1 2 132 5 -2 4 -32 64 12d93c1bc65897e3 0:11 0:11 0:11 0:11 0:11 0:11
+h -4 4 -2 2 0 5 -4 4 -64 64 2ca690240f8d6136 0:11 0:11 0:11 0:11 0:11 0:11
+h 7 7 3 3 137 10 7 7 112 112 bd945ed17f0e0674 140:7bf668fb312f2f4b 54:490e48e9db338af4 256:af2c514af75c0674 96:983677de46483afe 112:8d42f72f2d506039 0:11
+h -9 -9 -5 -5 260 10 -9 -9 -144 -144 b30500024beef229 140:24ae1613f1cb40ec 54:31f35dee20b357d4 256:7c6635f8681cf229 96:be6b5ec028542eca 112:1f205451469b296c 0:11
+h -2147483648 2147483647 -1073741824 1073741823 137 9 -2147483648 2147483647 0 -16 483b9863dd9c2e08 0:11 0:11 0:11 0:11 0:11 0:11
+h 2147483647 -2147483648 1073741823 -1073741824 137 6 2147483647 -2147483648 -16 0 b775f6dfa83a701a 0:11 0:11 0:11 0:11 0:11 0:11
+h -100001 77777 -50001 38888 137 10 -100001 77777 -1600016 1244432 fb0d8b154ca7a82b 0:11 0:11 0:11 0:11 0:11 0:11
+h0 64/64 64/64
+h1 true true 25 true true true true 256 1c76c64b231b9e88
+h2 -6 13 -6 13 326 12 -6 13 -96 208 a0d4ce0f38b32f59 0:11 0:11 0:11 0:11 0:11 0:11
+h3 true 176 fd6943c3bd8e196c 6a771b7ec1bf0d24
 ";
 
     /// `TileGeneratorOracle.java`'s output (`./run.sh` writes it to `out.txt`).
