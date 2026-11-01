@@ -23,8 +23,11 @@
  */
 
 use super::{
-    terraforged_concurrent::LazyCallable, terraforged_engine::Cell,
-    terraforged_filters::WorldFilters, terraforged_river::Rivermap, terraforged_tile::Tile,
+    terraforged_concurrent::LazyCallable,
+    terraforged_engine::Cell,
+    terraforged_filters::WorldFilters,
+    terraforged_river::Rivermap,
+    terraforged_tile::{GenChunk, Tile},
 };
 use std::sync::Arc;
 
@@ -143,6 +146,50 @@ where
         tile
     }
 
+    pub fn generate_batched_region(&self, region_x: i32, region_z: i32, batch_count: i32) -> Tile {
+        let mut tile = self.create_empty_region(region_x, region_z);
+        self.generate_area(&mut tile, batch_count, SampleTransform::Direct);
+        self.post_process(&mut tile, true);
+        tile
+    }
+
+    pub fn generate_batched_zoomed_region(
+        &self,
+        center_x: f32,
+        center_z: f32,
+        zoom: f32,
+        filter: bool,
+        batch_count: i32,
+    ) -> Tile {
+        let mut tile = self.create_empty_region(0, 0);
+        let transform = SampleTransform::zoomed(&tile, center_x, center_z, zoom);
+        self.generate_area(&mut tile, batch_count, transform);
+        self.post_process(&mut tile, filter);
+        tile
+    }
+
+    pub fn generate_striped_region(&self, region_x: i32, region_z: i32, sections: i32) -> Tile {
+        let mut tile = self.create_empty_region(region_x, region_z);
+        self.generate_striped(&mut tile, sections, SampleTransform::Direct);
+        self.post_process(&mut tile, true);
+        tile
+    }
+
+    pub fn generate_striped_zoomed_region(
+        &self,
+        center_x: f32,
+        center_z: f32,
+        zoom: f32,
+        filter: bool,
+        sections: i32,
+    ) -> Tile {
+        let mut tile = self.create_empty_region(0, 0);
+        let transform = SampleTransform::zoomed(&tile, center_x, center_z, zoom);
+        self.generate_striped(&mut tile, sections, transform);
+        self.post_process(&mut tile, filter);
+        tile
+    }
+
     pub fn create_empty_region(&self, region_x: i32, region_z: i32) -> Tile {
         Tile::new(region_x, region_z, self.factor, self.border)
     }
@@ -173,6 +220,95 @@ where
     fn post_process(&self, tile: &mut Tile, filter: bool) {
         self.generator.filters().apply(tile, filter);
     }
+
+    fn generate_area(&self, tile: &mut Tile, batch_count: i32, transform: SampleTransform) {
+        let chunk_size = tile.chunk_size();
+        let batch_size = Tile::batch_size(batch_count, chunk_size);
+        for delta_z in 0..batch_count {
+            let start_z = delta_z.wrapping_mul(batch_size);
+            let max_z = chunk_size.total.min(start_z.wrapping_add(batch_size));
+            for delta_x in 0..batch_count {
+                let start_x = delta_x.wrapping_mul(batch_size);
+                let max_x = chunk_size.total.min(start_x.wrapping_add(batch_size));
+                for chunk_z in start_z..max_z {
+                    for chunk_x in start_x..max_x {
+                        generate_chunk(
+                            tile.chunk_writer(chunk_x, chunk_z),
+                            self.generator.heightmap(),
+                            transform,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    fn generate_striped(&self, tile: &mut Tile, sections: i32, transform: SampleTransform) {
+        let chunk_size = tile.chunk_size();
+        let section_length = Tile::batch_size(sections, chunk_size);
+        for chunk_z in 0..chunk_size.total {
+            for section in 0..sections {
+                let start_x = section.wrapping_mul(section_length);
+                let max_x = chunk_size.total.min(start_x.wrapping_add(section_length));
+                for chunk_x in start_x..max_x {
+                    generate_chunk(
+                        tile.chunk_writer(chunk_x, chunk_z),
+                        self.generator.heightmap(),
+                        transform,
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum SampleTransform {
+    Direct,
+    Zoom {
+        translate_x: f32,
+        translate_z: f32,
+        zoom: f32,
+    },
+}
+
+impl SampleTransform {
+    fn zoomed(tile: &Tile, center_x: f32, center_z: f32, zoom: f32) -> Self {
+        Self::Zoom {
+            translate_x: center_x - tile.block_size().size as f32 * zoom / 2.0,
+            translate_z: center_z - tile.block_size().size as f32 * zoom / 2.0,
+            zoom,
+        }
+    }
+
+    fn apply(self, x: i32, z: i32) -> (f32, f32) {
+        match self {
+            Self::Direct => (x as f32, z as f32),
+            Self::Zoom {
+                translate_x,
+                translate_z,
+                zoom,
+            } => (x as f32 * zoom + translate_x, z as f32 * zoom + translate_z),
+        }
+    }
+}
+
+fn generate_chunk<H: HeightmapSource>(
+    mut chunk: GenChunk<'_>,
+    heightmap: &H,
+    transform: SampleTransform,
+) {
+    let mut current = None;
+    chunk.generate(|cell, _, _, block_x, block_z| {
+        let (x, z) = transform.apply(block_x, block_z);
+        heightmap.apply_base(cell, x, z);
+        let rivermap = Rivermap::get_for_cell(cell, current.take(), |map_x, map_z| {
+            heightmap.rivermap(map_x, map_z)
+        });
+        heightmap.apply_rivers(cell, x, z, &rivermap);
+        heightmap.apply_climate(cell, x, z);
+        current = Some(rivermap);
+    });
 }
 
 #[cfg(test)]
@@ -263,5 +399,53 @@ mod tests {
         assert!(!zoomed.is_done());
         assert_eq!((zoomed.get().region_x(), zoomed.get().region_z()), (0, 0));
         assert_eq!(*filters.lock().unwrap(), [true, false, true, false]);
+    }
+
+    #[test]
+    fn batched_tile_generators_match_engine_0_3_0() {
+        let create = || {
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let filters = Arc::new(Mutex::new(Vec::new()));
+            let heightmap = TestHeightmap {
+                map: Arc::new(Rivermap::new(7, -9, Vec::new(), GenWarp::direct())),
+                events: Arc::clone(&events),
+            };
+            (
+                TileGenerator::new(
+                    1,
+                    0,
+                    3,
+                    WorldGenerator::new(heightmap, TestFilters(filters)),
+                ),
+                events,
+            )
+        };
+
+        let (generator, events) = create();
+        let batched = generator.generate_batched_region(1, -1, 3);
+        assert_eq!(batched.cell(0, 0).value, 31_968.0);
+        assert_eq!(batched.cell(31, 31).value, 62_999.0);
+        assert_eq!(rivermap_events(&events), 4);
+
+        let (generator, events) = create();
+        let striped = generator.generate_striped_region(1, -1, 3);
+        assert_eq!(striped.cell(0, 0).value, 31_968.0);
+        assert_eq!(striped.cell(31, 31).value, 62_999.0);
+        assert_eq!(rivermap_events(&events), 4);
+
+        let (generator, _) = create();
+        let batched = generator.generate_batched_zoomed_region(100.0, -50.0, 0.5, false, 3);
+        let striped = generator.generate_striped_zoomed_region(100.0, -50.0, 0.5, false, 3);
+        assert_eq!(batched.cell(0, 0).value, striped.cell(0, 0).value);
+        assert_eq!(batched.cell(31, 31).value, striped.cell(31, 31).value);
+    }
+
+    fn rivermap_events(events: &Mutex<Vec<&'static str>>) -> usize {
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| **event == "rivermap")
+            .count()
     }
 }

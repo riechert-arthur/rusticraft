@@ -231,6 +231,9 @@ regions, creates empty tiles, generates regular or centered zoomed terrain, and 
 TerraForged's lazy callable now computes exactly once under concurrent access, reports completion and
 non-cancellation like the Java source, and backs lazy regular and zoomed tile generation handles.
 
+Batched and striped generators now preserve TerraForged's ceil-sized chunk partitions, per-chunk river
+context, clipped final tasks, centered zoom transforms, and post-processing flags.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
