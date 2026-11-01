@@ -2325,6 +2325,70 @@ impl Module {
             ModuleKind::Max(sources) => try_combine(sources, seed, x, y, java_max)?,
             ModuleKind::Min(sources) => try_combine(sources, seed, x, y, java_min)?,
             ModuleKind::Subtract(sources) => try_combine(sources, seed, x, y, |a, b| a - b)?,
+            ModuleKind::Base {
+                base,
+                source,
+                min,
+                max,
+                falloff,
+                interpolation,
+            } => {
+                let upper = sample(source)?;
+                if upper < *max {
+                    let lower = sample(base)?;
+                    if *falloff > 0.0 {
+                        let alpha = (*max - java_max(*min, upper)) / *falloff;
+                        lerp(upper, lower, interpolation.apply(alpha))
+                    } else {
+                        lower
+                    }
+                } else {
+                    upper
+                }
+            }
+            ModuleKind::Blend {
+                control,
+                lower,
+                upper,
+                blend_lower,
+                blend_upper,
+                blend_range,
+                interpolation,
+                ..
+            } => {
+                let select = sample(control)?;
+                if select < *blend_lower {
+                    sample(lower)?
+                } else if select > *blend_upper {
+                    sample(upper)?
+                } else {
+                    let alpha = (select - *blend_lower) / *blend_range;
+                    lerp(sample(lower)?, sample(upper)?, interpolation.apply(alpha))
+                }
+            }
+            ModuleKind::VariableBlend {
+                control,
+                variable,
+                lower,
+                upper,
+                midpoint,
+                min_blend,
+                max_blend,
+                interpolation,
+            } => {
+                let select = sample(control)?;
+                let radius = *min_blend + sample(variable)? * *max_blend;
+                let min = java_max(0.0, *midpoint - radius);
+                if select < min {
+                    return sample(lower);
+                }
+                let max = java_min(1.0, *midpoint + radius);
+                if select > max {
+                    return sample(upper);
+                }
+                let alpha = (select - min) / (max - min);
+                lerp(sample(lower)?, sample(upper)?, interpolation.apply(alpha))
+            }
             _ => return Err("runtime-seeded sampling is not implemented for this graph node"),
         })
     }
@@ -6201,6 +6265,215 @@ mod tests {
             unsupported
                 .warp(Domain::direct())
                 .try_value_seed_first(17, 1.0, 2.0)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn runtime_seeded_blends_match_current_noise2d() {
+        let source = Module::source(Source::new(
+            SourceKind::Simplex,
+            SourceConfig {
+                seed: i32::MAX,
+                frequency: 0.125,
+                octaves: 2,
+                gain: 0.65,
+                ..SourceConfig::default()
+            },
+        ));
+        let control = Module::source(Source::new(
+            SourceKind::Simplex2,
+            SourceConfig {
+                seed: -91,
+                frequency: 0.25,
+                octaves: 2,
+                ..SourceConfig::default()
+            },
+        ));
+        let lower = control.clone().scale(Module::constant(0.35));
+        let upper = source.clone().bias(Module::constant(0.2));
+        let expected: [[u64; 4]; 9] = [
+            [
+                0x48f9d5b731244d61,
+                0x361b7c8d328d38fe,
+                0x8ea734d33951a530,
+                0xaba4a4efe51114c5,
+            ],
+            [
+                0x99eadc2fef48965b,
+                0x99c95bd03389d9aa,
+                0x8cb265962e132f26,
+                0xd34e833ba0156b93,
+            ],
+            [
+                0xa7500c30060b86eb,
+                0x34fab80cbc41c5a1,
+                0x3001e73b44db7160,
+                0x99e60b7e0f6d16a2,
+            ],
+            [
+                0xe15c51ffe70e3059,
+                0x3ce2c78d3e14c098,
+                0x8b95d4cfa5ea52cf,
+                0x6121c3262f3756cd,
+            ],
+            [
+                0x74bd362fb01c0549,
+                0x80f83e2fc12b2f0e,
+                0x67b59dce2c33c676,
+                0x1b8fdc9ccf859a66,
+            ],
+            [
+                0x9d40d22ff4f3a75d,
+                0xad8df0623f3aaf8b,
+                0x060aeb0ba438f9ca,
+                0x3155165855450bc9,
+            ],
+            [
+                0xe0e8c81ef2ae01dc,
+                0x56e46b8d502c39aa,
+                0xdb0bfac0b97ee593,
+                0x5f613aa1ce090b4f,
+            ],
+            [
+                0x6960832f9ccd8120,
+                0xf138fbd262ea42c9,
+                0xfb4b706caec1186d,
+                0xa964187467cdc4d1,
+            ],
+            [
+                0x8d91022fda4be8ed,
+                0xf9cc82ff792b4787,
+                0x4b2e36eaf1509300,
+                0xa5822effa410c53f,
+            ],
+        ];
+        for (interpolation_index, interpolation) in [
+            Interpolation::Linear,
+            Interpolation::Curve3,
+            Interpolation::Curve4,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let graphs = [
+                lower.clone().base(source.clone(), 0.3, interpolation),
+                control
+                    .clone()
+                    .blend(lower.clone(), upper.clone(), 0.5, 0.4, interpolation),
+                control.clone().variable_blend(
+                    source.clone(),
+                    lower.clone(),
+                    upper.clone(),
+                    0.5,
+                    0.05,
+                    0.3,
+                    interpolation,
+                ),
+            ];
+            for (index, graph) in graphs.iter().enumerate() {
+                for (seed, expected) in [0, 17, -91, i32::MAX]
+                    .into_iter()
+                    .zip(expected[interpolation_index * 3 + index])
+                {
+                    let mut hash = 0xcbf29ce484222325u64;
+                    for (x, y) in [
+                        (0.0, 0.0),
+                        (0.125, -0.75),
+                        (12.34, 56.78),
+                        (-1234.5, 987.25),
+                    ] {
+                        hash ^=
+                            u64::from(graph.try_value_seed_first(seed, x, y).unwrap().to_bits());
+                        hash = hash.wrapping_mul(0x100000001b3);
+                    }
+                    assert_eq!(
+                        hash, expected,
+                        "interpolation {interpolation_index}, graph {index}, seed {seed}"
+                    );
+                }
+            }
+        }
+        let fixed = source.clone().blend(
+            lower.clone(),
+            upper.clone(),
+            0.5,
+            0.0,
+            Interpolation::Linear,
+        );
+        let variable = source.variable_blend(
+            Module::constant(0.0),
+            lower,
+            upper,
+            0.5,
+            0.0,
+            0.0,
+            Interpolation::Linear,
+        );
+        for graph in [fixed, variable] {
+            assert!(graph.try_value_seed_first(17, 0.0, 0.0).unwrap().is_nan());
+        }
+    }
+
+    #[test]
+    fn seeded_blends_only_evaluate_selected_children() {
+        let unsupported = Module::constant(0.25).cache();
+        let valid = Module::constant(0.75);
+        let fixed = |control, lower: Module, upper: Module| {
+            let kind = ModuleKind::Blend {
+                control: Module::constant(control),
+                lower,
+                upper,
+                midpoint: 0.5,
+                blend: 0.5,
+                blend_lower: 0.25,
+                blend_upper: 0.75,
+                blend_range: 0.5,
+                interpolation: Interpolation::Linear,
+            };
+            Module::node(kind, 0.0, 1.0)
+        };
+        assert_eq!(
+            fixed(0.0, valid.clone(), unsupported.clone()).try_value_seed_first(1, 0.0, 0.0),
+            Ok(0.75)
+        );
+        assert_eq!(
+            fixed(1.0, unsupported.clone(), valid.clone()).try_value_seed_first(1, 0.0, 0.0),
+            Ok(0.75)
+        );
+        for boundary in [0.25, 0.5, 0.75] {
+            assert!(
+                fixed(boundary, valid.clone(), unsupported.clone())
+                    .try_value_seed_first(1, 0.0, 0.0)
+                    .is_err()
+            );
+        }
+        for (control, lower, upper) in [
+            (0.0, valid.clone(), unsupported.clone()),
+            (1.0, unsupported.clone(), valid.clone()),
+        ] {
+            let graph = Module::constant(control).variable_blend(
+                Module::constant(1.0),
+                lower,
+                upper,
+                0.5,
+                0.0,
+                0.25,
+                Interpolation::Linear,
+            );
+            assert_eq!(graph.try_value_seed_first(1, 0.0, 0.0), Ok(0.75));
+        }
+        assert_eq!(
+            unsupported
+                .clone()
+                .base(valid.clone(), 0.0, Interpolation::Linear)
+                .try_value_seed_first(1, 0.0, 0.0),
+            Ok(0.75)
+        );
+        assert!(
+            unsupported
+                .base(Module::constant(0.0), 0.0, Interpolation::Linear)
+                .try_value_seed_first(1, 0.0, 0.0)
                 .is_err()
         );
     }
