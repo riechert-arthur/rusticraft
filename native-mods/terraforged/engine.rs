@@ -900,6 +900,8 @@ pub enum ContinentType {
 }
 
 impl ContinentType {
+    pub const VALUES: [Self; 4] = [Self::Multi, Self::Single, Self::MultiImproved, Self::Fancy];
+
     pub const fn index(self) -> i32 {
         self as i32
     }
