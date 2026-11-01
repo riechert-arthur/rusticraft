@@ -78,6 +78,9 @@ lacunarity, alpha, curve, power, clamp, map and global vertical-scale behavior.
 The plateau LandForms layer adds the warped valley, ridge top, surface detail and controlled four-step
 terrace composition used by TerraForged's plateau terrain.
 
+The terraced LandForms layer adds badlands and torridonian graphs with masks, dual step detail,
+modulation, linear and Curve3 slopes, advanced terracing and final boost shaping.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
