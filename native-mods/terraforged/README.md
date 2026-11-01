@@ -401,8 +401,12 @@ Runtime-seeded scalar graphs now propagate the seed through constants, octave so
 value, alpha, bias, clamp, inversion, mapping, powers, scaling, thresholds and all five arithmetic
 combiners. `Module::try_value_seed_first` returns an error for nodes not ported to runtime seeding;
 it never silently falls back to legacy sampling. Legacy sampling and serialized reseeding remain
-unchanged. Legacy and advanced terraces and other graph nodes still need this path
+unchanged. Advanced terraces and other graph nodes still need this path
 before current-source terrain blending can use it.
+
+Legacy terraces now propagate runtime seeds through the source and asymmetric lower/upper curve
+modules while preserving cubic interpolation and branch-lazy curve sampling. The current Noise2D
+oracle covers all four runtime seeds and transition directions.
 
 The scalar graph fixtures cover 15 graphs, four seeds and four coordinates (240 Java samples),
 including wrapped seed addition and mixed Perlin/seed-sensitive sources. Regenerate their hashes
