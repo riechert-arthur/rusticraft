@@ -27,8 +27,11 @@ use super::{
         DistanceFunction, Domain, EdgeFunction, Interpolation, Module, Source, SourceConfig,
         SourceKind, cell_vector, floor, noise_map, value_coord_2d,
     },
-    terraforged_engine::{Cell, ContinentShape, ControlPoints, Seed, WorldSettings},
+    terraforged_engine::{
+        Cell, ContinentShape, ControlPoints, Levels, RiverSettings, Seed, WorldSettings,
+    },
     terraforged_populator::Populator,
+    terraforged_river::{LegacyRiverCache, Rivermap, SimpleRiverGenerator},
     terraforged_util::{pack, unpack_left, unpack_right},
 };
 
@@ -45,6 +48,11 @@ pub struct SimpleContinentGenerator {
     warp: Domain,
     shape: Module,
     single_center: Option<(i32, i32)>,
+    river_cache: LegacyRiverCache,
+    river_root_seed: i32,
+    world: WorldSettings,
+    rivers: RiverSettings,
+    levels: Levels,
 }
 
 impl SimpleContinentGenerator {
@@ -57,6 +65,7 @@ impl SimpleContinentGenerator {
     }
 
     fn new(seed: &mut Seed, settings: WorldSettings, single: bool) -> Self {
+        let river_root_seed = seed.root();
         let tectonic_scale = settings.continent.continent_scale.wrapping_mul(4);
         let continent_scale = settings.continent.continent_scale / 2;
         let generator_seed = seed.next();
@@ -94,12 +103,30 @@ impl SimpleContinentGenerator {
             warp: first_warp.compound(second_warp),
             shape,
             single_center: None,
+            river_cache: LegacyRiverCache::new(),
+            river_root_seed,
+            world: settings,
+            rivers: RiverSettings::default(),
+            levels: Levels::from_properties(settings.properties),
         };
         if single {
             let center = generator.nearest_center(0.0, 0.0);
             generator.single_center = Some((unpack_left(center), unpack_right(center)));
         }
         generator
+    }
+
+    pub fn rivermap(&self, x: i32, z: i32) -> std::sync::Arc<Rivermap> {
+        self.river_cache.get_rivers(x, z, |x, z, id| {
+            SimpleRiverGenerator::new(
+                self,
+                self.river_root_seed,
+                self.world,
+                self.rivers,
+                self.levels,
+            )
+            .generate_rivers(x, z, id)
+        })
     }
 
     pub fn edge_value(&self, x: f32, y: f32) -> f32 {
@@ -398,6 +425,13 @@ mod tests {
                 .distance_to_ocean(unpack_left(center), unpack_right(center), 0.6, 0.8)
                 .to_bits(),
             0x45da53d8
+        );
+        let rivers = multi.rivermap(unpack_left(center), unpack_right(center));
+        let rivers_again = multi.rivermap(unpack_left(center), unpack_right(center));
+        assert!(std::sync::Arc::ptr_eq(&rivers, &rivers_again));
+        assert_eq!(
+            (rivers.x(), rivers.z()),
+            (unpack_left(center), unpack_right(center))
         );
 
         let mut seed = Seed::new(12_345);

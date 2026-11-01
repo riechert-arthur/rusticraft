@@ -27,8 +27,9 @@ use super::{
         Domain, Interpolation, Module, Source, SourceConfig, SourceKind, cell_vector, floor,
         noise_map, value_coord_2d,
     },
-    terraforged_engine::{Cell, ControlPoints, Seed, WorldSettings},
+    terraforged_engine::{Cell, ControlPoints, Levels, RiverSettings, Seed, WorldSettings},
     terraforged_populator::Populator,
+    terraforged_river::{RiverCache, Rivermap, SimpleRiverGenerator},
     terraforged_util::{pack, unpack_left, unpack_right},
 };
 
@@ -46,10 +47,16 @@ pub struct AdvancedContinentGenerator {
     warp: Domain,
     cliff_noise: Module,
     bay_noise: Module,
+    river_cache: RiverCache,
+    river_root_seed: i32,
+    world: WorldSettings,
+    rivers: RiverSettings,
+    levels: Levels,
 }
 
 impl AdvancedContinentGenerator {
     pub fn new(seed: &mut Seed, settings: WorldSettings) -> Self {
+        let river_root_seed = seed.root();
         let generator_seed = seed.next();
         let skipping_seed = seed.next();
         let continent_scale = settings.continent.continent_scale;
@@ -107,7 +114,25 @@ impl AdvancedContinentGenerator {
             warp,
             cliff_noise,
             bay_noise,
+            river_cache: RiverCache::new(),
+            river_root_seed,
+            world: settings,
+            rivers: RiverSettings::default(),
+            levels: Levels::from_properties(settings.properties),
         }
+    }
+
+    pub fn rivermap(&self, x: i32, z: i32) -> std::sync::Arc<Rivermap> {
+        self.river_cache.get_rivers(x, z, |x, z, id| {
+            SimpleRiverGenerator::new(
+                self,
+                self.river_root_seed,
+                self.world,
+                self.rivers,
+                self.levels,
+            )
+            .generate_rivers(x, z, id)
+        })
     }
 
     pub fn edge_value(&self, x: f32, z: f32) -> f32 {
@@ -403,6 +428,13 @@ mod tests {
                 .distance_to_ocean(unpack_left(center), unpack_right(center), 0.6, 0.8)
                 .to_bits(),
             0x45cc65af
+        );
+        let rivers = generator.rivermap(unpack_left(center), unpack_right(center));
+        let rivers_again = generator.rivermap(unpack_left(center), unpack_right(center));
+        assert!(std::sync::Arc::ptr_eq(&rivers, &rivers_again));
+        assert_eq!(
+            (rivers.x(), rivers.z()),
+            (unpack_left(center), unpack_right(center))
         );
 
         let settings = WorldSettings {

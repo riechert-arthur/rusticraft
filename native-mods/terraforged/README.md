@@ -162,6 +162,9 @@ preserves the legacy seed layout, and exposes cached fancy-continent rivermaps t
 The simple-river layer distributes integer-ended roots around simple and advanced continent centers,
 then feeds their lakes, forks and wetlands through the shared Java-compatible network generator.
 
+Simple continents now expose legacy-keyed cached rivermaps, while advanced continents use packed
+center keys; both retain their generator settings and share maps across repeated terrain samples.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
