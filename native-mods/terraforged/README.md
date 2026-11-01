@@ -271,6 +271,9 @@ and `0.645` times the global vertical scale, computed in double. The landform gr
 oracle for every settings case, with fancy mountains on and off, including mountain scales whose `Math.round` gives 0
 or keeps an odd integer above 2^23 and vertical scales whose `scale(1)` leaves the graph unscaled.
 
+The cell-model layer adds TerraForged's complete terrain sample state, Java defaults, copy/reset and
+absent-cell behavior, plus the ordered biome-type identities carried by each sample.
+
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings and its first landforms. They change nothing in the game, so there is
