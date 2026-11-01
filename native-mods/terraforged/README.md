@@ -194,6 +194,9 @@ default settings, ModTerrains' (a global vertical scale of 1) and degenerate sca
 `Math.round`'s edges). The other landforms, the ocean and land bases, and TerraForged's `RandSeed` (ModTerrains
 builds its landforms from a `SplittableRandom` seed rather than Engine's counter) are not ported yet.
 
+The hill LandForms layer adds both warped hill variants and the blended dales graph, preserving gain,
+lacunarity, alpha, curve, power, clamp, map and global vertical-scale behavior.
+
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings and its first landforms. They change nothing in the game, so there is
