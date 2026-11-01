@@ -177,6 +177,9 @@ and resolves a replacement only when sampling crosses into another continent.
 Contextual cache misses execute base terrain, rivermap carving and climate in Java order, while cache
 hits copy the completed cell without rerunning any generation stage.
 
+The filter foundation adds TerraForged's synchronized erosion-instance cache, reusing a filter while
+its map size matches and atomically rebuilding it when generation dimensions change.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:

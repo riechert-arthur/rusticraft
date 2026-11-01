@@ -96,3 +96,10 @@ file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_heightmap"
 source = "heightmap.rs"
 visibility = "pub"
+
+[[module]]
+id = "filters"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_filters"
+source = "filters.rs"
+visibility = "pub"
