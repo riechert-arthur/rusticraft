@@ -544,6 +544,13 @@ struct BlendNode {
     max: f32,
 }
 
+/// A `Terrace` step: its output value and the `[lower_bound, upper_bound]` window where it is flat.
+struct TerraceStep {
+    value: f32,
+    lower_bound: f32,
+    upper_bound: f32,
+}
+
 enum ModuleKind {
     Constant(f32),
     Source(Source),
@@ -595,6 +602,15 @@ enum ModuleKind {
         max_index: i32,
         blend_range: f32,
         interpolation: Interpolation,
+    },
+    /// `Terrace`: the steps and `maxIndex`, fixed in the constructor.
+    Terrace {
+        source: Module,
+        ramp: Module,
+        cliff: Module,
+        ramp_height: Module,
+        steps: Vec<TerraceStep>,
+        max_index: usize,
     },
     /// `Select`: `lower_curve`/`upper_curve` hold Engine's `(curveMin, curveMax, curveRange)` per bound, fixed in the
     /// constructor.
@@ -784,6 +800,41 @@ impl Module {
                     max.source.value(x, y),
                     interpolation.apply(alpha),
                 )
+            }
+            ModuleKind::Terrace {
+                source,
+                ramp,
+                cliff,
+                ramp_height,
+                steps,
+                max_index,
+            } => {
+                let noise_value = clamp(source.value(x, y), 0.0, 0.999999);
+                let index = floor(noise_value * steps.len() as f32) as usize;
+                let step = &steps[index];
+                if index == *max_index || noise_value < step.lower_bound {
+                    return step.value;
+                }
+                if noise_value > step.upper_bound {
+                    return steps[index + 1].value;
+                }
+                let ramp = 1.0 - ramp.value(x, y) * 0.5;
+                let cliff = 1.0 - cliff.value(x, y) * 0.5;
+                let alpha =
+                    (noise_value - step.lower_bound) / (step.upper_bound - step.lower_bound);
+                let mut value = step.value;
+                if alpha > ramp {
+                    let next = &steps[index + 1];
+                    let ramp_size = 1.0 - ramp;
+                    let ramp_alpha = (alpha - ramp) / ramp_size;
+                    value += (next.value - value) * ramp_alpha * ramp_height.value(x, y);
+                }
+                if alpha > cliff {
+                    let next = &steps[index + 1];
+                    let cliff_alpha = (alpha - cliff) / (1.0 - cliff);
+                    value = lerp(value, next.value, cliff_alpha);
+                }
+                value
             }
             ModuleKind::Select {
                 control,
@@ -1057,6 +1108,43 @@ impl Module {
             interpolation,
         };
         Self::node(kind, low, high)
+    }
+
+    /// `Module.terrace(ramp, cliff, rampHeight, steps, blendRange)` (`Terrace`): `steps` evenly spaced flat steps
+    /// over the source's range, fixed in the constructor, joined by a ramp and a cliff. Reports the source's bounds.
+    pub fn terrace(
+        self,
+        ramp: Self,
+        cliff: Self,
+        ramp_height: Self,
+        steps: usize,
+        blend_range: f32,
+    ) -> Self {
+        let max_index = steps - 1;
+        let range = self.max_value() - self.min_value();
+        let spacing = range / max_index as f32;
+        let steps = (0..steps)
+            .map(|index| {
+                let value = index as f32 * spacing;
+                let blend = spacing * blend_range;
+                let bound = (spacing - blend) / 2.0;
+                TerraceStep {
+                    value,
+                    lower_bound: value - bound,
+                    upper_bound: value + bound,
+                }
+            })
+            .collect();
+        let source = self.clone();
+        let kind = ModuleKind::Terrace {
+            source: self,
+            ramp,
+            cliff,
+            ramp_height,
+            steps,
+            max_index,
+        };
+        Self::modifier(kind, &source)
     }
 
     /// `Module.select(Module, Module, lowerBound, upperBound, falloff, Interpolation)` (Engine's five-argument
@@ -2866,5 +2954,76 @@ ctl5 0xbe800000 0x40600000 | 0x3f000000 0x3f0f52e0 0x3f012753 0x3f0a143e";
         Module::constant(-0.05)
             .multi_blend(0.4, Interpolation::Linear, vec![Module::constant(1.0); 3])
             .value(0.0, 0.0);
+    }
+
+    #[test]
+    fn terrace_matches_engine_0_3_0() {
+        let source = |kind, seed, scale: f32, octaves, gain| {
+            Module::source(Source::new(
+                kind,
+                SourceConfig {
+                    seed,
+                    octaves,
+                    gain,
+                    frequency: 1.0 / scale,
+                    lacunarity: 2.0,
+                    interpolation: Interpolation::Curve3,
+                },
+            ))
+        };
+        let module = source(SourceKind::Perlin, 601, 96.0, 4, 0.5).terrace(
+            source(SourceKind::Simplex, 602, 72.0, 3, 0.5),
+            source(SourceKind::Ridge, 603, 128.0, 3, 0.975),
+            source(SourceKind::Perlin, 604, 80.0, 2, 0.5),
+            7,
+            0.35,
+        );
+        let points = [
+            (0.0, 0.0),
+            (12.25, -98.75),
+            (-4096.5, 8192.25),
+            (123456.75, -0.125),
+            (64.0, 64.0),
+            (-128.0, 32.0),
+            (777.0, -333.0),
+            (-1024.0, -2048.0),
+        ];
+        assert_eq!(
+            [module.min_value().to_bits(), module.max_value().to_bits()],
+            [0x00000000, 0x3f800000]
+        );
+        assert_eq!(
+            bits(points.map(|(x, y)| module.value(x, y))),
+            [
+                0x3f000000, 0x3f000000, 0x3f000000, 0x3f000000, 0x3f000000, 0x3f000000, 0x3f017a74,
+                0x3e2aaaab,
+            ]
+        );
+
+        let bounded =
+            |value| Module::constant(value).clamp(Module::constant(0.0), Module::constant(1.0));
+        let values = [
+            -1.0, 0.0, 0.05416666, 0.05416667, 0.1, 0.11249999, 0.1125, 0.15, 0.16666667, 0.2,
+            0.22083333, 0.22083335, 0.999999, 1.0, 2.0,
+        ];
+        assert_eq!(
+            values.map(|value| {
+                bounded(value)
+                    .terrace(
+                        Module::constant(1.0),
+                        Module::constant(1.0),
+                        Module::constant(0.5),
+                        7,
+                        0.35,
+                    )
+                    .value(0.0, 0.0)
+                    .to_bits()
+            }),
+            [
+                0x00000000, 0x00000000, 0x3e2aaaaa, 0x3e2aaaab, 0x3e2aaaab, 0x3e2aaaab, 0x3e2aaaab,
+                0x3e2aaaab, 0x3e2aaaad, 0x3e93f1de, 0x3eaaaaab, 0x3eaaaaab, 0x3f800000, 0x3f800000,
+                0x3f800000,
+            ]
+        );
     }
 }

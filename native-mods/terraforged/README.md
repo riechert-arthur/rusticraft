@@ -38,6 +38,12 @@ lookup and reported bounds (the smallest minimum and largest maximum of the sour
 Engine throws (a control far enough outside 0..1 to pick a slot that does not exist, or sampling a `MultiBlend` without
 sources), this port panics.
 
+The terrace layer adds `Terrace` (`Module.terrace(ramp, cliff, rampHeight, steps, blendRange)`): it clamps its source
+to 0..0.999999 and snaps it to flat steps, rising to the next step through a ramp (scaled by `rampHeight`) and a cliff.
+As in Engine, the steps are fixed when it is built and start at 0, not at the source's minimum, spaced by the source's
+range over `steps - 1`; it reports the source's bounds. Where
+Engine throws (sampling a NaN or a terrace with no steps), this port panics.
+
 ## Status: development only
 
 This layer only adds the noise functions. It changes nothing in the game, so there is nothing for players to install
