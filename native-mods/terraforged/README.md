@@ -631,13 +631,24 @@ The rivermap-reuse layer adds Engine's static `Rivermap.get` (`river.rs`, `River
 `Rivermap::get_for_cell`, which reads the cell's continent cell): it returns the current river map when it belongs to
 the requested continent cell (both `x` and `z` equal) and otherwise asks for the map of that cell. As `Heightmap` is
 not ported, the lookup Engine makes (`heightmap.getContinent().getRivermap(x, z)`) is a closure, which callers give a
-continent's `rivermap`. Engine's tile and chunk tasks and `HeightmapCache.generate` call it; none of them is ported,
-so nothing calls it yet. Its test checks that a matching map is returned without a lookup and that a different `x`,
-a different `z`, swapped coordinates or no current map run exactly one lookup for the requested cell.
+continent's `rivermap`. Engine's tile and chunk tasks and `HeightmapCache.generate` call it; the cache's `generate` is
+ported (below), the tasks are not. Its test checks that a matching map is returned without a lookup and that a
+different `x`, a different `z`, swapped coordinates or no current map run exactly one lookup for the requested cell.
+
+The contextual heightmap-cache layer adds Engine's `HeightmapCache.generate(cell, x, z, rivermap)` (`heightmap.rs`,
+`HeightmapCache::generate`), the path `Tile.generate(HeightmapCache, ...)` takes for each block: on a miss it runs
+the heightmap's base, river and climate stages (closures, as `Heightmap` is not ported) on the caller's cell in that
+order, picking the river map with `Rivermap::get_for_cell` (reusing the caller's current map when it belongs to the
+cell's continent cell), caches the cell and returns the map it used; on a hit it copies the cached cell into the
+caller's (`copyFrom`, which leaves `terrain_region_center` alone) and returns the caller's map unchanged. It shares
+the cells of `get`, but makes no beach correction. Engine caches the caller's `Cell` object itself, so later changes
+to that tile cell reach the cache; this caches a snapshot taken after the climate stage. Nothing calls it yet (the
+tile code is not ported). Its test checks the stage order, the map reuse, that a hit runs no stage and copies the
+cached fields, and that `get` and `generate` share cells.
 
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache and the river-map reuse. They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path) and the river-map reuse. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development

@@ -68,14 +68,14 @@ impl HeightmapRivers {
     }
 }
 
-/// Engine 0.3.0's `HeightmapCache.get(x, z)`: memoizes the heightmap's cell of each block (keyed by
-/// `PosUtil.pack(x, z)`) and, on a miss, turns a coast cell whose value is above the water level and at most five
-/// blocks over it into a beach (the same correction as `WorldLookup.compute`).
+/// Engine 0.3.0's `HeightmapCache`: memoizes the heightmap's cell of each block (keyed by `PosUtil.pack(x, z)`).
+/// [`Self::get`] (`get(x, z)`) turns, on a miss, a coast cell whose value is above the water level and at most five
+/// blocks over it into a beach (the same correction as `WorldLookup.compute`); [`Self::generate`] (the tile path)
+/// fills the caller's cell and does not. Both share one cache.
 ///
-/// `Heightmap` itself is not ported yet, so [`Self::get`] takes its `apply(cell, x, z)` as a closure. Engine's
-/// `get` returns the shared cached `Cell` object; this returns a copy (every field, as `Clone`), so callers cannot
-/// change what the cache holds. Engine's `generate(cell, x, z, rivermap)` (the tile path, which caches the
-/// caller's own cell and does not apply the beach correction) is not ported.
+/// `Heightmap` itself is not ported yet, so both take its stages as closures. Engine's `get` returns the shared
+/// cached `Cell` object; this returns a copy (every field, as `Clone`), so callers cannot change what the cache
+/// holds.
 ///
 /// Engine's `LoadBalanceLongMap` splits the cache into per-thread-count sections, each dropping its oldest entry
 /// when full, and computes misses under a section's write lock. Here one map drops its oldest entry once it holds
@@ -140,6 +140,52 @@ impl HeightmapCache {
         {
             cell.terrain = self.beach.clone();
         }
+        self.insert(id, &cell);
+        cell
+    }
+
+    /// `generate(cell, x, z, rivermap)`, the tile path (`Tile.generate(HeightmapCache, ...)`): on a hit, copies the
+    /// cached cell into `cell` (`copyFrom`, which keeps `cell`'s `terrain_region_center`) and returns `current`
+    /// unchanged; on a miss, runs Engine's `contextCompute` on `cell` itself (not reset first): `apply_base`
+    /// (`heightmap.applyBase`), the river map of the cell's continent cell, reusing `current` when it matches
+    /// (`Rivermap.get(cell, rivermap, heightmap)`, with `lookup` as `heightmap.getRivermap`), `apply_rivers`
+    /// (`heightmap.applyRivers(cell, x, z, rivermap)`, e.g. [`HeightmapRivers::apply`]) and `apply_climate`
+    /// (`heightmap.applyClimate`), all with the block coordinates as floats, then caches a copy of `cell` and
+    /// returns the map it used. No beach correction is made on this path, as in Engine.
+    ///
+    /// Engine caches the caller's `Cell` object itself, so whatever the tile later does to that cell also changes
+    /// the cached entry (and a later `get` or `generate` of the block sees it); this caches a snapshot taken right
+    /// after `apply_climate`. As with [`Self::get`], misses run outside the lock: two threads missing the same
+    /// block both compute it (equal cells), and each returns the map it used where Engine's second thread would hit
+    /// and return its own `current`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn generate(
+        &self,
+        cell: &mut Cell,
+        x: i32,
+        z: i32,
+        current: Option<Arc<Rivermap>>,
+        apply_base: impl FnOnce(&mut Cell, f32, f32),
+        lookup: impl FnOnce(i32, i32) -> Arc<Rivermap>,
+        apply_rivers: impl FnOnce(&mut Cell, f32, f32, &Rivermap),
+        apply_climate: impl FnOnce(&mut Cell, f32, f32),
+    ) -> Option<Arc<Rivermap>> {
+        let id = pack(x, z);
+        if let Some(cached) = self.lock().map.get(&id) {
+            cell.copy_from(cached);
+            return current;
+        }
+        let (sample_x, sample_z) = (x as f32, z as f32);
+        apply_base(cell, sample_x, sample_z);
+        let rivermap = Rivermap::get_for_cell(cell, current, lookup);
+        apply_rivers(cell, sample_x, sample_z, &rivermap);
+        apply_climate(cell, sample_x, sample_z);
+        self.insert(id, cell);
+        Some(rivermap)
+    }
+
+    /// Caches `cell` for `id` unless another thread already did, dropping the oldest cells while full.
+    fn insert(&self, id: i64, cell: &Cell) {
         let mut cells = self.lock();
         if !cells.map.contains_key(&id) {
             // A capacity of 0 keeps one cell (Engine's map throws on its first miss).
@@ -152,11 +198,10 @@ impl HeightmapCache {
             cells.map.insert(id, cell.clone());
             cells.order.push_back(id);
         }
-        cell
     }
 
-    /// The cells. `apply` runs outside the lock, so a poisoned lock (a panic while inserting) still guards a
-    /// consistent map.
+    /// The cells. The heightmap stages run outside the lock, so a poisoned lock (a panic while inserting) still
+    /// guards a consistent map.
     fn lock(&self) -> std::sync::MutexGuard<'_, Cells> {
         self.cells.lock().unwrap_or_else(|error| error.into_inner())
     }
@@ -532,5 +577,52 @@ mod tests {
             }
         }
         assert_eq!((count, fold.0), (7_932, 1_547_846_148));
+    }
+
+    #[test]
+    fn contextual_heightmap_cache_matches_engine_0_3_0() {
+        let terrains = Arc::new(TerrainRegistry::new());
+        let cache = HeightmapCache::with_capacity(Levels::new(256, 63), Arc::clone(&terrains), 16);
+        let map = Arc::new(Rivermap::new(17, -9, Vec::new(), GenWarp::direct()));
+        let order = Mutex::new(Vec::new());
+        let mut cell = Cell::new(&terrains);
+        let selected = cache.generate(
+            &mut cell,
+            12,
+            -34,
+            Some(Arc::clone(&map)),
+            |cell, _, _| {
+                order.lock().unwrap().push("base");
+                cell.continent_x = 17;
+                cell.continent_z = -9;
+                cell.value = 0.6;
+            },
+            |_, _| unreachable!(),
+            |cell, _, _, _| {
+                order.lock().unwrap().push("rivers");
+                cell.river_mask = 0.25;
+            },
+            |cell, _, _| {
+                order.lock().unwrap().push("climate");
+                cell.temperature = 0.75;
+            },
+        );
+        assert!(Arc::ptr_eq(&map, selected.as_ref().unwrap()));
+        assert_eq!(*order.lock().unwrap(), ["base", "rivers", "climate"]);
+
+        let mut cached = Cell::new(&terrains);
+        let reused = cache.generate(
+            &mut cached,
+            12,
+            -34,
+            selected,
+            |_, _, _| unreachable!(),
+            |_, _| unreachable!(),
+            |_, _, _, _| unreachable!(),
+            |_, _, _| unreachable!(),
+        );
+        assert!(Arc::ptr_eq(&map, reused.as_ref().unwrap()));
+        assert_eq!(cached.river_mask.to_bits(), 0x3e800000);
+        assert_eq!(cached.temperature.to_bits(), 0x3f400000);
     }
 }
