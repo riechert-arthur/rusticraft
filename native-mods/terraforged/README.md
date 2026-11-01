@@ -493,6 +493,8 @@ Empty surface and highland climate pools now borrow the nearest original non-emp
 TerraForged's temperature-biased climate distance without order-dependent multi-hop borrowing.
 Surface-biome decisions now preserve per-cell wetland and mountain rolls, centered four-sample
 slope gating, and vanilla-compatible altitude snow checks before accepting a highland substitute.
+Initial biome selection now connects those decisions to wet, dry, and highland climate pools,
+including plains-style fallback, identity no-ops, and snow-incompatible substitution rejection.
 
 The scalar graph fixtures cover 15 graphs, four seeds and four coordinates (240 Java samples),
 including wrapped seed addition and mixed Perlin/seed-sensitive sources. Regenerate their hashes
