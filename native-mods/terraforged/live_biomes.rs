@@ -33,6 +33,7 @@ use super::{
     terraforged_generator_facade::TerraForgedGenerator,
 };
 use horizon_core::position::ChunkPos;
+use std::convert::Infallible;
 use std::{fmt, sync::Arc};
 
 const FALLBACK: &str = "minecraft:plains";
@@ -146,14 +147,13 @@ impl LiveBiomeBindings {
         Arc::clone(&self.overrides[index])
     }
 
-    pub fn fill_chunk<E>(
+    pub fn fill_chunk(
         &self,
         generator: &TerraForgedGenerator,
         chunk: &mut BiomeChunk<BiomeId>,
         position: ChunkPos,
         settings: InitialBiomeSettings,
-        cave_biome: impl FnMut(i32, i32) -> Result<Option<BiomeId>, E>,
-    ) -> Result<(), BiomeFillError<E>> {
+    ) -> Result<(), BiomeFillError<Infallible>> {
         generator.fill_biomes(
             chunk,
             position,
@@ -164,7 +164,6 @@ impl LiveBiomeBindings {
             settings,
             &|biome| self.base_temperature(*biome),
             &|replacement| self.override_biome(replacement),
-            cave_biome,
         )
     }
 }

@@ -37,6 +37,7 @@ use super::{
 };
 use crate::registry::BlockStateId;
 use horizon_core::position::ChunkPos;
+use std::convert::Infallible;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicI64, Ordering};
 
@@ -145,7 +146,7 @@ impl TerraForgedGenerator {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn fill_biomes<T: Clone, E>(
+    pub fn fill_biomes<T: Clone>(
         &self,
         chunk: &mut BiomeChunk<T>,
         position: ChunkPos,
@@ -156,8 +157,7 @@ impl TerraForgedGenerator {
         settings: InitialBiomeSettings,
         base_temperature: &impl Fn(&T) -> f32,
         override_biome: &impl Fn(BiomeOverride) -> Arc<T>,
-        cave_biome: impl FnMut(i32, i32) -> Result<Option<T>, E>,
-    ) -> Result<(), BiomeFillError<E>> {
+    ) -> Result<(), BiomeFillError<Infallible>> {
         let surface = CurrentSurfaceBiomeSampler::new(
             self.noise_generator(),
             wet,
@@ -167,25 +167,20 @@ impl TerraForgedGenerator {
             settings,
         );
         let seed = self.seed();
-        fill_noise_biomes(
-            chunk,
-            position,
-            |x, z| {
-                Ok::<_, E>(
-                    surface
-                        .sample(
-                            seed,
-                            x.wrapping_shl(2),
-                            z.wrapping_shl(2),
-                            base_temperature,
-                            override_biome,
-                        )
-                        .as_ref()
-                        .clone(),
-                )
-            },
-            cave_biome,
-        )
+        fill_noise_biomes(chunk, position, |x, _y, z| {
+            Ok::<_, Infallible>(
+                surface
+                    .sample(
+                        seed,
+                        x.wrapping_shl(2),
+                        z.wrapping_shl(2),
+                        base_temperature,
+                        override_biome,
+                    )
+                    .as_ref()
+                    .clone(),
+            )
+        })
     }
 
     pub fn noise_generator(&self) -> &NoiseGenerator {
@@ -253,7 +248,7 @@ mod tests {
     use super::*;
     use crate::{DATA_VERSION, heightmap::HeightmapState, nbt::Tag, registry::BlockRegistry};
     use horizon_core::position::ChunkPos;
-    use std::{convert::Infallible, sync::Arc};
+    use std::sync::Arc;
 
     #[derive(Clone, Copy)]
     struct State(u32);
@@ -480,7 +475,6 @@ mod tests {
                 settings,
                 &temperature,
                 &replacement,
-                |_, _| Ok::<_, Infallible>(Some(77)),
             )
             .unwrap();
 
@@ -502,6 +496,7 @@ mod tests {
             &replacement,
         );
         assert_eq!(*chunk.noise_biome([quart_x, 0, quart_z]), *expected);
-        assert_eq!(*chunk.noise_biome([quart_x, -1, quart_z]), 77);
+        // The surface layer reaches below y=0: TerraForged's caves carve their own biomes.
+        assert_eq!(*chunk.noise_biome([quart_x, -1, quart_z]), *expected);
     }
 }
