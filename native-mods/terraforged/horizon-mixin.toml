@@ -348,3 +348,10 @@ file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_current_climate"
 source = "current_climate.rs"
 visibility = "pub"
+
+[[module]]
+id = "current_biome_sampler"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_current_biome_sampler"
+source = "current_biome_sampler.rs"
+visibility = "pub"
