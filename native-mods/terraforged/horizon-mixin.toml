@@ -264,3 +264,10 @@ file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_river_network"
 source = "river_network.rs"
 visibility = "pub"
+
+[[module]]
+id = "lossy_cache"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_lossy_cache"
+source = "lossy_cache.rs"
+visibility = "pub"

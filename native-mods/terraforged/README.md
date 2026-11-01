@@ -340,6 +340,12 @@ generator, and keep the mod enabled for that world's unexplored chunks.
 
 ## Development
 
+The current-source lossy cache now preserves bucket rounding, FastUtil mixing, key-only hits
+(the supplied seed is not part of the cache key), eviction order, and post-unlock removal callbacks.
+An original-Java eviction trace and concurrent-hit tests cover the Rust implementation. Rust uses
+mutexes and shared ownership instead of optimistic stamped locks; speculative listener races and
+invalid Java allocation sizes are not emulated. Wiring it into cells and river pieces is separate.
+
 The current-source Noise2D seed-first API now has a separate `value_seed_first` entry point:
 it preserves Perlin/Perlin2's ignored seed argument and adds the configured seed for other sources
 with Java wrapping, without changing the legacy replacement-seed API. All eight source kinds have
