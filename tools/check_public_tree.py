@@ -26,6 +26,7 @@ ORIGINAL_TERRAFORGED_ORACLES = {
     "tools/terraforged/TerraForgedNoiseTileSizeOracle.java",
     "tools/terraforged/TerraForgedHeightmapSmoothingOracle.java",
     "tools/terraforged/TerraForgedErosionBrushOracle.java",
+    "tools/terraforged/TerraForgedErosionFilterOracle.java",
 }
 
 
