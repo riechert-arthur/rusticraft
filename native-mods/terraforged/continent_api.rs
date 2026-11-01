@@ -28,7 +28,7 @@ use super::{
     terraforged_advanced_continent::AdvancedContinentGenerator,
     terraforged_climate::LandValue,
     terraforged_continent::SimpleContinentGenerator,
-    terraforged_engine::{ContinentType, Seed, WorldSettings},
+    terraforged_engine::{ContinentType, Levels, RiverSettings, Seed, WorldSettings},
     terraforged_fancy::FancyContinentGenerator,
     terraforged_populator::Populator,
     terraforged_river::Rivermap,
@@ -118,13 +118,35 @@ pub fn create_continent(
     seed: &mut Seed,
     settings: WorldSettings,
 ) -> Arc<dyn Continent> {
+    create_continent_with_rivers(
+        kind,
+        seed,
+        settings,
+        RiverSettings::default(),
+        Levels::from_properties(settings.properties),
+    )
+}
+
+pub fn create_continent_with_rivers(
+    kind: ContinentType,
+    seed: &mut Seed,
+    settings: WorldSettings,
+    rivers: RiverSettings,
+    levels: Levels,
+) -> Arc<dyn Continent> {
     match kind {
-        ContinentType::Multi => Arc::new(SimpleContinentGenerator::multi(seed, settings)),
-        ContinentType::Single => Arc::new(SingleContinent(SimpleContinentGenerator::single(
-            seed, settings,
-        ))),
-        ContinentType::MultiImproved => Arc::new(AdvancedContinentGenerator::new(seed, settings)),
-        ContinentType::Fancy => Arc::new(FancyContinentGenerator::new(seed, settings)),
+        ContinentType::Multi => Arc::new(SimpleContinentGenerator::multi_with_rivers(
+            seed, settings, rivers, levels,
+        )),
+        ContinentType::Single => Arc::new(SingleContinent(
+            SimpleContinentGenerator::single_with_rivers(seed, settings, rivers, levels),
+        )),
+        ContinentType::MultiImproved => Arc::new(AdvancedContinentGenerator::with_rivers(
+            seed, settings, rivers, levels,
+        )),
+        ContinentType::Fancy => Arc::new(FancyContinentGenerator::with_rivers(
+            seed, settings, rivers, levels,
+        )),
     }
 }
 
@@ -182,6 +204,21 @@ mod tests {
                 continent.edge_value(12.25, -98.75).to_bits()
             );
             assert!(!cell.continent_edge.is_nan());
+        }
+    }
+
+    #[test]
+    fn continent_factory_accepts_context_river_settings() {
+        let world = WorldSettings::default();
+        let levels = Levels::from_properties(world.properties);
+        let rivers = RiverSettings {
+            river_count: 3,
+            ..RiverSettings::default()
+        };
+        for kind in ContinentType::VALUES {
+            let continent =
+                create_continent_with_rivers(kind, &mut Seed::new(4_321), world, rivers, levels);
+            assert_eq!(continent.kind(), kind);
         }
     }
 }

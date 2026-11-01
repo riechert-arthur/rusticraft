@@ -56,6 +56,20 @@ pub struct AdvancedContinentGenerator {
 
 impl AdvancedContinentGenerator {
     pub fn new(seed: &mut Seed, settings: WorldSettings) -> Self {
+        Self::with_rivers(
+            seed,
+            settings,
+            RiverSettings::default(),
+            Levels::from_properties(settings.properties),
+        )
+    }
+
+    pub fn with_rivers(
+        seed: &mut Seed,
+        settings: WorldSettings,
+        rivers: RiverSettings,
+        levels: Levels,
+    ) -> Self {
         let river_root_seed = seed.root();
         let generator_seed = seed.next();
         let skipping_seed = seed.next();
@@ -117,8 +131,8 @@ impl AdvancedContinentGenerator {
             river_cache: RiverCache::new(),
             river_root_seed,
             world: settings,
-            rivers: RiverSettings::default(),
-            levels: Levels::from_properties(settings.properties),
+            rivers,
+            levels,
         }
     }
 

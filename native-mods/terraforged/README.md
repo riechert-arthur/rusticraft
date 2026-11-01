@@ -276,6 +276,9 @@ climate randomness and offsets, and TerraForged's elevation-based temperature ad
 A shared continent interface now exposes terrain population, edge and land sampling, nearest centers,
 and river maps across multi, single, improved, and fancy generator factory modes.
 
+Continent construction now accepts the aggregate context's river settings and levels in every mode,
+while preserving default convenience constructors and TerraForged's seed order.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:

@@ -57,14 +57,48 @@ pub struct SimpleContinentGenerator {
 
 impl SimpleContinentGenerator {
     pub fn multi(seed: &mut Seed, settings: WorldSettings) -> Self {
-        Self::new(seed, settings, false)
+        Self::multi_with_rivers(
+            seed,
+            settings,
+            RiverSettings::default(),
+            Levels::from_properties(settings.properties),
+        )
     }
 
     pub fn single(seed: &mut Seed, settings: WorldSettings) -> Self {
-        Self::new(seed, settings, true)
+        Self::single_with_rivers(
+            seed,
+            settings,
+            RiverSettings::default(),
+            Levels::from_properties(settings.properties),
+        )
     }
 
-    fn new(seed: &mut Seed, settings: WorldSettings, single: bool) -> Self {
+    pub fn multi_with_rivers(
+        seed: &mut Seed,
+        settings: WorldSettings,
+        rivers: RiverSettings,
+        levels: Levels,
+    ) -> Self {
+        Self::with_rivers(seed, settings, rivers, levels, false)
+    }
+
+    pub fn single_with_rivers(
+        seed: &mut Seed,
+        settings: WorldSettings,
+        rivers: RiverSettings,
+        levels: Levels,
+    ) -> Self {
+        Self::with_rivers(seed, settings, rivers, levels, true)
+    }
+
+    fn with_rivers(
+        seed: &mut Seed,
+        settings: WorldSettings,
+        rivers: RiverSettings,
+        levels: Levels,
+        single: bool,
+    ) -> Self {
         let river_root_seed = seed.root();
         let tectonic_scale = settings.continent.continent_scale.wrapping_mul(4);
         let continent_scale = settings.continent.continent_scale / 2;
@@ -106,8 +140,8 @@ impl SimpleContinentGenerator {
             river_cache: LegacyRiverCache::new(),
             river_root_seed,
             world: settings,
-            rivers: RiverSettings::default(),
-            levels: Levels::from_properties(settings.properties),
+            rivers,
+            levels,
         };
         if single {
             let center = generator.nearest_center(0.0, 0.0);
