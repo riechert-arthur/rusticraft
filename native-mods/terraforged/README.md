@@ -180,6 +180,9 @@ hits copy the completed cell without rerunning any generation stage.
 The filter foundation adds TerraForged's synchronized erosion-instance cache, reusing a filter while
 its map size matches and atomically rebuilding it when generation dimensions change.
 
+The smoothing filter preserves TerraForged's in-place circular weighted pass, including erosion-mask,
+terrain-edge, river-mask, and elevation-range strength modifiers.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
