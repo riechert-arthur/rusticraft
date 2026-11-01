@@ -397,6 +397,18 @@ Java ShapeGenerator bytecode (with a plain NoiseSample holder replacing Minecraf
 Its cell-provider interface is ready for the current-source continent generator; this does not yet
 connect the mod to playable world generation.
 
+Runtime-seeded scalar graphs now propagate the seed through constants, octave sources, absolute
+value, alpha, bias, clamp, inversion, mapping, powers, scaling, thresholds and all five arithmetic
+combiners. `Module::try_value_seed_first` returns an error for nodes not ported to runtime seeding;
+it never silently falls back to legacy sampling. Legacy sampling and serialized reseeding remain
+unchanged. Domain warps, selectors, terraces, caches and other graph nodes still need this path
+before current-source terrain blending can use it.
+
+The scalar graph fixtures cover 15 graphs, four seeds and four coordinates (240 Java samples),
+including wrapped seed addition and mixed Perlin/seed-sensitive sources. Regenerate their hashes
+with `tools/terraforged/TerraForgedSeededGraphOracle.java` on a classpath containing compiled
+Noise2D commit `2cb48431148a321f74319d7ef0ea61b26bf8e59c` and its Cereal dependency.
+
 The noise layer is ordinary Rust and can be tested without Minecraft resources:
 
 ```sh

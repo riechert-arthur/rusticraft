@@ -2283,6 +2283,73 @@ impl Module {
         }
     }
 
+    pub fn try_value_seed_first(&self, seed: i32, x: f32, y: f32) -> Result<f32, &'static str> {
+        let sample = |module: &Module| module.try_value_seed_first(seed, x, y);
+        Ok(match self.0.as_ref() {
+            ModuleKind::Constant(value) => *value,
+            ModuleKind::Source(source) => source.value_seed_first(seed, x, y),
+            ModuleKind::Abs(source) => sample(source)?.abs(),
+            ModuleKind::Alpha(source, alpha) => {
+                let value = sample(source)?;
+                let alpha = sample(alpha)?;
+                value * alpha + (1.0 - alpha)
+            }
+            ModuleKind::Bias(source, bias) => sample(source)? + sample(bias)?,
+            ModuleKind::Clamp(source, min, max) => {
+                clamp(sample(source)?, sample(min)?, sample(max)?)
+            }
+            ModuleKind::Invert(source) => {
+                let value = sample(source)?;
+                if value > source.max_value() {
+                    source.min_value()
+                } else if value < source.min_value() {
+                    source.max_value()
+                } else {
+                    source.max_value() - value
+                }
+            }
+            ModuleKind::Map(source, min, max) => {
+                let alpha = (sample(source)? - source.min_value())
+                    / (source.max_value() - source.min_value());
+                let min = sample(min)?;
+                let max = sample(max)?;
+                min + alpha * (max - min)
+            }
+            ModuleKind::Power(source, power) => java_pow(sample(source)?, sample(power)?),
+            ModuleKind::Scale(source, scale, ..) => sample(source)? * sample(scale)?,
+            ModuleKind::Threshold(source, threshold) => {
+                if sample(source)? < sample(threshold)? {
+                    0.0
+                } else {
+                    1.0
+                }
+            }
+            ModuleKind::Add(sources)
+            | ModuleKind::Multiply(sources)
+            | ModuleKind::Max(sources)
+            | ModuleKind::Min(sources)
+            | ModuleKind::Subtract(sources) => {
+                let Some((first, rest)) = sources.split_first() else {
+                    return Ok(0.0);
+                };
+                let mut result = sample(first)?;
+                for source in rest {
+                    let value = sample(source)?;
+                    result = match self.0.as_ref() {
+                        ModuleKind::Add(_) => result + value,
+                        ModuleKind::Multiply(_) => result * value,
+                        ModuleKind::Max(_) => java_max(result, value),
+                        ModuleKind::Min(_) => java_min(result, value),
+                        ModuleKind::Subtract(_) => result - value,
+                        _ => unreachable!(),
+                    };
+                }
+                result
+            }
+            _ => return Err("runtime-seeded sampling is not implemented for this graph node"),
+        })
+    }
+
     pub fn min_value(&self) -> f32 {
         match self.0.as_ref() {
             ModuleKind::Constant(value) => *value,
@@ -3694,6 +3761,194 @@ mod tests {
         );
     }
 
+    #[test]
+    fn scalar_graph_runtime_seeds_match_current_noise2d() {
+        let source = Module::source(Source::new(
+            SourceKind::Simplex,
+            SourceConfig {
+                seed: i32::MAX,
+                frequency: 0.125,
+                octaves: 2,
+                gain: 0.65,
+                ..SourceConfig::default()
+            },
+        ));
+        let control = Module::source(Source::new(
+            SourceKind::Cubic,
+            SourceConfig {
+                seed: -91,
+                frequency: 0.25,
+                octaves: 2,
+                ..SourceConfig::default()
+            },
+        ));
+        let perlin = Module::source(Source::new(
+            SourceKind::Perlin,
+            SourceConfig {
+                seed: 53,
+                frequency: 0.5,
+                octaves: 2,
+                ..SourceConfig::default()
+            },
+        ));
+        let graphs = [
+            source.clone().bias(Module::constant(-0.5)).abs(),
+            Module(Box::new(ModuleKind::Alpha(source.clone(), control.clone()))),
+            source.clone().bias(control.clone()),
+            source.clone().clamp(
+                control.clone().scale(Module::constant(0.25)),
+                control.clone().bias(Module::constant(0.5)),
+            ),
+            source.clone().invert(),
+            source
+                .clone()
+                .map(control.clone(), control.clone().bias(Module::constant(1.0))),
+            source.clone().power(control.clone()),
+            source.clone().scale(control.clone()),
+            source.clone().threshold(control.clone()),
+            Module::add(vec![source.clone(), control.clone(), perlin.clone()]),
+            Module::multiply(vec![source.clone(), control.clone(), perlin.clone()]),
+            Module::max(vec![source.clone(), control.clone(), perlin.clone()]),
+            Module::min(vec![source.clone(), control.clone(), perlin.clone()]),
+            Module::subtract(vec![source.clone(), control.clone(), perlin.clone()]),
+            Module(Box::new(ModuleKind::Alpha(source, control)))
+                .bias(perlin)
+                .scale(Module::constant(0.4)),
+        ];
+        let expected: [[u64; 4]; 15] = [
+            [
+                0x8b824554e95d207f,
+                0xedc0a832360a66e3,
+                0x8eb1146735546699,
+                0x0fae72a3c3dcfcad,
+            ],
+            [
+                0x59ee6d740a1343aa,
+                0x48705ce73409335b,
+                0xd1edde565fafa762,
+                0x538889865e0b70e1,
+            ],
+            [
+                0x3b92f1abc8e45f50,
+                0x68764f9bb8fbb0df,
+                0x623158244a3e2b8c,
+                0x25d5ee315e2d28da,
+            ],
+            [
+                0x50f2a377b15912ae,
+                0x3bc130116da65f12,
+                0xbdc6b0ff4ad9622c,
+                0x450fd4be505a6f55,
+            ],
+            [
+                0x1e239698f275a2ea,
+                0xe0fee26e714bca65,
+                0xd702afc3eae3fec4,
+                0x2e1d94886897eb0b,
+            ],
+            [
+                0x3b92f1abc8e45f50,
+                0x68764f9bb8fbb0df,
+                0x623158244a3e2b8c,
+                0x25d5ee315e2d28da,
+            ],
+            [
+                0xf4624c568d09236b,
+                0x82b99bb85dd1a662,
+                0xbf534a21076e4401,
+                0xbdbd4dba26d45d8a,
+            ],
+            [
+                0x17a555d585ff21a9,
+                0x44d7c9e5521cb3c0,
+                0x5dccc6b4e66049e4,
+                0x74607cd50a9808d9,
+            ],
+            [
+                0xcd257655fc4e13f5,
+                0xcd257655fc4e13f5,
+                0xcd257655fc4e13f5,
+                0x1c4480da054e13f5,
+            ],
+            [
+                0xaa39381cc76c5f1a,
+                0x849145194b59731f,
+                0xb855bcdfd94a5dbd,
+                0x819a14a07b4a4655,
+            ],
+            [
+                0x88d6e252bf908ec6,
+                0xccddacd105664bd7,
+                0xdf0831a9b00faf0b,
+                0x8af4f81c18508596,
+            ],
+            [
+                0xb8d75a41879ceaea,
+                0xe41b2c22133a98c1,
+                0x92db9db450d14888,
+                0xc0e062df4d7f2146,
+            ],
+            [
+                0x5c54076e34378b65,
+                0x64650211b2b4bce8,
+                0x5a8766b7fafd681b,
+                0x51b92185d19e4202,
+            ],
+            [
+                0x251e33703dd6424b,
+                0x3786c672f07bcc40,
+                0x74c5cc64837b82f0,
+                0xb2d9ad39da2786e3,
+            ],
+            [
+                0xbb94bb9ca033522e,
+                0x513402c20cb58f6e,
+                0x894487b8aba56da1,
+                0xfe50e3ae1f83f07c,
+            ],
+        ];
+        for (graph_index, (graph, hashes)) in graphs.iter().zip(expected).enumerate() {
+            for (seed, expected) in [0, 17, -91, i32::MAX].into_iter().zip(hashes) {
+                let mut hash = 0xcbf29ce484222325u64;
+                for (x, y) in [
+                    (0.0, 0.0),
+                    (0.125, -0.75),
+                    (12.34, 56.78),
+                    (-1234.5, 987.25),
+                ] {
+                    hash ^= u64::from(graph.try_value_seed_first(seed, x, y).unwrap().to_bits());
+                    hash = hash.wrapping_mul(0x100000001b3);
+                }
+                assert_eq!(hash, expected, "graph {graph_index}, seed {seed}");
+            }
+        }
+    }
+
+    #[test]
+    fn seeded_scalar_graph_rejects_unsupported_children() {
+        let unsupported = Module::constant(0.5).warp(Domain::direct());
+        assert!(unsupported.try_value_seed_first(1, 0.0, 0.0).is_err());
+        assert!(
+            Module::constant(0.25)
+                .bias(unsupported.clone())
+                .try_value_seed_first(1, 0.0, 0.0)
+                .is_err()
+        );
+        assert!(
+            Module::add(vec![Module::constant(0.0), unsupported])
+                .try_value_seed_first(1, 0.0, 0.0)
+                .is_err()
+        );
+        for empty in [
+            Module::add(vec![]),
+            Module::multiply(vec![]),
+            Module::min(vec![]),
+            Module::max(vec![]),
+            Module::subtract(vec![]),
+        ] {
+            assert_eq!(empty.try_value_seed_first(1, 0.0, 0.0), Ok(0.0));
+        }
+    }
     #[test]
     fn module_graph_matches_engine_0_3_0() {
         let base = Module::source(Source::new(
