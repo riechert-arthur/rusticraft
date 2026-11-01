@@ -297,6 +297,9 @@ height, base, river, terrain, gradient, and extrema conversion from the current 
 The current-source terrain-generator contract now owns reusable terrain data, delegates bordered noise
 generation, scales direct height queries, and preserves TerraForged's object-pool behavior exactly.
 
+Terrain blending utilities now preserve weighted noise bands, identity-keyed sample caching, hashed
+random selection, and square-spiral terrain searches from TerraForged's current source.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
