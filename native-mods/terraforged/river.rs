@@ -1514,6 +1514,46 @@ impl ContinentSampler for super::terraforged_fancy::FancyContinentGenerator {
     }
 }
 
+/// The part of Engine's `SimpleContinent` the simple river generator reads besides `getEdgeValue`:
+/// `getDistanceToOcean(cx, cz, dx, dz)`.
+pub trait SimpleContinentSampler: ContinentSampler {
+    fn distance_to_ocean(&self, center_x: i32, center_z: i32, dx: f32, dz: f32) -> f32;
+}
+
+impl<T: SimpleContinentSampler + ?Sized> SimpleContinentSampler for &T {
+    fn distance_to_ocean(&self, center_x: i32, center_z: i32, dx: f32, dz: f32) -> f32 {
+        T::distance_to_ocean(*self, center_x, center_z, dx, dz)
+    }
+}
+
+impl ContinentSampler for super::terraforged_continent::SimpleContinentGenerator {
+    fn edge_value(&self, x: f32, z: f32) -> f32 {
+        super::terraforged_continent::SimpleContinentGenerator::edge_value(self, x, z)
+    }
+}
+
+impl SimpleContinentSampler for super::terraforged_continent::SimpleContinentGenerator {
+    fn distance_to_ocean(&self, center_x: i32, center_z: i32, dx: f32, dz: f32) -> f32 {
+        super::terraforged_continent::SimpleContinentGenerator::distance_to_ocean(
+            self, center_x, center_z, dx, dz,
+        )
+    }
+}
+
+impl ContinentSampler for super::terraforged_advanced_continent::AdvancedContinentGenerator {
+    fn edge_value(&self, x: f32, z: f32) -> f32 {
+        super::terraforged_advanced_continent::AdvancedContinentGenerator::edge_value(self, x, z)
+    }
+}
+
+impl SimpleContinentSampler for super::terraforged_advanced_continent::AdvancedContinentGenerator {
+    fn distance_to_ocean(&self, center_x: i32, center_z: i32, dx: f32, dz: f32) -> f32 {
+        super::terraforged_advanced_continent::AdvancedContinentGenerator::distance_to_ocean(
+            self, center_x, center_z, dx, dz,
+        )
+    }
+}
+
 /// Engine's `rivermap.river.BaseRiverGenerator`: the river, fork, lake and wetland configs of a world and the
 /// fork, lake and wetland placement its subclasses share. Engine reads everything from a `GeneratorContext`:
 /// here the caller passes `context.seed.root()`, `context.settings.world`, `context.settings.rivers`,
@@ -1855,6 +1895,92 @@ impl<C: ContinentSampler> BaseRiverGenerator<C> {
             valley_curve: RiverCarver::valley_type(random),
         };
         RiverCarver::new(river, warp, config, settings, self.levels, &self.registry)
+    }
+}
+
+/// Engine's `continent.simple.SimpleRiverGenerator`, the river generator of the simple (multi and single) and
+/// advanced continents: `count` main rivers spread around the continent centre, each from at least 400 blocks out
+/// to the ocean, with integer endpoints, then the base class's forks, lakes and wetlands.
+pub struct SimpleRiverGenerator<C> {
+    pub base: BaseRiverGenerator<C>,
+}
+
+impl<C: SimpleContinentSampler> SimpleRiverGenerator<C> {
+    /// `new SimpleRiverGenerator(continent, context)`: see [`BaseRiverGenerator::new`].
+    pub fn new(
+        continent: C,
+        root_seed: i32,
+        world: &WorldSettings,
+        rivers: &RiverSettings,
+        levels: Levels,
+        registry: Arc<TerrainRegistry>,
+    ) -> Self {
+        Self {
+            base: BaseRiverGenerator::new(continent, root_seed, world, rivers, levels, registry),
+        }
+    }
+
+    /// `generateRivers(x, z, id)` with this class's roots.
+    pub fn generate_rivers(&self, x: i32, z: i32, id: i64) -> Rivermap {
+        self.base.generate_rivers(x, z, id, Self::generate_roots)
+    }
+
+    /// `generateRoots(x, z, random, warp)`: one `nextFloat` for the start angle, then per root its angle
+    /// variance and start distance, the valley width, the valley curve and the warp, and the base class's
+    /// `addLake`, in Engine's draw order.
+    pub fn generate_roots(
+        base: &BaseRiverGenerator<C>,
+        x: i32,
+        z: i32,
+        random: &mut LegacyRandom,
+        warp: &GenWarp,
+    ) -> Vec<RiverNetworkBuilder> {
+        let start = random.next_float();
+        let spacing = PI2 / base.count as f32;
+        let space_var = spacing * 0.75;
+        let space_bias = -space_var / 2.0;
+        // Engine's `new ArrayList(count)` throws for a negative count; the port returns no roots instead.
+        let mut roots = Vec::with_capacity(base.count.max(0) as usize);
+        for index in 0..base.count {
+            let variance = random.next_float() * space_var + space_bias;
+            let angle = start + spacing * index as f32 + variance;
+            let dx = sin(angle);
+            let dz = cos(angle);
+            let start_mod = 0.05 + random.next_float() * 0.45;
+            let length = base.continent.distance_to_ocean(x, z, dx, dz);
+            let start_dist = java_max(400.0, start_mod * length);
+            let x1 = x as f32 + dx * start_dist;
+            let z1 = z as f32 + dz * start_dist;
+            let x2 = x as f32 + dx * length;
+            let z2 = z as f32 + dz * length;
+            let valley_size = River::VALLEY_WIDTH as f32 * River::MAIN_VALLEY.next(random);
+            // `new River((int) x1, (int) z1, (int) x2, (int) z2)`: `as i32` saturates and maps NaN to 0, as Java.
+            let river = River::new(
+                x1 as i32 as f32,
+                z1 as i32 as f32,
+                x2 as i32 as f32,
+                z2 as i32 as f32,
+            );
+            let settings = RiverCarverSettings {
+                valley_curve: RiverCarver::valley_type(random),
+                fade_in: base.main.fade,
+                valley_size,
+                connecting: false,
+            };
+            let river_warp = RiverWarp::create_range(0.1, 0.85, random);
+            let carver = RiverCarver::new(
+                river,
+                river_warp,
+                base.main,
+                settings,
+                base.levels,
+                &base.registry,
+            );
+            let mut branch = RiverNetwork::builder(carver);
+            base.add_lake(&mut branch, random, warp);
+            roots.push(branch);
+        }
+        roots
     }
 }
 

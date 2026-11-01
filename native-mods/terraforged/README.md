@@ -576,6 +576,14 @@ generation and the cached instance for negative and extreme cells, and fold the 
 settings variants and six cells, against a Java oracle running Engine's classes, `RiverCacheOracle.java` in
 `.local/terraforged/oracles/river/`, plus the expiry.
 
+The simple-river layer adds Engine's `SimpleRiverGenerator` (`river.rs`), the river generator of the simple
+(multi and single) and advanced continents, which now implement the edge and ocean-distance lookups it reads. It
+spreads the world's river count of main rivers around the continent centre at evenly spaced angles (from one
+random start, each with a random offset of up to 3/8 of the spacing either way), each from a random 5% to 50% of
+the distance to the ocean (at least 400 blocks) out to the ocean, with both ends truncated to whole blocks, gives
+each a valley, warp and lake in Engine's draw order, then hands them to the base generator's shuffle, forks and
+wetlands. Nothing calls it yet.
+
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator and its river caches. They change nothing in the game, so there is
