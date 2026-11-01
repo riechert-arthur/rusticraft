@@ -471,6 +471,9 @@ fold every field and method over 2560 segments (zero-length, NaN, infinite and -
 intersections and overlaps, and warps with degenerate and NaN fades over distances outside 0..1, against a Java
 oracle running Engine's classes, `RiverGeometryOracle.java` in `.local/terraforged/oracles/river/`.
 
+The river-carver layer adds tapered valley, bank and bed shaping, mouth scaling, terrain tagging,
+fork-profile derivation and Java-random valley curves with exact normalized height behavior.
+
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps and its river geometry. They change nothing in the game, so there is
