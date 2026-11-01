@@ -107,7 +107,7 @@ mod tests {
         }
 
         fn blocks_motion_in_heightmap(self) -> bool {
-            self.0 >= 2 && !self.has_fluid()
+            self.0 >= 2 && !self.has_fluid() && !(9..16).contains(&self.0)
         }
 
         fn blocks_motion_in_heightmap_no_leaves(self) -> bool {
@@ -130,29 +130,45 @@ mod tests {
             ("DataVersion", Tag::Int(DATA_VERSION)),
             (
                 "states",
-                Tag::List(vec![
-                    Tag::compound([("id", Tag::String("minecraft:air".into()))]),
-                    Tag::compound([("id", Tag::String("minecraft:void_air".into()))]),
-                    Tag::compound([("id", Tag::String("minecraft:stone".into()))]),
-                    Tag::compound([("id", Tag::String("minecraft:water".into()))]),
-                    Tag::compound([("id", Tag::String("minecraft:dirt".into()))]),
-                    Tag::compound([("id", Tag::String("minecraft:snow_block".into()))]),
-                    Tag::compound([("id", Tag::String("minecraft:gravel".into()))]),
-                    Tag::compound([
-                        ("id", Tag::String("minecraft:water".into())),
-                        (
-                            "properties",
-                            Tag::compound([("level", Tag::String("2".into()))]),
-                        ),
-                    ]),
-                    Tag::compound([
-                        ("id", Tag::String("minecraft:water".into())),
-                        (
-                            "properties",
-                            Tag::compound([("level", Tag::String("1".into()))]),
-                        ),
-                    ]),
-                ]),
+                Tag::List(
+                    vec![
+                        Tag::compound([("id", Tag::String("minecraft:air".into()))]),
+                        Tag::compound([("id", Tag::String("minecraft:void_air".into()))]),
+                        Tag::compound([("id", Tag::String("minecraft:stone".into()))]),
+                        Tag::compound([("id", Tag::String("minecraft:water".into()))]),
+                        Tag::compound([("id", Tag::String("minecraft:dirt".into()))]),
+                        Tag::compound([("id", Tag::String("minecraft:snow_block".into()))]),
+                        Tag::compound([("id", Tag::String("minecraft:gravel".into()))]),
+                        Tag::compound([
+                            ("id", Tag::String("minecraft:water".into())),
+                            (
+                                "properties",
+                                Tag::compound([("level", Tag::String("2".into()))]),
+                            ),
+                        ]),
+                        Tag::compound([
+                            ("id", Tag::String("minecraft:water".into())),
+                            (
+                                "properties",
+                                Tag::compound([("level", Tag::String("1".into()))]),
+                            ),
+                        ]),
+                    ]
+                    .into_iter()
+                    .chain((1..=8).map(|layers| {
+                        Tag::compound([
+                            ("id", Tag::String("minecraft:snow".into())),
+                            (
+                                "properties",
+                                Tag::compound([(
+                                    "layers",
+                                    Tag::String(layers.to_string().as_str().into()),
+                                )]),
+                            ),
+                        ])
+                    }))
+                    .collect(),
+                ),
             ),
             (
                 "defaults",
@@ -164,6 +180,7 @@ mod tests {
                     ("minecraft:dirt", Tag::Int(4)),
                     ("minecraft:snow_block", Tag::Int(5)),
                     ("minecraft:gravel", Tag::Int(6)),
+                    ("minecraft:snow", Tag::Int(9)),
                 ]),
             ),
         ]))
@@ -179,6 +196,10 @@ mod tests {
     }
 
     fn terrain_with_river(slope: f32, kind: &str, river_noise: f32) -> TerrainData {
+        terrain_fixture(slope, kind, river_noise, 0.2)
+    }
+
+    fn terrain_fixture(slope: f32, kind: &str, river_noise: f32, height_noise: f32) -> TerrainData {
         let registry = TerrainRegistry::new();
         let hills = registry.get_by_name("hills").unwrap();
         let river = registry.get_by_name(kind).unwrap();
@@ -189,7 +210,7 @@ mod tests {
                     x,
                     z,
                     &NoiseSample {
-                        height_noise: 0.2 + x as f32 * slope,
+                        height_noise: height_noise + x as f32 * slope,
                         base_noise: if (x, z) == (0, 0) { 0.5 } else { 0.25 },
                         river_noise: if (x, z) == (0, 0) { river_noise } else { 1.0 },
                         terrain_type: if (x, z) == (0, 0) {
@@ -205,6 +226,101 @@ mod tests {
         let mut terrain = TerrainData::new(TerrainLevels::default());
         terrain.accept(&noise);
         terrain
+    }
+
+    #[test]
+    fn snow_postprocessing_matches_original_java_columns() {
+        use super::super::super::terrain::PreLightChunkStage;
+        use super::super::terraforged_surface::{self, SnowBlocks};
+
+        struct Snow;
+        impl SnowBlocks for Snow {
+            fn is_air(&self, state: BlockStateId) -> bool {
+                State(state.0).is_air()
+            }
+            fn is_snow_layer(&self, state: BlockStateId) -> bool {
+                (9..=16).contains(&state.0)
+            }
+            fn is_snow(&self, state: BlockStateId) -> bool {
+                state.0 == 5 || self.is_snow_layer(state)
+            }
+            fn is_erodible(&self, state: BlockStateId) -> bool {
+                state.0 == 4 || self.is_snow(state)
+            }
+            fn with_layers(
+                &self,
+                _: BlockStateId,
+                layers: i32,
+            ) -> Result<BlockStateId, TerrainError> {
+                if !(1..=8).contains(&layers) {
+                    return Err(TerrainError::InvalidState);
+                }
+                Ok(BlockStateId(8 + layers as u32))
+            }
+            fn air(&self) -> BlockStateId {
+                BlockStateId(0)
+            }
+            fn stone(&self) -> BlockStateId {
+                BlockStateId(2)
+            }
+        }
+
+        let cases = [
+            (96.0, 80, 9, 60, false, 9, 0x8c3c226f5a6c374a),
+            (96.125, 80, 9, 60, false, 9, 0x8c3c226f5a6c374a),
+            (96.25, 80, 9, 60, false, 10, 0x434277d40644be89),
+            (96.5, 80, 9, 60, false, 12, 0xf91c7777ff31930f),
+            (96.999, 80, 9, 60, false, 16, 0x1d0321e54fcf7613),
+            (-1.0, 80, 9, 60, false, 16, 0x1d0321e54fcf7613),
+            (-1.25, 80, 9, 60, false, 14, 0x6729224156e2a18d),
+            (96.0, 80, 9, 60, true, 0, 0x8f78ffc48d497c93),
+            (96.0, 80, 9, 77, true, 0, 0xf91474d09f571ae5),
+            (96.0, 80, 5, 60, true, 0, 0x8f78ffc48d497c93),
+            (96.0, 80, 4, 60, true, 4, 0xb14f229d5df5cd07),
+            (96.0, 2, 9, -2, true, 0, 0x35894c4eefce2ded),
+            (96.0, 0, 9, -4, true, 0, 0x0de871e882a47d43),
+        ];
+        for stage in [PreLightChunkStage::Empty, PreLightChunkStage::Terrain] {
+            for (height, top, initial, bottom, steep, expected, expected_hash) in cases {
+                let registry = registry();
+                let terrain =
+                    terrain_fixture(if steep { 0.01 } else { 0.0 }, "hills", 1.0, height / 480.0);
+                let mut chunk =
+                    TerrainChunk::new(ChunkPos::new(-1, 2), -64, 192, &registry, Properties)
+                        .unwrap();
+                chunk.set_generation_stage(stage);
+                for y in -64..=top {
+                    let state = if y == top {
+                        initial
+                    } else if y <= bottom {
+                        2
+                    } else {
+                        4
+                    };
+                    chunk.set_block_raw(0, y, 0, BlockStateId(state)).unwrap();
+                }
+                let raw_height = terrain.height().get(0, 0);
+                terraforged_surface::apply_post(&terrain, &mut chunk, 255, &Snow).unwrap();
+                let hash = (-64..128).fold(0xcbf29ce484222325u64, |hash, y| {
+                    (hash ^ u64::from(chunk.block(0, y, 0).0)).wrapping_mul(0x100000001b3)
+                });
+                assert_eq!((chunk.block(0, top, 0).0, hash), (expected, expected_hash));
+                assert_eq!(terrain.height().get(0, 0), raw_height);
+                let surface = (-64..128)
+                    .rev()
+                    .find(|&y| State(chunk.block(0, y, 0).0).blocks_motion_in_heightmap_no_leaves())
+                    .unwrap_or(-65);
+                assert_eq!(
+                    chunk
+                        .heightmap(HeightmapType::MotionBlockingNoLeaves)
+                        .unwrap()
+                        .highest_taken(0, 0)
+                        .unwrap(),
+                    surface
+                );
+                assert_eq!(chunk.generation_stage(), stage);
+            }
+        }
     }
 
     #[test]
