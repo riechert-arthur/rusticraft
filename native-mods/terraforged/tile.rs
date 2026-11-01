@@ -339,6 +339,54 @@ impl Tile {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn generate_cached_zoomed_heightmap(
+        &mut self,
+        cache: &HeightmapCache,
+        offset_x: f32,
+        offset_z: f32,
+        zoom: f32,
+        mut apply_base: impl FnMut(&mut Cell, f32, f32),
+        mut lookup_rivermap: impl FnMut(i32, i32) -> Arc<Rivermap>,
+        mut apply_rivers: impl FnMut(&mut Cell, f32, f32, &Rivermap),
+        mut apply_climate: impl FnMut(&mut Cell, f32, f32),
+    ) {
+        let mut current = None;
+        let translate_x = offset_x - self.block_size.size as f32 * zoom / 2.0;
+        let translate_z = offset_z - self.block_size.size as f32 * zoom / 2.0;
+        for chunk_z in 0..self.chunk_size.total {
+            let world_chunk_z = self.chunk_z.wrapping_add(chunk_z).wrapping_sub(self.border);
+            let region_block_z = chunk_z.wrapping_shl(4);
+            for chunk_x in 0..self.chunk_size.total {
+                let world_chunk_x = self.chunk_x.wrapping_add(chunk_x).wrapping_sub(self.border);
+                let region_block_x = chunk_x.wrapping_shl(4);
+                for delta_z in 0..16 {
+                    let region_z = region_block_z.wrapping_add(delta_z);
+                    let world_z = world_chunk_z.wrapping_shl(4).wrapping_add(delta_z);
+                    let sample_z = world_z as f32 * zoom + translate_z;
+                    let cache_z = java_floor(sample_z);
+                    for delta_x in 0..16 {
+                        let region_x = region_block_x.wrapping_add(delta_x);
+                        let world_x = world_chunk_x.wrapping_shl(4).wrapping_add(delta_x);
+                        let sample_x = world_x as f32 * zoom + translate_x;
+                        let cache_x = java_floor(sample_x);
+                        let index = self.block_size.index_of(region_x, region_z) as usize;
+                        current = cache.generate(
+                            &mut self.blocks[index],
+                            cache_x,
+                            cache_z,
+                            current,
+                            |cell, x, z| apply_base(cell, x, z),
+                            &mut lookup_rivermap,
+                            |cell, x, z, map| apply_rivers(cell, x, z, map),
+                            |cell, x, z| apply_climate(cell, x, z),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     /// `getCell(blockX, blockZ)`: the non-border cell at a world block position, wrapped into the
     /// tile with `mask`. Panics where Engine throws (a negative border or a zero block size can
     /// put the masked index outside the backing).
@@ -443,6 +491,14 @@ impl Filterable for FilterRegion<'_> {
 
     fn backing_mut(&mut self) -> &mut [Cell] {
         &mut self.tile.blocks
+    }
+}
+
+fn java_floor(value: f32) -> i32 {
+    if value >= 0.0 {
+        value as i32
+    } else {
+        (value as i32).wrapping_sub(1)
     }
 }
 
@@ -1533,5 +1589,46 @@ z12 4 1 6ce2a26113d5f45e 4b01fc4e28169c11 774fcf24a9588431
         } else {
             value.to_bits() as i32
         }
+    }
+
+    #[test]
+    fn cached_zoomed_tile_heightmap_generation_matches_engine_0_3_0() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let terrains = Arc::new(TerrainRegistry::new());
+        let cache =
+            HeightmapCache::with_capacity(Levels::new(256, 63), Arc::clone(&terrains), 8_192);
+        let calls = AtomicUsize::new(0);
+        let generate = |tile: &mut Tile| {
+            tile.generate_cached_zoomed_heightmap(
+                &cache,
+                100.0,
+                -50.0,
+                0.5,
+                |cell, x, z| {
+                    calls.fetch_add(1, Ordering::Relaxed);
+                    cell.value = x * 1_000.0 + z;
+                    cell.continent_x = 7;
+                    cell.continent_z = -9;
+                },
+                |x, z| Arc::new(Rivermap::new(x, z, Vec::new(), GenWarp::direct())),
+                |cell, _, _, _| cell.river_mask = 0.25,
+                |cell, _, _| cell.temperature = 0.75,
+            );
+        };
+
+        let mut first = Tile::new(0, 0, 1, 1, &terrains);
+        generate(&mut first);
+        let unique_samples = calls.load(Ordering::Relaxed);
+        let mut second = Tile::new(0, 0, 1, 1, &terrains);
+        generate(&mut second);
+
+        assert_eq!(calls.load(Ordering::Relaxed), unique_samples);
+        assert!(unique_samples < 4_096);
+        for tile in [&first, &second] {
+            assert_eq!(tile.raw_cell(0, 0).unwrap().value, 83_933.0);
+            assert_eq!(tile.raw_cell(63, 63).unwrap().value, 114_965.0);
+        }
+        assert_eq!(java_floor(-66.0), -67);
+        assert_eq!(java_floor(-34.5), -35);
     }
 }
