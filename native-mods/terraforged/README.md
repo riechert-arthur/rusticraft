@@ -279,6 +279,9 @@ and river maps across multi, single, improved, and fancy generator factory modes
 Continent construction now accepts the aggregate context's river settings and levels in every mode,
 while preserving default convenience constructors and TerraForged's seed order.
 
+Generator settings and context now aggregate world, climate, terrain, river, and filter configuration,
+with TerraForged's root-seed copy, split, offset, and level initialization semantics.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
