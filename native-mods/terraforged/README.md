@@ -449,6 +449,9 @@ cases (`int` limits, NaN, infinite and negative widths, six `Levels`, including 
 `Levels(63, 255)`), against a Java oracle in `.local/terraforged/oracles/river/`, which also prints TerraForged's
 own config.
 
+The river-warp layer adds the paired lake and channel domain transforms used while carving generated
+networks, including TerraForged's original seed increments and currently unused mega-warp scaling.
+
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator) and Engine's river configuration. They change nothing in the game, so there is
