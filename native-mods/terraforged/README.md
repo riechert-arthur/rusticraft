@@ -120,6 +120,9 @@ searches, ocean-distance solving and the single-continent center filter.
 The advanced-continent layer adds variable-size warped Voronoi continents, skipping, corrected
 centers, cliff and bay shaping, and exact iterative edge and ocean-distance searches.
 
+The fancy-island layer adds scaled line segments, translated island bounds, overlap and containment,
+deep/shallow/coast edge shaping and curved land-distance values.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
