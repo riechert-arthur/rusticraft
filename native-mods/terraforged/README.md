@@ -476,8 +476,10 @@ supports readiness probes and eager hints, and removes completed entries after d
 terrain handles defer pool restoration until their final concurrent reader releases the data.
 
 The generator query facade captures Java's narrowed and raw world seeds, exposes level and cached
-chunk data, and reproduces structure heightmap and raw base-column queries, including their deliberate
-eroded-versus-un-eroded height split. A standalone current-source oracle records the query fixtures.
+chunk data, and reproduces structure heightmap and base-column queries using raw noise samples for
+both, as in the pinned source. Chunk filling still consumes eroded terrain. The height-query oracle
+executes the original Java method, and a smoothing-enabled regression distinguishes raw query
+heights from eroded block heights for all six heightmap types.
 
 The first playable terrain stage now fills Rusticraft chunks from TerraForged height data with stone
 and water, including river/lake base-height water levels, build-range clipping, and the ocean-floor and

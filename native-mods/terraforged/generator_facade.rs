@@ -143,8 +143,12 @@ impl TerraForgedGenerator {
     pub fn base_height(&self, x: i32, z: i32, heightmap: TerraHeightmap) -> i32 {
         let seed = self.seed();
         let sample = self.terrain.noise_sample(seed, x, z);
-        let eroded_height = self.terrain.eroded_height_noise(seed, x, z);
-        base_height_from_noise(self.levels, sample.base_noise, eroded_height, heightmap)
+        base_height_from_noise(
+            self.levels,
+            sample.base_noise,
+            sample.height_noise,
+            heightmap,
+        )
     }
 
     pub fn base_column(&self, x: i32, z: i32) -> BaseColumn {
@@ -156,11 +160,11 @@ impl TerraForgedGenerator {
 fn base_height_from_noise(
     levels: TerrainLevels,
     base_noise: f32,
-    eroded_height_noise: f32,
+    height_noise: f32,
     heightmap: TerraHeightmap,
 ) -> i32 {
     let base = levels.height(levels.scaled_base_level(base_noise));
-    let height = levels.height(levels.scaled_height(eroded_height_noise));
+    let height = levels.height(levels.scaled_height(height_noise));
     if heightmap.includes_base() {
         base.max(height).wrapping_add(1)
     } else {
@@ -185,7 +189,7 @@ fn base_column_from_noise(levels: TerrainLevels, base_noise: f32, height_noise: 
 #[cfg(test)]
 mod tests {
     use super::super::{
-        terraforged::Module,
+        terraforged::{Module, Source, SourceConfig, SourceKind},
         terraforged_context::{GeneratorContext, GeneratorSettings},
         terraforged_continent_noise::ContinentNoise,
         terraforged_engine::TerrainRegistry,
@@ -259,6 +263,16 @@ mod tests {
     }
 
     fn generator() -> TerraForgedGenerator {
+        generator_with_land(
+            Module::constant(0.25),
+            HeightmapSmoothingSettings::default(),
+        )
+    }
+
+    fn generator_with_land(
+        land_noise: Module,
+        smoothing: HeightmapSmoothingSettings,
+    ) -> TerraForgedGenerator {
         let levels = TerrainLevels::new(false, 1.0, -64, 480, 128, 62, 22);
         let terrains = Arc::new(TerrainRegistry::new());
         let continent = ContinentNoise::new(
@@ -274,7 +288,7 @@ mod tests {
             vec![Arc::new(TerrainNoise::new(
                 terrains.get_by_name("hills").unwrap(),
                 1.0,
-                Module::constant(0.25),
+                land_noise,
             ))],
         );
         TerraForgedGenerator::new(
@@ -285,9 +299,53 @@ mod tests {
                     droplets_per_chunk: 0,
                     ..ErosionFilterSettings::default()
                 },
-                HeightmapSmoothingSettings::default(),
+                smoothing,
             ),
         )
+    }
+
+    #[test]
+    fn base_height_uses_raw_sample_even_when_smoothing_changes_terrain() {
+        let generator = generator_with_land(
+            Module::source(Source::new(
+                SourceKind::Simplex,
+                SourceConfig {
+                    frequency: 0.2,
+                    ..SourceConfig::default()
+                },
+            )),
+            HeightmapSmoothingSettings {
+                iterations: 2,
+                smoothing_rate: 1.0,
+                ..HeightmapSmoothingSettings::default()
+            },
+        );
+        generator.capture_seed(7);
+        let mut changed = false;
+        for (x, z) in [(0, 0), (7, 11), (15, 15), (31, 17)] {
+            let raw = generator.terrain.noise_sample(7, x, z);
+            let eroded = generator.terrain.eroded_height_noise(7, x, z);
+            let levels = generator.levels();
+            changed |= levels.height(levels.scaled_height(raw.height_noise))
+                != levels.height(levels.scaled_height(eroded));
+            for heightmap in [
+                TerraHeightmap::WorldSurface,
+                TerraHeightmap::WorldSurfaceWorldgen,
+                TerraHeightmap::MotionBlocking,
+                TerraHeightmap::MotionBlockingNoLeaves,
+                TerraHeightmap::OceanFloor,
+                TerraHeightmap::OceanFloorWorldgen,
+            ] {
+                assert_eq!(
+                    generator.base_height(x, z, heightmap),
+                    base_height_from_noise(levels, raw.base_noise, raw.height_noise, heightmap)
+                );
+            }
+        }
+        assert!(
+            changed,
+            "fixture must distinguish raw from smoothed block heights"
+        );
     }
 
     #[test]
