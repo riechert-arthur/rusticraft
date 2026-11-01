@@ -125,6 +125,41 @@ impl LandForms {
             .warp(noise_warp(seed.next(), 300, 1, 100.0))
             .scale(Module::constant(0.4))
     }
+
+    pub fn plateau(&self, seed: &mut Seed) -> Module {
+        let valley = source(SourceKind::Ridge, seed.next(), 500, 1, 0.975, 2.0)
+            .invert()
+            .warp(noise_warp(seed.next(), 100, 1, 150.0))
+            .warp(noise_warp(seed.next(), 20, 1, 15.0));
+        let top = source(SourceKind::Ridge, seed.next(), 150, 3, 0.975, 2.45)
+            .warp(noise_warp(seed.next(), 300, 1, 150.0))
+            .warp(noise_warp(seed.next(), 40, 2, 20.0))
+            .scale(Module::constant(0.15));
+        let top_mask = valley
+            .clone()
+            .clamp(Module::constant(0.02), Module::constant(0.1))
+            .map(Module::constant(0.0), Module::constant(1.0));
+        let top = Module::multiply(vec![top, top_mask]);
+        let surface = perlin(seed.next(), 20, 3, 2.0)
+            .scale(Module::constant(0.05))
+            .warp(noise_warp(seed.next(), 40, 2, 20.0));
+        let body = Module::multiply(vec![
+            valley,
+            source(SourceKind::Cubic, seed.next(), 500, 1, 0.5, 2.0)
+                .scale(Module::constant(0.6))
+                .bias(Module::constant(0.3)),
+        ]);
+        let terraced = Module::add(vec![body, top]).terrace(
+            Module::constant(0.9),
+            Module::constant(0.15),
+            Module::constant(0.35),
+            4,
+            0.4,
+        );
+        Module::add(vec![terraced, surface]).scale(Module::constant(
+            (0.475_f64 * f64::from(self.settings.general.global_vertical_scale)) as f32,
+        ))
+    }
 }
 
 /// `Source.build(seed, scale, octaves).lacunarity(lacunarity).perlin()` (Engine's builder defaults otherwise).
@@ -379,5 +414,31 @@ mod tests {
             );
             assert_eq!(got, (after, min, max, hash), "{name} {kind} {start}");
         }
+    }
+
+    #[test]
+    fn plateau_matches_engine_0_3_0() {
+        let forms = LandForms::new(TerrainSettings::default());
+        let mut seed = Seed::new(123);
+        let plateau = forms.plateau(&mut seed);
+        assert_eq!(seed.get(), 132);
+        assert_eq!(plateau.min_value().to_bits(), 0x00000000);
+        assert_eq!(plateau.max_value().to_bits(), 0x3ee26b50);
+        assert_eq!(
+            bits(&plateau),
+            [0x3c3eab37, 0x3e1cfff9, 0x3e1cbbb1, 0x3e18dbdd]
+        );
+
+        let mut settings = TerrainSettings::default();
+        settings.general.global_vertical_scale = 0.37;
+        let forms = LandForms::new(settings);
+        let mut seed = Seed::new(i32::MAX - 8);
+        let plateau = forms.plateau(&mut seed);
+        assert_eq!(seed.get(), i32::MIN);
+        assert_eq!(plateau.max_value().to_bits(), 0x3e2af838);
+        assert_eq!(
+            bits(&plateau),
+            [0x3b8ff973, 0x3ddf6222, 0x3d8c5342, 0x3bf244bf]
+        );
     }
 }

@@ -206,6 +206,9 @@ is exactly 1 leaves that hill landform unscaled. The same grid test covers the t
 two such vertical scales. The other landforms, the ocean and land bases, and TerraForged's `RandSeed` (ModTerrains
 builds its landforms from a `SplittableRandom` seed rather than Engine's counter) are not ported yet.
 
+The plateau LandForms layer adds the warped valley, ridge top, surface detail and controlled four-step
+terrace composition used by TerraForged\'s plateau terrain.
+
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings and its first landforms. They change nothing in the game, so there is
