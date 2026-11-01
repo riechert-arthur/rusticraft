@@ -294,6 +294,9 @@ base-height bounds plus exact automatic horizontal-frequency and normalized-heig
 Bordered noise maps and chunk terrain data now preserve TerraForged's coordinate indexing, sampled
 height, base, river, terrain, gradient, and extrema conversion from the current source implementation.
 
+The current-source terrain-generator contract now owns reusable terrain data, delegates bordered noise
+generation, scales direct height queries, and preserves TerraForged's object-pool behavior exactly.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
