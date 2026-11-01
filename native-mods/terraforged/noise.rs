@@ -2185,6 +2185,77 @@ impl Module {
         Ok(match &self.0.kind {
             ModuleKind::Constant(value) => *value,
             ModuleKind::Source(source) => source.value_seed_first(seed, x, y),
+            ModuleKind::CellSource {
+                config,
+                displacement,
+                function,
+                distance,
+                lookup,
+            } => {
+                let effective_seed = config.seed.wrapping_add(seed);
+                let cell = nearest_cell(
+                    x * config.frequency,
+                    y * config.frequency,
+                    effective_seed,
+                    *displacement,
+                    *distance,
+                );
+                match function {
+                    CellFunction::CellValue => map(
+                        value_coord_2d(effective_seed, cell.x, cell.y),
+                        -1.0,
+                        1.0,
+                        2.0,
+                    ),
+                    CellFunction::NoiseLookup => {
+                        let Some(vector) = cell.vector else {
+                            panic!(
+                                "Noise2D throws a NullPointerException: no cell is nearer than Float.MAX_VALUE"
+                            );
+                        };
+                        lookup.try_value_seed_first(
+                            effective_seed,
+                            cell.x as f32 + vector[0],
+                            cell.y as f32 + vector[1],
+                        )?
+                    }
+                    CellFunction::Distance => 0.0,
+                }
+            }
+            ModuleKind::CellEdgeSource {
+                config,
+                displacement,
+                edge,
+                distance,
+            } => {
+                let value = cell_edge(
+                    x * config.frequency,
+                    y * config.frequency,
+                    config.seed.wrapping_add(seed),
+                    *displacement,
+                    *edge,
+                    *distance,
+                );
+                let (min, max, range) = edge.bounds();
+                map(value, min, max, range)
+            }
+            ModuleKind::SineSource { frequency, alpha } => {
+                let alpha = alpha.try_value_seed_first(
+                    SourceConfig::default().seed.wrapping_add(seed),
+                    x,
+                    y,
+                )?;
+                let x = x * *frequency;
+                let y = y * *frequency;
+                let noise = if alpha == 0.0 {
+                    sin(x)
+                } else if alpha == 1.0 {
+                    sin(y)
+                } else {
+                    lerp(sin(x), sin(y), alpha)
+                };
+                map(noise, -1.0, 1.0, 2.0)
+            }
             ModuleKind::Warp(source, domain) => source.try_value_seed_first(
                 seed,
                 domain.try_x_seed_first(seed, x, y)?,
@@ -2197,6 +2268,13 @@ impl Module {
                 value * alpha + (1.0 - alpha)
             }
             ModuleKind::Bias(source, bias) => sample(source)? + sample(bias)?,
+            ModuleKind::Boost(source, iterations) => {
+                let mut value = sample(source)?;
+                for _ in 0..*iterations {
+                    value = java_pow(value, 1.0 - value);
+                }
+                value
+            }
             ModuleKind::Clamp(source, min, max) => {
                 let value = sample(source)?;
                 clamp(value, sample(min)?, sample(max)?)
@@ -9292,6 +9370,109 @@ mod tests {
                 .unwrap()
                 .to_bits()
         );
+    }
+
+    #[test]
+    fn runtime_seeded_special_sources_match_current_noise2d() {
+        let source = |kind, seed, frequency, octaves, gain| {
+            Module::source(Source::new(
+                kind,
+                SourceConfig {
+                    seed,
+                    octaves,
+                    gain,
+                    frequency,
+                    lacunarity: 2.0,
+                    interpolation: Interpolation::Curve3,
+                },
+            ))
+        };
+        let lookup = source(SourceKind::Simplex, 1303, 1.0 / 64.0, 3, 0.5);
+        let alpha = source(SourceKind::Simplex2, 1304, 1.0 / 72.0, 2, 0.5);
+        let cell_config = SourceConfig {
+            seed: 1301,
+            octaves: 1,
+            gain: 0.5,
+            frequency: 1.0 / 96.0,
+            lacunarity: 2.0,
+            interpolation: Interpolation::Curve3,
+        };
+        let edge_config = SourceConfig {
+            seed: 1302,
+            frequency: 1.0 / 80.0,
+            ..cell_config
+        };
+        let graphs = [
+            lookup.clone().boost(2),
+            Module::cell_source(
+                cell_config,
+                0.85,
+                CellFunction::CellValue,
+                DistanceFunction::Manhattan,
+                Module::constant(0.0),
+            ),
+            Module::cell_source(
+                cell_config,
+                0.85,
+                CellFunction::NoiseLookup,
+                DistanceFunction::Natural,
+                lookup,
+            ),
+            Module::cell_edge_source(
+                edge_config,
+                0.7,
+                EdgeFunction::Distance2Add,
+                DistanceFunction::Natural,
+            ),
+            Module::sine_source(1.0 / 64.0, alpha),
+        ];
+        let expected = [
+            [
+                0x0cd5c1c44d7adbaf,
+                0x62e89b22ef3eda45,
+                0x2a37ca81ba3fdddb,
+                0x4451930bbf5d320a,
+            ],
+            [
+                0x77712f421d8d9149,
+                0x3b3142ebd823dca3,
+                0x6e59a545cbddf7f5,
+                0x45961bcc004e5ab9,
+            ],
+            [
+                0xb7cf1fbb2e0bc225,
+                0x80808cc2104975a6,
+                0xb5c7f407337972f8,
+                0x16ed23ba914fa72e,
+            ],
+            [
+                0xeab022e606ae48ec,
+                0xee086d6dbf4243b4,
+                0x53e969de04b31350,
+                0x49710aa763fa8c76,
+            ],
+            [
+                0xcd49ed4705b66fcf,
+                0xbdb543614d9c0939,
+                0xb942b54bec18da08,
+                0x244e92ee113ed92a,
+            ],
+        ];
+        for (graph, hashes) in graphs.iter().zip(expected) {
+            for (seed, expected) in [0, 17, -91, i32::MAX].into_iter().zip(hashes) {
+                let mut hash = 0xcbf29ce484222325u64;
+                for (x, y) in [
+                    (0.0, 0.0),
+                    (0.125, -0.75),
+                    (12.34, 56.78),
+                    (-1234.5, 987.25),
+                ] {
+                    hash ^= u64::from(graph.try_value_seed_first(seed, x, y).unwrap().to_bits());
+                    hash = hash.wrapping_mul(0x100000001b3);
+                }
+                assert_eq!(hash, expected, "seed {seed}");
+            }
+        }
     }
 
     #[test]

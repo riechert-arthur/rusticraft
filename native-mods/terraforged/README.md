@@ -1665,7 +1665,7 @@ its source and upper bound and, unless the source sample is above the upper boun
 `java_pow`); `Modulate` reads its direction and strength, then the source at the point moved by `NoiseUtil.sin`/`cos` of
 `direction * PI2` times the strength. `Steps` is the one that calls `NoiseUtil.map`, so the seed-first path maps with
 `map_current`: an infinite slope range gives 1 there, the jar's path NaN. Java throws nowhere here; NaN controls give NaN
-as in Java (a `0 * inf` offset moves the point to NaN). `Boost` is not seed-first yet. `TerraForgedSeededTransformOracle.java`
+as in Java (a `0 * inf` offset moves the point to NaN). `TerraForgedSeededTransformOracle.java`
 (the PR's four graphs over seeded Perlin/Simplex/Ridge/Perlin2 sources, four seeds, four points) and
 `SeededTransformEdgeOracle.java` (43 families with a fixed value at and one ulp beside every step height, slope-window
 edge, gradient bound and quarter turn, plus NaN, ±inf, ±0, subnormals and ±1e30; zero, negative, infinite and NaN slope
@@ -1675,6 +1675,10 @@ children; a nested graph of all four; seven seeds including both `int` extremes;
 run in the same `run-graphs.sh` (`.local/terraforged/oracles/seed_first/`, outside Git); the tests match both bit for
 bit in debug and release, check which children each sample reads, and that reseeding gives the same bits over
 non-Perlin sources.
+
+Boost, cellular value/lookup, cellular edge and sine sources now support runtime-seeded sampling.
+Cell seeds use Java wrapping addition, lookup children retain the runtime seed, and sine controls
+sample the original coordinates before axis interpolation.
 
 The bounded concurrent lossy cache (`lossy_cache.rs`, `ConcurrentLossyCache`) ports the newer source tree's
 `LossyCache.Concurrent` and its `LossyCache.Stamped` buckets (`com.terraforged.mod.util.storage`, 6dd607eb). The
