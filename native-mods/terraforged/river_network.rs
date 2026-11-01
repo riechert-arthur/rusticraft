@@ -2,6 +2,7 @@
  * MIT License
  *
  * Copyright (c) 2021 TerraForged
+ * Copyright (c) 2020 TerraForged
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -23,13 +24,16 @@
  */
 
 use super::{
-    terraforged::{hash, hash_2d, map},
+    terraforged::{Source, SourceConfig, SourceKind, hash, hash_2d, map},
+    terraforged_continent_carver::RiverCarver,
     terraforged_continent_cell::CellPoint,
     terraforged_continent_cells::window,
     terraforged_continent_config::ContinentConfig,
     terraforged_continent_shape::{ContinentCells, ShapeGenerator},
+    terraforged_engine::TerrainRegistry,
     terraforged_river_nodes::{CarverSample, NodeSample, RiverNode, RiverPieces},
     terraforged_terrain_blend_util::random,
+    terraforged_terrain_data::NoiseSample,
 };
 
 /// `RiverGenerator.DIRS`: the four neighbours, in the order `computeNodes` visits them.
@@ -37,21 +41,36 @@ pub const DIRECTIONS: [(i32, i32); 4] = [(1, 0), (0, 1), (-1, 0), (0, -1)];
 
 /// The newer source tree's `RiverGenerator.computeNodes` (`worldgen.noise.continent.river`): the river and lake
 /// pieces of one continent cell. The 1.18.2-0.3.1 jar draws from `config.rivers.seed` and reads seedless cells; the
-/// newer source (ported here) passes its runtime `seed` to both and never reads `rivers.seed`. Its river warp,
-/// carver call and piece cache are not ported here.
+/// newer source (ported here) passes its runtime `seed` to both and never reads `rivers.seed`. [`Self::sample`] is
+/// the warped, carved `sample`; the piece cache is not ported here.
 pub struct RiverNetwork<'a, Cells> {
     continent: &'a Cells,
     shape: &'a ShapeGenerator,
     lake_density: f32,
+    /// `riverWarp`'s axes: `Source.builder().seed(X_OFFSET / Y_OFFSET).frequency(30).simplex()`.
+    warp_x: Source,
+    warp_y: Source,
 }
 
 impl<'a, Cells: ContinentCells> RiverNetwork<'a, Cells> {
-    /// `new RiverGenerator(continent, config)`, keeping only what `computeNodes` reads.
+    /// `new RiverGenerator(continent, config)` without its `RiverCarver` (passed to [`Self::sample`]) and caches.
     pub fn new(continent: &'a Cells, shape: &'a ShapeGenerator, config: ContinentConfig) -> Self {
+        let warp = |seed| {
+            Source::new(
+                SourceKind::Simplex,
+                SourceConfig {
+                    seed,
+                    frequency: 30.0,
+                    ..SourceConfig::default()
+                },
+            )
+        };
         Self {
             continent,
             shape,
             lake_density: config.rivers.lake_density,
+            warp_x: warp(8_657_124),
+            warp_y: warp(5_123_678),
         }
     }
 
@@ -116,8 +135,28 @@ impl<'a, Cells: ContinentCells> RiverNetwork<'a, Cells> {
         pieces
     }
 
-    /// The newer source's `RiverGenerator.sample(seed, x, y, NoiseSample)` up to its carver call, without the river
-    /// warp: `localRiverSample.get().reset()`, then the private `sample(seed, x, y, CarverSample)`. It takes the
+    /// The newer source's public `RiverGenerator.sample(seed, x, y, NoiseSample)`: warps the point with `riverWarp`
+    /// (`Domain.warp(x, y, constant(0.004))`, Noise2D seed-first: each axis adds `(simplex - 0.5) * 0.004f`, both read
+    /// at the unwarped point), samples the nearest nodes there ([`Self::sample_nodes`]) and carves `sample` with
+    /// `carver` at the warped point. `terrains` is the world registry the carver sample's terrains come from.
+    pub fn sample(
+        &self,
+        seed: i32,
+        x: f32,
+        y: f32,
+        sample: &mut NoiseSample,
+        carver: &RiverCarver,
+        terrains: &TerrainRegistry,
+    ) {
+        let point_x = x + (-0.5 + self.warp_x.value_seed_first(seed, x, y)) * 0.004;
+        let point_y = y + (-0.5 + self.warp_y.value_seed_first(seed, x, y)) * 0.004;
+        let mut nodes = CarverSample::new(terrains);
+        self.sample_nodes(seed, point_x, point_y, &mut nodes);
+        carver.carve(seed, point_x, point_y, sample, &nodes);
+    }
+
+    /// The newer source's `RiverGenerator.sample(seed, x, y, NoiseSample)` between the warp and the carver call:
+    /// `localRiverSample.get().reset()`, then the private `sample(seed, x, y, CarverSample)`. It takes the
     /// nearest cell of the unadjusted point, adjusts the point for the cell shape, and runs [`sample_node`] over the
     /// river nodes and the lake nodes of the 3x3 cells around that centre (rows outer, each in insertion order).
     /// The winners are recorded by [`Self::record_node`]; a sample with no winner is invalidated (distance NaN).
@@ -325,6 +364,7 @@ mod tests {
         terraforged_continent_cell::{CellShape, CellSource},
         terraforged_continent_cells::CellGenerator,
         terraforged_engine::{ControlPoints, TerrainRegistry, WorldControlPoints},
+        terraforged_terrain_levels::NoiseLevels,
     };
     use super::*;
 
@@ -497,6 +537,59 @@ mod tests {
     const POINTS: [f32; 26] = [f32::NAN, f32::NEG_INFINITY, f32::INFINITY, -0.0, 0.0, MIN, -MIN, 1e30, -1e30,
         f32::MAX, -f32::MAX, 2_147_483_520.0, 2_147_483_648.0, -2_147_483_648.0, -2_147_483_520.0, 16_777_216.0,
         -16_777_216.0, 16_777_218.0, 0.5, -0.5, 1.75, -2.25, 123.4, -98.76, 0.999_999_94, -1.0];
+
+    /// The PR's warped carving grid: `RiverGenerator.sample(42, x, y, NoiseSample)` after `ShapeGenerator.sample`
+    /// on a 7x7 grid per configuration, folding the carved continent, base, height and river noise and the terrain.
+    #[test]
+    fn warped_carving_pipeline_matches_current_java() {
+        let expected = [
+            (0xa09768f390824b4a, 5),
+            (0xb7898604981bbb00, 5),
+            (0x7d54a9341e2b731a, 8),
+            (0xf78c629e5c4541d4, 0),
+            (0x22ebd6c0ccfabeaa, 0),
+            (0x9cb05b15abf2c063, 2),
+        ];
+        let terrains = TerrainRegistry::new();
+        let levels = NoiseLevels::new(false, 1.0, 62, 22, 256, 128);
+        for (index, (shape, source)) in SHAPES
+            .into_iter()
+            .flat_map(|shape| SOURCES.map(|source| (shape, source)))
+            .enumerate()
+        {
+            let mut config = ContinentConfig::default();
+            config.shape.cell_shape = shape;
+            config.shape.cell_source = source;
+            config.rivers.seed = i32::MAX;
+            let cells = CellGenerator::new(config);
+            let shape = ShapeGenerator::new(config, ControlPoints::new(WorldControlPoints::default()));
+            let network = RiverNetwork::new(&cells, &shape, config);
+            let carver = RiverCarver::new(levels, config);
+            let mut fold = Fold::new();
+            let mut carved = 0;
+            for sample_y in -3..=3 {
+                for sample_x in -3..=3 {
+                    let x = sample_x as f32 + 0.125;
+                    let y = sample_y as f32 - 0.375;
+                    let mut sample = NoiseSample::new(&terrains);
+                    shape.sample(&cells, 42, x, y, &mut sample);
+                    sample.height_noise = levels.to_height_noise(sample.base_noise, 0.35);
+                    network.sample(42, x, y, &mut sample, &carver, &terrains);
+                    for value in [
+                        sample.continent_noise,
+                        sample.base_noise,
+                        sample.height_noise,
+                        sample.river_noise,
+                    ] {
+                        fold.add(value.to_bits() as u64);
+                    }
+                    fold.add(sample.terrain_type.id() as u64);
+                    carved += usize::from(sample.terrain_type.id() != 0);
+                }
+            }
+            assert_eq!((fold.hash, carved), expected[index]);
+        }
+    }
 
     /// `RiverSamplingOracle.java` (`.local/terraforged/oracles/river_network/run-sampling.sh`): the private
     /// `RiverGenerator.sample(.., CarverSample)` of the jar and of the newer source (equal under the seed mapping)
