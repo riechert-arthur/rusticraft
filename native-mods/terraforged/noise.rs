@@ -432,7 +432,7 @@ pub fn floor(value: f32) -> i32 {
     if value >= 0.0 {
         value as i32
     } else {
-        value as i32 - 1
+        (value as i32).wrapping_sub(1)
     }
 }
 

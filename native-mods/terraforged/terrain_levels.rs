@@ -74,11 +74,11 @@ impl NoiseLevels {
     }
 
     pub fn floor(self, value: f32) -> f32 {
-        (value / self.unit).floor() * self.unit
+        super::terraforged::floor(value / self.unit) as f32 * self.unit
     }
 
     pub fn ceil(self, value: f32) -> f32 {
-        self.unit + (value / self.unit).floor() * self.unit
+        self.unit + super::terraforged::floor(value / self.unit) as f32 * self.unit
     }
 
     pub fn calc_frequency(vertical_range: i32, auto: bool, scale: f32) -> f32 {
@@ -178,7 +178,7 @@ impl TerrainLevels {
     }
 
     pub fn height(self, scaled_height: f32) -> i32 {
-        scaled_height.floor() as i32
+        super::terraforged::floor(scaled_height)
     }
 }
 
@@ -264,8 +264,29 @@ mod tests {
         assert_eq!(noise.to_depth_noise(0.25).to_bits(), 0x3d888888);
         assert_eq!(noise.to_height_noise(0.25, 0.25).to_bits(), 0x3eb19999);
         assert_eq!(levels.scaled_height(0.25).to_bits(), 0x42f00000);
-        assert_eq!(levels.height(levels.scaled_height(-1.0)), -480);
+        assert_eq!(levels.height(levels.scaled_height(-1.0)), -481);
         assert_eq!(noise.floor(0.25).to_bits(), 0x3e7ddddf);
         assert_eq!(noise.ceil(0.25).to_bits(), 0x3e800001);
+    }
+
+    #[test]
+    fn height_rounding_matches_noise_util_oracle() {
+        let levels = TerrainLevels::default();
+        for (value, expected) in [
+            (-480.0, -481),
+            (-1.0, -2),
+            (-1.25, -2),
+            (-0.0, 0),
+            (0.0, 0),
+            (1.0, 1),
+            (f32::NAN, -1),
+            (f32::NEG_INFINITY, i32::MAX),
+            (f32::INFINITY, i32::MAX),
+        ] {
+            assert_eq!(levels.height(value), expected, "{value}");
+        }
+        let noise = NoiseLevels::new(false, 1.0, 62, 22, 256, 128);
+        assert_eq!(noise.floor(-0.25).to_bits(), 0xbe820000);
+        assert_eq!(noise.ceil(-0.25).to_bits(), 0xbe800000);
     }
 }
