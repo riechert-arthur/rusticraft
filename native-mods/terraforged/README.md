@@ -804,6 +804,9 @@ size, the border left out); `generate` hands the cells out mutably. With a negat
 `int` math, which the batched tile generation (#82) uses. `TileOracle.java`'s `v` and `b` lines check both on the same
 tiles and on zero, negative and overflowing sizes and counts; debug and release builds agree.
 
+The synchronous tile generator now owns TerraForged's heightmap and filter stages, maps chunks to
+regions, creates empty tiles, generates regular or centered zoomed terrain, and post-processes filters.
+
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache) and the tile visitors. They change nothing in the game, so there is
