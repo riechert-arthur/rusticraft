@@ -428,6 +428,9 @@ geometry, `getMin`/`getMax`, the continent's values over a grid in continent uni
 over the block grid for seven configs (continent scale 0, 1, 2, -3001 and `Integer.MAX_VALUE`, seeds at the `int`
 edges, custom control points), against a fourth Java oracle in `.local/terraforged/oracles/continent/`.
 
+The river-configuration layer adds TerraForged's default river, lake and wetland settings, normalized
+river profiles, fork scaling and the original variance semantics used by later network generation.
+
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators and the fancy continents (island geometry and generator). They change nothing in the game, so there is

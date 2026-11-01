@@ -82,3 +82,10 @@ file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_fancy"
 source = "fancy.rs"
 visibility = "pub"
+
+[[module]]
+id = "river"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_river"
+source = "river.rs"
+visibility = "pub"
