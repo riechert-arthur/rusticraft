@@ -463,6 +463,10 @@ access-order eviction. Concurrent callers share one build, seed changes invalida
 failed builders are removed for retry while negative chunk and block coordinates retain Java layout.
 `tools/terraforged/TerraForgedErosionRegionOracle.java` records the signed-coordinate fixtures.
 
+The eroded-noise wrapper now builds each bordered 256-by-256 height region from raw terrain samples,
+applies hydraulic erosion and optional smoothing in current-source order, and exposes the expensive
+single-column height accessor that reapplies rivers after reading the cached eroded surface.
+
 The scalar graph fixtures cover 15 graphs, four seeds and four coordinates (240 Java samples),
 including wrapped seed addition and mixed Perlin/seed-sensitive sources. Regenerate their hashes
 with `tools/terraforged/TerraForgedSeededGraphOracle.java` on a classpath containing compiled

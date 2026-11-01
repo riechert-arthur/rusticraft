@@ -292,3 +292,10 @@ file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_erosion"
 source = "erosion.rs"
 visibility = "pub"
+
+[[module]]
+id = "eroded_noise_generator"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_eroded_noise_generator"
+source = "eroded_noise_generator.rs"
+visibility = "pub"
