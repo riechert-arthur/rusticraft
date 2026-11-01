@@ -93,6 +93,9 @@ Manhattan, Natural), the five `EdgeFunc` functions with their bounds, and the 3Ã
 and, among tied cells, the first one found (row by row from the lower corner) wins. Their tests check raw bits against a
 Java oracle, including NaN and infinite coordinates. The graph sources built on them come in a later layer.
 
+The cellular source layer adds cell value, lookup, distance and edge modules, preserving the
+Engine's single-frequency sampling, feature-point lookup coordinates and reported `0..1` bounds.
+
 ## Status: development only
 
 This layer only adds the noise functions. It changes nothing in the game, so there is nothing for players to install

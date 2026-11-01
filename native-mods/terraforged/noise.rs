@@ -87,6 +87,13 @@ pub enum EdgeFunction {
     Distance2Div,
 }
 
+#[derive(Clone, Copy)]
+pub enum CellFunction {
+    CellValue,
+    NoiseLookup,
+    Distance,
+}
+
 impl EdgeFunction {
     fn apply(self, distance: f32, distance2: f32) -> f32 {
         match self {
@@ -472,6 +479,8 @@ pub fn value_coord_2d(seed: i32, x: i32, y: i32) -> f32 {
 struct CellResult {
     x: i32,
     y: i32,
+    vector: [f32; 2],
+    distance: f32,
 }
 
 fn cell_vector(seed: i32, x: i32, y: i32) -> [f32; 2] {
@@ -487,7 +496,12 @@ fn nearest_cell(
 ) -> CellResult {
     let xi = floor(x);
     let yi = floor(y);
-    let mut result = CellResult { x: xi, y: yi };
+    let mut result = CellResult {
+        x: xi,
+        y: yi,
+        vector: [0.0; 2],
+        distance: f32::MAX,
+    };
     let mut nearest = f32::MAX;
     for dy in -1..=1 {
         for dx in -1..=1 {
@@ -502,6 +516,8 @@ fn nearest_cell(
                 result = CellResult {
                     x: cell_x,
                     y: cell_y,
+                    vector,
+                    distance: candidate,
                 };
             }
         }
@@ -1005,6 +1021,19 @@ struct CacheValue {
 enum ModuleKind {
     Constant(f32),
     Source(Source),
+    CellSource {
+        config: SourceConfig,
+        displacement: f32,
+        function: CellFunction,
+        distance: DistanceFunction,
+        lookup: Module,
+    },
+    CellEdgeSource {
+        config: SourceConfig,
+        displacement: f32,
+        edge: EdgeFunction,
+        distance: DistanceFunction,
+    },
     Abs(Module),
     Alpha(Module, Module),
     Bias(Module, Module),
@@ -1187,10 +1216,89 @@ impl Module {
         )
     }
 
+    pub fn cell_source(
+        config: SourceConfig,
+        displacement: f32,
+        function: CellFunction,
+        distance: DistanceFunction,
+        lookup: Self,
+    ) -> Self {
+        Self::node(
+            ModuleKind::CellSource {
+                config,
+                displacement,
+                function,
+                distance,
+                lookup,
+            },
+            0.0,
+            1.0,
+        )
+    }
+
+    pub fn cell_edge_source(
+        config: SourceConfig,
+        displacement: f32,
+        edge: EdgeFunction,
+        distance: DistanceFunction,
+    ) -> Self {
+        Self::node(
+            ModuleKind::CellEdgeSource {
+                config,
+                displacement,
+                edge,
+                distance,
+            },
+            0.0,
+            1.0,
+        )
+    }
+
     pub fn value(&self, x: f32, y: f32) -> f32 {
         match &self.0.kind {
             ModuleKind::Constant(value) => *value,
             ModuleKind::Source(source) => source.value(x, y),
+            ModuleKind::CellSource {
+                config,
+                displacement,
+                function,
+                distance,
+                lookup,
+            } => {
+                let x = x * config.frequency;
+                let y = y * config.frequency;
+                let cell = nearest_cell(x, y, config.seed, *displacement, *distance);
+                match function {
+                    CellFunction::CellValue => {
+                        map(value_coord_2d(config.seed, cell.x, cell.y), -1.0, 1.0, 2.0)
+                    }
+                    CellFunction::NoiseLookup => lookup.value(
+                        cell.x as f32 + cell.vector[0],
+                        cell.y as f32 + cell.vector[1],
+                    ),
+                    CellFunction::Distance => {
+                        let _ = cell.distance - 1.0;
+                        0.0
+                    }
+                }
+            }
+            ModuleKind::CellEdgeSource {
+                config,
+                displacement,
+                edge,
+                distance,
+            } => {
+                let value = cell_edge(
+                    x * config.frequency,
+                    y * config.frequency,
+                    config.seed,
+                    *displacement,
+                    *edge,
+                    *distance,
+                );
+                let (min, max, range) = edge.bounds();
+                map(value, min, max, range)
+            }
             ModuleKind::Abs(source) => source.value(x, y).abs(),
             ModuleKind::Alpha(source, alpha) => {
                 let value = source.value(x, y);
@@ -2841,6 +2949,136 @@ mod tests {
                 [0xbf800000, 0, 0x3f800000],
             ]
         );
+    }
+
+    #[test]
+    fn cellular_sources_match_engine_0_3_0() {
+        let points = [
+            (0.0, 0.0),
+            (12.25, -98.75),
+            (-4096.5, 8192.25),
+            (123456.75, -0.125),
+            (64.0, 64.0),
+            (-128.0, 32.0),
+            (777.0, -333.0),
+            (-1024.0, -2048.0),
+        ];
+        let cell_config = SourceConfig {
+            seed: 1301,
+            octaves: 4,
+            gain: 0.3,
+            frequency: 1.0 / 96.0,
+            lacunarity: 3.0,
+            interpolation: Interpolation::Curve3,
+        };
+        let lookup = Module::source(Source::new(
+            SourceKind::Simplex,
+            SourceConfig {
+                seed: 1303,
+                octaves: 3,
+                gain: 0.5,
+                frequency: 1.0 / 64.0,
+                lacunarity: 2.0,
+                interpolation: Interpolation::Curve3,
+            },
+        ))
+        .map(Module::constant(-0.5), Module::constant(1.5));
+        let cases = [
+            (
+                Module::cell_source(
+                    cell_config,
+                    0.85,
+                    CellFunction::CellValue,
+                    DistanceFunction::Manhattan,
+                    Module::constant(0.0),
+                ),
+                [
+                    0x3ef9506c, 0x3f20d6b0, 0x3eb03077, 0x3ead7c8c, 0x3f621908, 0x3f5b9c57,
+                    0x3f18b79e, 0x3eb5c000,
+                ],
+            ),
+            (
+                Module::cell_source(
+                    cell_config,
+                    0.85,
+                    CellFunction::NoiseLookup,
+                    DistanceFunction::Natural,
+                    lookup,
+                ),
+                [
+                    0x3eecc702, 0x3f14aac2, 0x3f78df12, 0x3dde7898, 0x3f04884a, 0x3eb0e454,
+                    0x3f5f8b3c, 0x3f0f3ce4,
+                ],
+            ),
+            (
+                Module::cell_source(
+                    cell_config,
+                    0.85,
+                    CellFunction::Distance,
+                    DistanceFunction::Euclidean,
+                    Module::constant(0.0),
+                ),
+                [0; 8],
+            ),
+        ];
+        for (module, expected) in cases {
+            assert_eq!(
+                [module.min_value().to_bits(), module.max_value().to_bits()],
+                [0, 0x3f800000]
+            );
+            assert_eq!(bits(points.map(|(x, y)| module.value(x, y))), expected);
+        }
+
+        let edge_config = SourceConfig {
+            seed: 1302,
+            octaves: 5,
+            gain: 0.2,
+            frequency: 1.0 / 80.0,
+            lacunarity: 4.0,
+            interpolation: Interpolation::Curve3,
+        };
+        let edge_cases = [
+            (
+                EdgeFunction::Distance2,
+                [
+                    0x3f50c706, 0x3f3bb0b2, 0x3f510a1e, 0x3f14d227, 0x3f0c0452, 0x3f800000,
+                    0x3f54a0ca, 0x3f579e1a,
+                ],
+            ),
+            (
+                EdgeFunction::Distance2Add,
+                [
+                    0x3f800000, 0x3f3cd56e, 0x3f4ba8b7, 0x3f009a9a, 0x3f25deec, 0x3f7ea082,
+                    0x3f800000, 0x3f56957a,
+                ],
+            ),
+            (
+                EdgeFunction::Distance2Sub,
+                [
+                    0x3db09687, 0x3f105460, 0x3f2a5bad, 0x3f10f3b2, 0x3e8f1d6d, 0x3f539dd2,
+                    0x3eb6d292, 0x3f293219,
+                ],
+            ),
+            (
+                EdgeFunction::Distance2Mul,
+                [
+                    0x3f800000, 0x3ec76615, 0x3ed619e6, 0x3dc8f431, 0x3ec29f0c, 0x3f286c6f,
+                    0x3f7ec242, 0x3efb0ebf,
+                ],
+            ),
+            (
+                EdgeFunction::Distance2Div,
+                [
+                    0x3f67a3f1, 0x3e9da7b6, 0x3e8877d4, 0x3dfcb7f8, 0x3f0a4044, 0x3e8a01f6,
+                    0x3f1cf2c9, 0x3e9668b6,
+                ],
+            ),
+        ];
+        for (edge, expected) in edge_cases {
+            let module =
+                Module::cell_edge_source(edge_config, 0.7, edge, DistanceFunction::Natural);
+            assert_eq!(bits(points.map(|(x, y)| module.value(x, y))), expected);
+        }
     }
 
     #[test]
