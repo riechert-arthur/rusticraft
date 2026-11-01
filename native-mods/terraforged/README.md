@@ -340,6 +340,11 @@ generator, and keep the mod enabled for that world's unexplored chunks.
 
 ## Development
 
+The current-source river carver now applies valley/bank/bed shaping, erosion modifiers, coastline
+clipping, and river-then-lake precedence. Seven Java-source fixtures use an explicitly supplied
+erosion value; erosion-noise graph wiring is deliberately separate until the differing dependency
+seed APIs are verified. This is component parity, not an integrated river-generation claim.
+
 The current-source river layer now includes displaced river-node geometry, node/carver sample
 sentinels, and reusable river/lake piece collections. Geometry fixtures compare raw float bits
 against the original Java RiverNode, including projection clamping and radial falloff.

@@ -3009,7 +3009,7 @@ fn java_max(first: f32, second: f32) -> f32 {
     }
 }
 
-fn java_min(first: f32, second: f32) -> f32 {
+pub(crate) fn java_min(first: f32, second: f32) -> f32 {
     if first.is_nan() {
         first
     } else if second.is_nan() {
