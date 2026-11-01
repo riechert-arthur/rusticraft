@@ -229,6 +229,11 @@ impl<N: NoiseGenerator + 'static> TerrainCache<N> {
 /// The queries Java's `TerrainCache` passes to its `INoiseGenerator`, for the eroded generator Reimagined builds it
 /// on (the port's [`NoiseGenerator`] trait has no `erodedHeightNoise`/`getNoiseSample`/`sample`). None is cached.
 impl TerrainCache<ErodedNoiseGenerator> {
+    /// The eroded generator the cache builds its chunks from (Reimagined's `TerrainCache.generator`).
+    pub fn noise_generator(&self) -> &ErodedNoiseGenerator {
+        self.generator.noise_generator()
+    }
+
     /// `getErodedHeightNoise(seed, x, z)`: [`ErodedNoiseGenerator::eroded_height_noise`].
     pub fn eroded_height_noise(&self, seed: i32, x: i32, z: i32) -> Result<f32, &'static str> {
         self.generator

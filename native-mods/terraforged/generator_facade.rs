@@ -29,13 +29,21 @@
 // 2026 Romoslayer; see `LICENSE-TERRAFORGED-REIMAGINED`.
 
 use super::{
+    super::biome_chunk::{BiomeChunk, BiomeFillError},
     super::terrain::{TerrainBlockStates, TerrainChunk, TerrainError},
+    terraforged_biome_chunk_fill::fill_noise_biomes,
+    terraforged_biome_map::BiomePools,
+    terraforged_biome_sampler::{BiomeOverride, WetlandSettings},
     terraforged_chunk_fill::fill_chunk,
+    terraforged_current_surface_biomes::CurrentSurfaceBiomeSampler,
     terraforged_eroded_noise_generator::ErodedNoiseGenerator,
+    terraforged_noise_generator::NoiseGenerator,
     terraforged_terrain_cache::{TerrainCache, TerrainDataHandle, TerrainTask},
     terraforged_terrain_levels::TerrainLevels,
 };
 use crate::registry::BlockStateId;
+use horizon_core::position::ChunkPos;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicI64, Ordering};
 
 /// `Seeds.get(long)`: the level seed as TerraForged's noise uses it, narrowed to a Java `int` (its low 32 bits).
@@ -194,6 +202,53 @@ impl TerraForgedGenerator {
         let terrain = self.chunk_data(self.seed(), position.x, position.z);
         fill_chunk(self.sea_level(), chunk, &terrain, stone, water)?;
         Ok(terrain)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn fill_biomes<T: Clone>(
+        &self,
+        chunk: &mut BiomeChunk<T>,
+        position: ChunkPos,
+        wet: &BiomePools<T>,
+        dry: &BiomePools<T>,
+        highland: &BiomePools<T>,
+        plains: &Arc<T>,
+        wetlands: WetlandSettings,
+        mountain_usage: f32,
+        base_temperature: impl Fn(&T) -> f32,
+        override_biome: impl Fn(BiomeOverride) -> Arc<T>,
+        cave_biome: impl FnMut(i32, i32) -> Result<Option<T>, &'static str>,
+    ) -> Result<(), BiomeFillError<&'static str>> {
+        let surface = CurrentSurfaceBiomeSampler::new(
+            self.noise_generator(),
+            wet,
+            dry,
+            highland,
+            plains,
+            wetlands,
+            mountain_usage,
+        );
+        let seed = self.seed();
+        fill_noise_biomes(
+            chunk,
+            position,
+            |x, z| {
+                surface
+                    .sample_biome(
+                        seed,
+                        x.wrapping_shl(2),
+                        z.wrapping_shl(2),
+                        &base_temperature,
+                        &override_biome,
+                    )
+                    .map(|biome| T::clone(&biome))
+            },
+            cave_biome,
+        )
+    }
+
+    pub fn noise_generator(&self) -> &NoiseGenerator {
+        self.terrain.noise_generator().generator()
     }
 
     /// `terrainCache().drop(seed, pos)`, as `applyBiomeDecoration` calls it with `Seeds.get(region.getSeed())`.
