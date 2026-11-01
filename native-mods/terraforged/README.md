@@ -120,6 +120,9 @@ static helpers (`dist2`, `sign`, `intersect`, `distance_on_line`, `distance2_lin
 tests check raw bits against a Java oracle, including those NaNs, NaN and infinite points and every collinear case of
 `intersect`.
 
+The engine type layer begins terrain composition with TerraForged's wrapping seed cursor and full
+terrain-category property model, including dominance ordering and derived override behavior.
+
 ## Status: development only
 
 This layer only adds the noise functions. It changes nothing in the game, so there is nothing for players to install
