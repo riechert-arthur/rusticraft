@@ -10,6 +10,7 @@ PRIVATE_ROOTS = {".local", "decompiled", "minecraft", "assets", "run", "logs"}
 PRIVATE_EXTENSIONS = {".jar", ".class", ".jfr", ".hprof", ".java"}
 ORIGINAL_JDK_TOOLS = {"tools/JfrSummary.java", "tests/java/JfrFixture.java"}
 ORIGINAL_TERRAFORGED_ORACLES = {
+    "tools/terraforged/TerraForgedSeededBlendOracle.java",
     "tools/terraforged/TerraForgedSeededGraphOracle.java",
     "tools/terraforged/TerraForgedSeededDomainOracle.java",
 }
