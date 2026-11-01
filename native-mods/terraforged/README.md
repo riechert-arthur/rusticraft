@@ -141,6 +141,9 @@ fork-profile derivation and Java-random valley curves with exact normalized heig
 The lake layer adds circular beds, depth blending, shoreline valleys, bank-height interpolation,
 river-mask shaping, overlap checks and the float bounds accumulator used by river networks.
 
+The wetland layer adds line-bounded valleys, pools, banks and seeded mound noise, including separate
+warped geometry and terrain-noise coordinates plus exact wetland tagging and erosion masks.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
