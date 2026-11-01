@@ -414,6 +414,9 @@ with -0, subnormal, huge, infinite and NaN coordinates, before and after transla
 zero coast, zero-length, NaN and infinite segments, zero and NaN scales), against a third Java oracle in
 `.local/terraforged/oracles/continent/`.
 
+The fancy-continent layer assembles the main island and twelve Java-random satellite islands, then
+adds exact multi-scale domain warping, land masks, nearest-center metadata and cell population.
+
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators and the fancy continents' island geometry. They change nothing in the game, so there is
