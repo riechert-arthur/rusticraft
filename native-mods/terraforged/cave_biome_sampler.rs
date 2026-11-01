@@ -29,9 +29,6 @@ use super::{
 use std::sync::Arc;
 
 pub const OFFSET: i32 = 124_897;
-pub const MASK_OFFSET: i32 = 987_541;
-pub const MASK_FREQUENCY: f32 = 1.0 / 1600.0;
-pub const MASK_THRESHOLD: f32 = 0.62;
 
 pub struct CaveBiomeSampler<T> {
     scale: i32,
@@ -41,10 +38,7 @@ pub struct CaveBiomeSampler<T> {
 }
 
 impl<T> CaveBiomeSampler<T> {
-    pub fn new(scale: i32, global: Vec<Arc<T>>, mut special: Vec<Arc<T>>) -> Self {
-        if special.is_empty() {
-            special = global.clone();
-        }
+    pub fn new(scale: i32, global: Vec<Arc<T>>, special: Vec<Arc<T>>) -> Self {
         Self {
             scale,
             frequency: 1.0 / scale as f32,
@@ -74,15 +68,6 @@ impl<T> CaveBiomeSampler<T> {
             CaveType::Unique => self.unique.get_value(noise),
         }
     }
-
-    pub fn get_layer_biome(&self, seed: i32, x: i32, z: i32) -> Option<&Arc<T>> {
-        let mask = sample(seed.wrapping_add(MASK_OFFSET), x, z, MASK_FREQUENCY);
-        if mask < MASK_THRESHOLD {
-            None
-        } else {
-            self.get_underground_biome(seed, x, z, CaveType::Unique)
-        }
-    }
 }
 
 pub fn sample(seed: i32, x: i32, z: i32, frequency: f32) -> f32 {
@@ -101,52 +86,62 @@ mod tests {
     use super::*;
 
     #[test]
-    fn samples_and_layer_choices_match_current_java_source() {
+    fn choices_match_original_java_sampler() {
         let sampler = CaveBiomeSampler::new(
             800,
             vec![Arc::new(9)],
             vec![Arc::new(0), Arc::new(1), Arc::new(2)],
         );
-        assert_eq!(sampler.scale(), 800);
-        assert_eq!(sampler.frequency().to_bits(), 983_815_946);
-        let fixtures: [(i32, i32, i32, u32, u32, Option<i32>); 4] = [
-            (0, 0, 0, 1_056_964_608, 1_056_964_608, None),
-            (0, 1024, -768, 1_060_992_068, 1_042_551_020, None),
-            (
-                123_456_789,
-                -2048,
-                4096,
-                1_055_041_553,
-                1_060_087_566,
-                Some(1),
-            ),
-            (-987_654_321, 777, -333, 1_047_861_866, 1_038_883_312, None),
-        ];
-        for (seed, x, z, choice_bits, mask_bits, layer) in fixtures {
+        for (seed, x, z, bits, choice) in [
+            (0i32, 0, 0, 1_056_964_608, 1),
+            (0, 1024, -768, 1_060_992_068, 2),
+            (123_456_789, -2048, 4096, 1_055_041_553, 1),
+            (-987_654_321, 777, -333, 1_047_861_866, 0),
+        ] {
             assert_eq!(
                 sample(seed.wrapping_add(OFFSET), x, z, sampler.frequency()).to_bits(),
-                choice_bits
+                bits
             );
             assert_eq!(
-                sample(seed.wrapping_add(MASK_OFFSET), x, z, MASK_FREQUENCY).to_bits(),
-                mask_bits
+                sampler
+                    .get_underground_biome(seed, x, z, CaveType::Unique)
+                    .map(|value| **value),
+                Some(choice)
             );
             assert_eq!(
-                sampler.get_layer_biome(seed, x, z).map(|value| **value),
-                layer
+                sampler
+                    .get_underground_biome(seed, x, z, CaveType::Global)
+                    .map(|value| **value),
+                Some(9)
             );
         }
     }
 
     #[test]
-    fn empty_special_set_falls_back_to_global_set() {
-        let global = Arc::new(7);
-        let sampler = CaveBiomeSampler::new(800, vec![Arc::clone(&global)], Vec::new());
-        assert!(Arc::ptr_eq(
+    fn empty_pools_remain_independent() {
+        let sampler = CaveBiomeSampler::new(800, vec![Arc::new(9)], Vec::new());
+        assert!(
             sampler
                 .get_underground_biome(0, 0, 0, CaveType::Unique)
-                .unwrap(),
-            &global
-        ));
+                .is_none()
+        );
+        assert_eq!(
+            sampler
+                .get_underground_biome(0, 0, 0, CaveType::Global)
+                .map(|value| **value),
+            Some(9)
+        );
+        let sampler = CaveBiomeSampler::new(800, Vec::new(), vec![Arc::new(2)]);
+        assert!(
+            sampler
+                .get_underground_biome(0, 0, 0, CaveType::Global)
+                .is_none()
+        );
+        assert_eq!(
+            sampler
+                .get_underground_biome(0, 0, 0, CaveType::Unique)
+                .map(|value| **value),
+            Some(2)
+        );
     }
 }

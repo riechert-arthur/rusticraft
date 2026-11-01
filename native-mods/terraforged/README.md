@@ -487,8 +487,10 @@ storage, and returns the same pooled handle so the remaining terrain stages can 
 
 Biome chunk filling now precomputes TerraForged's surface and optional cave 4-by-4 layers in Java
 call order, repeats them through whole sections, and keeps the surface layer above the y=0 cave band.
-The cave-biome sampler now reproduces the coarse coverage mask, independent biome-choice noise,
-equal-weight selection, non-surface fallback, and Java-width seed offsets used by that deep layer.
+The cave-biome sampler reproduces independent GLOBAL and UNIQUE pools, equal-weight selection,
+and Java-width seed offsets. Empty pools remain empty, matching Java's null result; no coverage mask
+is applied. `tools/terraforged/run_cave_biome_oracle.py` compiles the original CaveBiomeSampler,
+WeightMap and MathUtil with minimal Minecraft registry stand-ins rather than restating their logic.
 Empty surface and highland climate pools now borrow the nearest original non-empty pool using
 TerraForged's temperature-biased climate distance without order-dependent multi-hop borrowing.
 Surface-biome decisions now preserve per-cell wetland and mountain rolls, centered four-sample
