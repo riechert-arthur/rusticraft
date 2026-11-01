@@ -1258,6 +1258,26 @@ impl Rivermap {
         self.networks.len()
     }
 
+    pub fn get_or_lookup(
+        x: i32,
+        z: i32,
+        current: Option<Arc<Self>>,
+        lookup: impl FnOnce(i32, i32) -> Arc<Self>,
+    ) -> Arc<Self> {
+        match current {
+            Some(map) if map.x == x && map.z == z => map,
+            _ => lookup(x, z),
+        }
+    }
+
+    pub fn get_for_cell(
+        cell: &Cell,
+        current: Option<Arc<Self>>,
+        lookup: impl FnOnce(i32, i32) -> Arc<Self>,
+    ) -> Arc<Self> {
+        Self::get_or_lookup(cell.continent_x, cell.continent_z, current, lookup)
+    }
+
     #[cfg(test)]
     pub fn root_rivers(&self) -> Vec<(River, usize)> {
         self.networks
@@ -2390,6 +2410,14 @@ mod tests {
                 (0x3f19999a, 0x3f800000, false, 0),
             ]
         );
+
+        let map = Arc::new(map);
+        let reused = Rivermap::get_or_lookup(17, -9, Some(Arc::clone(&map)), |_, _| unreachable!());
+        assert!(Arc::ptr_eq(&map, &reused));
+        let replaced = Rivermap::get_or_lookup(18, -9, Some(map), |x, z| {
+            Arc::new(Rivermap::new(x, z, Vec::new(), GenWarp::direct()))
+        });
+        assert_eq!((replaced.x(), replaced.z()), (18, -9));
     }
 
     #[test]
