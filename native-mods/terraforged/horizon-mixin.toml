@@ -19,3 +19,10 @@ file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_engine"
 source = "engine.rs"
 visibility = "pub"
+
+[[module]]
+id = "landforms"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_landforms"
+source = "landforms.rs"
+visibility = "pub"

@@ -182,6 +182,9 @@ scale of 1 (and fancy mountains off for the two `mountains_ridge` terrains), and
 values rather than these: 1.5 for steppe, 2.5 for plains, 2 for each hills terrain, 1.5 for dales, 2 for plateau,
 1.75 for badlands, 2.5 for torridonian and 1.25 for each mountains terrain and dolomites, with no volcano entry.
 
+The first LandForms layer adds executable steppe and plains graphs with exact octave configuration,
+seed consumption, erosion alpha, axis warping, large-scale warping and final vertical scaling.
+
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels and its settings. They change nothing in the game, so there is
