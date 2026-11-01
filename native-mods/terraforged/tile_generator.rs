@@ -99,6 +99,84 @@ pub struct TileCache<H, F> {
     cache: Cache<CacheEntry<Tile>>,
 }
 
+pub struct CachedChunk {
+    tile: Arc<CacheEntry<Tile>>,
+    chunk_x: i32,
+    chunk_z: i32,
+    block_x: i32,
+    block_z: i32,
+}
+
+impl CachedChunk {
+    fn new(tile: Arc<CacheEntry<Tile>>, chunk_x: i32, chunk_z: i32) -> Self {
+        Self {
+            tile,
+            chunk_x,
+            chunk_z,
+            block_x: chunk_x.wrapping_shl(4),
+            block_z: chunk_z.wrapping_shl(4),
+        }
+    }
+
+    pub const fn chunk_x(&self) -> i32 {
+        self.chunk_x
+    }
+
+    pub const fn chunk_z(&self) -> i32 {
+        self.chunk_z
+    }
+
+    pub const fn block_x(&self) -> i32 {
+        self.block_x
+    }
+
+    pub const fn block_z(&self) -> i32 {
+        self.block_z
+    }
+
+    pub fn cell(&self, block_x: i32, block_z: i32) -> &Cell {
+        self.tile.get().cell(
+            self.block_x.wrapping_add(block_x & 15),
+            self.block_z.wrapping_add(block_z & 15),
+        )
+    }
+
+    pub fn iterate(&self, mut visitor: impl FnMut(&Cell, i32, i32)) {
+        for delta_z in 0..16 {
+            for delta_x in 0..16 {
+                visitor(self.cell(delta_x, delta_z), delta_x, delta_z);
+            }
+        }
+    }
+
+    pub fn visit(
+        &self,
+        mut min_x: i32,
+        mut min_z: i32,
+        mut max_x: i32,
+        mut max_z: i32,
+        mut visitor: impl FnMut(&Cell, i32, i32),
+    ) {
+        if max_x < self.block_x || max_z < self.block_z {
+            return;
+        }
+        let region_max_x = self.block_x.wrapping_add(15);
+        let region_max_z = self.block_z.wrapping_add(15);
+        if min_x > region_max_x || max_z > region_max_z {
+            return;
+        }
+        min_x = min_x.max(self.block_x);
+        min_z = min_z.max(self.block_z);
+        max_x = max_x.min(region_max_x);
+        max_z = max_z.min(region_max_z);
+        for z in min_z..=max_x {
+            for x in min_x..=max_z {
+                visitor(self.cell(x, z), x, z);
+            }
+        }
+    }
+}
+
 impl<H, F> TileCache<H, F>
 where
     H: HeightmapSource + Send + Sync + 'static,
@@ -162,6 +240,12 @@ where
 
     pub fn expire(&self) -> usize {
         self.cache.run()
+    }
+
+    pub fn get_chunk(&self, chunk_x: i32, chunk_z: i32) -> CachedChunk {
+        let region_x = self.chunk_to_region(chunk_x);
+        let region_z = self.chunk_to_region(chunk_z);
+        CachedChunk::new(self.get_tile_at(region_x, region_z), chunk_x, chunk_z)
     }
 }
 
@@ -718,6 +802,37 @@ mod tests {
         let disabled = generator.cached(4);
         disabled.queue_region(9, 9);
         assert!(disabled.get(Tile::region_id_for(9, 9)).is_none());
+    }
+
+    #[test]
+    fn cached_chunk_reader_matches_engine_0_3_0() {
+        let heightmap = TestHeightmap {
+            map: Arc::new(Rivermap::new(7, -9, Vec::new(), GenWarp::direct())),
+            events: Arc::new(Mutex::new(Vec::new())),
+        };
+        let generator = Arc::new(TileGenerator::new(
+            1,
+            0,
+            0,
+            WorldGenerator::new(heightmap, TestFilters(Arc::new(Mutex::new(Vec::new())))),
+        ));
+        let cache = generator.cached(5);
+        let chunk = cache.get_chunk(5, -11);
+
+        assert_eq!(
+            (
+                chunk.chunk_x(),
+                chunk.chunk_z(),
+                chunk.block_x(),
+                chunk.block_z(),
+            ),
+            (5, -11, 80, -176)
+        );
+        assert_eq!(chunk.cell(0, 0).value, 79_824.0);
+        assert_eq!(chunk.cell(15, 15).value, 94_839.0);
+        let mut count = 0;
+        chunk.iterate(|_, _, _| count += 1);
+        assert_eq!(count, 256);
     }
 
     fn rivermap_events(events: &Mutex<Vec<&'static str>>) -> usize {

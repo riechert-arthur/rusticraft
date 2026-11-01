@@ -249,6 +249,9 @@ the cache wrapper supports explicit close-on-remove and strict timestamp expirat
 The tile cache now keys asynchronous generation by packed region coordinates, reuses in-flight and
 completed entries, supports blocking and present-only lookup, and gates queueing above four workers.
 
+Cached chunk readers now retain their tile entry, expose chunk and block coordinates, and reproduce
+TerraForged's cell lookup, full iteration, and original bounded-visit behavior safely across threads.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
