@@ -23,8 +23,8 @@
  */
 
 // Adapted from TerraForged Reimagined (https://github.com/Romoslayer/TerraForged-Reimagined, a24d450):
-// `buildRegion`, `erodedHeightNoise`, `erodedHeight`, `getRegion`, `generate`, `find`, `getHeightNoise`,
-// `getLevels` and `getTerrainLevels` of
+// `buildRegion`, `erodedHeightNoise`, `erodedHeight`, `getRegion`, `generate`, `find`, `getNoiseSample`,
+// `sample`, `getHeightNoise`, `getLevels` and `getTerrainLevels` of
 // `src/main/java/com/terraforged/mod/worldgen/noise/erosion/ErodedNoiseGenerator.java`. MIT License, Copyright (c)
 // 2020 TerraForged, Copyright (c) 2026 Romoslayer; see `LICENSE-TERRAFORGED-REIMAGINED`.
 
@@ -77,6 +77,29 @@ impl ErodedNoiseGenerator {
     /// The wrapped, un-eroded generator (Java's `generator` field).
     pub fn generator(&self) -> &NoiseGenerator {
         &self.generator
+    }
+
+    /// `getNoiseSample(seed, x, z)`: the un-eroded generator's sample of the block (its `getNoiseSample`, a reset
+    /// sample filled by `sample`), without erosion. Java returns its thread-local sample; this returns a new one.
+    /// `Err` where [`NoiseGenerator::sample`] fails.
+    pub fn noise_sample(&self, seed: i32, x: i32, z: i32) -> Result<NoiseSample, &'static str> {
+        let mut sample = NoiseSample::new(&self.generator.continent().context().terrain);
+        self.sample(seed, x, z, &mut sample)?;
+        Ok(sample)
+    }
+
+    /// `sample(seed, x, z, sample)`: the un-eroded generator's [`NoiseGenerator::sample`] into `sample` (not reset
+    /// first, as in Java), with a new blender. `Err` where that fails.
+    pub fn sample(
+        &self,
+        seed: i32,
+        x: i32,
+        z: i32,
+        sample: &mut NoiseSample,
+    ) -> Result<(), &'static str> {
+        let mut blender = self.generator.blender_resource();
+        self.generator.sample(seed, x, z, sample, &mut blender)?;
+        Ok(())
     }
 
     /// `erodedHeightNoise(seed, x, z)`: the column's height as the world is built, erosion and rivers included. A new
