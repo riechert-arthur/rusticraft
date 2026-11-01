@@ -14,6 +14,7 @@ ORIGINAL_TERRAFORGED_ORACLES = {
     "tools/terraforged/TerraForgedSeededBlendOracle.java",
     "tools/terraforged/TerraForgedSeededGraphOracle.java",
     "tools/terraforged/TerraForgedSeededDomainOracle.java",
+    "tools/terraforged/TerraForgedSeededCacheOracle.java",
 }
 
 
