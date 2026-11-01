@@ -340,6 +340,10 @@ generator, and keep the mod enabled for that world's unexplored chunks.
 
 ## Development
 
+The current-source river layer now includes displaced river-node geometry, node/carver sample
+sentinels, and reusable river/lake piece collections. Geometry fixtures compare raw float bits
+against the original Java RiverNode, including projection clamping and radial falloff.
+
 The current-source cell generator now supplies seeded jittered cells and nearest-cell lookup to the
 shape blender. Tests compare cell fields and combined shape outputs for both cell layouts and all
 three noise sources against the local Java source, including overflowing seed additions. This
