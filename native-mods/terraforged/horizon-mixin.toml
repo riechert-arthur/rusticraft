@@ -40,3 +40,10 @@ file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_region"
 source = "region.rs"
 visibility = "pub"
+
+[[module]]
+id = "provider"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_provider"
+source = "provider.rs"
+visibility = "pub"
