@@ -799,7 +799,7 @@ impl Source {
                 signal *= signal;
                 signal *= weight;
                 weight = clamp(signal * amplitude, 0.0, 1.0);
-                value += signal * spectral_frequency.powf(-1.0);
+                value += signal * java_pow(spectral_frequency, -1.0);
                 spectral_frequency *= self.config.lacunarity;
                 x *= self.config.lacunarity;
                 y *= self.config.lacunarity;
@@ -871,7 +871,7 @@ fn ridge_bound(config: SourceConfig) -> f32 {
         noise *= noise;
         noise *= weight;
         weight = clamp(noise * amplitude, 0.0, 1.0);
-        value += noise * spectral_frequency.powf(-1.0);
+        value += noise * java_pow(spectral_frequency, -1.0);
         spectral_frequency *= config.lacunarity;
         amplitude *= config.gain;
     }

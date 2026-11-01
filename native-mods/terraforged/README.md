@@ -75,6 +75,9 @@ seed consumption, erosion alpha, axis warping, large-scale warping and final ver
 The hill LandForms layer adds both warped hill variants and the blended dales graph, preserving gain,
 lacunarity, alpha, curve, power, clamp, map and global vertical-scale behavior.
 
+The plateau LandForms layer adds the warped valley, ridge top, surface detail and controlled four-step
+terrace composition used by TerraForged's plateau terrain.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
