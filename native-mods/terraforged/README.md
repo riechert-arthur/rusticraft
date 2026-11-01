@@ -1342,7 +1342,8 @@ lossy cache whose pool always hands out fresh points, so the cache never changes
 directly (the cache is a later layer). The jar has no runtime seed: `ContinentNoise.createContinent` binds the world
 seed by drawing `seed0` and `seed1` from the generator context's `Seed`. The port's `seed` parameters are the newer
 source's runtime seed, added (Java `int` wrap) to both seeds; 0 gives the jar's cells, and seed `s` over `(a, b)`
-equals seed 0 over `(a + s, b + s)`. The spawn-offset search and the river generator come later.
+equals seed 0 over `(a + s, b + s)`. Spawn offsets follow the original spiral search, origin skip, asymmetric
+neighborhood check, and retained first-seed result. The river generator comes later.
 `ContinentCellsOracle.java` (`.local/terraforged/oracles/continent_cells/`, with a `Mth` stub plus the biome override's
 and terrain levels' stubs) runs the jar's own `ContinentGenerator` (its constructor, cache and pool) and
 `ShapeGenerator` over 8 seed pairs (`int` extremes and wrapping sample seeds), 10 jitters (signed zeros, a subnormal,
