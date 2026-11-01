@@ -1249,6 +1249,18 @@ impl Rivermap {
     pub const fn z(&self) -> i32 {
         self.z
     }
+
+    pub fn network_count(&self) -> usize {
+        self.networks.len()
+    }
+
+    #[cfg(test)]
+    pub fn root_rivers(&self) -> Vec<(River, usize)> {
+        self.networks
+            .iter()
+            .map(|network| (network.river_carver.river, network.children.len()))
+            .collect()
+    }
 }
 
 pub trait ContinentSampler {

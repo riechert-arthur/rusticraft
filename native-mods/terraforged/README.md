@@ -153,6 +153,9 @@ networks while retaining continent coordinates and cache timestamps.
 The base-river-generator layer adds deterministic root shuffling, recursive forks, overlap rejection,
 lake and wetland placement, and complete rivermap assembly from Java-compatible random streams.
 
+The fancy-river layer projects roots from island segments and endpoints, extends them through matching
+island IDs, and immediately generates their branches and wetlands in the original Java random order.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
