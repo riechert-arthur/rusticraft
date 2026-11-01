@@ -351,6 +351,9 @@ configurations (Engine's defaults; a seed offset, zero and NaN weights, scaled l
 the seed cursor, registered populators, variant and name lookups, both shuffled lists with samples on a grid, and the
 registry's composites; the oracle lives outside Git, in `.local/terraforged/oracles/provider/`.
 
+The heightmap-blending layer adds module- and populator-controlled terrain blending plus two- and
+three-way continent interpolation with exact boundary and terrain-tag behavior.
+
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator and its standard terrain provider. They change nothing in the game, so there is
