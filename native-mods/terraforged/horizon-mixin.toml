@@ -278,3 +278,10 @@ file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_continent_noise"
 source = "continent_noise.rs"
 visibility = "pub"
+
+[[module]]
+id = "noise_generator"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_noise_generator"
+source = "noise_generator.rs"
+visibility = "pub"

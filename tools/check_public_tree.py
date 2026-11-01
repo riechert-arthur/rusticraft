@@ -22,6 +22,7 @@ ORIGINAL_TERRAFORGED_ORACLES = {
     "tools/terraforged/TerraForgedSeededTransformOracle.java",
     "tools/terraforged/TerraForgedSeededSpecialSourceOracle.java",
     "tools/terraforged/TerraForgedSeededLineOracle.java",
+    "tools/terraforged/TerraForgedNoiseHeightOracle.java",
 }
 
 

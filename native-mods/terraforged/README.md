@@ -432,6 +432,12 @@ preserving octave cache reuse and matching recursive serialized reseeding bit-fo
 Current-source terrain blending now forwards runtime seeds through its coordinate warp and every
 selected terrain-noise module, including cached border blends and nearest-terrain iteration.
 
+The current height sampler now selects deep ocean, ocean-to-beach, beach-to-coast and inland
+branches at TerraForged's exact control points. It preserves runtime-seeded ocean and terrain noise,
+Java float interpolation order, the 1.2 land-height multiplier and branch-specific terrain labels.
+`tools/terraforged/TerraForgedNoiseHeightOracle.java` records direct current-source Java bits for
+all four branches.
+
 The scalar graph fixtures cover 15 graphs, four seeds and four coordinates (240 Java samples),
 including wrapped seed addition and mixed Perlin/seed-sensitive sources. Regenerate their hashes
 with `tools/terraforged/TerraForgedSeededGraphOracle.java` on a classpath containing compiled
