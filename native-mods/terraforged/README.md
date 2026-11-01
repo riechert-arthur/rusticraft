@@ -506,6 +506,8 @@ continent, river, and climate sampling in Java order. Climate-only and edge-shap
 the caller's terrain sample just like `IBiomeSampler.Sampler`.
 The surface override now uses the current source's full `COAST - BEACH` shoreline band instead of
 the obsolete 0.005 fringe, so coastal columns remain beach candidates through the coast marker.
+Surface sampling now composes climate pools, the per-cell mountain roll, four-point slope gate,
+height-adjusted snow compatibility, and final ocean, shore, and river overrides in source order.
 
 The scalar graph fixtures cover 15 graphs, four seeds and four coordinates (240 Java samples),
 including wrapped seed addition and mixed Perlin/seed-sensitive sources. Regenerate their hashes
