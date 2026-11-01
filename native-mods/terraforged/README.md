@@ -273,6 +273,9 @@ continent-adjusted moisture, biome classification, and coastal terrain masking.
 The outer climate stage now adds biome-edge resampling, submerged coast conversion, deterministic
 climate randomness and offsets, and TerraForged's elevation-based temperature adjustments.
 
+A shared continent interface now exposes terrain population, edge and land sampling, nearest centers,
+and river maps across multi, single, improved, and fancy generator factory modes.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
