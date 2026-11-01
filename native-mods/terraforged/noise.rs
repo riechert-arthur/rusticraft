@@ -2097,65 +2097,14 @@ impl Module {
                 *max,
                 *range,
             ),
-            ModuleKind::Steps {
-                source,
-                steps,
-                slope_min,
-                slope_max,
-                curve,
-            } => {
-                let noise_value = source.value(x, y);
-                let min = slope_min.value(x, y);
-                let max = slope_max.value(x, y);
-                let step_count = steps.value(x, y);
-                let range = max - min;
-                if range <= 0.0 {
-                    return (noise_value * step_count) as i32 as f32 / step_count;
-                }
-                let inverted = 1.0 - noise_value;
-                let value = (inverted * step_count) as i32 as f32 / step_count;
-                let delta = inverted - value;
-                let alpha = map(delta * step_count, min, max, range);
-                1.0 - lerp(value, inverted, curve.apply(alpha))
-            }
-            ModuleKind::Frequency {
-                source,
-                x: x_frequency,
-                y: y_frequency,
-            } => {
-                let x_frequency = x_frequency.value(x, y);
-                let y_frequency = y_frequency.value(x, y);
-                source.value(x * x_frequency, y * y_frequency)
-            }
-            ModuleKind::Gradient {
-                source,
-                lower,
-                upper,
-                strength,
-            } => {
-                let noise_value = source.value(x, y);
-                let upper_bound = upper.value(x, y);
-                if noise_value > upper_bound {
-                    return noise_value;
-                }
-                let amount = strength.value(x, y);
-                let lower_bound = lower.value(x, y);
-                if noise_value < lower_bound {
-                    return java_pow(noise_value, 1.0 - amount);
-                }
-                let alpha = 1.0 - (noise_value - lower_bound) / (upper_bound - lower_bound);
-                java_pow(noise_value, 1.0 - amount * alpha)
-            }
-            ModuleKind::Modulate {
-                source,
-                direction,
-                strength,
-            } => {
-                let angle = direction.value(x, y) * PI2;
-                let strength = strength.value(x, y);
-                let dx = sin(angle) * strength;
-                let dy = cos(angle) * strength;
-                source.value(x + dx, y + dy)
+            ModuleKind::Steps { .. }
+            | ModuleKind::Frequency { .. }
+            | ModuleKind::Gradient { .. }
+            | ModuleKind::Modulate { .. } => {
+                let Ok(value) = transform_value(&self.0.kind, x, y, map, |module, x, y| {
+                    Ok::<_, std::convert::Infallible>(module.value(x, y))
+                });
+                value
             }
             // Engine keeps one unsynchronised entry per `Cache`. Horizon samples one graph from many threads, so the
             // entry sits behind a lock that is only held to copy it in or out, never while the source is sampled, and
@@ -2504,6 +2453,16 @@ impl Module {
                     *max,
                     *range,
                 )
+            }
+            // Noise2D 2cb4843's `Steps.modify` maps with its own `NoiseUtil.map`: 1, not NaN, where the slope range
+            // is infinite (a zero or negative one takes the rounding branch before the map).
+            ModuleKind::Steps { .. }
+            | ModuleKind::Frequency { .. }
+            | ModuleKind::Gradient { .. }
+            | ModuleKind::Modulate { .. } => {
+                transform_value(&self.0.kind, x, y, map_current, |module, x, y| {
+                    module.try_value_seed_first(seed, x, y)
+                })?
             }
             // Noise2D 2cb4843's `Cache` keeps one entry per thread keyed by `x == this.x && y == this.y` alone, so a
             // repeated point at another runtime seed returns the first seed's sample. The port keys the shared entry
@@ -3703,6 +3662,85 @@ fn power_curve_value(value: f32, midpoint: f32, power: f32) -> f32 {
     } else {
         midpoint - java_pow(midpoint - value, power)
     }
+}
+
+/// `Steps`, `Freq`, `Grad` and `Modulate`, shared by the seedless and seed-first paths (Engine 0.3.0 and Noise2D
+/// 2cb4843 agree here apart from the seed and `Steps`'s `map`, the jar's [`map`] or 2cb4843's [`map_current`]).
+/// `sample(module, x, y)` reads a child. Children are read in Java's order and only where Java reads them:
+/// `Steps` reads its source, then slope min, slope max and step count; `Freq` its x and y frequencies (at the
+/// original point), then the source at `(x * fx, y * fy)`; `Grad` its source and upper bound, then (below the upper
+/// bound) strength and lower bound; `Modulate` its direction and strength, then the source at the point moved by
+/// `NoiseUtil.sin`/`cos` of `direction * PI2` times the strength. `(int)` casts saturate (NaN to 0) like Java's.
+fn transform_value<E>(
+    kind: &ModuleKind,
+    x: f32,
+    y: f32,
+    map: fn(f32, f32, f32, f32) -> f32,
+    mut sample: impl FnMut(&Module, f32, f32) -> Result<f32, E>,
+) -> Result<f32, E> {
+    Ok(match kind {
+        ModuleKind::Steps {
+            source,
+            steps,
+            slope_min,
+            slope_max,
+            curve,
+        } => {
+            let noise_value = sample(source, x, y)?;
+            let min = sample(slope_min, x, y)?;
+            let max = sample(slope_max, x, y)?;
+            let step_count = sample(steps, x, y)?;
+            let range = max - min;
+            if range <= 0.0 {
+                return Ok((noise_value * step_count) as i32 as f32 / step_count);
+            }
+            let inverted = 1.0 - noise_value;
+            let value = (inverted * step_count) as i32 as f32 / step_count;
+            let delta = inverted - value;
+            let alpha = map(delta * step_count, min, max, range);
+            1.0 - lerp(value, inverted, curve.apply(alpha))
+        }
+        ModuleKind::Frequency {
+            source,
+            x: x_frequency,
+            y: y_frequency,
+        } => {
+            let x_frequency = sample(x_frequency, x, y)?;
+            let y_frequency = sample(y_frequency, x, y)?;
+            sample(source, x * x_frequency, y * y_frequency)?
+        }
+        ModuleKind::Gradient {
+            source,
+            lower,
+            upper,
+            strength,
+        } => {
+            let noise_value = sample(source, x, y)?;
+            let upper_bound = sample(upper, x, y)?;
+            if noise_value > upper_bound {
+                return Ok(noise_value);
+            }
+            let amount = sample(strength, x, y)?;
+            let lower_bound = sample(lower, x, y)?;
+            if noise_value < lower_bound {
+                return Ok(java_pow(noise_value, 1.0 - amount));
+            }
+            let alpha = 1.0 - (noise_value - lower_bound) / (upper_bound - lower_bound);
+            java_pow(noise_value, 1.0 - amount * alpha)
+        }
+        ModuleKind::Modulate {
+            source,
+            direction,
+            strength,
+        } => {
+            let angle = sample(direction, x, y)? * PI2;
+            let strength = sample(strength, x, y)?;
+            let dx = sin(angle) * strength;
+            let dy = cos(angle) * strength;
+            sample(source, x + dx, y + dy)?
+        }
+        _ => unreachable!("transform_value only takes Steps, Freq, Grad and Modulate"),
+    })
 }
 
 /// `NoiseUtil.pow(float, int)`: repeated float products (`value * value * value` for 3), not `Math.pow`; a negative
@@ -8871,6 +8909,80 @@ mod tests {
         {
             let fold = seeded_edge_fold(table, &specials, *bounds, build);
             assert_eq!(fold, expected, "family {index}");
+        }
+    }
+
+    #[test]
+    fn runtime_seeded_transforms_match_current_noise2d() {
+        let source = |kind, seed, frequency, octaves, gain| {
+            Module::source(Source::new(
+                kind,
+                SourceConfig {
+                    seed,
+                    octaves,
+                    gain,
+                    frequency,
+                    lacunarity: 2.0,
+                    interpolation: Interpolation::Curve3,
+                },
+            ))
+        };
+        let base = source(SourceKind::Perlin, 1001, 1.0 / 96.0, 4, 0.5);
+        let simplex = source(SourceKind::Simplex, 1002, 1.0 / 80.0, 3, 0.5);
+        let ridge = source(SourceKind::Ridge, 1003, 1.0 / 128.0, 2, 0.975);
+        let perlin2 = source(SourceKind::Perlin2, 1004, 1.0 / 64.0, 2, 0.5);
+        let graphs = [
+            base.clone().steps(
+                simplex.clone(),
+                Module::constant(0.2),
+                ridge.clone(),
+                CurveFunction::Interpolation(Interpolation::Linear),
+            ),
+            base.clone().frequency(simplex.clone(), ridge.clone()),
+            base.clone()
+                .gradient(simplex.clone(), ridge.clone(), perlin2),
+            base.modulate(simplex, ridge),
+        ];
+        let expected = [
+            [
+                0x9f745b5614915957,
+                0x6c683937178c790d,
+                0x74a80d94932da15f,
+                0xa18cd68140e13a4b,
+            ],
+            [
+                0xd73e35f81bbfafdf,
+                0xbb7d3fa76cc7677a,
+                0xa9df7d00157a964b,
+                0x808cb808658362f0,
+            ],
+            [
+                0xc3d0d844aeb558ad,
+                0x2277c180ca2f135f,
+                0x03706f82c69daf2b,
+                0x4f1d0987ae38d539,
+            ],
+            [
+                0xbf826dcb75996b52,
+                0x2639ab937c91bfef,
+                0x14f548b29c1b99bb,
+                0x961c25513e62a41f,
+            ],
+        ];
+        for (graph, hashes) in graphs.iter().zip(expected) {
+            for (seed, expected) in [0, 17, -91, i32::MAX].into_iter().zip(hashes) {
+                let mut hash = 0xcbf29ce484222325u64;
+                for (x, y) in [
+                    (0.0, 0.0),
+                    (0.125, -0.75),
+                    (12.34, 56.78),
+                    (-1234.5, 987.25),
+                ] {
+                    hash ^= u64::from(graph.try_value_seed_first(seed, x, y).unwrap().to_bits());
+                    hash = hash.wrapping_mul(0x100000001b3);
+                }
+                assert_eq!(hash, expected, "seed {seed}");
+            }
         }
     }
 
