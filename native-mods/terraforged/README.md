@@ -459,6 +459,9 @@ yet: the river networks that do are not ported. Its tests fold every warp's offs
 -0, huge, infinite and NaN coordinates for eight seeds (the `int` edges among them) against a Java oracle running
 Engine's `GenWarp`, `GenWarpOracle.java` in `.local/terraforged/oracles/river/`.
 
+The river-geometry layer adds normalized channel segments, expanded bounds, intersections, shortening,
+position sampling and simplex-driven local warping with the original endpoint and wiggle fades.
+
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration and its river warps. They change nothing in the game, so there is
