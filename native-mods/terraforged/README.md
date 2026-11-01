@@ -51,6 +51,9 @@ lookup table behavior and `0..1` remapping.
 The line source layer adds dynamic radius, endpoint fading, feathering, clipping, intersection and
 distance helpers for TerraForged's finite line masks.
 
+The engine type layer begins terrain composition with TerraForged's wrapping seed cursor and full
+terrain-category property model, including dominance ordering and derived override behavior.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:

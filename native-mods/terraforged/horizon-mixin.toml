@@ -12,3 +12,10 @@ file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged"
 source = "noise.rs"
 visibility = "pub"
+
+[[module]]
+id = "engine"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_engine"
+source = "engine.rs"
+visibility = "pub"
