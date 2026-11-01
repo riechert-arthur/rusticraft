@@ -22,49 +22,28 @@
  * SOFTWARE.
  */
 
-import com.terraforged.noise.util.Noise;
-import com.terraforged.noise.util.NoiseUtil;
+import com.terraforged.mod.worldgen.biome.CaveBiomeSampler;
+import com.terraforged.mod.worldgen.biome.util.BiomeMapManager;
+import com.terraforged.mod.worldgen.cave.CaveType;
 
-public final class TerraForgedCaveBiomeSamplerOracle {
-    private static final int OFFSET = 124897;
-    private static final int MASK_OFFSET = 987541;
-    private static final float FREQUENCY = 1F / 800F;
-    private static final float MASK_FREQUENCY = 1F / 1600F;
-    private static final float MASK_THRESHOLD = 0.62F;
+public final class TerraForgedCaveBiomeSamplerOracle extends CaveBiomeSampler {
+    private TerraForgedCaveBiomeSamplerOracle(boolean global, int count) {
+        super(800, new BiomeMapManager(global, count));
+    }
 
     public static void main(String[] args) {
-        int[][] cases = {
-                {0, 0, 0},
-                {0, 1024, -768},
-                {123456789, -2048, 4096},
-                {-987654321, 777, -333},
-        };
-        System.out.printf("F %d%n", Float.floatToRawIntBits(FREQUENCY));
-        for (int[] value : cases) {
-            int seed = value[0];
-            int x = value[1];
-            int z = value[2];
-            float choice = sample(seed + OFFSET, x, z, FREQUENCY);
-            float mask = sample(seed + MASK_OFFSET, x, z, MASK_FREQUENCY);
-            int selected = mask < MASK_THRESHOLD ? -1 : select(choice, 3);
-            System.out.printf("C %d %d %d%n",
-                    Float.floatToRawIntBits(choice), Float.floatToRawIntBits(mask), selected);
+        var sampler = new TerraForgedCaveBiomeSamplerOracle(true, 3);
+        for (int[] point : new int[][]{{0,0,0}, {0,1024,-768}, {123456789,-2048,4096}, {-987654321,777,-333}}) {
+            int seed = point[0], x = point[1], z = point[2];
+            System.out.printf("%d %s %s%n",
+                Float.floatToRawIntBits(sample(seed + OFFSET, x, z, sampler.frequency)),
+                sampler.getUnderGroundBiome(seed, x, z, CaveType.UNIQUE),
+                sampler.getUnderGroundBiome(seed, x, z, CaveType.GLOBAL));
         }
-    }
-
-    private static float sample(int seed, int x, int z, float frequency) {
-        float nx = x * frequency;
-        float nz = z * frequency;
-        float noise = (1 + Noise.singleSimplex(nx, nz, seed)) * 0.5F;
-        return NoiseUtil.clamp(noise, 0F, 1F);
-    }
-
-    private static int select(float noise, int count) {
-        float value = noise * (count * 0.99999F);
-        if (value < 1F) return 0;
-        for (int index = 1; index < count; index++) {
-            if (value < index + 1F) return index;
+        for (boolean global : new boolean[]{false, true}) {
+            var empty = new TerraForgedCaveBiomeSamplerOracle(global, 0);
+            System.out.printf("empty %s %s%n", empty.getUnderGroundBiome(0,0,0,CaveType.UNIQUE),
+                empty.getUnderGroundBiome(0,0,0,CaveType.GLOBAL));
         }
-        return -1;
     }
 }
