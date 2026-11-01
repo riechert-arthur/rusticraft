@@ -74,7 +74,91 @@ pub struct TileGenerator<H, F> {
     factor: i32,
     border: i32,
     batch_size: i32,
+    style: GenerationStyle,
     generator: WorldGenerator<H, F>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GenerationStyle {
+    Direct,
+    Batched,
+    Striped,
+}
+
+pub struct TileGeneratorBuilder<H, F> {
+    factor: i32,
+    border: i32,
+    batch_size: i32,
+    striped: bool,
+    generator: Option<WorldGenerator<H, F>>,
+}
+
+impl<H, F> Default for TileGeneratorBuilder<H, F> {
+    fn default() -> Self {
+        Self {
+            factor: 0,
+            border: 0,
+            batch_size: 0,
+            striped: false,
+            generator: None,
+        }
+    }
+}
+
+impl<H, F> TileGeneratorBuilder<H, F>
+where
+    H: HeightmapSource,
+    F: TileFilters,
+{
+    pub fn size(mut self, factor: i32, border: i32) -> Self {
+        self.factor = factor;
+        self.border = border;
+        self
+    }
+
+    pub fn factor(mut self, factor: i32) -> Self {
+        self.factor = factor;
+        self
+    }
+
+    pub fn border(mut self, border: i32) -> Self {
+        self.border = border;
+        self
+    }
+
+    pub fn generator(mut self, generator: WorldGenerator<H, F>) -> Self {
+        self.generator = Some(generator);
+        self
+    }
+
+    pub fn batch(mut self, batch_size: i32) -> Self {
+        self.batch_size = batch_size;
+        self
+    }
+
+    pub fn striped(mut self) -> Self {
+        self.striped = true;
+        self
+    }
+
+    pub fn build(self) -> TileGenerator<H, F> {
+        let style = if self.batch_size > 0 {
+            if self.striped {
+                GenerationStyle::Striped
+            } else {
+                GenerationStyle::Batched
+            }
+        } else {
+            GenerationStyle::Direct
+        };
+        TileGenerator::with_style(
+            self.factor,
+            self.border,
+            self.batch_size,
+            style,
+            self.generator.expect("tile generator requires a generator"),
+        )
+    }
 }
 
 impl<H, F> TileGenerator<H, F>
@@ -88,12 +172,33 @@ where
         batch_size: i32,
         generator: WorldGenerator<H, F>,
     ) -> Self {
+        Self::with_style(
+            factor,
+            border,
+            batch_size,
+            GenerationStyle::Direct,
+            generator,
+        )
+    }
+
+    const fn with_style(
+        factor: i32,
+        border: i32,
+        batch_size: i32,
+        style: GenerationStyle,
+        generator: WorldGenerator<H, F>,
+    ) -> Self {
         Self {
             factor,
             border,
             batch_size,
+            style,
             generator,
         }
+    }
+
+    pub fn builder() -> TileGeneratorBuilder<H, F> {
+        TileGeneratorBuilder::default()
     }
 
     pub const fn generator(&self) -> &WorldGenerator<H, F> {
@@ -128,7 +233,15 @@ where
 
     pub fn generate_region(&self, region_x: i32, region_z: i32) -> Tile {
         let mut tile = self.create_empty_region(region_x, region_z);
-        self.generate_heightmap(&mut tile);
+        match self.style {
+            GenerationStyle::Direct => self.generate_heightmap(&mut tile),
+            GenerationStyle::Batched => {
+                self.generate_area(&mut tile, self.batch_size, SampleTransform::Direct)
+            }
+            GenerationStyle::Striped => {
+                self.generate_striped(&mut tile, self.batch_size, SampleTransform::Direct)
+            }
+        }
         self.post_process(&mut tile, true);
         tile
     }
@@ -141,7 +254,19 @@ where
         filter: bool,
     ) -> Tile {
         let mut tile = self.create_empty_region(0, 0);
-        self.generate_zoomed_heightmap(&mut tile, center_x, center_z, zoom);
+        match self.style {
+            GenerationStyle::Direct => {
+                self.generate_zoomed_heightmap(&mut tile, center_x, center_z, zoom)
+            }
+            GenerationStyle::Batched => {
+                let transform = SampleTransform::zoomed(&tile, center_x, center_z, zoom);
+                self.generate_area(&mut tile, self.batch_size, transform);
+            }
+            GenerationStyle::Striped => {
+                let transform = SampleTransform::zoomed(&tile, center_x, center_z, zoom);
+                self.generate_striped(&mut tile, self.batch_size, transform);
+            }
+        }
         self.post_process(&mut tile, filter);
         tile
     }
@@ -438,6 +563,44 @@ mod tests {
         let striped = generator.generate_striped_zoomed_region(100.0, -50.0, 0.5, false, 3);
         assert_eq!(batched.cell(0, 0).value, striped.cell(0, 0).value);
         assert_eq!(batched.cell(31, 31).value, striped.cell(31, 31).value);
+    }
+
+    #[test]
+    fn tile_generator_builder_matches_engine_0_3_0() {
+        let create = || {
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let heightmap = TestHeightmap {
+                map: Arc::new(Rivermap::new(7, -9, Vec::new(), GenWarp::direct())),
+                events,
+            };
+            WorldGenerator::new(heightmap, TestFilters(Arc::new(Mutex::new(Vec::new()))))
+        };
+
+        let direct = TileGenerator::builder()
+            .size(1, 0)
+            .batch(0)
+            .striped()
+            .generator(create())
+            .build();
+        assert_eq!(direct.style, GenerationStyle::Direct);
+
+        let batched = TileGenerator::builder()
+            .factor(1)
+            .border(0)
+            .batch(3)
+            .generator(create())
+            .build();
+        assert_eq!(batched.style, GenerationStyle::Batched);
+        assert_eq!(batched.generate_region(1, -1).cell(31, 31).value, 62_999.0);
+
+        let striped = TileGenerator::builder()
+            .size(1, 0)
+            .batch(3)
+            .striped()
+            .generator(create())
+            .build();
+        assert_eq!(striped.style, GenerationStyle::Striped);
+        assert_eq!(striped.generate_region(1, -1).cell(31, 31).value, 62_999.0);
     }
 
     fn rivermap_events(events: &Mutex<Vec<&'static str>>) -> usize {

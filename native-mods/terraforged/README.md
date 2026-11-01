@@ -234,6 +234,9 @@ non-cancellation like the Java source, and backs lazy regular and zoomed tile ge
 Batched and striped generators now preserve TerraForged's ceil-sized chunk partitions, per-chunk river
 context, clipped final tasks, centered zoom transforms, and post-processing flags.
 
+The tile-generator builder now mirrors TerraForged's factor, border, batch, and striped configuration,
+selecting direct generation unless a positive batch size requests batched or striped traversal.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
