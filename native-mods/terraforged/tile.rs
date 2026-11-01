@@ -435,6 +435,36 @@ impl Tile {
         size.index_of(x, z)
     }
 
+    pub fn iterate(&self, mut visitor: impl FnMut(&Cell, i32, i32)) {
+        for delta_z in 0..self.block_size.size {
+            let z = self.block_size.border.wrapping_add(delta_z);
+            for delta_x in 0..self.block_size.size {
+                let x = self.block_size.border.wrapping_add(delta_x);
+                let index = self.block_size.index_of(x, z) as usize;
+                visitor(&self.blocks[index], delta_x, delta_z);
+            }
+        }
+    }
+
+    pub fn generate(&mut self, mut visitor: impl FnMut(&mut Cell, i32, i32)) {
+        for delta_z in 0..self.block_size.size {
+            let z = self.block_size.border.wrapping_add(delta_z);
+            for delta_x in 0..self.block_size.size {
+                let x = self.block_size.border.wrapping_add(delta_x);
+                let index = self.block_size.index_of(x, z) as usize;
+                visitor(&mut self.blocks[index], delta_x, delta_z);
+            }
+        }
+    }
+
+    pub fn batch_size(batch_count: i32, chunk_size: Size) -> i32 {
+        let mut batch_size = chunk_size.total / batch_count;
+        if batch_size.wrapping_mul(batch_count) < chunk_size.total {
+            batch_size = batch_size.wrapping_add(1);
+        }
+        batch_size
+    }
+
     /// `Tile.getRegionId(regionX, regionZ)`.
     pub fn region_id_for(region_x: i32, region_z: i32) -> i64 {
         pack(region_x, region_z)
@@ -1467,6 +1497,38 @@ y15 0 0 11 5502ddd13a2410d1 744e9f090aa3f6e3
     /// lines), and `Tile.generate(HeightmapCache, offsetX, offsetZ, zoom)` over
     /// [`HEIGHTMAP_CACHED_ZOOMS`] on the `c`/`r` runs' cache (`y` lines: hits shared with the
     /// unzoomed runs and between zoomed blocks). Floats fold as `floatToIntBits` (NaNs canonical).
+    #[test]
+    fn tile_visitors_match_engine_0_3_0() {
+        let mut tile = Tile::new(0, 0, 1, 1, &TerrainRegistry::new());
+        for (index, cell) in tile.blocks.iter_mut().enumerate() {
+            cell.value = index as f32;
+        }
+
+        let mut visited = Vec::new();
+        tile.iterate(|cell, x, z| {
+            if (x == 0 && z == 0) || (x == 31 && z == 31) {
+                visited.push((cell.value, x, z));
+            }
+        });
+        assert_eq!(visited, [(1_040.0, 0, 0), (3_055.0, 31, 31)]);
+
+        let mut count = 0;
+        tile.generate(|cell, x, z| {
+            count += 1;
+            cell.value = (x.wrapping_mul(100).wrapping_add(z)) as f32;
+        });
+        assert_eq!(count, 1_024);
+        assert_eq!(tile.raw_cell(16, 16).unwrap().value, 0.0);
+        assert_eq!(tile.raw_cell(47, 47).unwrap().value, 3_131.0);
+        assert_eq!(tile.raw_cell(15, 16).unwrap().value, 1_039.0);
+
+        let size = Size::new(8, 2);
+        assert_eq!(Tile::batch_size(1, size), 12);
+        assert_eq!(Tile::batch_size(3, size), 4);
+        assert_eq!(Tile::batch_size(5, size), 3);
+        assert_eq!(Tile::batch_size(16, size), 1);
+    }
+
     #[test]
     fn tile_heightmap_generation_matches_engine_0_3_0() {
         let terrains = Arc::new(TerrainRegistry::new());
