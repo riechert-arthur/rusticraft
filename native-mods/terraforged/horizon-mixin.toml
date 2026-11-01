@@ -306,3 +306,10 @@ file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_terrain_cache"
 source = "terrain_cache.rs"
 visibility = "pub"
+
+[[module]]
+id = "generator_facade"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_generator_facade"
+source = "generator_facade.rs"
+visibility = "pub"

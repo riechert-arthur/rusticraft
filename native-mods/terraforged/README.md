@@ -2057,10 +2057,29 @@ readiness, sharing, removal, regeneration, seeds and `int`-limit chunks, interpr
 replays the trace on one task thread. Others check that cached chunks equal uncached ones bit for bit for four seeds
 on eight threads, that a running task is shared and reported not ready, and that a failed generation is not rerun.
 
+The generator queries (`generator_facade.rs`, `TerraForgedGenerator`) are TerraForged Reimagined's
+`worldgen.Generator` (a24d450, MIT, as above) over its terrain cache: `createState`'s seed capture (`Seeds.get`, the
+level seed's low 32 bits, kept beside the raw level seed), `getChunkData`/`getChunkDataAsync`, the cache hints and
+drop (each with the seed its Java hook passes), `getMinY`, `getSeaLevel`, `getGenDepth`, `getBaseHeight` and
+`getBaseColumn`. Heights count from block 0, as TerraForged's levels do; `getGenDepth` is `levels.maxY` (480 by
+default, the exclusive top, not `maxY - minY`), and Reimagined fits that by widening the overworld dimension type to
+`-64..960`. Mapping the levels onto Horizon's 26.3 build range (`-64..320`) is the job of the layer that registers the
+generator. `getBaseHeight` reads the un-eroded sample's base (water) level and the ERODED column height, the surface
+heightmaps returning the higher plus one, the ocean-floor ones the height plus one; `getBaseColumn` reads only the
+un-eroded sample (stone up to the raw height, water up to the surface) and, as Java, reports the height as the
+column's `minY`. A sample that fails (a custom module has no seed-first form) is an `Err` the caller gets, never a
+made-up height; a negative column height panics where Java throws. `GeneratorQueryOracle.java`
+(`.local/terraforged/oracles/generator_facade/`, `run.sh`, after `oracles/erosion_region/e2e/run.sh`) runs the query
+bodies (copied, since `Generator` needs Minecraft's `ChunkGenerator`) on Reimagined's own `TerrainLevels`,
+`NoiseLevels` and `ErodedNoiseGenerator` over the newer source's `NoiseGenerator`, interpreted and JIT-compiled alike:
+the query math over signed zeros, subnormals, huge values, infinities and NaN for three level sets, `Seeds.get`, and
+thirteen end-to-end positions (four seeds, negative blocks, `int` limits, the world border); the tests match them bit
+for bit in debug and release.
+
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives, the biome climate types, the climate settings, the climate module, the climate stage, the continent factory, the generator context, the heightmap, the world generator factory, TerraForged's terrain levels, its terrain data, its terrain generator, its terrain-blend utilities, its terrain blender with its nearest-terrain search (and the newer source's seed-first blender), noise-graph reseeding, the cave noise primitives, the biome viability rules, the biome overrides, the continent control points, the continent cell primitives, the continent configuration, the continent shape blending, the continent cell generator with its spawn-offset search, the continent river nodes, the continent river carver's arithmetic, the continent river networks with their nearest-node sampling and their warped, carved river sampling, the newer source's seed-first noise sources, scalar noise graphs, domain warps, selectors, graph caches, terraces, legacy terraces, advanced terraces, curves, transforms (steps, frequency, gradient and modulation), special sources (boost, cell, cell edge and sine) and lines, and its bounded concurrent lossy cache with the continent's cell and
-river-piece caches on it, the continent noise module that joins the continent layers, the newer source's terrain height sampler with its bordered chunk generation and its nearest-terrain search, the erosion tile geometry, and TerraForged Reimagined's heightmap smoothing, erosion brushes, hydraulic erosion filter, eroded-region cache, eroded region build, eroded chunk generation and terrain cache. They change nothing in the game, so there is
+river-piece caches on it, the continent noise module that joins the continent layers, the newer source's terrain height sampler with its bordered chunk generation and its nearest-terrain search, the erosion tile geometry, and TerraForged Reimagined's heightmap smoothing, erosion brushes, hydraulic erosion filter, eroded-region cache, eroded region build, eroded chunk generation, terrain cache and generator queries. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
