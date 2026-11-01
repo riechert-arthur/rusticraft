@@ -255,6 +255,9 @@ TerraForged's cell lookup, full iteration, and original bounded-visit behavior s
 Tile disposal now counts unbordered chunks with Java-width atomic increments and removes a completed
 region from its provider cache when the source threshold is reached.
 
+The async tile-factory wrapper now starts regular and zoomed generation immediately, delegates region
+mapping, remains idempotently asynchronous, and creates tile caches with the same worker configuration.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:

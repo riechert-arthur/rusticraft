@@ -99,6 +99,54 @@ pub struct TileCache<H, F> {
     cache: Arc<Cache<CacheEntry<Tile>>>,
 }
 
+pub struct AsyncTileGenerator<H, F> {
+    generator: Arc<TileGenerator<H, F>>,
+    worker_count: usize,
+}
+
+impl<H, F> AsyncTileGenerator<H, F>
+where
+    H: HeightmapSource + Send + Sync + 'static,
+    F: TileFilters + Send + Sync + 'static,
+{
+    pub const fn new(generator: Arc<TileGenerator<H, F>>, worker_count: usize) -> Self {
+        Self {
+            generator,
+            worker_count,
+        }
+    }
+
+    pub fn chunk_to_region(&self, coordinate: i32) -> i32 {
+        self.generator.chunk_to_region(coordinate)
+    }
+
+    pub fn get_tile(&self, region_x: i32, region_z: i32) -> CacheEntry<Tile> {
+        let generator = Arc::clone(&self.generator);
+        CacheEntry::compute_async(move || generator.generate_region(region_x, region_z))
+    }
+
+    pub fn get_zoomed_tile(
+        &self,
+        center_x: f32,
+        center_z: f32,
+        zoom: f32,
+        filter: bool,
+    ) -> CacheEntry<Tile> {
+        let generator = Arc::clone(&self.generator);
+        CacheEntry::compute_async(move || {
+            generator.generate_zoomed_region(center_x, center_z, zoom, filter)
+        })
+    }
+
+    pub const fn asynchronous(&self) -> &Self {
+        self
+    }
+
+    pub fn cached(&self) -> TileCache<H, F> {
+        TileCache::new(Arc::clone(&self.generator), self.worker_count)
+    }
+}
+
 pub struct CachedChunk {
     tile: Arc<CacheEntry<Tile>>,
     cache: Arc<Cache<CacheEntry<Tile>>>,
@@ -580,6 +628,10 @@ where
     pub fn cached(self: Arc<Self>, worker_count: usize) -> TileCache<H, F> {
         TileCache::new(self, worker_count)
     }
+
+    pub fn asynchronous(self: Arc<Self>, worker_count: usize) -> AsyncTileGenerator<H, F> {
+        AsyncTileGenerator::new(self, worker_count)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -891,6 +943,32 @@ mod tests {
         }
         chunks[3].dispose();
         assert!(cache.get(id).is_none());
+    }
+
+    #[test]
+    fn asynchronous_tile_factory_matches_engine_0_3_0() {
+        let heightmap = TestHeightmap {
+            map: Arc::new(Rivermap::new(7, -9, Vec::new(), GenWarp::direct())),
+            events: Arc::new(Mutex::new(Vec::new())),
+        };
+        let generator = Arc::new(TileGenerator::new(
+            1,
+            0,
+            0,
+            WorldGenerator::new(heightmap, TestFilters(Arc::new(Mutex::new(Vec::new())))),
+        ));
+        let asynchronous = generator.asynchronous(5);
+
+        assert_eq!(asynchronous.chunk_to_region(-3), -2);
+        assert!(std::ptr::eq(asynchronous.asynchronous(), &asynchronous));
+        let tile = asynchronous.get_tile(-2, 3);
+        assert_eq!((tile.get().region_x(), tile.get().region_z()), (-2, 3));
+        let zoomed = asynchronous.get_zoomed_tile(100.0, -50.0, 0.5, false);
+        assert_eq!((zoomed.get().region_x(), zoomed.get().region_z()), (0, 0));
+
+        let cache = asynchronous.cached();
+        cache.queue_region(4, -5);
+        assert!(cache.get(Tile::region_id_for(4, -5)).is_some());
     }
 
     fn rivermap_events(events: &Mutex<Vec<&'static str>>) -> usize {
