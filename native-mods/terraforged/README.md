@@ -458,6 +458,11 @@ is shared across the map while clipped edge cells retain Java's ordered, reweigh
 The current hydraulic droplet simulation now preserves region and legacy-tile seeding, bilinear
 gradients, height falloff, sediment capacity, deposition, erosion, gravity and evaporation order.
 
+The eroded-region cache now uses current eight-chunk regions, four-chunk margins and sixteen-entry
+access-order eviction. Concurrent callers share one build, seed changes invalidate all entries, and
+failed builders are removed for retry while negative chunk and block coordinates retain Java layout.
+`tools/terraforged/TerraForgedErosionRegionOracle.java` records the signed-coordinate fixtures.
+
 The scalar graph fixtures cover 15 graphs, four seeds and four coordinates (240 Java samples),
 including wrapped seed addition and mixed Perlin/seed-sensitive sources. Regenerate their hashes
 with `tools/terraforged/TerraForgedSeededGraphOracle.java` on a classpath containing compiled

@@ -22,6 +22,11 @@
  * SOFTWARE.
  */
 
+use std::{
+    collections::{HashMap, VecDeque},
+    sync::{Arc, Condvar, Mutex, MutexGuard},
+};
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NoiseTileSize {
     pub chunk_length: i32,
@@ -529,6 +534,188 @@ fn java_min(first: f32, second: f32) -> f32 {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ErosionRegionLayout;
+
+impl ErosionRegionLayout {
+    pub const REGION_CHUNKS: i32 = 8;
+    pub const MARGIN_CHUNKS: i32 = 4;
+    pub const TOTAL_CHUNKS: i32 = Self::REGION_CHUNKS + Self::MARGIN_CHUNKS * 2;
+    pub const MAP_SIZE: i32 = Self::TOTAL_CHUNKS * NoiseTileSize::CHUNK_SIZE;
+    pub const MARGIN_BLOCKS: i32 = Self::MARGIN_CHUNKS * NoiseTileSize::CHUNK_SIZE;
+    pub const CACHE_SIZE: usize = 16;
+
+    pub fn region(chunk_x: i32, chunk_z: i32) -> (i32, i32) {
+        (
+            chunk_x.div_euclid(Self::REGION_CHUNKS),
+            chunk_z.div_euclid(Self::REGION_CHUNKS),
+        )
+    }
+
+    pub fn origin_chunk(region_x: i32, region_z: i32) -> (i32, i32) {
+        (
+            region_x
+                .wrapping_mul(Self::REGION_CHUNKS)
+                .wrapping_sub(Self::MARGIN_CHUNKS),
+            region_z
+                .wrapping_mul(Self::REGION_CHUNKS)
+                .wrapping_sub(Self::MARGIN_CHUNKS),
+        )
+    }
+
+    pub fn chunk_offset(chunk: i32) -> i32 {
+        Self::MARGIN_BLOCKS.wrapping_add(chunk.rem_euclid(Self::REGION_CHUNKS).wrapping_shl(4))
+    }
+
+    pub fn block_offset(block: i32) -> i32 {
+        Self::chunk_offset(block >> 4).wrapping_add(block & 15)
+    }
+
+    pub fn block_index(x: i32, z: i32) -> usize {
+        Self::block_offset(z)
+            .wrapping_mul(Self::MAP_SIZE)
+            .wrapping_add(Self::block_offset(x)) as usize
+    }
+
+    pub fn key(region_x: i32, region_z: i32) -> i64 {
+        (i64::from(region_x) << 32) | (i64::from(region_z) & 0xffff_ffff)
+    }
+}
+
+enum RegionState<T> {
+    Building,
+    Ready(Arc<T>),
+    Failed,
+}
+
+struct RegionEntry<T> {
+    state: Mutex<RegionState<T>>,
+    ready: Condvar,
+}
+
+impl<T> RegionEntry<T> {
+    fn building() -> Self {
+        Self {
+            state: Mutex::new(RegionState::Building),
+            ready: Condvar::new(),
+        }
+    }
+}
+
+struct RegionCacheInner<T> {
+    seed: Option<i32>,
+    entries: HashMap<i64, Arc<RegionEntry<T>>>,
+    order: VecDeque<i64>,
+}
+
+pub struct ErosionRegionCache<T> {
+    inner: Mutex<RegionCacheInner<T>>,
+}
+
+impl<T> Default for ErosionRegionCache<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T> ErosionRegionCache<T> {
+    pub fn new() -> Self {
+        Self {
+            inner: Mutex::new(RegionCacheInner {
+                seed: None,
+                entries: HashMap::with_capacity(ErosionRegionLayout::CACHE_SIZE * 2),
+                order: VecDeque::with_capacity(ErosionRegionLayout::CACHE_SIZE + 1),
+            }),
+        }
+    }
+
+    pub fn get_or_build(
+        &self,
+        seed: i32,
+        chunk_x: i32,
+        chunk_z: i32,
+        build: impl FnOnce(i32, i32) -> T,
+    ) -> Arc<T> {
+        let (region_x, region_z) = ErosionRegionLayout::region(chunk_x, chunk_z);
+        let key = ErosionRegionLayout::key(region_x, region_z);
+        let (entry, mine) = {
+            let mut inner = lock_unpoisoned(&self.inner);
+            if inner.seed != Some(seed) {
+                inner.entries.clear();
+                inner.order.clear();
+                inner.seed = Some(seed);
+            }
+            if let Some(entry) = inner.entries.get(&key).cloned() {
+                touch(&mut inner.order, key);
+                (entry, false)
+            } else {
+                let entry = Arc::new(RegionEntry::building());
+                inner.entries.insert(key, Arc::clone(&entry));
+                inner.order.push_back(key);
+                if inner.order.len() > ErosionRegionLayout::CACHE_SIZE {
+                    if let Some(oldest) = inner.order.pop_front() {
+                        inner.entries.remove(&oldest);
+                    }
+                }
+                (entry, true)
+            }
+        };
+        if mine {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                Arc::new(build(region_x, region_z))
+            }));
+            match result {
+                Ok(value) => {
+                    *lock_unpoisoned(&entry.state) = RegionState::Ready(Arc::clone(&value));
+                    entry.ready.notify_all();
+                    value
+                }
+                Err(payload) => {
+                    *lock_unpoisoned(&entry.state) = RegionState::Failed;
+                    entry.ready.notify_all();
+                    let mut inner = lock_unpoisoned(&self.inner);
+                    if inner
+                        .entries
+                        .get(&key)
+                        .is_some_and(|current| Arc::ptr_eq(current, &entry))
+                    {
+                        inner.entries.remove(&key);
+                        inner.order.retain(|candidate| *candidate != key);
+                    }
+                    std::panic::resume_unwind(payload)
+                }
+            }
+        } else {
+            let mut state = lock_unpoisoned(&entry.state);
+            loop {
+                match &*state {
+                    RegionState::Building => {
+                        state = entry
+                            .ready
+                            .wait(state)
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    }
+                    RegionState::Ready(value) => return Arc::clone(value),
+                    RegionState::Failed => panic!("TerraForged erosion region build failed"),
+                }
+            }
+        }
+    }
+}
+
+fn touch(order: &mut VecDeque<i64>, key: i64) {
+    if let Some(index) = order.iter().position(|candidate| *candidate == key) {
+        order.remove(index);
+    }
+    order.push_back(key);
+}
+
+fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 impl ErosionBrushes {
     pub const RADIUS: i32 = 7;
 
@@ -776,5 +963,112 @@ mod tests {
             &mut region_map,
         );
         assert_eq!(hash(&region_map), 0x293bedd53953eb33);
+    }
+
+    #[test]
+    fn erosion_region_layout_matches_current_java_source() {
+        let chunk_fixtures = [
+            (-17, -3, -28, 176),
+            (-16, -2, -20, 64),
+            (-9, -2, -20, 176),
+            (-8, -1, -12, 64),
+            (-1, -1, -12, 176),
+            (0, 0, -4, 64),
+            (7, 0, -4, 176),
+            (8, 1, 4, 64),
+            (15, 1, 4, 176),
+            (16, 2, 12, 64),
+        ];
+        for (chunk, expected_region, expected_origin, expected_offset) in chunk_fixtures {
+            assert_eq!(ErosionRegionLayout::region(chunk, chunk).0, expected_region);
+            assert_eq!(
+                ErosionRegionLayout::origin_chunk(expected_region, expected_region).0,
+                expected_origin
+            );
+            assert_eq!(ErosionRegionLayout::chunk_offset(chunk), expected_offset);
+        }
+        let block_fixtures = [
+            (-257, 191),
+            (-256, 64),
+            (-145, 175),
+            (-144, 176),
+            (-17, 175),
+            (-16, 176),
+            (-1, 191),
+            (0, 64),
+            (15, 79),
+            (16, 80),
+            (127, 191),
+            (128, 64),
+        ];
+        for (block, expected) in block_fixtures {
+            assert_eq!(ErosionRegionLayout::block_offset(block), expected);
+        }
+    }
+
+    #[test]
+    fn erosion_region_cache_shares_builds_resets_seeds_and_evicts_lru() {
+        use std::sync::{
+            Barrier,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        let cache = Arc::new(ErosionRegionCache::new());
+        let builds = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(Barrier::new(8));
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let cache = Arc::clone(&cache);
+                let builds = Arc::clone(&builds);
+                let barrier = Arc::clone(&barrier);
+                scope.spawn(move || {
+                    barrier.wait();
+                    let value = cache.get_or_build(42, -1, -1, |region_x, region_z| {
+                        builds.fetch_add(1, Ordering::SeqCst);
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                        (region_x, region_z)
+                    });
+                    assert_eq!(*value, (-1, -1));
+                });
+            }
+        });
+        assert_eq!(builds.load(Ordering::SeqCst), 1);
+        cache.get_or_build(43, -1, -1, |_, _| {
+            builds.fetch_add(1, Ordering::SeqCst);
+            (-1, -1)
+        });
+        assert_eq!(builds.load(Ordering::SeqCst), 2);
+
+        for region in 0..ErosionRegionLayout::CACHE_SIZE as i32 {
+            cache.get_or_build(
+                43,
+                region * ErosionRegionLayout::REGION_CHUNKS,
+                0,
+                |x, z| (x, z),
+            );
+        }
+        cache.get_or_build(43, 0, 0, |_, _| unreachable!());
+        cache.get_or_build(
+            43,
+            ErosionRegionLayout::CACHE_SIZE as i32 * ErosionRegionLayout::REGION_CHUNKS,
+            0,
+            |x, z| (x, z),
+        );
+        let rebuilt = AtomicUsize::new(0);
+        cache.get_or_build(43, ErosionRegionLayout::REGION_CHUNKS, 0, |x, _| {
+            rebuilt.fetch_add(1, Ordering::SeqCst);
+            (x, 0)
+        });
+        assert_eq!(rebuilt.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn failed_region_build_is_removed_for_retry() {
+        let cache = ErosionRegionCache::new();
+        let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            cache.get_or_build(1, 0, 0, |_, _| -> i32 { panic!("fixture failure") });
+        }));
+        assert!(failure.is_err());
+        assert_eq!(*cache.get_or_build(1, 0, 0, |_, _| 7), 7);
     }
 }

@@ -27,6 +27,7 @@ ORIGINAL_TERRAFORGED_ORACLES = {
     "tools/terraforged/TerraForgedHeightmapSmoothingOracle.java",
     "tools/terraforged/TerraForgedErosionBrushOracle.java",
     "tools/terraforged/TerraForgedErosionFilterOracle.java",
+    "tools/terraforged/TerraForgedErosionRegionOracle.java",
 }
 
 
