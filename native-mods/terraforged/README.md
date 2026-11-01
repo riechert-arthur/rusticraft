@@ -614,9 +614,12 @@ advanced and fancy continents' river caches (five settings variants each, a bloc
 points, fresh cells and six fills of value, river mask and terrain), against `HeightmapRiversOracle.java` in
 `.local/terraforged/oracles/heightmap/`, which calls Engine's `Heightmap.applyRivers`.
 
+The heightmap cache memoizes packed block coordinates, copies stable cell snapshots, and performs the
+same coast-to-beach correction used by TerraForged's direct world lookup.
+
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches and the heightmap's river stage. They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage and the heightmap cache. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
