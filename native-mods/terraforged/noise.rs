@@ -516,6 +516,13 @@ fn hash(x: i32, y: i32) -> i32 {
 pub struct Module(Box<ModuleKind>);
 
 #[derive(Clone)]
+struct BlendNode {
+    source: Module,
+    min: f32,
+    max: f32,
+}
+
+#[derive(Clone)]
 enum ModuleKind {
     Constant(f32),
     Source(Source),
@@ -556,6 +563,13 @@ enum ModuleKind {
         midpoint: f32,
         min_blend: f32,
         max_blend: f32,
+        interpolation: Interpolation,
+    },
+    MultiBlend {
+        control: Module,
+        nodes: Vec<BlendNode>,
+        max_index: usize,
+        blend_range: f32,
         interpolation: Interpolation,
     },
     Select {
@@ -700,6 +714,34 @@ impl Module {
                     interpolation.apply(alpha),
                 )
             }
+            ModuleKind::MultiBlend {
+                control,
+                nodes,
+                max_index,
+                blend_range,
+                interpolation,
+            } => {
+                let selector = control.value(x, y);
+                let index = round(selector * *max_index as f32) as usize;
+                let mut min = &nodes[index];
+                let mut max = min;
+                if *blend_range == 0.0 {
+                    return min.source.value(x, y);
+                }
+                if selector > min.max {
+                    max = &nodes[index + 1];
+                } else if selector < min.min {
+                    min = &nodes[index - 1];
+                } else {
+                    return min.source.value(x, y);
+                }
+                let alpha = clamp((selector - min.max) / *blend_range, 0.0, 1.0);
+                lerp(
+                    min.source.value(x, y),
+                    max.source.value(x, y),
+                    interpolation.apply(alpha),
+                )
+            }
             ModuleKind::Select {
                 control,
                 lower,
@@ -739,6 +781,11 @@ impl Module {
             | ModuleKind::Select { lower, upper, .. } => {
                 java_min(lower.min_value(), upper.min_value())
             }
+            ModuleKind::MultiBlend { nodes, .. } => nodes[1..]
+                .iter()
+                .fold(nodes[0].source.min_value(), |value, node| {
+                    java_min(value, node.source.min_value())
+                }),
             ModuleKind::Add(sources) => combine_bounds(sources, true, |a, b| a + b),
             ModuleKind::Multiply(sources) => combine_bounds(sources, true, |a, b| a * b),
             ModuleKind::Max(sources) => {
@@ -772,6 +819,11 @@ impl Module {
             | ModuleKind::Select { lower, upper, .. } => {
                 java_max(lower.max_value(), upper.max_value())
             }
+            ModuleKind::MultiBlend { nodes, .. } => nodes[1..]
+                .iter()
+                .fold(nodes[0].source.max_value(), |value, node| {
+                    java_max(value, node.source.max_value())
+                }),
             ModuleKind::Add(sources) => combine_bounds(sources, false, |a, b| a + b),
             ModuleKind::Multiply(sources) => combine_bounds(sources, false, |a, b| a * b),
             ModuleKind::Max(sources) => combine_bounds(sources, false, java_max),
@@ -917,6 +969,43 @@ impl Module {
             midpoint,
             min_blend,
             max_blend,
+            interpolation,
+        }))
+    }
+
+    pub fn multi_blend(self, blend: f32, interpolation: Interpolation, sources: Vec<Self>) -> Self {
+        let spacing = 1.0 / sources.len() as f32;
+        let radius = spacing / 2.0;
+        let blend_range = radius * blend;
+        let cell_radius = (radius - blend_range) / 2.0;
+        let max_index = sources.len() - 1;
+        let nodes = sources
+            .into_iter()
+            .enumerate()
+            .map(|(index, source)| {
+                let position = index as f32 * spacing + radius;
+                let min = if index == 0 {
+                    0.0
+                } else {
+                    position - cell_radius
+                };
+                let max = if index == max_index {
+                    1.0
+                } else {
+                    position + cell_radius
+                };
+                BlendNode {
+                    source,
+                    min: java_max(0.0, min),
+                    max: java_min(1.0, max),
+                }
+            })
+            .collect();
+        Self(Box::new(ModuleKind::MultiBlend {
+            control: self,
+            nodes,
+            max_index,
+            blend_range,
             interpolation,
         }))
     }
@@ -1656,5 +1745,75 @@ mod tests {
                 expected_values
             );
         }
+    }
+
+    #[test]
+    fn multi_blend_matches_engine_0_3_0() {
+        let sources = || {
+            vec![
+                Module::constant(-1.0),
+                Module::constant(0.25),
+                Module::constant(2.0),
+            ]
+        };
+        let points = [
+            (0.0, 0.0),
+            (12.25, -98.75),
+            (-4096.5, 8192.25),
+            (123456.75, -0.125),
+            (64.0, 64.0),
+            (-128.0, 32.0),
+            (777.0, -333.0),
+            (-1024.0, -2048.0),
+        ];
+        let control = Module::source(Source::new(
+            SourceKind::Perlin,
+            SourceConfig {
+                seed: 501,
+                octaves: 3,
+                gain: 0.5,
+                frequency: 1.0 / 80.0,
+                lacunarity: 2.0,
+                interpolation: Interpolation::Curve3,
+            },
+        ));
+        let module = control.multi_blend(0.4, Interpolation::Curve3, sources());
+        assert_eq!(
+            [module.min_value().to_bits(), module.max_value().to_bits()],
+            [0xbf800000, 0x40000000]
+        );
+        assert_eq!(
+            bits(points.map(|(x, y)| module.value(x, y))),
+            [
+                0x3e800000, 0x3e800000, 0x3e800000, 0x3fb9d3fa, 0x3e800000, 0x3ffd47bb, 0x3ece61c4,
+                0x3e800000,
+            ]
+        );
+
+        let selectors = [
+            0.0, 0.21666665, 0.21666667, 0.25, 0.2833333, 0.28333336, 0.5, 0.55, 0.5833333,
+            0.6166666, 0.6166667, 0.75, 1.0,
+        ];
+        assert_eq!(
+            selectors.map(|selector| {
+                Module::constant(selector)
+                    .multi_blend(0.4, Interpolation::Curve3, sources())
+                    .value(0.0, 0.0)
+                    .to_bits()
+            }),
+            [
+                0xbf800000, 0xbf800000, 0xbf800000, 0xbec00004, 0x3e800000, 0x3e800000, 0x3e800000,
+                0x3e800000, 0x3f8ffff4, 0x40000000, 0x40000000, 0x40000000, 0x40000000,
+            ]
+        );
+        assert_eq!(
+            [0.49, 0.5, 0.51].map(|selector| {
+                Module::constant(selector)
+                    .multi_blend(0.0, Interpolation::Curve3, sources())
+                    .value(0.0, 0.0)
+                    .to_bits()
+            }),
+            [0x3e800000; 3]
+        );
     }
 }

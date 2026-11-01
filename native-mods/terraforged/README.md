@@ -18,6 +18,9 @@ plus warped module sampling. Directional warps reproduce Engine 0.3.0's 4096-ent
 The selector layer adds base blending, fixed and variable blends and bounded selection, preserving
 Engine 0.3.0's interpolation, edge conditions and reported source bounds.
 
+The multi-blend layer adds TerraForged's evenly spaced multi-source selector, including its exact
+slot boundaries, Java rounding behavior and interpolation across neighboring sources.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
