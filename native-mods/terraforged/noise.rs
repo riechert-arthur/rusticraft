@@ -1292,11 +1292,14 @@ enum ModuleKind {
         falloff: f32,
         interpolation: Interpolation,
     },
-    /// `Blend`: the blend window is fixed from the control's bounds in the constructor.
+    /// `Blend`: the blend window is fixed from the control's bounds in the constructor; `midpoint` and `blend` are
+    /// the constructor's arguments, which reseeding passes again.
     Blend {
         control: Module,
         lower: Module,
         upper: Module,
+        midpoint: f32,
+        blend: f32,
         blend_lower: f32,
         blend_upper: f32,
         blend_range: f32,
@@ -1317,6 +1320,7 @@ enum ModuleKind {
         control: Module,
         nodes: Vec<BlendNode>,
         max_index: i32,
+        blend: f32,
         blend_range: f32,
         interpolation: Interpolation,
     },
@@ -1328,6 +1332,7 @@ enum ModuleKind {
         ramp_height: Module,
         steps: Vec<TerraceStep>,
         max_index: i32,
+        blend: f32,
     },
     /// `LegacyTerrace`: the steps and `maxIndex`, fixed in the constructor.
     LegacyTerrace {
@@ -1336,6 +1341,7 @@ enum ModuleKind {
         upper_curve: Module,
         steps: Vec<TerraceStep>,
         max_index: i32,
+        blend: f32,
     },
     /// `AdvancedTerrace`: `blendRange` (`blendMax - blendMin`) and `modRange` (`source.maxValue() +
     /// modulation.maxValue()`), fixed in the constructor.
@@ -1409,6 +1415,8 @@ enum ModuleKind {
         control: Module,
         lower: Module,
         upper: Module,
+        lower_bound: f32,
+        upper_bound: f32,
         falloff: f32,
         lower_curve: (f32, f32, f32),
         upper_curve: (f32, f32, f32),
@@ -1875,6 +1883,7 @@ impl Module {
                 blend_upper,
                 blend_range,
                 interpolation,
+                ..
             } => {
                 let select = control.value(x, y);
                 if select < *blend_lower {
@@ -1923,6 +1932,7 @@ impl Module {
                 max_index,
                 blend_range,
                 interpolation,
+                ..
             } => {
                 let selector = control.value(x, y);
                 let index = round(selector * *max_index as f32);
@@ -1952,6 +1962,7 @@ impl Module {
                 ramp_height,
                 steps,
                 max_index,
+                ..
             } => {
                 let noise_value = clamp(source.value(x, y), 0.0, 0.999999);
                 let index = floor(noise_value * steps.len() as f32);
@@ -1990,6 +2001,7 @@ impl Module {
                 upper_curve,
                 steps,
                 max_index,
+                ..
             } => {
                 let noise_value = clamp(source.value(x, y), 0.0, 1.0);
                 let index = round(noise_value * *max_index as f32);
@@ -2179,6 +2191,7 @@ impl Module {
                 lower_curve: (lower_min, lower_max, lower_range),
                 upper_curve: (upper_min, upper_max, upper_range),
                 interpolation,
+                ..
             } => {
                 let value = control.value(x, y);
                 if *falloff == 0.0 {
@@ -2370,6 +2383,8 @@ impl Module {
             control: self,
             lower,
             upper,
+            midpoint,
+            blend: blend_range,
             blend_lower,
             blend_upper,
             blend_range: blend_upper - blend_lower,
@@ -2441,6 +2456,7 @@ impl Module {
             control: self,
             nodes,
             max_index,
+            blend,
             blend_range,
             interpolation,
         };
@@ -2466,6 +2482,7 @@ impl Module {
             ramp_height,
             steps,
             max_index,
+            blend: blend_range,
         };
         Self::modifier(kind, &source)
     }
@@ -2489,6 +2506,7 @@ impl Module {
             upper_curve,
             steps,
             max_index,
+            blend: blend_range,
         };
         Self::modifier(kind, &source)
     }
@@ -2656,6 +2674,8 @@ impl Module {
             control: self,
             lower,
             upper,
+            lower_bound,
+            upper_bound,
             falloff,
             lower_curve: curve(lower_bound),
             upper_curve: curve(upper_bound),
@@ -2700,6 +2720,249 @@ impl Module {
     }
 }
 
+/// Recursive reseeding, as TerraForged's Cereal context adds its seed to every nested source.
+impl Module {
+    /// `withSeed(seed)`: a new graph whose sources add `(int) seed` to their seeds.
+    pub fn with_seed(&self, seed: i64) -> Self {
+        self.reseed(seed as i32)
+    }
+
+    fn reseed(&self, seed: i32) -> Self {
+        let r = |module: &Self| module.reseed(seed);
+        let all = |sources: &[Self]| sources.iter().map(r).collect::<Vec<_>>();
+        let modifier = |kind, source: &Self| Self::modifier(kind, source);
+        match &self.0.kind {
+            ModuleKind::Constant(_) | ModuleKind::Custom(_) => self.clone(),
+            ModuleKind::Source(source) => {
+                let mut config = source.config;
+                config.seed = config.seed.wrapping_add(seed);
+                Self::source(Source::new(source.kind, config))
+            }
+            ModuleKind::ErosionRidge { ridge, source } => {
+                let ridge = ErosionRidge {
+                    seed: ridge.seed.wrapping_add(seed),
+                    ..*ridge
+                };
+                Self::erosion_ridge(ridge, r(source))
+            }
+            ModuleKind::CellSource {
+                config,
+                displacement,
+                function,
+                distance,
+                lookup,
+            } => {
+                let config = SourceConfig {
+                    seed: config.seed.wrapping_add(seed),
+                    ..*config
+                };
+                Self::cell_source(config, *displacement, *function, *distance, r(lookup))
+            }
+            ModuleKind::CellEdgeSource {
+                config,
+                displacement,
+                edge,
+                distance,
+            } => {
+                let config = SourceConfig {
+                    seed: config.seed.wrapping_add(seed),
+                    ..*config
+                };
+                Self::cell_edge_source(config, *displacement, *edge, *distance)
+            }
+            ModuleKind::SineSource { frequency, alpha } => Self::sine_source(*frequency, r(alpha)),
+            ModuleKind::Line(line) => Self::line(Line::new(
+                line.x1,
+                line.y1,
+                line.x2,
+                line.y2,
+                r(&line.radius),
+                r(&line.fade_in),
+                r(&line.fade_out),
+                line.feather_scale,
+            )),
+            ModuleKind::Abs(source) => {
+                let source = r(source);
+                modifier(ModuleKind::Abs(source.clone()), &source)
+            }
+            ModuleKind::Alpha(source, alpha) => {
+                let source = r(source);
+                modifier(ModuleKind::Alpha(source.clone(), r(alpha)), &source)
+            }
+            // Cereal reads the bias back as 0.
+            ModuleKind::Bias(source, _) => {
+                let (source, bias) = (r(source), Self::constant(0.0));
+                let (min, max) = (source.min_value() + 0.0, source.max_value() + 0.0);
+                Self::node(ModuleKind::Bias(source, bias), min, max)
+            }
+            ModuleKind::Boost(source, iterations) => {
+                let source = r(source).map(Self::constant(0.0), Self::constant(1.0));
+                modifier(ModuleKind::Boost(source.clone(), *iterations), &source)
+            }
+            ModuleKind::Clamp(source, min, max) => {
+                let (min, max) = (r(min), r(max));
+                let (low, high) = (min.min_value(), max.max_value());
+                Self::node(ModuleKind::Clamp(r(source), min, max), low, high)
+            }
+            ModuleKind::Invert(source) => r(source).invert(),
+            ModuleKind::Map(source, min, max, _) => {
+                let (source, min, max) = (r(source), r(min), r(max));
+                let range = source.max_value() - source.min_value();
+                let (low, high) = (min.min_value(), max.max_value());
+                Self::node(ModuleKind::Map(source, min, max, range), low, high)
+            }
+            ModuleKind::Power(source, power) => {
+                let source = r(source);
+                modifier(ModuleKind::Power(source.clone(), r(power)), &source)
+            }
+            ModuleKind::Scale(source, scale) => {
+                let (source, scale) = (r(source), r(scale));
+                let min = source.min_value() * scale.min_value();
+                let max = source.max_value() * scale.max_value();
+                Self::node(ModuleKind::Scale(source, scale), min, max)
+            }
+            ModuleKind::Threshold(source, threshold) => r(source).threshold(r(threshold)),
+            ModuleKind::Warp(source, domain) => r(source).warp(domain.reseed(seed)),
+            ModuleKind::Base {
+                base,
+                source,
+                falloff,
+                interpolation,
+                ..
+            } => r(base).base(r(source), *falloff, *interpolation),
+            ModuleKind::Blend {
+                control,
+                lower,
+                upper,
+                midpoint,
+                blend,
+                interpolation,
+                ..
+            } => r(control).blend(r(lower), r(upper), *midpoint, *blend, *interpolation),
+            ModuleKind::VariableBlend {
+                control,
+                variable,
+                lower,
+                upper,
+                midpoint,
+                min_blend,
+                max_blend,
+                interpolation,
+            } => r(control).variable_blend(
+                r(variable),
+                r(lower),
+                r(upper),
+                *midpoint,
+                *min_blend,
+                *max_blend,
+                *interpolation,
+            ),
+            ModuleKind::MultiBlend {
+                control,
+                nodes,
+                blend,
+                interpolation,
+                ..
+            } => {
+                let sources = nodes.iter().map(|node| r(&node.source)).collect();
+                r(control).multi_blend(*blend, *interpolation, sources)
+            }
+            ModuleKind::Terrace {
+                source,
+                ramp,
+                cliff,
+                ramp_height,
+                steps,
+                blend,
+                ..
+            } => r(source).terrace(r(ramp), r(cliff), r(ramp_height), steps.len(), *blend),
+            ModuleKind::LegacyTerrace {
+                source,
+                lower_curve,
+                upper_curve,
+                steps,
+                blend,
+                ..
+            } => r(source).legacy_terrace(r(lower_curve), r(upper_curve), steps.len(), *blend),
+            ModuleKind::AdvancedTerrace {
+                source,
+                modulation,
+                mask,
+                slope,
+                blend_min,
+                blend_max,
+                steps,
+                octaves,
+                ..
+            } => r(source).advanced_terrace(
+                r(modulation),
+                r(mask),
+                r(slope),
+                *blend_min,
+                *blend_max,
+                *steps,
+                *octaves,
+            ),
+            ModuleKind::Curve { source, function } => r(source).curve(*function),
+            ModuleKind::VariableCurve {
+                source,
+                midpoint,
+                gradient,
+            } => r(source).variable_curve(r(midpoint), r(gradient)),
+            ModuleKind::PowerCurve { source, power, .. } => r(source).power_curve(*power),
+            ModuleKind::Steps {
+                source,
+                steps,
+                slope_min,
+                slope_max,
+                curve,
+            } => r(source).steps(r(steps), r(slope_min), r(slope_max), *curve),
+            ModuleKind::Frequency { source, x, y } => r(source).frequency(r(x), r(y)),
+            ModuleKind::Gradient {
+                source,
+                lower,
+                upper,
+                strength,
+            } => r(source).gradient(r(lower), r(upper), r(strength)),
+            ModuleKind::Modulate {
+                source,
+                direction,
+                strength,
+            } => r(source).modulate(r(direction), r(strength)),
+            ModuleKind::Cache { source, .. } => {
+                let source = r(source);
+                let kind = ModuleKind::Cache {
+                    source: source.clone(),
+                    value: std::sync::Mutex::new(None),
+                };
+                modifier(kind, &source)
+            }
+            ModuleKind::Select {
+                control,
+                lower,
+                upper,
+                lower_bound,
+                upper_bound,
+                falloff,
+                interpolation,
+                ..
+            } => r(control).select(
+                r(lower),
+                r(upper),
+                *lower_bound,
+                *upper_bound,
+                *falloff,
+                *interpolation,
+            ),
+            ModuleKind::Add(sources) => Self::add(all(sources)),
+            ModuleKind::Multiply(sources) => Self::multiply(all(sources)),
+            ModuleKind::Max(sources) => Self::max(all(sources)),
+            ModuleKind::Min(sources) => Self::min(all(sources)),
+            ModuleKind::Subtract(sources) => Self::subtract(all(sources)),
+        }
+    }
+}
+
 /// Engine's `Domain`: a coordinate warp. Cloning shares the node, as Java shares domain instances.
 #[derive(Clone)]
 pub struct Domain(Arc<DomainKind>);
@@ -2726,6 +2989,21 @@ enum DomainKind {
 impl Domain {
     fn node(kind: DomainKind) -> Self {
         Self(Arc::new(kind))
+    }
+
+    fn reseed(&self, seed: i32) -> Self {
+        let r = |module: &Module| module.reseed(seed);
+        match self.0.as_ref() {
+            DomainKind::DomainWarp { x, y, distance } => Self::domain_warp(r(x), r(y), r(distance)),
+            DomainKind::Direction {
+                direction,
+                strength,
+            } => Self::direction(r(direction), r(strength)),
+            DomainKind::Add(first, second) => first.reseed(seed).add(second.reseed(seed)),
+            DomainKind::Compound(first, second) => first.reseed(seed).compound(second.reseed(seed)),
+            DomainKind::Cumulative(first, second) => first.reseed(seed).then(second.reseed(seed)),
+            DomainKind::Direct => self.clone(),
+        }
     }
 
     /// `Domain.DIRECT`.
@@ -7101,5 +7379,59 @@ steps c2 0x7fc00000 0x3f4ccccd 0x3e4ccccd 0xbf800000 0x40000000 | 0x7fc00000 0x7
                 });
             }
         });
+    }
+
+    #[test]
+    fn recursive_reseeding_matches_cereal_context() {
+        let source = |kind, seed, scale: f32, octaves| {
+            Module::source(Source::new(
+                kind,
+                SourceConfig {
+                    seed,
+                    octaves,
+                    frequency: 1.0 / scale,
+                    ..SourceConfig::default()
+                },
+            ))
+        };
+        let graph = source(SourceKind::Perlin, 12, 80.0, 3)
+            .bias(source(SourceKind::Simplex, -4, 45.0, 2))
+            .warp(Domain::domain_warp(
+                source(SourceKind::Simplex, 7, 100.0, 2),
+                source(SourceKind::Simplex, 8, 100.0, 2),
+                Module::constant(25.0),
+            ));
+        let reseeded = graph.with_seed(99);
+        let ModuleKind::Warp(reseeded_source, _) = &reseeded.0.kind else {
+            unreachable!()
+        };
+        let ModuleKind::Bias(reseeded_perlin, reseeded_bias) = &reseeded_source.0.kind else {
+            unreachable!()
+        };
+        let ModuleKind::Source(reseeded_perlin) = &reseeded_perlin.0.kind else {
+            unreachable!()
+        };
+        let ModuleKind::Constant(reseeded_bias) = &reseeded_bias.0.kind else {
+            unreachable!()
+        };
+        assert_eq!(reseeded_perlin.config.seed, 111);
+        assert_eq!(*reseeded_bias, 0.0);
+        let points = [(0.0, 0.0), (17.25, -9.5), (-341.75, 888.125)];
+        assert_eq!(
+            bits(points.map(|(x, y)| graph.value(x, y))),
+            [0x3f800000, 0x3f527f30, 0x3f9d9dbc]
+        );
+        assert_eq!(
+            bits(points.map(|(x, y)| reseeded.value(x, y))),
+            [0x3f000000, 0x3eda521d, 0x3f0f1506]
+        );
+
+        let cached = graph.cache();
+        cached.value(1.0, 2.0);
+        let reseeded_cache = cached.with_seed(99);
+        let ModuleKind::Cache { value, .. } = &reseeded_cache.0.kind else {
+            unreachable!()
+        };
+        assert!(value.lock().unwrap().is_none());
     }
 }

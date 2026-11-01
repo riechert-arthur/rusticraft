@@ -77,6 +77,15 @@ impl TerrainNoise {
     pub fn noise(&self) -> &Module {
         &self.noise
     }
+
+    /// `withSeed(seed)`.
+    pub fn with_seed(&self, seed: i64) -> Self {
+        Self::new(
+            self.terrain.clone(),
+            self.weight,
+            self.noise.with_seed(seed),
+        )
+    }
 }
 
 impl Weighted for TerrainNoise {
@@ -89,10 +98,10 @@ impl Weighted for TerrainNoise {
 /// TerraForged's `worldgen.terrain.TerrainBlender` (1.18.2-0.3.1), the terrain module of the mod's noise
 /// generator: the point is warped and scaled into a grid of jittered cells; each cell's hash picks a terrain from the
 /// weight map, and points near the border of their nearest cell blend in the neighbouring cells' terrain noises.
-/// As in the jar, the seed is bound when the blender is built. Not ported here: `withSeed` (reseeding the terrain
-/// noises).
+/// As in the jar, the seed is bound when the blender is built; [`TerrainBlender::with_seed`] builds a new one.
 pub struct TerrainBlender {
     region_seed: i32,
+    scale: i32,
     frequency: f32,
     jitter: f32,
     blending: f32,
@@ -127,6 +136,7 @@ impl TerrainBlender {
         };
         Self {
             region_seed: (seed as i32).wrapping_add(REGION_SEED_OFFSET),
+            scale,
             frequency,
             jitter,
             blending,
@@ -137,6 +147,18 @@ impl TerrainBlender {
                 Module::constant(scale as f32 / 2.5),
             ),
         }
+    }
+
+    /// `withSeed(seed)`: `new TerrainBlender(seed, scale, jitter, blending, reseeded)`, each terrain noise reseeded in
+    /// the weight map's order ([`TerrainNoise::with_seed`]). This blender is left as it is.
+    pub fn with_seed(&self, seed: i64) -> Self {
+        let terrains = self
+            .terrains
+            .values()
+            .iter()
+            .map(|terrain| Arc::new(terrain.with_seed(seed)))
+            .collect();
+        Self::new(seed, self.scale, self.jitter, self.blending, terrains)
     }
 
     /// `getValue(x, z)`, with this thread's [`Blender`] (`localBlender`; one per thread is shared by all
