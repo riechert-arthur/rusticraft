@@ -383,3 +383,10 @@ file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_current_settings"
 source = "current_settings.rs"
 visibility = "pub"
+
+[[module]]
+id = "terrain_overrides"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_terrain_overrides"
+source = "terrain_overrides.rs"
+visibility = "pub"

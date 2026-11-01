@@ -66,6 +66,10 @@ impl TerrainNoise {
         &self.noise
     }
 
+    pub fn weight(&self) -> f32 {
+        self.weight
+    }
+
     pub fn with_seed(&self, seed: i64) -> Self {
         Self::new(
             self.terrain.clone(),
