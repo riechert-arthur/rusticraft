@@ -340,6 +340,12 @@ generator, and keep the mod enabled for that world's unexplored chunks.
 
 ## Development
 
+The current-source Noise2D seed-first API now has a separate `value_seed_first` entry point:
+it preserves Perlin/Perlin2's ignored seed argument and adds the configured seed for other sources
+with Java wrapping, without changing the legacy replacement-seed API. All eight source kinds have
+raw-bit fixtures against upstream Noise2D commit
+`2cb48431148a321f74319d7ef0ea61b26bf8e59c`, whose seed refactor predates the pinned TerraForged source.
+
 Current-source river networks now generate downhill connections, displaced segments, ocean
 extensions, and source lakes. Six 13×13-cell Java-source grids check counts and a checksum of every
 node's raw float bits across both layouts and all noise sources. Nearest-node sampling now preserves

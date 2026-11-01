@@ -2,6 +2,7 @@
  * MIT License
  *
  * Copyright (c) 2021 TerraForged
+ * Copyright (c) 2020 TerraForged
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -934,6 +935,14 @@ impl Source {
 
     pub fn value_seeded(self, x: f32, y: f32, seed: i32) -> f32 {
         self.evaluate(x, y, seed, true)
+    }
+
+    pub fn value_seed_first(self, seed: i32, x: f32, y: f32) -> f32 {
+        if matches!(self.kind, SourceKind::Perlin | SourceKind::Perlin2) {
+            self.value(x, y)
+        } else {
+            self.evaluate(x, y, self.config.seed.wrapping_add(seed), false)
+        }
     }
 
     pub fn min_value(self) -> f32 {
@@ -3577,6 +3586,54 @@ mod tests {
             Line::distance2_line_including_ends(8.0, 9.0, 0.0, 0.0, 4.0, 4.0).to_bits(),
             0x42240000
         );
+    }
+
+    #[test]
+    fn seed_offset_sources_match_current_noise2d() {
+        let expected = [
+            [0x3f000000, 0x3f000000, 0x3edf0d3a],
+            [0x3f000000, 0x3f000000, 0x3f09e3f6],
+            [0x3f000000, 0x3e309b54, 0x3ef4b0d1],
+            [0x3f000000, 0x3db98455, 0x3ef1dd05],
+            [0x3ed71df8, 0x3f16df8b, 0x3f090c39],
+            [0x3f800000, 0x3f800000, 0x3f11065b],
+            [0, 0, 0x3eddf34a],
+            [0x3f800000, 0x3d9947bb, 0x3f0c6ac6],
+        ];
+        for (source_index, kind) in [
+            SourceKind::Perlin,
+            SourceKind::Perlin2,
+            SourceKind::Simplex,
+            SourceKind::Simplex2,
+            SourceKind::Cubic,
+            SourceKind::Ridge,
+            SourceKind::Billow,
+            SourceKind::SimplexRidge,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let source = Source::new(
+                kind,
+                SourceConfig {
+                    seed: i32::MAX,
+                    octaves: 2,
+                    gain: 0.65,
+                    frequency: 128.0,
+                    ..SourceConfig::default()
+                },
+            );
+            for (point_index, (x, y)) in [(0.0, 0.0), (0.125, -0.75), (12.34, 56.78)]
+                .into_iter()
+                .enumerate()
+            {
+                assert_eq!(
+                    source.value_seed_first(17, x, y).to_bits(),
+                    expected[source_index][point_index],
+                    "source={source_index}, point={point_index}"
+                );
+            }
+        }
     }
 
     #[test]
