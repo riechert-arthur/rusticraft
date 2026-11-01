@@ -126,6 +126,9 @@ deep/shallow/coast edge shaping and curved land-distance values.
 The fancy-continent layer assembles the main island and twelve Java-random satellite islands, then
 adds exact multi-scale domain warping, land masks, nearest-center metadata and cell population.
 
+The river-configuration layer adds TerraForged's default river, lake and wetland settings, normalized
+river profiles, fork scaling and the original variance semantics used by later network generation.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
