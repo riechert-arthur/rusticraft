@@ -365,6 +365,9 @@ NaN and infinities, degenerate and reversed ranges, populators that read the cel
 grid, against a Java oracle running Engine's classes on Engine cells; the oracle lives outside Git, in
 `.local/terraforged/oracles/blend/`.
 
+The position-utility layer adds mixed integer/float packing, half-open containment, rectangular
+visitation and TerraForged's exact 2D/3D iterator state transitions, including its Y-step sentinel.
+
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider and its heightmap blenders. They change nothing in the game, so there is
