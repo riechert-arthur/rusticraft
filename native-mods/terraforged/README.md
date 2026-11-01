@@ -225,6 +225,9 @@ completed cache cells when multiple zoomed blocks resolve to the same integer co
 Tile-wide visitors now traverse only the unbordered generation area with local coordinates, while the
 generation visitor exposes mutable cells and tile batch sizing preserves TerraForged's ceil division.
 
+The synchronous tile generator now owns TerraForged's heightmap and filter stages, maps chunks to
+regions, creates empty tiles, generates regular or centered zoomed terrain, and post-processes filters.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:

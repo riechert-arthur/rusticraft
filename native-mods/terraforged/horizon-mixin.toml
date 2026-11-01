@@ -110,3 +110,10 @@ file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_tile"
 source = "tile.rs"
 visibility = "pub"
+
+[[module]]
+id = "tile_generator"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_tile_generator"
+source = "tile_generator.rs"
+visibility = "pub"
