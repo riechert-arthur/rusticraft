@@ -429,6 +429,9 @@ short-circuits, fade ordering, radius evaluation and feathering.
 Erosion ridge now applies runtime seeds to both its cell lattice and every nested source sample,
 preserving octave cache reuse and matching recursive serialized reseeding bit-for-bit.
 
+Current-source terrain blending now forwards runtime seeds through its coordinate warp and every
+selected terrain-noise module, including cached border blends and nearest-terrain iteration.
+
 The scalar graph fixtures cover 15 graphs, four seeds and four coordinates (240 Java samples),
 including wrapped seed addition and mixed Perlin/seed-sensitive sources. Regenerate their hashes
 with `tools/terraforged/TerraForgedSeededGraphOracle.java` on a classpath containing compiled

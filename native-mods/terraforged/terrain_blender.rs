@@ -143,8 +143,16 @@ impl TerrainBlender {
     }
 
     pub fn value_with(&self, seed: i32, x: f32, z: f32, blender: &mut Blender) -> f32 {
-        let region_x = self.warp.x(x, z) * self.frequency;
-        let region_z = self.warp.y(x, z) * self.frequency;
+        let region_x = self
+            .warp
+            .try_x_seed_first(seed, x, z)
+            .expect("TerraForged terrain warp must support runtime seeding")
+            * self.frequency;
+        let region_z = self
+            .warp
+            .try_y_seed_first(seed, x, z)
+            .expect("TerraForged terrain warp must support runtime seeding")
+            * self.frequency;
         get_cell(
             seed.wrapping_add(REGION_SEED_OFFSET),
             region_x,
@@ -201,14 +209,22 @@ impl TerrainBlender {
 
     pub fn iterator(
         &self,
-        _seed: i32,
+        seed: i32,
         x: f32,
         z: f32,
         min_radius: i32,
         max_radius: i32,
     ) -> SpiralIterator {
-        let region_x = self.warp.x(x, z) * self.frequency;
-        let region_z = self.warp.y(x, z) * self.frequency;
+        let region_x = self
+            .warp
+            .try_x_seed_first(seed, x, z)
+            .expect("TerraForged terrain warp must support runtime seeding")
+            * self.frequency;
+        let region_z = self
+            .warp
+            .try_y_seed_first(seed, x, z)
+            .expect("TerraForged terrain warp must support runtime seeding")
+            * self.frequency;
         SpiralIterator::new(floor(region_x), floor(region_z), min_radius, max_radius)
     }
 }
@@ -248,7 +264,7 @@ impl Blender {
 
     pub fn centre_value(
         &self,
-        _seed: i32,
+        seed: i32,
         x: f32,
         z: f32,
         terrains: &WeightMap<TerrainNoise>,
@@ -257,7 +273,8 @@ impl Blender {
             .get_value(self.centre_noise_index())
             .unwrap()
             .noise()
-            .value(x, z)
+            .try_value_seed_first(seed, x, z)
+            .expect("TerraForged terrain noise must support runtime seeding")
     }
 
     pub fn value(
@@ -282,7 +299,7 @@ impl Blender {
 
     pub fn blended_value(
         &mut self,
-        _seed: i32,
+        seed: i32,
         x: f32,
         z: f32,
         nearest: f32,
@@ -291,11 +308,12 @@ impl Blender {
         terrains: &WeightMap<TerrainNoise>,
     ) -> f32 {
         self.cache.clear();
-        let mut sum_noise = self.cache_value(self.closest_index, x, z, terrains);
+        let mut sum_noise = self.cache_value(seed, self.closest_index, x, z, terrains);
         let mut sum_weight = weight(nearest, nearest, blend_range);
         let nearest_weight2 = weight(nearest2, nearest, blend_range);
         if nearest_weight2 > 0.0 {
-            sum_noise += self.cache_value(self.closest_index2, x, z, terrains) * nearest_weight2;
+            sum_noise +=
+                self.cache_value(seed, self.closest_index2, x, z, terrains) * nearest_weight2;
             sum_weight += nearest_weight2;
         }
         for index in 0..9 {
@@ -304,7 +322,7 @@ impl Blender {
             }
             let sample_weight = weight(self.distance(index), nearest, blend_range);
             if sample_weight > 0.0 {
-                sum_noise += self.cache_value(index, x, z, terrains) * sample_weight;
+                sum_noise += self.cache_value(seed, index, x, z, terrains) * sample_weight;
                 sum_weight += sample_weight;
             }
         }
@@ -313,6 +331,7 @@ impl Blender {
 
     fn cache_value(
         &mut self,
+        seed: i32,
         index: usize,
         x: f32,
         z: f32,
@@ -322,7 +341,10 @@ impl Blender {
         if let Some(value) = self.cache.get(terrain) {
             return value;
         }
-        let value = terrain.noise().value(x, z);
+        let value = terrain
+            .noise()
+            .try_value_seed_first(seed, x, z)
+            .expect("TerraForged terrain noise must support runtime seeding");
         self.cache.put(terrain, value);
         value
     }
@@ -457,6 +479,42 @@ mod tests {
             .into_iter()
             .collect();
         assert_eq!(values, [0x3f5cdecb, 0x3f666666, 0x3f666666]);
+    }
+
+    #[test]
+    fn terrain_blender_propagates_runtime_seeds() {
+        let terrain_type = Terrain::new(0, "flats", TerrainCategory::Flatland);
+        let source = Module::source(Source::new(
+            SourceKind::Simplex,
+            SourceConfig {
+                seed: 8128,
+                octaves: 3,
+                gain: 0.5,
+                frequency: 1.0 / 96.0,
+                lacunarity: 2.0,
+                interpolation: super::super::terraforged::Interpolation::Curve3,
+            },
+        ));
+        let terrain = Arc::new(TerrainNoise::new(terrain_type, 1.0, source));
+        let expected_noise = terrain.noise().clone();
+        let blender = TerrainBlender::new(91, 64, 0.8, 0.0, vec![terrain]);
+        for seed in [0, 17, -91, i32::MAX] {
+            for (x, z) in [(0.0, 0.0), (37.25, -91.5), (-240.0, 118.75)] {
+                assert_eq!(
+                    blender.value(seed, x, z).to_bits(),
+                    expected_noise
+                        .try_value_seed_first(seed, x, z)
+                        .unwrap()
+                        .to_bits()
+                );
+            }
+        }
+
+        assert!((0..64).any(|index| {
+            let x = index as f32 * 73.25 - 2_000.0;
+            let z = index as f32 * -41.5 + 1_000.0;
+            blender.iterator(0, x, z, 1, 1).next() != blender.iterator(17, x, z, 1, 1).next()
+        }));
     }
 
     #[test]
