@@ -102,6 +102,9 @@ edge shaping and packed world-space centers, including Java integer-overflow beh
 The region-selection layer adds weighted populator slot expansion and edge interpolation, preserving
 zero-weight fallback, Engine rounding and the upper region's terrain identity during blends.
 
+The volcano layer adds cell-driven cone height, inversion throats, lowland blending and river/water
+pipe demotion with exact Engine seed consumption and terrain identity behavior.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:

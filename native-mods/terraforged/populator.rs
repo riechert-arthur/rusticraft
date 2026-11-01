@@ -23,8 +23,12 @@
  */
 
 use super::{
-    terraforged::Module,
-    terraforged_engine::{Cell, Terrain, TerrainFormSettings},
+    terraforged::{
+        CellFunction, DistanceFunction, Domain, EdgeFunction, Interpolation, Module, Source,
+        SourceConfig, SourceKind,
+    },
+    terraforged_engine::{Cell, Levels, Seed, Terrain, TerrainFormSettings, TerrainRegistry},
+    terraforged_region::RegionConfig,
 };
 
 pub trait Populator {
@@ -222,6 +226,196 @@ impl TerrainPopulatorLike for ScaledPopulator {
     }
 }
 
+pub struct VolcanoPopulator {
+    populator: TerrainPopulator,
+    cone: Module,
+    height: Module,
+    lowlands: Module,
+    inversion_point: f32,
+    blend_lower: f32,
+    blend_upper: f32,
+    blend_range: f32,
+    bias: f32,
+    inner: Terrain,
+    outer: Terrain,
+}
+
+impl VolcanoPopulator {
+    pub const RIVER_MASK: f32 = 0.85;
+    pub const COAST_MASK: f32 = 0.85;
+
+    pub fn new(
+        seed: &mut Seed,
+        region: &RegionConfig,
+        levels: Levels,
+        weight: f32,
+        terrains: &TerrainRegistry,
+    ) -> Self {
+        let midpoint = 0.3;
+        let range = 0.3;
+        let blend_lower = midpoint - range / 2.0;
+        let blend_upper = blend_lower + range;
+        let blend_range = blend_upper - blend_lower;
+        let height_noise =
+            perlin(seed.next(), 2, 1).map(Module::constant(0.45), Module::constant(0.65));
+        let height = Module::cell_source(
+            source_config(region.seed, region.scale, 1, 0.5, 2.0),
+            1.0,
+            CellFunction::NoiseLookup,
+            DistanceFunction::Euclidean,
+            height_noise,
+        )
+        .warp(Domain::domain_warp(
+            region.warp_x.clone(),
+            region.warp_z.clone(),
+            Module::constant(region.warp_strength as f32),
+        ));
+        let cone = Module::cell_edge_source(
+            source_config(region.seed, region.scale, 1, 0.5, 2.0),
+            1.0,
+            EdgeFunction::Distance2Div,
+            DistanceFunction::Euclidean,
+        )
+        .invert()
+        .warp(Domain::domain_warp(
+            region.warp_x.clone(),
+            region.warp_z.clone(),
+            Module::constant(region.warp_strength as f32),
+        ))
+        .power_curve(11.0)
+        .clamp(Module::constant(0.475), Module::constant(1.0))
+        .map(Module::constant(0.0), Module::constant(1.0))
+        .gradient(
+            Module::constant(0.0),
+            Module::constant(0.5),
+            Module::constant(0.5),
+        )
+        .warp(noise_warp(seed.next(), 15, 2, 10.0))
+        .scale(height.clone());
+        let lowlands = source(SourceKind::Ridge, seed.next(), 150, 3, 0.975, 2.0)
+            .warp(noise_warp(seed.next(), 30, 1, 30.0))
+            .scale(Module::constant(0.1));
+        let outer = terrains.get_by_id(14);
+        let inner = terrains.get_by_id(15);
+        Self {
+            populator: TerrainPopulator::new(
+                outer.clone(),
+                Module::constant(0.0),
+                Module::constant(0.0),
+                weight,
+            ),
+            cone,
+            height,
+            lowlands,
+            inversion_point: 0.94,
+            blend_lower,
+            blend_upper,
+            blend_range,
+            bias: levels.ground,
+            inner,
+            outer,
+        }
+    }
+
+    pub fn modify_volcano_type(cell: &mut Cell, levels: Levels, terrains: &TerrainRegistry) {
+        if cell.terrain.id() == 15
+            && (cell.value < levels.water || cell.river_mask < Self::RIVER_MASK)
+        {
+            cell.terrain = terrains.get_by_id(14);
+        }
+    }
+}
+
+impl Populator for VolcanoPopulator {
+    fn apply(&self, cell: &mut Cell, x: f32, z: f32) {
+        let mut value = self.cone.value(x, z);
+        let limit = self.height.value(x, z);
+        let max_height = limit * self.inversion_point;
+        if value > max_height {
+            let delta = value - max_height;
+            let range = limit - max_height;
+            let alpha = delta / range;
+            if alpha > 0.925 {
+                cell.terrain = self.inner.clone();
+            }
+            value = max_height - max_height / 5.0 * alpha;
+        } else if value < self.blend_lower {
+            value += self.lowlands.value(x, z);
+            cell.terrain = self.outer.clone();
+        } else if value < self.blend_upper {
+            let alpha = 1.0 - (value - self.blend_lower) / self.blend_range;
+            value += self.lowlands.value(x, z) * alpha;
+            cell.terrain = self.outer.clone();
+        }
+        cell.value = self.bias + value;
+    }
+
+    fn terrain_weight(&self) -> Option<f32> {
+        Some(self.populator.weight)
+    }
+}
+
+impl TerrainPopulatorLike for VolcanoPopulator {
+    fn weight(&self) -> f32 {
+        self.populator.weight()
+    }
+
+    fn variance(&self) -> &Module {
+        self.populator.variance()
+    }
+
+    fn terrain_type(&self) -> &Terrain {
+        self.populator.terrain_type()
+    }
+
+    fn as_config(&self) -> TerrainConfig {
+        self.populator.as_config()
+    }
+}
+
+fn perlin(seed: i32, scale: i32, octaves: usize) -> Module {
+    source(SourceKind::Perlin, seed, scale, octaves, 0.5, 2.0)
+}
+
+fn source(
+    kind: SourceKind,
+    seed: i32,
+    scale: i32,
+    octaves: usize,
+    gain: f32,
+    lacunarity: f32,
+) -> Module {
+    Module::source(Source::new(
+        kind,
+        source_config(seed, scale, octaves, gain, lacunarity),
+    ))
+}
+
+fn source_config(
+    seed: i32,
+    scale: i32,
+    octaves: usize,
+    gain: f32,
+    lacunarity: f32,
+) -> SourceConfig {
+    SourceConfig {
+        seed,
+        octaves,
+        gain,
+        frequency: 1.0 / scale as f32,
+        lacunarity,
+        interpolation: Interpolation::Curve3,
+    }
+}
+
+fn noise_warp(seed: i32, scale: i32, octaves: usize, strength: f32) -> Domain {
+    Domain::domain_warp(
+        perlin(seed, scale, octaves),
+        perlin(seed.wrapping_add(1), scale, octaves),
+        Module::constant(strength),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::terraforged_engine::TerrainRegistry;
@@ -312,5 +506,45 @@ mod tests {
             run(&clamped),
             (0x3f800000, 8, 0x3f800000, 0x00000000, 0x3f800000)
         );
+    }
+
+    #[test]
+    fn volcano_populator_matches_engine_0_3_0() {
+        let terrains = TerrainRegistry::new();
+        let region = RegionConfig::new(777, 400, perlin(91, 100, 2), perlin(92, 100, 2), 50.5);
+        let levels = Levels::new(256, 63);
+        let mut seed = Seed::new(12_345);
+        let volcano = VolcanoPopulator::new(&mut seed, &region, levels, 2.75, &terrains);
+        assert_eq!(seed.get(), 12_349);
+        assert_eq!(volcano.weight().to_bits(), 0x40300000);
+        for ((x, z), value) in [
+            ((0.0, 0.0), 0x3ee4ebeb),
+            ((12.25, -98.75), 0x3ee42413),
+            ((-4096.5, 8192.25), 0x3e8d8c0f),
+            ((123456.75, -0.125), 0x3edcbdc2),
+        ] {
+            let mut cell = Cell::default();
+            volcano.apply(&mut cell, x, z);
+            assert_eq!(cell.value.to_bits(), value);
+            assert_eq!(cell.terrain.id(), 14);
+        }
+        let mut pipe = Cell::default();
+        volcano.apply(&mut pipe, -940.0, -1960.0);
+        assert_eq!(pipe.value.to_bits(), 0x3f243fe2);
+        assert_eq!(pipe.terrain.id(), 15);
+
+        for (value, river_mask, terrain) in [
+            (0.1, 0.5, 14),
+            (0.1, 1.0, 14),
+            (0.5, 0.5, 14),
+            (0.5, 1.0, 15),
+        ] {
+            let mut cell = Cell::default();
+            cell.terrain = terrains.get_by_id(15);
+            cell.value = value;
+            cell.river_mask = river_mask;
+            VolcanoPopulator::modify_volcano_type(&mut cell, levels, &terrains);
+            assert_eq!(cell.terrain.id(), terrain);
+        }
     }
 }
