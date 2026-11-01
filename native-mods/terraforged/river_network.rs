@@ -50,9 +50,9 @@ pub const DIRECTIONS: [(i32, i32); 4] = [(1, 0), (0, 1), (-1, 0), (0, -1)];
 /// pieces of one continent cell. The 1.18.2-0.3.1 jar draws from `config.rivers.seed` and reads seedless cells; the
 /// newer source (ported here) passes its runtime `seed` to both and never reads `rivers.seed`. [`Self::sample`] is
 /// the warped, carved `sample`; [`Self::nodes`] is `getNodes`, the piece cache (seed-checked, see there).
-pub struct RiverNetwork<'a, Cells> {
-    continent: &'a Cells,
-    shape: &'a ShapeGenerator,
+pub struct RiverNetwork<Cells> {
+    continent: Cells,
+    shape: ShapeGenerator,
     lake_density: f32,
     /// `riverWarp`'s axes: `Source.builder().seed(X_OFFSET / Y_OFFSET).frequency(30).simplex()`.
     warp_x: Source,
@@ -60,17 +60,17 @@ pub struct RiverNetwork<'a, Cells> {
     cache: ConcurrentLossyCache<RiverPieces>,
 }
 
-impl<'a, Cells: ContinentCells> RiverNetwork<'a, Cells> {
+impl<Cells: ContinentCells> RiverNetwork<Cells> {
     /// `new RiverGenerator(continent, config)` without its `RiverCarver` (passed to [`Self::sample`]): the piece
     /// cache is `LossyCache.concurrent(RIVER_CACHE_SIZE, ...)`, `Environment.CORES` buckets.
-    pub fn new(continent: &'a Cells, shape: &'a ShapeGenerator, config: ContinentConfig) -> Self {
+    pub fn new(continent: Cells, shape: &ShapeGenerator, config: ContinentConfig) -> Self {
         Self::with_concurrency(continent, shape, config, available_processors())
     }
 
     /// [`Self::new`] with the piece cache's bucket count (`concurrency`, Java's `Environment.CORES`) given.
     pub fn with_concurrency(
-        continent: &'a Cells,
-        shape: &'a ShapeGenerator,
+        continent: Cells,
+        shape: &ShapeGenerator,
         config: ContinentConfig,
         concurrency: i32,
     ) -> Self {
@@ -86,7 +86,7 @@ impl<'a, Cells: ContinentCells> RiverNetwork<'a, Cells> {
         };
         Self {
             continent,
-            shape,
+            shape: *shape,
             cache: ConcurrentLossyCache::new(RIVER_CACHE_SIZE, concurrency),
             lake_density: config.rivers.lake_density,
             warp_x: warp(8_657_124),
@@ -600,7 +600,7 @@ mod tests {
 
     /// One pipeline's stages: network, carver, shape and cells.
     type Stages<'a, 'b> = (
-        &'a RiverNetwork<'b, CellGenerator>,
+        &'a RiverNetwork<&'b CellGenerator>,
         &'a RiverCarver,
         &'a ShapeGenerator,
         &'a CellGenerator,
@@ -655,7 +655,7 @@ mod tests {
         /// Runs `f(network, carver, shape, cells)` on this pipeline.
         fn run(
             &self,
-            f: impl FnOnce(&RiverNetwork<CellGenerator>, &RiverCarver, &ShapeGenerator, &CellGenerator),
+            f: impl FnOnce(&RiverNetwork<&CellGenerator>, &RiverCarver, &ShapeGenerator, &CellGenerator),
         ) {
             let cells = CellGenerator::with_concurrency(self.config, CORES);
             let shape = ShapeGenerator::new(
@@ -920,7 +920,7 @@ mod tests {
     #[test]
     fn river_pipeline_is_send_and_sync() {
         fn shared<T: Send + Sync>() {}
-        shared::<RiverNetwork<'static, CellGenerator>>();
+        shared::<RiverNetwork<CellGenerator>>();
         shared::<RiverCarver>();
     }
 

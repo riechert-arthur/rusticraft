@@ -42,9 +42,34 @@ pub trait ContinentCells {
     fn cell_shape(&self) -> CellShape;
 }
 
+impl<Cells: ContinentCells + ?Sized> ContinentCells for &Cells {
+    fn nearest_cell(&self, seed: i32, x: f32, y: f32) -> (i32, i32) {
+        (**self).nearest_cell(seed, x, y)
+    }
+    fn cell(&self, seed: i32, x: i32, y: i32) -> CellPoint {
+        (**self).cell(seed, x, y)
+    }
+    fn cell_shape(&self) -> CellShape {
+        (**self).cell_shape()
+    }
+}
+
+impl<Cells: ContinentCells + ?Sized> ContinentCells for std::sync::Arc<Cells> {
+    fn nearest_cell(&self, seed: i32, x: f32, y: f32) -> (i32, i32) {
+        (**self).nearest_cell(seed, x, y)
+    }
+    fn cell(&self, seed: i32, x: i32, y: i32) -> CellPoint {
+        (**self).cell(seed, x, y)
+    }
+    fn cell_shape(&self) -> CellShape {
+        (**self).cell_shape()
+    }
+}
+
 /// The jar's `ShapeGenerator` (`worldgen.noise.continent.shape`): blends the cells around a point into its base and
 /// continent noise. The continent is passed to each call instead of stored; the jar's thread-local buffers are stack
 /// arrays. `threshold`, `base_falloff_min` and `base_falloff_max` are the jar's public fields.
+#[derive(Clone, Copy)]
 pub struct ShapeGenerator {
     base_falloff: f32,
     continent_falloff: f32,

@@ -271,3 +271,10 @@ file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_lossy_cache"
 source = "lossy_cache.rs"
 visibility = "pub"
+
+[[module]]
+id = "continent_noise"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_continent_noise"
+source = "continent_noise.rs"
+visibility = "pub"
