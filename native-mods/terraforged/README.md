@@ -260,6 +260,9 @@ Java oracle over a grid of positive, negative and large coordinates and at huge,
 three modes, a source sampling -1 or NaN, zero and negative octaves, negative, zero and tiny grid sizes, and the
 `int` wrap of `octaves + 1`.
 
+The mountain LandForms layer adds all three ridge and cell-edge mountain graphs, including optional
+directional fancy-mountain erosion and the original advanced terrace variant.
+
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings and its first landforms. They change nothing in the game, so there is
