@@ -183,6 +183,7 @@ class PublicationTests(unittest.TestCase):
             "tools/terraforged/TerraForgedSeededGraphOracle.java",
             "tools/terraforged/TerraForgedSeededDomainOracle.java",
             "tools/terraforged/TerraForgedSeededBlendOracle.java",
+            "tools/terraforged/TerraForgedSeededSelectionOracle.java",
         ]:
             self.assertFalse(check_public_tree.prohibited(path), path)
         for path in [
