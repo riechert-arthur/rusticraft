@@ -261,6 +261,9 @@ mapping, remains idempotently asynchronous, and creates tile caches with the sam
 Climate primitives now include TerraForged's range compressor, latitude temperature curve, and
 frequency-scaled moisture shaping as composable noise modules with Java-oracle raw-bit fixtures.
 
+Biome climate classification now reproduces TerraForged's complete 256-square lookup map, climate
+ranges, display colors, curved and linear sampling, and direct cell application without a PNG decoder.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
