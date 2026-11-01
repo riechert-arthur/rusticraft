@@ -198,6 +198,9 @@ sampling, weighted erosion, deposition, evaporation, and terrain-aware strength 
 The world-filter pipeline caches erosion by map size, runs optional erosion then smoothing, and always
 runs required steepness then beach detection in TerraForged's original order.
 
+The tile foundation reproduces TerraForged's block/chunk size, border, masking, indexing, and coordinate
+conversion model with Java-width wrapping arithmetic.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:

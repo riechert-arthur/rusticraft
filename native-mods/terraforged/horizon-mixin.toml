@@ -103,3 +103,10 @@ file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_filters"
 source = "filters.rs"
 visibility = "pub"
+
+[[module]]
+id = "tile"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_tile"
+source = "tile.rs"
+visibility = "pub"
