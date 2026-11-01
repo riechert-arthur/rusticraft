@@ -2483,6 +2483,47 @@ impl Module {
                 || sample(lower_curve),
                 || sample(upper_curve),
             )?,
+            ModuleKind::AdvancedTerrace {
+                source,
+                modulation,
+                mask,
+                slope,
+                blend_min,
+                blend_max,
+                blend_range,
+                mod_range,
+                steps,
+                octaves,
+            } => {
+                let value = sample(source)?;
+                if value <= *blend_min {
+                    value
+                } else {
+                    let mask = sample(mask)?;
+                    if mask == 0.0 {
+                        value
+                    } else {
+                        let slope = sample(slope)?;
+                        let modulation = sample(modulation)?;
+                        let mut result = value;
+                        for octave in 1..=*octaves {
+                            let step_count = *steps * octave;
+                            result = round(result * step_count as f32) as f32 / step_count as f32;
+                            result += (value - result) * slope;
+                        }
+                        result = (result + modulation) / *mod_range;
+                        let mut alpha = if value > *blend_max {
+                            1.0
+                        } else {
+                            (value - *blend_min) / *blend_range
+                        };
+                        if mask != 1.0 {
+                            alpha *= mask;
+                        }
+                        lerp(value, result, alpha)
+                    }
+                }
+            }
             // Noise2D 2cb4843's `Cache` keeps one entry per thread keyed by `x == this.x && y == this.y` alone, so a
             // repeated point at another runtime seed returns the first seed's sample. The port keys the shared entry
             // by the seed too (and by the coordinates' bits, as the seedless path does): a hit is always the sample
@@ -8147,6 +8188,50 @@ mod tests {
             let table = steps.map_or_else(Vec::new, |steps| edges(steps, *blend, *bounds));
             let fold = seeded_edge_fold(&table, &specials, *bounds, build);
             assert_eq!(fold, expected, "family {index}");
+        }
+    }
+
+    #[test]
+    fn runtime_seeded_advanced_terrace_matches_current_noise2d() {
+        let source = |kind, seed, frequency, octaves, gain| {
+            Module::source(Source::new(
+                kind,
+                SourceConfig {
+                    seed,
+                    octaves,
+                    gain,
+                    frequency,
+                    lacunarity: 2.0,
+                    interpolation: Interpolation::Curve3,
+                },
+            ))
+        };
+        let terrace = source(SourceKind::Perlin, 801, 1.0 / 96.0, 4, 0.5).advanced_terrace(
+            source(SourceKind::Simplex, 802, 1.0 / 80.0, 3, 0.5),
+            source(SourceKind::Ridge, 803, 1.0 / 128.0, 2, 0.975),
+            source(SourceKind::Perlin, 804, 1.0 / 64.0, 2, 0.5),
+            0.2,
+            0.8,
+            8,
+            3,
+        );
+        for (seed, expected) in [0, 17, -91, i32::MAX].into_iter().zip([
+            0x9da2a5c3366d4444,
+            0x9f2c62d939ce57c2,
+            0xcbc7c4d2781a530f,
+            0x30888fb4340299f7,
+        ]) {
+            let mut hash = 0xcbf29ce484222325u64;
+            for (x, y) in [
+                (0.0, 0.0),
+                (0.125, -0.75),
+                (12.34, 56.78),
+                (-1234.5, 987.25),
+            ] {
+                hash ^= u64::from(terrace.try_value_seed_first(seed, x, y).unwrap().to_bits());
+                hash = hash.wrapping_mul(0x100000001b3);
+            }
+            assert_eq!(hash, expected, "seed {seed}");
         }
     }
 
