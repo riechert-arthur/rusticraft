@@ -69,6 +69,9 @@ shape, scale, jitter, skipping, size variance and octave-distortion defaults.
 The terrain-settings layer adds exact global and per-landform weights plus vertical, horizontal and
 base scaling controls consumed by TerraForged's terrain distribution and LandForms graph.
 
+The first LandForms layer adds executable steppe and plains graphs with exact octave configuration,
+seed consumption, erosion alpha, axis warping, large-scale warping and final vertical scaling.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
