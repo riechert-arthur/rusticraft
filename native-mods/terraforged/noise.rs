@@ -2582,6 +2582,28 @@ impl Module {
                     }
                 }
             }
+            ModuleKind::Curve { source, function } => function.apply(sample(source)?),
+            ModuleKind::VariableCurve {
+                source,
+                midpoint,
+                gradient,
+            } => noise_curve(sample(source)?, sample(midpoint)?, sample(gradient)?),
+            ModuleKind::PowerCurve {
+                source,
+                min,
+                max,
+                midpoint,
+                range,
+                power,
+            } => {
+                let value = sample(source)?;
+                let value = if value >= *midpoint {
+                    *midpoint + java_pow(value - *midpoint, *power)
+                } else {
+                    *midpoint - java_pow(*midpoint - value, *power)
+                };
+                noise_map(value, *min, *max, *range)
+            }
             ModuleKind::Cache { source, value } => {
                 let mut cached = value.lock().expect("TerraForged cache lock poisoned");
                 if !cached.empty && x == cached.x && y == cached.y {
@@ -3460,7 +3482,12 @@ mod tests {
     }
 
     fn unsupported_seeded_node(value: f32) -> Module {
-        Module::constant(value).variable_curve(Module::constant(0.5), Module::constant(1.0))
+        Module::constant(value).steps(
+            Module::constant(4.0),
+            Module::constant(0.25),
+            Module::constant(0.75),
+            CurveFunction::Interpolation(Interpolation::Curve3),
+        )
     }
 
     #[test]
@@ -5072,6 +5099,62 @@ mod tests {
                 hash = hash.wrapping_mul(0x100000001b3);
             }
             assert_eq!(hash, expected, "seed {seed}");
+        }
+    }
+
+    #[test]
+    fn runtime_seeded_curves_match_current_noise2d() {
+        let source = |kind, seed, frequency, octaves, gain| {
+            Module::source(Source::new(
+                kind,
+                SourceConfig {
+                    seed,
+                    octaves,
+                    gain,
+                    frequency,
+                    lacunarity: 2.0,
+                    interpolation: Interpolation::Curve3,
+                },
+            ))
+        };
+        let base = source(SourceKind::Perlin, 901, 1.0 / 96.0, 4, 0.5);
+        let graphs = [
+            base.clone().curve(CurveFunction::Midpoint {
+                midpoint: 0.4,
+                steepness: 6.0,
+            }),
+            base.clone().curve(CurveFunction::s_curve(0.5, -0.2)),
+            base.clone().variable_curve(
+                source(SourceKind::Simplex, 902, 1.0 / 80.0, 3, 0.5),
+                source(SourceKind::Ridge, 903, 1.0 / 128.0, 2, 0.975),
+            ),
+            base.power_curve(0.8),
+        ];
+        let expected = [
+            [0x01599d465de40a43; 4],
+            [0xa6a665d0d63d0c48; 4],
+            [
+                0x5d4f1efc413f1011,
+                0x46db897093016fff,
+                0x2f4d070948218174,
+                0x71b0b05f4e543d5c,
+            ],
+            [0xf87ba5b74029c866; 4],
+        ];
+        for (graph, hashes) in graphs.iter().zip(expected) {
+            for (seed, expected) in [0, 17, -91, i32::MAX].into_iter().zip(hashes) {
+                let mut hash = 0xcbf29ce484222325u64;
+                for (x, y) in [
+                    (0.0, 0.0),
+                    (0.125, -0.75),
+                    (12.34, 56.78),
+                    (-1234.5, 987.25),
+                ] {
+                    hash ^= u64::from(graph.try_value_seed_first(seed, x, y).unwrap().to_bits());
+                    hash = hash.wrapping_mul(0x100000001b3);
+                }
+                assert_eq!(hash, expected, "seed {seed}");
+            }
         }
     }
 
