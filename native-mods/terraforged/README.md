@@ -71,6 +71,9 @@ it is built, so a constant source samples NaN (or 1 for a zero power); `Steps` t
 a slope window (`slopeMax <= slopeMin`) it rounds samples towards zero onto its steps. `NoiseUtil.pow` keeps
 `Math.pow`'s NaN for a NaN power and for a base of ±1 with an infinite power.
 
+The scalar layer adds `Freq` (`Module.freq(x, y)`), `Grad` (`Module.grad(lower, upper, strength)`), `Modulate`
+(`Module.mod(direction, strength)`) and the `Min` and `Sub` combiners (`Module.min`, `Module.sub`).
+
 ## Status: development only
 
 This layer only adds the noise functions. It changes nothing in the game, so there is nothing for players to install
