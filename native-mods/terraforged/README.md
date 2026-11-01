@@ -111,6 +111,9 @@ composites, preserves variant fallback and performs Java-compatible deterministi
 The heightmap-blending layer adds module- and populator-controlled terrain blending plus two- and
 three-way continent interpolation with exact boundary and terrain-tag behavior.
 
+The position-utility layer adds mixed integer/float packing, half-open containment, rectangular
+visitation and TerraForged's exact 2D/3D iterator state transitions, including its Y-step sentinel.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
