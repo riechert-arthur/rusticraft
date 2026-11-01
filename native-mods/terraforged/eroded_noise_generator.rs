@@ -23,19 +23,44 @@
  */
 
 use super::{
+    terraforged_engine::Terrain,
     terraforged_erosion::{
         ErosionFilter, ErosionFilterSettings, ErosionRegionCache, ErosionRegionLayout,
         ErosionResource, HeightmapSmoothing, HeightmapSmoothingSettings,
     },
     terraforged_noise_generator::NoiseGenerator,
-    terraforged_terrain_data::NoiseSample,
+    terraforged_terrain_data::{NoiseData, NoiseSample},
+    terraforged_terrain_generator::NoiseGenerator as NoiseGeneratorContract,
+    terraforged_terrain_levels::{NoiseLevels, TerrainLevels},
 };
-use std::sync::Arc;
+use std::{
+    collections::VecDeque,
+    panic::{AssertUnwindSafe, catch_unwind},
+    sync::{Arc, Mutex},
+};
+
+struct NoiseResource {
+    chunk: NoiseData,
+    chunk_samples: Vec<NoiseSample>,
+}
+
+impl Default for NoiseResource {
+    fn default() -> Self {
+        let length = NoiseData::MAX.wrapping_sub(NoiseData::MIN) as usize;
+        Self {
+            chunk: NoiseData::new(),
+            chunk_samples: std::iter::repeat_with(NoiseSample::default)
+                .take(length * length)
+                .collect(),
+        }
+    }
+}
 
 pub struct ErodedNoiseGenerator {
     erosion: ErosionFilter,
     generator: NoiseGenerator,
     smoothing: HeightmapSmoothingSettings,
+    resources: Mutex<VecDeque<NoiseResource>>,
     regions: ErosionRegionCache<Vec<f32>>,
 }
 
@@ -49,6 +74,7 @@ impl ErodedNoiseGenerator {
             erosion: ErosionFilter::new(ErosionRegionLayout::MAP_SIZE, erosion),
             generator,
             smoothing,
+            resources: Mutex::new(VecDeque::new()),
             regions: ErosionRegionCache::new(),
         }
     }
@@ -74,6 +100,19 @@ impl ErodedNoiseGenerator {
     pub fn eroded_height(&self, seed: i32, x: i32, z: i32) -> f32 {
         let region = self.region(seed, x >> 4, z >> 4);
         region[ErosionRegionLayout::block_index(x, z)]
+    }
+
+    pub fn find(
+        &self,
+        seed: i32,
+        x: i32,
+        z: i32,
+        min_radius: i32,
+        max_radius: i32,
+        terrain: &Terrain,
+    ) -> i64 {
+        self.generator
+            .find(seed, x, z, min_radius, max_radius, terrain)
     }
 
     fn region(&self, seed: i32, chunk_x: i32, chunk_z: i32) -> Arc<Vec<f32>> {
@@ -117,6 +156,78 @@ impl ErodedNoiseGenerator {
         );
         HeightmapSmoothing::apply(&mut map, map_size, self.smoothing);
         map
+    }
+
+    fn take_resource(&self) -> NoiseResource {
+        self.resources
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .pop_front()
+            .unwrap_or_default()
+    }
+
+    fn restore_resource(&self, resource: NoiseResource) {
+        self.resources
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push_back(resource);
+    }
+}
+
+impl NoiseGeneratorContract for ErodedNoiseGenerator {
+    fn levels(&self) -> NoiseLevels {
+        self.generator.levels().noise_levels
+    }
+
+    fn terrain_levels(&self) -> TerrainLevels {
+        self.generator.levels()
+    }
+
+    fn height_noise(&self, seed: i32, x: i32, z: i32) -> f32 {
+        NoiseGeneratorContract::height_noise(&self.generator, seed, x, z)
+    }
+
+    fn generate(
+        &self,
+        seed: i32,
+        chunk_x: i32,
+        chunk_z: i32,
+        consumer: &mut dyn FnMut(&NoiseData),
+    ) {
+        let region = self.region(seed, chunk_x, chunk_z);
+        let offset_x = ErosionRegionLayout::chunk_offset(chunk_x);
+        let offset_z = ErosionRegionLayout::chunk_offset(chunk_z);
+        let mut resource = self.take_resource();
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let mut blender = self.generator.blender_resource();
+            let start_x = chunk_x.wrapping_shl(4);
+            let start_z = chunk_z.wrapping_shl(4);
+            let frequency = self.generator.levels().noise_levels.frequency;
+            for delta_z in NoiseData::MIN..NoiseData::MAX {
+                let noise_z = start_z.wrapping_add(delta_z) as f32 * frequency;
+                let row = offset_z
+                    .wrapping_add(delta_z)
+                    .wrapping_mul(ErosionRegionLayout::MAP_SIZE);
+                for delta_x in NoiseData::MIN..NoiseData::MAX {
+                    let noise_x = start_x.wrapping_add(delta_x) as f32 * frequency;
+                    let index = resource.chunk.height().index().of(delta_x, delta_z);
+                    let sample = &mut resource.chunk_samples[index];
+                    self.generator
+                        .sample_terrain(seed, noise_x, noise_z, sample, &mut blender);
+                    sample.height_noise =
+                        region[row.wrapping_add(offset_x).wrapping_add(delta_x) as usize];
+                    self.generator.sample_river(seed, noise_x, noise_z, sample);
+                    resource.chunk.set_noise_index(index, sample);
+                }
+            }
+            consumer(&resource.chunk);
+        }));
+        self.restore_resource(resource);
+        if result.is_err() {
+            eprintln!(
+                "Eroded noise failed for chunk {chunk_x}, {chunk_z} -- that chunk will be left unfilled"
+            );
+        }
     }
 }
 
@@ -217,5 +328,123 @@ mod tests {
                 expected.to_bits()
             );
         }
+    }
+
+    #[test]
+    fn bordered_chunk_generation_uses_eroded_height_and_raw_metadata() {
+        let eroded = ErodedNoiseGenerator::new(
+            generator(),
+            ErosionFilterSettings {
+                droplets_per_chunk: 1,
+                droplet_lifetime: 4,
+                ..ErosionFilterSettings::default()
+            },
+            HeightmapSmoothingSettings {
+                iterations: 1,
+                ..HeightmapSmoothingSettings::default()
+            },
+        );
+        let seed = 91;
+        let chunk_x: i32 = -3;
+        let chunk_z: i32 = 5;
+        let region = eroded.region(seed, chunk_x, chunk_z);
+        let offset_x = ErosionRegionLayout::chunk_offset(chunk_x);
+        let offset_z = ErosionRegionLayout::chunk_offset(chunk_z);
+        let frequency = eroded.generator.levels().noise_levels.frequency;
+        let mut blender = eroded.generator.blender_resource();
+        let mut expected = NoiseSample::default();
+        let mut expected_values = Vec::new();
+        for delta_z in NoiseData::MIN..NoiseData::MAX {
+            let world_z = chunk_z.wrapping_shl(4).wrapping_add(delta_z);
+            let row = offset_z
+                .wrapping_add(delta_z)
+                .wrapping_mul(ErosionRegionLayout::MAP_SIZE);
+            for delta_x in NoiseData::MIN..NoiseData::MAX {
+                let world_x = chunk_x.wrapping_shl(4).wrapping_add(delta_x);
+                eroded.generator.sample_terrain(
+                    seed,
+                    world_x as f32 * frequency,
+                    world_z as f32 * frequency,
+                    &mut expected,
+                    &mut blender,
+                );
+                expected.height_noise =
+                    region[row.wrapping_add(offset_x).wrapping_add(delta_x) as usize];
+                eroded.generator.sample_river(
+                    seed,
+                    world_x as f32 * frequency,
+                    world_z as f32 * frequency,
+                    &mut expected,
+                );
+                expected_values.push((
+                    expected.height_noise.to_bits(),
+                    expected.base_noise.to_bits(),
+                    expected.river_noise.to_bits(),
+                    expected.terrain_type.name().to_owned(),
+                ));
+            }
+        }
+        let mut calls = 0;
+        let mut actual_values = Vec::new();
+        NoiseGeneratorContract::generate(&eroded, seed, chunk_x, chunk_z, &mut |chunk| {
+            calls += 1;
+            for delta_z in NoiseData::MIN..NoiseData::MAX {
+                for delta_x in NoiseData::MIN..NoiseData::MAX {
+                    actual_values.push((
+                        chunk.height().get(delta_x, delta_z).to_bits(),
+                        chunk.base().get(delta_x, delta_z).to_bits(),
+                        chunk.river().get(delta_x, delta_z).to_bits(),
+                        chunk
+                            .terrain()
+                            .get(delta_x, delta_z)
+                            .unwrap()
+                            .name()
+                            .to_owned(),
+                    ));
+                }
+            }
+        });
+        assert_eq!(calls, 1);
+        assert_eq!(actual_values, expected_values);
+    }
+
+    #[test]
+    fn contract_height_and_find_stay_on_raw_generator() {
+        let eroded = ErodedNoiseGenerator::new(
+            generator(),
+            ErosionFilterSettings::default(),
+            HeightmapSmoothingSettings::default(),
+        );
+        let seed = 31;
+        assert_eq!(
+            NoiseGeneratorContract::height_noise(&eroded, seed, 80, -32).to_bits(),
+            NoiseGeneratorContract::height_noise(&eroded.generator, seed, 80, -32).to_bits()
+        );
+        let terrain = TerrainRegistry::new().get_by_name("hills").unwrap();
+        assert_eq!(
+            eroded.find(seed, 0, 0, 1, 4, &terrain),
+            eroded.generator.find(seed, 0, 0, 1, 4, &terrain)
+        );
+    }
+
+    #[test]
+    fn consumer_failure_still_restores_scratch_resource() {
+        let eroded = ErodedNoiseGenerator::new(
+            generator(),
+            ErosionFilterSettings {
+                droplets_per_chunk: 0,
+                ..ErosionFilterSettings::default()
+            },
+            HeightmapSmoothingSettings::default(),
+        );
+        NoiseGeneratorContract::generate(&eroded, 7, 0, 0, &mut |_| panic!("consumer failed"));
+        assert_eq!(
+            eroded
+                .resources
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .len(),
+            1
+        );
     }
 }
