@@ -39,6 +39,35 @@ impl Interpolation {
     }
 }
 
+#[derive(Clone, Copy)]
+pub enum CurveFunction {
+    Interpolation(Interpolation),
+    Midpoint { midpoint: f32, steepness: f32 },
+    SCurve { lower: f32, upper: f32 },
+}
+
+impl CurveFunction {
+    fn apply(self, value: f32) -> f32 {
+        match self {
+            Self::Interpolation(interpolation) => interpolation.apply(value),
+            Self::Midpoint {
+                midpoint,
+                steepness,
+            } => noise_curve(value, midpoint, steepness),
+            Self::SCurve { lower, upper } => java_pow(value, lower + upper * value),
+        }
+    }
+
+    pub fn s_curve(lower: f32, upper: f32) -> Self {
+        let upper = if upper < 0.0 {
+            java_max(-lower, upper)
+        } else {
+            upper
+        };
+        Self::SCurve { lower, upper }
+    }
+}
+
 const GRAD_2D: [[f32; 2]; 8] = [
     [-1.0, -1.0],
     [1.0, -1.0],
@@ -451,6 +480,27 @@ fn clamp(value: f32, min: f32, max: f32) -> f32 {
     }
 }
 
+fn noise_map(value: f32, min: f32, max: f32, range: f32) -> f32 {
+    let difference = clamp(value, min, max) - min;
+    if difference > range {
+        1.0
+    } else {
+        difference / range
+    }
+}
+
+fn noise_curve(value: f32, midpoint: f32, steepness: f32) -> f32 {
+    1.0 / (1.0 + noise_exp(-steepness * (value - midpoint)))
+}
+
+fn noise_exp(mut value: f32) -> f32 {
+    value = 1.0 + value / 256.0;
+    for _ in 0..8 {
+        value *= value;
+    }
+    value
+}
+
 fn map(value: f32, min: f32, max: f32, range: f32) -> f32 {
     let clamped = clamp(value, min, max);
     let difference = clamped - min;
@@ -605,6 +655,30 @@ enum ModuleKind {
         mod_range: f32,
         steps: usize,
         octaves: usize,
+    },
+    Curve {
+        source: Module,
+        function: CurveFunction,
+    },
+    VariableCurve {
+        source: Module,
+        midpoint: Module,
+        gradient: Module,
+    },
+    PowerCurve {
+        source: Module,
+        min: f32,
+        max: f32,
+        midpoint: f32,
+        range: f32,
+        power: f32,
+    },
+    Steps {
+        source: Module,
+        steps: Module,
+        slope_min: Module,
+        slope_max: Module,
+        curve: CurveFunction,
     },
     Select {
         control: Module,
@@ -878,6 +952,53 @@ impl Module {
                 }
                 lerp(value, result, alpha)
             }
+            ModuleKind::Curve { source, function } => function.apply(source.value(x, y)),
+            ModuleKind::VariableCurve {
+                source,
+                midpoint,
+                gradient,
+            } => noise_curve(
+                source.value(x, y),
+                midpoint.value(x, y),
+                gradient.value(x, y),
+            ),
+            ModuleKind::PowerCurve {
+                source,
+                min,
+                max,
+                midpoint,
+                range,
+                power,
+            } => {
+                let value = source.value(x, y);
+                let value = if value >= *midpoint {
+                    *midpoint + java_pow(value - *midpoint, *power)
+                } else {
+                    *midpoint - java_pow(*midpoint - value, *power)
+                };
+                noise_map(value, *min, *max, *range)
+            }
+            ModuleKind::Steps {
+                source,
+                steps,
+                slope_min,
+                slope_max,
+                curve,
+            } => {
+                let noise_value = source.value(x, y);
+                let min = slope_min.value(x, y);
+                let max = slope_max.value(x, y);
+                let step_count = steps.value(x, y);
+                let range = max - min;
+                if range <= 0.0 {
+                    return (noise_value * step_count) as i32 as f32 / step_count;
+                }
+                let inverted = 1.0 - noise_value;
+                let value = (inverted * step_count) as i32 as f32 / step_count;
+                let delta = inverted - value;
+                let alpha = noise_map(delta * step_count, min, max, range);
+                1.0 - lerp(value, inverted, curve.apply(alpha))
+            }
             ModuleKind::Select {
                 control,
                 lower,
@@ -924,7 +1045,11 @@ impl Module {
                 }),
             ModuleKind::Terrace { source, .. }
             | ModuleKind::LegacyTerrace { source, .. }
-            | ModuleKind::AdvancedTerrace { source, .. } => source.min_value(),
+            | ModuleKind::AdvancedTerrace { source, .. }
+            | ModuleKind::Curve { source, .. }
+            | ModuleKind::VariableCurve { source, .. }
+            | ModuleKind::PowerCurve { source, .. }
+            | ModuleKind::Steps { source, .. } => source.min_value(),
             ModuleKind::Add(sources) => combine_bounds(sources, true, |a, b| a + b),
             ModuleKind::Multiply(sources) => combine_bounds(sources, true, |a, b| a * b),
             ModuleKind::Max(sources) => {
@@ -965,7 +1090,11 @@ impl Module {
                 }),
             ModuleKind::Terrace { source, .. }
             | ModuleKind::LegacyTerrace { source, .. }
-            | ModuleKind::AdvancedTerrace { source, .. } => source.max_value(),
+            | ModuleKind::AdvancedTerrace { source, .. }
+            | ModuleKind::Curve { source, .. }
+            | ModuleKind::VariableCurve { source, .. }
+            | ModuleKind::PowerCurve { source, .. }
+            | ModuleKind::Steps { source, .. } => source.max_value(),
             ModuleKind::Add(sources) => combine_bounds(sources, false, |a, b| a + b),
             ModuleKind::Multiply(sources) => combine_bounds(sources, false, |a, b| a * b),
             ModuleKind::Max(sources) => combine_bounds(sources, false, java_max),
@@ -1237,6 +1366,54 @@ impl Module {
             mod_range,
             steps,
             octaves,
+        }))
+    }
+
+    pub fn curve(self, function: CurveFunction) -> Self {
+        Self(Box::new(ModuleKind::Curve {
+            source: self,
+            function,
+        }))
+    }
+
+    pub fn variable_curve(self, midpoint: Self, gradient: Self) -> Self {
+        Self(Box::new(ModuleKind::VariableCurve {
+            source: self,
+            midpoint,
+            gradient,
+        }))
+    }
+
+    pub fn power_curve(self, power: f32) -> Self {
+        let source_min = self.min_value();
+        let source_max = self.max_value();
+        let source_midpoint = source_min + (source_max - source_min) / 2.0;
+        let min = source_midpoint - java_pow(source_midpoint - source_min, power);
+        let max = source_midpoint + java_pow(source_max - source_midpoint, power);
+        let range = max - min;
+        Self(Box::new(ModuleKind::PowerCurve {
+            source: self,
+            min,
+            max,
+            midpoint: min + range / 2.0,
+            range,
+            power,
+        }))
+    }
+
+    pub fn steps(
+        self,
+        steps: Self,
+        slope_min: Self,
+        slope_max: Self,
+        curve: CurveFunction,
+    ) -> Self {
+        Self(Box::new(ModuleKind::Steps {
+            source: self,
+            steps,
+            slope_min,
+            slope_max,
+            curve,
         }))
     }
 
@@ -2265,5 +2442,100 @@ mod tests {
                 .to_bits(),
             0x3f404a79
         );
+    }
+
+    #[test]
+    fn curve_modifiers_match_engine_0_3_0() {
+        let source = |kind, seed, scale: f32, octaves, gain| {
+            Module::source(Source::new(
+                kind,
+                SourceConfig {
+                    seed,
+                    octaves,
+                    gain,
+                    frequency: 1.0 / scale,
+                    lacunarity: 2.0,
+                    interpolation: Interpolation::Curve3,
+                },
+            ))
+        };
+        let base = source(SourceKind::Perlin, 901, 96.0, 4, 0.5);
+        let points = [
+            (0.0, 0.0),
+            (12.25, -98.75),
+            (-4096.5, 8192.25),
+            (123456.75, -0.125),
+            (64.0, 64.0),
+            (-128.0, 32.0),
+            (777.0, -333.0),
+            (-1024.0, -2048.0),
+        ];
+        let cases = [
+            (
+                base.clone().curve(CurveFunction::Midpoint {
+                    midpoint: 0.4,
+                    steepness: 6.0,
+                }),
+                [
+                    0x3f255467, 0x3f42e2dd, 0x3f0fcb78, 0x3f24d9c2, 0x3f4c0704, 0x3f606716,
+                    0x3f121320, 0x3edb3db7,
+                ],
+            ),
+            (
+                base.clone().curve(CurveFunction::s_curve(0.5, -0.2)),
+                [
+                    0x3f420300, 0x3f51b756, 0x3f36cc95, 0x3f41c3b0, 0x3f56f9f6, 0x3f647114,
+                    0x3f3800c8, 0x3f236a93,
+                ],
+            ),
+            (
+                base.clone().variable_curve(
+                    source(SourceKind::Simplex, 902, 80.0, 3, 0.5),
+                    source(SourceKind::Ridge, 903, 128.0, 2, 0.975),
+                ),
+                [
+                    0x3f000000, 0x3f065e28, 0x3ef0ed3b, 0x3f0513bd, 0x3f03d748, 0x3f0aaa49,
+                    0x3efe7b16, 0x3eea1d84,
+                ],
+            ),
+            (
+                base.clone().power_curve(0.8),
+                [
+                    0x3f000000, 0x3f2148a1, 0x3ed1e2d7, 0x3efdbc37, 0x3f2ad941, 0x3f43b07c,
+                    0x3ed5b8cd, 0x3e9f3786,
+                ],
+            ),
+            (
+                base.clone().steps(
+                    Module::constant(9.5),
+                    Module::constant(0.2),
+                    Module::constant(0.8),
+                    CurveFunction::Interpolation(Interpolation::Curve4),
+                ),
+                [
+                    0x3f001a52, 0x3f17c488, 0x3ef1d004, 0x3eff64d8, 0x3f260dbe, 0x3f3cd8b8,
+                    0x3ef2751a, 0x3ebca1b0,
+                ],
+            ),
+            (
+                base.steps(
+                    Module::constant(7.0),
+                    Module::constant(0.5),
+                    Module::constant(0.5),
+                    CurveFunction::Interpolation(Interpolation::Curve3),
+                ),
+                [
+                    0x3edb6db7, 0x3f124925, 0x3edb6db7, 0x3edb6db7, 0x3f124925, 0x3f36db6e,
+                    0x3edb6db7, 0x3e924925,
+                ],
+            ),
+        ];
+        for (module, expected) in cases {
+            assert_eq!(
+                [module.min_value().to_bits(), module.max_value().to_bits()],
+                [0x00000000, 0x3f800000]
+            );
+            assert_eq!(bits(points.map(|(x, y)| module.value(x, y))), expected);
+        }
     }
 }

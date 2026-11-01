@@ -30,6 +30,9 @@ and upper curve controls.
 The advanced terrace layer adds masked, sloped, modulated and multi-octave stepping with the
 original blend thresholds and normalization range.
 
+The curve layer adds midpoint and S-curves, variable curves, symmetric power curves and configurable
+step smoothing with TerraForged's original approximate exponential and mapping behavior.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
