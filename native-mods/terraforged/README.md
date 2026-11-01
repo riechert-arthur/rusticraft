@@ -603,6 +603,9 @@ checking that a second lookup returns the cached map, against `RiverCacheOracle.
 `.local/terraforged/oracles/river/`, which calls Engine's `getRivermap`; the simple-river layer's extreme-cell test
 now also goes through the caches.
 
+The heightmap-river stage applies a continent's cached rivermap and then performs TerraForged's
+volcano-pipe demotion for submerged or river-cut terrain.
+
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator and the continents' river caches. They change nothing in the game, so there is
