@@ -2272,6 +2272,8 @@ two halves, since the two trees' Engine classes can't share a JVM: 6dd607eb's ov
 continent drawing the continent's four seeds) for the climate fields, `getShape`, `sample` and the seed draws; three
 levels variants, two terrain sets, six runtime seeds and 202 block positions (`int` edges and a signed grid) match
 bit for bit in debug and release builds.
+The surface override now uses the current source's full `COAST - BEACH` shoreline band instead of
+the obsolete 0.005 fringe, so coastal columns remain beach candidates through the coast marker.
 
 ## Status: development only
 

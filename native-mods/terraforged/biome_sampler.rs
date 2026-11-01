@@ -45,7 +45,7 @@ pub const COAST: f32 = 0.55;
 pub const INLAND: f32 = 0.6;
 /// `BiomeSampler.beachSize`: the beach band is `BEACH < noise <= BEACH + BEACH_SIZE` (javac folds the sum
 /// to the float `0.505f`, as this f32 constant sum does).
-pub const BEACH_SIZE: f32 = 0.005;
+pub const BEACH_SIZE: f32 = COAST - BEACH;
 /// Reimagined's `BiomeSampler.SLOPE_STEP`: blocks between the slope gate's opposite height samples.
 pub const SLOPE_STEP: i32 = 24;
 /// Reimagined's `maxFlatGradient`: blocks of rise per block above which ground is steep (about 23 degrees).
@@ -568,6 +568,18 @@ K 3f0147ae 19 river-hills flats-hills
     #[test]
     fn biome_overrides_match_terraforged_jar() {
         assert_eq!(oracle_output(), ORACLE);
+    }
+
+    #[test]
+    fn beach_band_reaches_the_coast() {
+        let terrains = TerrainRegistry::new();
+        let hills = terrains.get_by_name("hills").unwrap();
+        let at = |continent| {
+            biome_override(&sample(&terrains, BiomeType::Grassland, continent, &hills, 1.0))
+        };
+        assert_eq!(at(BEACH + BEACH_SIZE), BiomeOverride::Beach);
+        assert_eq!(at(BEACH + 0.006), BiomeOverride::Beach);
+        assert_eq!(at(COAST + f32::EPSILON), BiomeOverride::Input);
     }
 
     #[test]
