@@ -487,6 +487,12 @@ world-surface generation heightmaps used by later surface, structure, and carvin
 The generator facade now joins the cached terrain for a chunk's own position, fills its real block
 storage, and returns the same pooled handle so the remaining terrain stages can consume it safely.
 
+Structure-terrain column operations now preserve stable piece ordering, ground-level offsets,
+distance-based raising, highest-piece carving and elliptical roof clearance. The caller supplies
+eligible nearby rigid pieces and a column-access adapter; structure discovery and the game-facing
+adapter are still pending. Returned height updates must be applied to the terrain height map.
+The original Java method oracle checks ordered block edits and resulting heights across six columns.
+
 Biome chunk filling samples one 4-by-4 biome buffer at quart y=-1 in Java call order and repeats
 it through every section. It does not inject a separate cave layer. Sampling completes before
 section writes, so a source failure cannot partially fill the chunk. The biome-fill oracle runner

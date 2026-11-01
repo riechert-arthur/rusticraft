@@ -1253,7 +1253,7 @@ fn white(x: f32, y: f32, seed: i32) -> f32 {
     value_coord_2d(seed, round(x), round(y))
 }
 
-fn round(value: f32) -> i32 {
+pub(crate) fn round(value: f32) -> i32 {
     if value >= 0.0 {
         (value + 0.5) as i32
     } else {
