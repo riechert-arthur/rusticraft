@@ -657,6 +657,9 @@ factory under a write lock, checking again first so that threads asking at once 
 and replay a transcript of the validator and factory calls from `WorldErosionOracle.java` in
 `.local/terraforged/oracles/world_erosion/`, which calls Engine's `WorldErosion.get`.
 
+The smoothing filter preserves TerraForged's in-place circular weighted pass, including erosion-mask,
+terrain-edge, river-mask, and elevation-range strength modifiers.
+
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse and the world-erosion cache. They change nothing in the game, so there is
