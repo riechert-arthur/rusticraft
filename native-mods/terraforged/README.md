@@ -1160,6 +1160,10 @@ negative and huge coordinates and borders, four chunks (smooth, random, special 
 signed zeros and subnormals, and one with unset cells) read with four `TerrainLevels`, every element, height,
 gradient and water level, bit for bit.
 
+The terrain-generator layer (`terrain_generator.rs`) adds TerraForged's terrain-generator contract: it owns reusable
+terrain data, delegates bordered noise generation, scales direct height queries, and keeps TerraForged's object-pool
+behavior.
+
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives, the biome climate types, the climate settings, the climate module, the climate stage, the continent factory, the generator context, the heightmap, the world generator factory and TerraForged's terrain levels. They change nothing in the game, so there is
