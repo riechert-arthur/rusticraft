@@ -321,6 +321,9 @@ beach variants, exact river masking, and base-only sample reset behavior.
 Continent control points now classify deep ocean, shallow ocean, coast, and inland terrain and map
 custom world settings through TerraForged's clamped five-segment falloff curve with exact float order.
 
+Current-source continent cells now preserve mutable point samples, square and staggered-hexagon
+jitter placement, coordinate adjustment, and Perlin, Simplex, and Cubic source normalization.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
