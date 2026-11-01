@@ -45,6 +45,29 @@ impl Default for SmoothingSettings {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ErosionSettings {
+    pub droplets_per_chunk: i32,
+    pub droplet_lifetime: i32,
+    pub droplet_volume: f32,
+    pub droplet_velocity: f32,
+    pub erosion_rate: f32,
+    pub deposit_rate: f32,
+}
+
+impl Default for ErosionSettings {
+    fn default() -> Self {
+        Self {
+            droplets_per_chunk: 135,
+            droplet_lifetime: 12,
+            droplet_volume: 0.7,
+            droplet_velocity: 0.7,
+            erosion_rate: 0.5,
+            deposit_rate: 0.5,
+        }
+    }
+}
+
 pub trait Filterable {
     fn block_x(&self) -> i32;
 
@@ -77,12 +100,19 @@ struct RangeModifier {
 }
 
 impl RangeModifier {
-    fn inverted(min: f32, max: f32) -> Self {
+    fn range(min: f32, max: f32) -> Self {
         Self {
             min,
             max,
             range: max - min,
+            inverted: false,
+        }
+    }
+
+    fn inverted(min: f32, max: f32) -> Self {
+        Self {
             inverted: true,
+            ..Self::range(min, max)
         }
     }
 
@@ -112,6 +142,137 @@ impl RangeModifier {
             strength *= map(cell.river_mask, 0.002, 0.1, 0.098);
         }
         self.value(cell.value) * strength * value
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct FastRandom {
+    seed: u64,
+    gamma: u64,
+}
+
+impl FastRandom {
+    pub fn seeded(seed: i64, gamma: i64) -> Self {
+        Self {
+            seed: seed as u64,
+            gamma: mix_gamma(gamma as u64),
+        }
+    }
+
+    pub fn next_int(&mut self, bound: i32) -> i32 {
+        let mut result = mix32(self.next_seed());
+        let mask = bound - 1;
+        if bound & mask == 0 {
+            return result & mask;
+        }
+        let mut unsigned = (result as u32 >> 1) as i32;
+        loop {
+            result = unsigned % bound;
+            if unsigned.wrapping_add(mask).wrapping_sub(result) >= 0 {
+                return result;
+            }
+            unsigned = (mix32(self.next_seed()) as u32 >> 1) as i32;
+        }
+    }
+
+    fn next_seed(&mut self) -> u64 {
+        self.seed = self.seed.wrapping_add(self.gamma);
+        self.seed
+    }
+}
+
+fn mix32(mut value: u64) -> i32 {
+    value = (value ^ (value >> 33)).wrapping_mul(7_109_453_100_751_455_733);
+    ((value ^ (value >> 28)).wrapping_mul((-3_808_689_974_395_783_757_i64) as u64) >> 32) as i32
+}
+
+fn mix_gamma(mut value: u64) -> u64 {
+    value = (value ^ (value >> 33)).wrapping_mul((-49_064_778_989_728_563_i64) as u64);
+    value = (value ^ (value >> 33)).wrapping_mul((-4_265_267_296_055_464_877_i64) as u64);
+    value = (value ^ (value >> 33)) | 1;
+    if (value ^ (value >> 1)).count_ones() < 24 {
+        value ^ 0xaaaa_aaaa_aaaa_aaaa
+    } else {
+        value
+    }
+}
+
+#[derive(Debug)]
+struct ErosionBrush {
+    indices: Vec<usize>,
+    weights: Vec<f32>,
+}
+
+#[derive(Debug)]
+pub struct ErosionBrushes {
+    entries: Vec<ErosionBrush>,
+}
+
+impl ErosionBrushes {
+    pub fn new(size: usize, radius: isize) -> Self {
+        let capacity = (radius * radius * 4) as usize;
+        let mut x_offsets = vec![0_isize; capacity];
+        let mut y_offsets = vec![0_isize; capacity];
+        let mut weights = vec![0.0_f32; capacity];
+        let mut weight_sum = 0.0_f32;
+        let mut add_index = 0;
+        let mut entries = Vec::with_capacity(size * size);
+        for index in 0..size * size {
+            let center_x = index % size;
+            let center_y = index / size;
+            if center_y <= radius as usize
+                || center_y >= size - radius as usize
+                || center_x <= radius as usize + 1
+                || center_x >= size - radius as usize
+            {
+                weight_sum = 0.0;
+                add_index = 0;
+                for y in -radius..=radius {
+                    for x in -radius..=radius {
+                        let squared_distance = (x * x + y * y) as f32;
+                        if squared_distance >= (radius * radius) as f32 {
+                            continue;
+                        }
+                        let coordinate_x = center_x as isize + x;
+                        let coordinate_y = center_y as isize + y;
+                        if coordinate_x < 0
+                            || coordinate_x >= size as isize
+                            || coordinate_y < 0
+                            || coordinate_y >= size as isize
+                        {
+                            continue;
+                        }
+                        let weight =
+                            1.0 - f64::from(squared_distance).sqrt() as f32 / radius as f32;
+                        weight_sum += weight;
+                        weights[add_index] = weight;
+                        x_offsets[add_index] = x;
+                        y_offsets[add_index] = y;
+                        add_index += 1;
+                    }
+                }
+            }
+            let mut indices = Vec::with_capacity(add_index);
+            let mut normalized_weights = Vec::with_capacity(add_index);
+            for point in 0..add_index {
+                indices.push(
+                    ((y_offsets[point] + center_y as isize) * size as isize
+                        + x_offsets[point]
+                        + center_x as isize) as usize,
+                );
+                normalized_weights.push(weights[point] / weight_sum);
+            }
+            entries.push(ErosionBrush {
+                indices,
+                weights: normalized_weights,
+            });
+        }
+        Self { entries }
+    }
+
+    pub fn get(&self, index: usize) -> (&[usize], &[f32]) {
+        let brush = &self.entries[index];
+        (&brush.indices, &brush.weights)
     }
 }
 
@@ -520,6 +681,47 @@ mod tests {
     }
 
     #[test]
+    fn erosion_primitives_match_engine_0_3_0() {
+        assert_eq!(
+            ErosionSettings::default(),
+            ErosionSettings {
+                droplets_per_chunk: 135,
+                droplet_lifetime: 12,
+                droplet_volume: 0.7,
+                droplet_velocity: 0.7,
+                erosion_rate: 0.5,
+                deposit_rate: 0.5,
+            }
+        );
+        let iteration_seed = pack_seed(12_768 + 12_345, 7);
+        let chunk_seed = pack_seed(-11, 29);
+        let mut random = FastRandom::seeded(chunk_seed, iteration_seed);
+        assert_eq!(
+            std::array::from_fn::<_, 8, _>(|_| random.next_int(16)),
+            [14, 4, 10, 14, 11, 11, 8, 4]
+        );
+
+        let brushes = ErosionBrushes::new(12, 4);
+        for (cell, expected) in [
+            (0, [(0, 0x3e1f1215), (15, 0x3d0541cc), (38, 0x3c7afb1a)]),
+            (65, [(27, 0x3bc0eb7f), (65, 0x3d748b2f), (103, 0x3bc0eb7f)]),
+            (78, [(40, 0x3bc0eb7f), (78, 0x3d748b2f), (116, 0x3bc0eb7f)]),
+            (
+                143,
+                [(105, 0x3c7afb1b), (128, 0x3d0541cd), (143, 0x3e1f1216)],
+            ),
+        ] {
+            let brush = &brushes.entries[cell];
+            let points = [0, brush.indices.len() / 2, brush.indices.len() - 1];
+            assert_eq!(
+                points.map(|point| (brush.indices[point], brush.weights[point].to_bits())),
+                expected,
+                "brush {cell}"
+            );
+        }
+    }
+
+    #[test]
     fn world_erosion_matches_engine_0_3_0() {
         let builds = AtomicUsize::new(0);
         let cache = WorldErosion::new(
@@ -538,5 +740,9 @@ mod tests {
         assert_eq!(*resized, 8_192);
         assert!(!Arc::ptr_eq(&first, &resized));
         assert_eq!(builds.load(Ordering::Relaxed), 2);
+    }
+
+    fn pack_seed(x: i32, z: i32) -> i64 {
+        (u64::from(x as u32) | (u64::from(z as u32) << 32)) as i64
     }
 }

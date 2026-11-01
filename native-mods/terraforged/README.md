@@ -189,6 +189,9 @@ clamps submerged neighbors to water level, and records the scaled result as terr
 Beach detection samples coast gradients eight blocks in each cardinal direction and reclassifies only
 low-edge, low-gradient coast cells with the shared beach terrain identity.
 
+Hydraulic-erosion primitives reproduce TerraForged's filter settings, paired-seed fast random stream,
+and radius-four normalized brush cache, including its reused interior brush layout.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
