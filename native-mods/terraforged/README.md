@@ -90,6 +90,9 @@ source-value caching and constant, input-linear and output-linear blending modes
 The mountain LandForms layer adds all three ridge and cell-edge mountain graphs, including optional
 directional fancy-mountain erosion and the original advanced terrace variant.
 
+The cell-model layer adds TerraForged's complete terrain sample state, Java defaults, copy/reset and
+absent-cell behavior, plus the ordered biome-type identities carried by each sample.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
