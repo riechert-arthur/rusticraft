@@ -15,6 +15,9 @@ the original combiner bound behavior.
 The domain layer adds direct, axis-noise, directional, additive, compound and cumulative warps,
 plus warped module sampling. Directional warps reproduce Engine 0.3.0's 4096-entry sine lookup.
 
+The selector layer adds base blending, fixed and variable blends and bounded selection, preserving
+Engine 0.3.0's interpolation, edge conditions and reported source bounds.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
