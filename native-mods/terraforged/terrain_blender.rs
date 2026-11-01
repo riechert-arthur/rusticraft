@@ -24,7 +24,12 @@
 
 use super::terraforged::{Domain, Module, Source, SourceConfig, SourceKind, floor, hash_2d};
 use super::terraforged_engine::Terrain;
-use super::terraforged_terrain_blend_util::{Object2FloatCache, WeightMap, Weighted, random};
+use super::terraforged_terrain_blend_util::{
+    Object2FloatCache, PositionFinder, SpiralIterator, WeightMap, Weighted, random,
+};
+use super::terraforged_util::{
+    pack_floats, unpack_left, unpack_left_float, unpack_right, unpack_right_float,
+};
 use std::sync::Arc;
 
 const REGION_SEED_OFFSET: i32 = 21_491_124;
@@ -139,6 +144,54 @@ impl TerrainBlender {
     pub fn terrain<'a>(&'a self, blender: &Blender) -> &'a Terrain {
         let index = blender.centre_noise_index();
         self.terrains.get_value(index).unwrap().terrain()
+    }
+
+    pub fn find_nearest(
+        &self,
+        seed: i32,
+        x: f32,
+        z: f32,
+        min_radius: i32,
+        max_radius: i32,
+        terrain: &Terrain,
+    ) -> Option<PositionFinder<impl FnMut(&mut SpiralIterator) -> i64>> {
+        let terrain = self
+            .terrains
+            .find(|candidate| candidate.terrain().name() == terrain.name())?;
+        let band = self.terrains.band(terrain)?;
+        let lower = unpack_left_float(band);
+        let upper = unpack_right_float(band);
+        let jitter = self.jitter;
+        let frequency = self.frequency;
+        Some(
+            self.iterator(seed, x, z, min_radius, max_radius)
+                .finder(move |iterator| {
+                    let position = find(
+                        seed.wrapping_add(REGION_SEED_OFFSET),
+                        jitter,
+                        lower,
+                        upper,
+                        iterator,
+                    );
+                    pack_floats(
+                        unpack_left_float(position) / frequency,
+                        unpack_right_float(position) / frequency,
+                    )
+                }),
+        )
+    }
+
+    pub fn iterator(
+        &self,
+        _seed: i32,
+        x: f32,
+        z: f32,
+        min_radius: i32,
+        max_radius: i32,
+    ) -> SpiralIterator {
+        let region_x = self.warp.x(x, z) * self.frequency;
+        let region_z = self.warp.y(x, z) * self.frequency;
+        SpiralIterator::new(floor(region_x), floor(region_z), min_radius, max_radius)
     }
 }
 
@@ -312,6 +365,30 @@ fn hash_pair(first: i32, second: i32) -> i32 {
     (hash >> 13) ^ hash
 }
 
+fn find(seed: i32, jitter: f32, lower: f32, upper: f32, iterator: &mut SpiralIterator) -> i64 {
+    for position in iterator {
+        let cell_x = unpack_left(position);
+        let cell_z = unpack_right(position);
+        let hash = hash_2d(seed, cell_x, cell_z);
+        let noise = random(hash);
+        if noise > lower && noise <= upper {
+            let delta_x = random(hash_pair(
+                hash,
+                super::terraforged_terrain_blend_util::X_PRIME,
+            ));
+            let delta_z = random(hash_pair(
+                hash,
+                super::terraforged_terrain_blend_util::Y_PRIME,
+            ));
+            return pack_floats(
+                cell_x as f32 + delta_x * jitter,
+                cell_z as f32 + delta_z * jitter,
+            );
+        }
+    }
+    0
+}
+
 fn weight(distance: f32, origin: f32, blend_range: f32) -> f32 {
     let delta = distance - origin;
     if delta <= 0.0 {
@@ -362,5 +439,37 @@ mod tests {
             .into_iter()
             .collect();
         assert_eq!(values, [0x3f5cdecb, 0x3f666666, 0x3f666666]);
+    }
+
+    #[test]
+    fn nearest_terrain_search_matches_terraforged_source() {
+        let hills = terrain(1, "hills", 3.0, 0.55);
+        let blender = TerrainBlender::new(
+            91,
+            64,
+            0.8,
+            0.65,
+            vec![
+                terrain(0, "flats", 2.0, 0.2),
+                hills.clone(),
+                terrain(2, "mountains", 5.0, 0.9),
+            ],
+        );
+        let cases = [
+            (0, 0.0, 0.0, 0xc2509cb4, 0xc21018f4),
+            (17, 37.25, -91.5, 0x42e1c20b, 0xc22c74c0),
+            (-4, -240.0, 118.75, 0xc3931915, 0x4327a17b),
+        ];
+        for (seed, x, z, expected_x, expected_z) in cases {
+            let position = blender
+                .find_nearest(seed, x, z, 1, 8, hills.terrain())
+                .unwrap()
+                .next()
+                .unwrap();
+            assert_eq!(unpack_left_float(position).to_bits(), expected_x);
+            assert_eq!(unpack_right_float(position).to_bits(), expected_z);
+        }
+        let missing = Terrain::new(3, "missing", TerrainCategory::Flatland);
+        assert!(blender.find_nearest(0, 0.0, 0.0, 1, 8, &missing).is_none());
     }
 }

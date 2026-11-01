@@ -303,6 +303,9 @@ random selection, and square-spiral terrain searches from TerraForged's current 
 The concrete terrain blender now reproduces TerraForged's warped nine-cell terrain selection,
 minimum-noise bias, identity-cached terrain sampling, and squared border-weight blending.
 
+Terrain searches now traverse TerraForged's warped square spiral, filter weighted terrain bands by
+name, jitter matching region cells, and return world-scaled nearest positions.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
