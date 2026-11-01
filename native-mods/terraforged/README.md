@@ -84,6 +84,9 @@ modulation, linear and Curve3 slopes, advanced terracing and final boost shaping
 The ocean LandForms layer adds exact level and ground context, ocean/land base accessors and the
 deep-ocean hills/canyons blend with its mixed float/double sea-level scaling and six seed increments.
 
+The erosion Ridge layer adds TerraForged's cellular valley-distance graph node with octave controls,
+source-value caching and constant, input-linear and output-linear blending modes.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:

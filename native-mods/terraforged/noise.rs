@@ -470,6 +470,194 @@ fn cell_vector(seed: i32, x: i32, y: i32) -> [f32; 2] {
     CELL_2D[(hash_2d(seed, x, y) & 255) as usize]
 }
 
+#[derive(Clone, Copy)]
+pub enum ErosionMode {
+    Constant,
+    InputLinear,
+    OutputLinear,
+}
+
+impl ErosionMode {
+    fn blend(self, value: f32, erosion: f32, strength: f32) -> f32 {
+        match self {
+            Self::Constant => 1.0 - strength,
+            Self::InputLinear => 1.0 - strength * value,
+            Self::OutputLinear => 1.0 - strength * erosion,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct ErosionRidge {
+    seed: i32,
+    octaves: i32,
+    strength: f32,
+    grid_size: f32,
+    amplitude: f32,
+    lacunarity: f32,
+    distance_falloff: f32,
+    blend_mode: ErosionMode,
+}
+
+impl ErosionRidge {
+    pub fn new(seed: i32, strength: f32, grid_size: f32, blend_mode: ErosionMode) -> Self {
+        Self::with_octaves(seed, 1, strength, grid_size, blend_mode)
+    }
+
+    pub fn with_octaves(
+        seed: i32,
+        octaves: i32,
+        strength: f32,
+        grid_size: f32,
+        blend_mode: ErosionMode,
+    ) -> Self {
+        Self::full(
+            seed,
+            octaves,
+            strength,
+            grid_size,
+            1.0 / (octaves + 1) as f32,
+            2.25,
+            0.75,
+            blend_mode,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn full(
+        seed: i32,
+        octaves: i32,
+        strength: f32,
+        grid_size: f32,
+        amplitude: f32,
+        lacunarity: f32,
+        distance_falloff: f32,
+        blend_mode: ErosionMode,
+    ) -> Self {
+        Self {
+            seed,
+            octaves,
+            strength,
+            grid_size,
+            amplitude,
+            lacunarity,
+            distance_falloff,
+            blend_mode,
+        }
+    }
+
+    pub fn wrap(self, source: Module) -> Module {
+        Module::erosion_ridge(self, source)
+    }
+
+    pub fn value(self, x: f32, y: f32, source: &Module) -> f32 {
+        let mut cache = [0.0; 25];
+        let value = source.value(x, y);
+        let erosion = self.erosion_value_with_cache(x, y, source, &mut cache);
+        lerp(
+            erosion,
+            value,
+            self.blend_mode.blend(value, erosion, self.strength),
+        )
+    }
+
+    pub fn erosion_value(self, x: f32, y: f32, source: &Module) -> f32 {
+        self.erosion_value_with_cache(x, y, source, &mut [0.0; 25])
+    }
+
+    fn erosion_value_with_cache(
+        self,
+        mut x: f32,
+        mut y: f32,
+        source: &Module,
+        cache: &mut [f32; 25],
+    ) -> f32 {
+        let mut sum = 0.0;
+        let mut max = 0.0;
+        let mut gain = 1.0;
+        let mut distance = self.grid_size;
+        for _ in 0..self.octaves {
+            let value = self.single_erosion_value(x, y, distance, source, cache);
+            sum += value * gain;
+            max += gain;
+            gain *= self.amplitude;
+            distance *= self.distance_falloff;
+            x *= self.lacunarity;
+            y *= self.lacunarity;
+        }
+        sum / max
+    }
+
+    fn single_erosion_value(
+        self,
+        x: f32,
+        y: f32,
+        grid_size: f32,
+        source: &Module,
+        cache: &mut [f32; 25],
+    ) -> f32 {
+        cache.fill(-1.0);
+        let pixel_x = floor(x / grid_size);
+        let pixel_y = floor(y / grid_size);
+        let mut min_height2 = f32::MAX;
+        for delta_y1 in -1_i32..=1 {
+            for delta_x1 in -1_i32..=1 {
+                let point_a_x = pixel_x.wrapping_add(delta_x1);
+                let point_a_y = pixel_y.wrapping_add(delta_y1);
+                let vector_a = cell_vector(self.seed, point_a_x, point_a_y);
+                let ax = (point_a_x as f32 + vector_a[0]) * grid_size;
+                let ay = (point_a_y as f32 + vector_a[1]) * grid_size;
+                let mut bx = ax;
+                let mut by = ay;
+                let mut lowest_neighbour = f32::MAX;
+                for delta_y2 in -1_i32..=1 {
+                    for delta_x2 in -1_i32..=1 {
+                        let point_b_x = point_a_x.wrapping_add(delta_x2);
+                        let point_b_y = point_a_y.wrapping_add(delta_y2);
+                        let vector_b = if point_b_x == point_a_x && point_b_y == point_a_y {
+                            vector_a
+                        } else {
+                            cell_vector(self.seed, point_b_x, point_b_y)
+                        };
+                        let candidate_x = (point_b_x as f32 + vector_b[0]) * grid_size;
+                        let candidate_y = (point_b_y as f32 + vector_b[1]) * grid_size;
+                        let index =
+                            ((delta_y1 + delta_y2 + 2) * 5 + delta_x1 + delta_x2 + 2) as usize;
+                        let mut height = cache[index];
+                        if height == -1.0 {
+                            height = source.value(candidate_x, candidate_y);
+                            cache[index] = height;
+                        }
+                        if height < lowest_neighbour {
+                            lowest_neighbour = height;
+                            bx = candidate_x;
+                            by = candidate_y;
+                        }
+                    }
+                }
+                let height2 = segment_distance2(x, y, ax, ay, bx, by);
+                if height2 < min_height2 {
+                    min_height2 = height2;
+                }
+            }
+        }
+        clamp((f64::from(min_height2).sqrt() as f32) / grid_size, 0.0, 1.0)
+    }
+}
+
+fn segment_distance2(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
+    let point_x = px - ax;
+    let point_y = py - ay;
+    let segment_x = bx - ax;
+    let segment_y = by - ay;
+    let projection = point_x * segment_x + point_y * segment_y;
+    let length2 = segment_x * segment_x + segment_y * segment_y;
+    let scale = clamp(projection / length2, 0.0, 1.0);
+    let dx = segment_x * scale - point_x;
+    let dy = segment_y * scale - point_y;
+    dx * dx + dy * dy
+}
+
 fn nearest_cell(
     x: f32,
     y: f32,
@@ -1030,6 +1218,10 @@ impl Default for CacheValue {
 enum ModuleKind {
     Constant(f32),
     Source(Source),
+    ErosionRidge {
+        ridge: ErosionRidge,
+        source: Module,
+    },
     CellSource {
         config: SourceConfig,
         displacement: f32,
@@ -1399,6 +1591,10 @@ impl Module {
         Self(Box::new(ModuleKind::Source(source)))
     }
 
+    pub fn erosion_ridge(ridge: ErosionRidge, source: Self) -> Self {
+        Self(Box::new(ModuleKind::ErosionRidge { ridge, source }))
+    }
+
     pub fn cell_source(
         config: SourceConfig,
         displacement: f32,
@@ -1441,6 +1637,7 @@ impl Module {
         match self.0.as_ref() {
             ModuleKind::Constant(value) => *value,
             ModuleKind::Source(source) => source.value(x, y),
+            ModuleKind::ErosionRidge { ridge, source } => ridge.value(x, y, source),
             ModuleKind::CellSource {
                 config,
                 displacement,
@@ -1872,6 +2069,7 @@ impl Module {
         match self.0.as_ref() {
             ModuleKind::Constant(value) => *value,
             ModuleKind::Source(source) => source.min_value(),
+            ModuleKind::ErosionRidge { .. } => 0.0,
             ModuleKind::CellSource { .. }
             | ModuleKind::CellEdgeSource { .. }
             | ModuleKind::SineSource { .. }
@@ -1934,6 +2132,7 @@ impl Module {
         match self.0.as_ref() {
             ModuleKind::Constant(value) => *value,
             ModuleKind::Source(source) => source.max_value(),
+            ModuleKind::ErosionRidge { .. } => 1.0,
             ModuleKind::CellSource { .. }
             | ModuleKind::CellEdgeSource { .. }
             | ModuleKind::SineSource { .. }
@@ -2722,6 +2921,81 @@ mod tests {
         let perlin = Source::new(SourceKind::Perlin, config);
         assert_eq!(perlin.min_value().to_bits(), 0);
         assert_eq!(perlin.max_value().to_bits(), 0x3f800000);
+    }
+
+    #[test]
+    fn erosion_ridge_matches_engine_0_3_0() {
+        let perlin = |seed, scale: f32, octaves| {
+            Module::source(Source::new(
+                SourceKind::Perlin,
+                SourceConfig {
+                    seed,
+                    octaves,
+                    gain: 0.5,
+                    frequency: 1.0 / scale,
+                    lacunarity: 2.0,
+                    interpolation: Interpolation::Curve3,
+                },
+            ))
+        };
+        let source = perlin(991, 200.0, 4).warp(Domain::domain_warp(
+            perlin(77, 50.0, 2),
+            perlin(78, 50.0, 2),
+            Module::constant(20.0),
+        ));
+        let points = [
+            (0.0, 0.0),
+            (12.25, -98.75),
+            (-4096.5, 8192.25),
+            (123456.75, -0.125),
+        ];
+        let cases = [
+            (
+                ErosionRidge::full(123, 2, 0.65, 128.0, 0.15, 3.1, 0.8, ErosionMode::Constant),
+                source.clone(),
+                [0x3e7b3143, 0x3ed0cd11, 0x3e9902f0, 0x3e94ff56],
+                [0x3ddd83e0, 0x3ebbbbbc, 0x3e2ef49e, 0x3e75ed6f],
+            ),
+            (
+                ErosionRidge::full(
+                    -456,
+                    3,
+                    0.4,
+                    96.0,
+                    0.2,
+                    2.25,
+                    0.75,
+                    ErosionMode::InputLinear,
+                ),
+                source.clone(),
+                [0x3f131dca, 0x3ed624a8, 0x3ee20805, 0x3eb8f883],
+                [0x3f5f94f2, 0x3e13044a, 0x3dbf7efc, 0x3e6a298c],
+            ),
+            (
+                ErosionRidge::with_octaves(789, 2, 0.8, 64.0, ErosionMode::OutputLinear),
+                source,
+                [0x3ee92098, 0x3ee00a0d, 0x3ef53cd6, 0x3eb63175],
+                [0x3e2c711f, 0x3e6628f0, 0x3e8895d0, 0x3e51cc46],
+            ),
+            (
+                ErosionRidge::new(321, 0.7, 80.0, ErosionMode::Constant),
+                Module::constant(0.35),
+                [0x3e01136a, 0x3e119ee2, 0x3e821828, 0x3e8eee68],
+                [0x3cf65a30, 0x3d59b7c8, 0x3e5a1922, 0x3e7ec66a],
+            ),
+        ];
+        for (ridge, source, expected, expected_erosion) in cases {
+            let wrapped = ridge.wrap(source.clone());
+            assert_eq!(
+                [wrapped.min_value().to_bits(), wrapped.max_value().to_bits()],
+                [0, 0x3f800000]
+            );
+            assert_eq!(bits(points.map(|(x, y)| wrapped.value(x, y))), expected);
+            assert_eq!(
+                bits(points.map(|(x, y)| ridge.erosion_value(x, y, &source))),
+                expected_erosion
+            );
+        }
     }
 
     #[test]
