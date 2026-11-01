@@ -156,7 +156,7 @@ fn fill_columns<B: TerrainBlockStates>(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::super::{
         terraforged_engine::TerrainRegistry,
         terraforged_terrain_data::{NoiseData, NoiseSample},
@@ -165,12 +165,12 @@ mod tests {
     use crate::{DATA_VERSION, heightmap::HeightmapState, nbt::Tag, registry::BlockRegistry};
     use horizon_core::position::ChunkPos;
 
-    const AIR: BlockStateId = BlockStateId(0);
-    const STONE: BlockStateId = BlockStateId(2);
-    const WATER: BlockStateId = BlockStateId(3);
+    pub(crate) const AIR: BlockStateId = BlockStateId(0);
+    pub(crate) const STONE: BlockStateId = BlockStateId(2);
+    pub(crate) const WATER: BlockStateId = BlockStateId(3);
 
     #[derive(Clone, Copy)]
-    struct State(u32);
+    pub(crate) struct State(u32);
 
     impl HeightmapState for State {
         fn is_air(self) -> bool {
@@ -194,7 +194,7 @@ mod tests {
         }
     }
 
-    struct Properties;
+    pub(crate) struct Properties;
 
     impl TerrainBlockStates for Properties {
         type State = State;
@@ -204,7 +204,7 @@ mod tests {
         }
     }
 
-    fn registry() -> BlockRegistry {
+    pub(crate) fn registry() -> BlockRegistry {
         BlockRegistry::from_nbt(&Tag::compound([
             ("DataVersion", Tag::Int(DATA_VERSION)),
             (

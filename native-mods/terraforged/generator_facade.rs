@@ -25,14 +25,17 @@
 // Adapted from TerraForged Reimagined (https://github.com/Romoslayer/TerraForged-Reimagined, a24d450):
 // `src/main/java/com/terraforged/mod/worldgen/Generator.java` (`createState`'s seed capture, `getSeed`,
 // `getChunkData`, `getChunkDataAsync`, `getMinY`, `getSeaLevel`, `getGenDepth`, the terrain-cache hints and drop,
-// `getBaseHeight`, `getBaseColumn`) and `Seeds.java`. MIT License, Copyright (c) 2020 TerraForged, Copyright (c)
+// `getBaseHeight`, `getBaseColumn`, and `buildTerrain`'s hand-off to `fillFromNoise`) and `Seeds.java`. MIT License, Copyright (c) 2020 TerraForged, Copyright (c)
 // 2026 Romoslayer; see `LICENSE-TERRAFORGED-REIMAGINED`.
 
 use super::{
+    super::terrain::{TerrainBlockStates, TerrainChunk, TerrainError},
+    terraforged_chunk_fill::fill_chunk,
     terraforged_eroded_noise_generator::ErodedNoiseGenerator,
     terraforged_terrain_cache::{TerrainCache, TerrainDataHandle, TerrainTask},
     terraforged_terrain_levels::TerrainLevels,
 };
+use crate::registry::BlockStateId;
 use std::sync::atomic::{AtomicI32, AtomicI64, Ordering};
 
 /// `Seeds.get(long)`: the level seed as TerraForged's noise uses it, narrowed to a Java `int` (its low 32 bits).
@@ -164,6 +167,35 @@ impl TerraForgedGenerator {
         self.terrain.hint(seed, chunk_x, chunk_z);
     }
 
+    /// The terrain stage's first step: Reimagined's `buildTerrain` hands the chunk to
+    /// `terrainCache().combineAsync(EXECUTOR, seed, chunk, ..)` with the captured [`Self::seed`] (6dd607eb's
+    /// `fillFromNoise` passes `Seeds.get(state)` instead), which waits for the chunk's cached `TerrainData` at the
+    /// chunk's own position and runs `fillFromNoise`'s `ChunkUtil.fillChunk` + `primeHeightmaps` with `getSeaLevel()`
+    /// ([`fill_chunk`]). Returns that cache entry's data, for the later steps of the stage.
+    ///
+    /// Java runs the fill as a continuation on its executor; the port waits for the cache task on the calling thread
+    /// and fills there (same data, same blocks). Like Java it neither hints nor drops: the entry stays cached until
+    /// [`Self::drop_chunk`] (`applyBiomeDecoration`). The fill writes inside `chunk`'s own build range
+    /// (`min_y()`..`min_y() + height()`), clipping terrain outside it ([`fill_chunk`]); TerraForged's levels are not
+    /// rescaled to it. Not ported here: the rest of Java's `fillFromNoise` (`buildStructureTerrain`, Deep Caves,
+    /// Strata) and the stage's surface and carver steps.
+    ///
+    /// `Err` where the chunk refuses a write ([`fill_chunk`]). Panics where Java's future completes exceptionally: a
+    /// chunk whose region build failed (the cache task panicked; see [`TerrainCache::get_now`]). A failure after the
+    /// region is read leaves the data unfilled and the chunk is filled from it, as in Java
+    /// ([`ErodedNoiseGenerator::generate`]).
+    pub fn fill_from_noise<B: TerrainBlockStates>(
+        &self,
+        chunk: &mut TerrainChunk<'_, B>,
+        stone: BlockStateId,
+        water: BlockStateId,
+    ) -> Result<TerrainDataHandle<ErodedNoiseGenerator>, TerrainError> {
+        let position = chunk.position();
+        let terrain = self.chunk_data(self.seed(), position.x, position.z);
+        fill_chunk(self.sea_level(), chunk, &terrain, stone, water)?;
+        Ok(terrain)
+    }
+
     /// `terrainCache().drop(seed, pos)`, as `applyBiomeDecoration` calls it with `Seeds.get(region.getSeed())`.
     pub fn drop_chunk(&self, seed: i32, chunk_x: i32, chunk_z: i32) {
         self.terrain.remove(seed, chunk_x, chunk_z);
@@ -242,11 +274,13 @@ fn base_column_from_noise(levels: TerrainLevels, base_noise: f32, height_noise: 
 mod tests {
     use super::super::{
         terraforged::Module,
+        terraforged_chunk_fill::tests::{AIR, Properties, STONE, WATER, registry},
         terraforged_erosion::{ErosionFilterSettings, HeightmapSmoothingSettings},
         terraforged_noise_generator::tests::{generator, generator_with},
         terraforged_terrain_blender::TerrainNoise,
     };
     use super::*;
+    use horizon_core::position::ChunkPos;
     use std::{
         panic::{AssertUnwindSafe, catch_unwind},
         sync::Arc,
@@ -604,5 +638,34 @@ q 3 -770 1240 3eafbae6 3f060470 3f0530fb 134 134 134 134 134 0
         let l = levels(0);
         assert!(catch_unwind(AssertUnwindSafe(|| base_column_from_noise(l, -1.0, -1.0))).is_err());
         assert!(catch_unwind(AssertUnwindSafe(|| base_column_from_noise(l, 0.25, -0.5))).is_err());
+    }
+
+    /// The stage fills the chunk at its own position from the cache entry of the captured seed (`Seeds.get`, not the
+    /// raw level seed), leaves that entry cached and returns it; `drop_chunk` removes it.
+    #[test]
+    fn fill_from_noise_uses_chunk_position_and_keeps_terrain_for_later_stages() {
+        let g = facade(0, 0, 0, 25, 0);
+        g.capture_seed((5_i64 << 32) | 7);
+        let blocks = registry();
+        let mut chunk =
+            TerrainChunk::new(ChunkPos::new(-2, 3), -64, 544, &blocks, Properties).unwrap();
+        let terrain = g.fill_from_noise(&mut chunk, STONE, WATER).unwrap();
+        assert!(terrain.ptr_eq(&g.chunk_data(7, -2, 3)));
+        assert!(!terrain.ptr_eq(&g.chunk_data(7, 3, -2)));
+        for z in 0..16 {
+            for x in 0..16 {
+                let height = terrain.height_at(x, z);
+                let water = TerrainLevels::water_level(x, z, g.sea_level(), &terrain);
+                let top = height.max(water);
+                assert_eq!(chunk.block(x, height, z), STONE);
+                assert_eq!(
+                    chunk.block(x, top, z),
+                    if top == height { STONE } else { WATER }
+                );
+                assert_eq!(chunk.block(x, top + 1, z), AIR);
+            }
+        }
+        g.drop_chunk(7, -2, 3);
+        assert!(!terrain.ptr_eq(&g.chunk_data(7, -2, 3)));
     }
 }
