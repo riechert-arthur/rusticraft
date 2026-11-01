@@ -401,7 +401,7 @@ Runtime-seeded scalar graphs now propagate the seed through constants, octave so
 value, alpha, bias, clamp, inversion, mapping, powers, scaling, thresholds and all five arithmetic
 combiners. `Module::try_value_seed_first` returns an error for nodes not ported to runtime seeding;
 it never silently falls back to legacy sampling. Legacy sampling and serialized reseeding remain
-unchanged. Terraces and other graph nodes still need this path
+unchanged. Legacy and advanced terraces and other graph nodes still need this path
 before current-source terrain blending can use it.
 
 The scalar graph fixtures cover 15 graphs, four seeds and four coordinates (240 Java samples),
@@ -430,6 +430,10 @@ interpolation modes and nine exact falloff-boundary samples; Rust also checks la
 Runtime-seeded caches now preserve Noise2D's coordinate-only key: a hit retains the first seed's
 value, signed zero coordinates compare equal, NaN coordinates always miss, and failed child samples
 are not stored. `tools/terraforged/TerraForgedSeededCacheOracle.java` records the direct Java bits.
+
+Standard terraces now propagate runtime seeds through source, ramp, cliff, and ramp-height modules
+while retaining branch-lazy child evaluation and exact step boundaries. The direct Java oracle is
+`tools/terraforged/TerraForgedSeededTerraceOracle.java`.
 
 The noise layer is ordinary Rust and can be tested without Minecraft resources:
 
