@@ -501,6 +501,9 @@ steppe-to-grassland remap across runtime seeds. Raw fixture bits come from the c
 `tools/terraforged/TerraForgedCurrentClimateOracle.java` regenerates the 24 samples when compiled with
 the current TerraForged `noise` and `engine` source trees, their `terraforged/biome_types.bin` resource,
 and the Cereal dependency from the original 0.3.1 artifact.
+The current biome-sampler bridge now scales block coordinates by terrain frequency and composes
+continent, river, and climate sampling in Java order. Climate-only and edge-shape queries preserve
+the caller's terrain sample just like `IBiomeSampler.Sampler`.
 
 The scalar graph fixtures cover 15 graphs, four seeds and four coordinates (240 Java samples),
 including wrapped seed addition and mixed Perlin/seed-sensitive sources. Regenerate their hashes
