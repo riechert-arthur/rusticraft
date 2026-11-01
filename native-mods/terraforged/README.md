@@ -2154,22 +2154,29 @@ limits included, seven build ranges from `128..192` to `-2032..2032`, three cave
 the sampler's call trace and every cell of every section; failures at five calls, a reused resource and the band
 tests at the `int` limits are compared too. The tests match all of them.
 
-The cave biome sampler (`cave_biome_sampler.rs`, `CaveBiomeSampler`) is Reimagined's `CaveBiomeSampler` (a24d450,
-MIT, as above): one simplex noise (`Noise.singleSimplex`, seed + 124897 with Java `int` wrap, frequency `1F /
-scale`, mapped to `(1 + n) * 0.5` and clamped to 0..1) picks from an equal-weight `WeightMap` of the GLOBAL pool
-(`terraforged:cave`) or the UNIQUE pool (the registry's non-surface biomes: the `NON_SURFACE` tag, or a path
-`cave/…` or `…_caves`; an empty UNIQUE pool falls back to GLOBAL). `get_layer_biome`, the cave layer #159's fill
-asks for, first reads a coarser mask (seed + 987541, frequency `1F / 1600F`) and has no cave biome (`None`, the
-column keeps its surface biome) below 0.62. It takes block coordinates: Reimagined's `Source.getLayerBiome` shifts
-the quart coordinates by 2 and passes the captured world seed. TerraForged 6dd607eb has the choice noise and the
-two pools but no mask, no layer lookup and no fallback; the pools themselves (biome names onto Horizon's registry)
-come with a later layer, and Reimagined's startup warning about incomplete cave biomes is not ported.
+The cave biome sampler (`cave_biome_sampler.rs`, `CaveBiomeSampler`) is TerraForged 6dd607eb's `CaveBiomeSampler`
+(MIT): one simplex noise (`Noise.singleSimplex`, seed + 124897 with Java `int` wrap, frequency `1F / scale`, mapped to
+`(1 + n) * 0.5` and clamped to 0..1) picks from an equal-weight `WeightMap` of the GLOBAL pool (`terraforged:cave`) or
+the UNIQUE pool. `CaveBiomeSampler::new` keeps the two pools independent, as 6dd607eb does: an empty pool stays empty
+and its lookups are `None` (Java's `WeightMap.getValue` returns null). 6dd607eb's own UNIQUE pool is every registry
+biome (its `UNDERGROUND` filter is commented out), and its biome source never returns a cave biome: only its noise-cave
+carver (`CarverChunk`) asks the sampler.
 
-`CaveBiomeSamplerOracle.java` (`.local/terraforged/oracles/cave_biome_sampler/`, `run.sh`) compiles Reimagined's
-own `CaveBiomeSampler`, `WeightMap`, `MathUtil`, `Noise` and `NoiseUtil` from source with stub registries and runs
-them interpreted and with `-Xcomp`: 8 scales (`0` and the `int` limits included), 6 pools (empty, fallback, one to
-seven biomes), 16 seeds (the offsets' wrap edges included) and 310 positions, 238,080 samples of the choice and
-mask bits and the layer, GLOBAL and UNIQUE choices. The test matches every digest in debug and release builds.
+Two parts are Reimagined's (a24d450, MIT, as above) and serve only the Reimagined chunk biome layer
+(`create_biomes`): `CaveBiomeSampler::reimagined`, which builds the UNIQUE pool from the registry's non-surface biomes
+(the `NON_SURFACE` tag, or a path `cave/…` or `…_caves`) and lets an empty UNIQUE pool fall back to GLOBAL, and
+`get_layer_biome`, the cave layer #159's fill asks for, which first reads a coarser mask (seed + 987541, frequency
+`1F / 1600F`) and has no cave biome (`None`, the column keeps its surface biome) below 0.62. It takes block
+coordinates: Reimagined's `Source.getLayerBiome` shifts the quart coordinates by 2 and passes the captured world seed.
+Reimagined's startup warning about incomplete cave biomes is not ported.
+
+Two oracles live outside Git in `.local/terraforged/oracles/cave_biome_sampler/`. `6dd607eb/run.sh` compiles
+6dd607eb's own `CaveBiomeSampler`, `WeightMap` and `MathUtil` with Noise2D's `Noise` and `NoiseUtil` from source over
+stub registries and runs them interpreted and with `-Xcomp`: 8 scales (`0` and the `int` limits included), 6
+registries (empty, one biome with and without `terraforged:cave`, up to nine biomes), 15 seeds and 310 positions,
+223,200 samples of the choice bits and the GLOBAL and UNIQUE choices. `run.sh` does the same for Reimagined's
+classes (6 pools, the fallback included, 16 seeds, 238,080 samples, with the mask bits and the layer choice). The
+tests match every digest of both in debug and release builds.
 
 The biome pool fallback (`biome_map.rs`, `BiomePools::fill_empty_climates`) is Reimagined's
 `BiomeMapManager.fillEmptyClimates` (a24d450, MIT, as above): every climate type whose pool is missing or empty takes

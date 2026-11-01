@@ -170,7 +170,7 @@ impl LiveBiomeBindings {
             fallback,
             overrides,
             temperatures: entries.iter().map(|entry| entry.temperature).collect(),
-            cave: CaveBiomeSampler::new(CAVE_SCALE, global, special),
+            cave: CaveBiomeSampler::reimagined(CAVE_SCALE, global, special),
         })
     }
 

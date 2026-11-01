@@ -1129,7 +1129,7 @@ terraforged:cave/deep=1031424 windswept_hills=1707552\n\
             })
             .map(|name| Arc::new(*name))
             .collect();
-        CaveBiomeSampler::new(800, global, special)
+        CaveBiomeSampler::reimagined(800, global, special)
     }
 
     fn chunk_biome_lines() -> Vec<String> {
