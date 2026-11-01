@@ -192,6 +192,9 @@ low-edge, low-gradient coast cells with the shared beach terrain identity.
 Hydraulic-erosion primitives reproduce TerraForged's filter settings, paired-seed fast random stream,
 and radius-four normalized brush cache, including its reused interior brush layout.
 
+Hydraulic erosion runs TerraForged's deterministic chunk-seeded droplet simulation, bilinear gradient
+sampling, weighted erosion, deposition, evaporation, and terrain-aware strength modifier.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
