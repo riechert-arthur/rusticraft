@@ -4660,23 +4660,45 @@ mod tests {
             (world, rivers)
         }
 
-        /// `new SimpleRiverGenerator(continent, context)`, with `GeneratorContext`'s seed root `(int) world.seed`
-        /// and `Levels(world)`.
-        fn generator<C: SimpleContinentSampler>(
-            continent: C,
+        /// `SimpleRiverGeneratorOracle.continent(kind, continent_seed, ctx)`: the multi (0), single (1) or advanced
+        /// (2) continent generator, built from `GeneratorContext.createNoCache(settings(variant))` (seed root
+        /// `(int) world.seed`, `Levels(world)`); its `SimpleRiverGenerator` is the one the oracle builds.
+        enum Continent {
+            Simple(SimpleContinentGenerator),
+            Advanced(AdvancedContinentGenerator),
+        }
+
+        impl Continent {
+            fn rivermap(&self, x: i32, z: i32) -> Arc<Rivermap> {
+                match self {
+                    Self::Simple(continent) => continent.rivermap(x, z),
+                    Self::Advanced(continent) => continent.rivermap(x, z),
+                }
+            }
+        }
+
+        fn continent(
+            kind: i32,
+            continent_seed: i32,
             variant: i32,
             registry: &Arc<TerrainRegistry>,
-        ) -> SimpleRiverGenerator<C> {
+        ) -> Continent {
             let (world, rivers) = settings(variant);
             let levels = Levels::new(world.properties.world_height, world.properties.sea_level);
-            SimpleRiverGenerator::new(
-                continent,
-                world.seed as i32,
-                &world,
-                &rivers,
-                levels,
-                Arc::clone(registry),
-            )
+            let seed = &mut Seed::new(continent_seed);
+            let root = world.seed as i32;
+            let registry = Arc::clone(registry);
+            match kind {
+                0 => Continent::Simple(SimpleContinentGenerator::multi(
+                    seed, root, world, rivers, levels, registry,
+                )),
+                1 => Continent::Simple(SimpleContinentGenerator::single(
+                    seed, root, world, rivers, levels, registry,
+                )),
+                _ => Continent::Advanced(AdvancedContinentGenerator::new(
+                    seed, root, world, rivers, levels, registry,
+                )),
+            }
         }
 
         const POINTS: [(f32, f32); 3] = [(1000.0, -2000.0), (-7000.0, 3000.0), (25000.0, 18000.0)];
@@ -4740,33 +4762,25 @@ mod tests {
                     let (world, _) = settings(variant);
                     let scale = world.continent.continent_scale;
                     for continent_seed in [12_345, -98_765] {
-                        let mut seed = Seed::new(continent_seed);
-                        if kind == 2 {
-                            let continent = AdvancedContinentGenerator::new(&mut seed, world);
-                            fold_continent(
-                                &generator(&continent, variant, &registry),
+                        match continent(kind, continent_seed, variant, &registry) {
+                            Continent::Advanced(continent) => fold_continent(
+                                &continent.river_generator(),
                                 |x, z| continent.nearest_center(x, z),
                                 false,
                                 scale,
                                 &registry,
                                 &mut fold,
                                 &mut counts,
-                            );
-                        } else {
-                            let continent = if kind == 0 {
-                                SimpleContinentGenerator::multi(&mut seed, world)
-                            } else {
-                                SimpleContinentGenerator::single(&mut seed, world)
-                            };
-                            fold_continent(
-                                &generator(&continent, variant, &registry),
+                            ),
+                            Continent::Simple(continent) => fold_continent(
+                                &continent.river_generator(),
                                 |x, z| continent.nearest_center(x, z),
                                 true,
                                 scale,
                                 &registry,
                                 &mut fold,
                                 &mut counts,
-                            );
+                            ),
                         }
                     }
                 }
@@ -4777,7 +4791,50 @@ mod tests {
             );
         }
 
-        /// Extreme and negative continent cells, with the ids the continents' caches build.
+        /// The multi, single and advanced continents' `getRivermap`: their river caches over their own
+        /// `SimpleRiverGenerator`, for `RiverCacheOracle`'s cells plus the centres nearest `POINTS`, against
+        /// `RiverCacheOracle.java`'s `simple` line.
+        #[test]
+        fn rivermaps_match_engine() {
+            const CELLS: [(i32, i32); 6] = [
+                (-7, 9),
+                (0, 0),
+                (17, -9),
+                (i32::MIN, i32::MAX),
+                (-1, -1),
+                (3, i32::MIN),
+            ];
+            let registry = Arc::new(TerrainRegistry::new());
+            let mut fold = Fold(17);
+            let (mut networks, mut nodes) = (0, 0);
+            for kind in 0..3 {
+                for variant in 0..5 {
+                    let continent = continent(kind, -98_765, variant, &registry);
+                    let centers = POINTS.map(|(px, pz)| {
+                        let center = match &continent {
+                            Continent::Simple(continent) => continent.nearest_center(px, pz),
+                            Continent::Advanced(continent) => continent.nearest_center(px, pz),
+                        };
+                        (unpack_left(center), unpack_right(center))
+                    });
+                    for (x, z) in CELLS.into_iter().chain(centers) {
+                        let map = continent.rivermap(x, z);
+                        assert!(Arc::ptr_eq(&map, &continent.rivermap(x, z)));
+                        fold.mix(map.x());
+                        fold.mix(map.z());
+                        fold.mix(map.networks.len() as i32);
+                        networks += map.networks.len();
+                        for network in &map.networks {
+                            nodes += mix_network(&mut fold, network);
+                        }
+                    }
+                }
+            }
+            assert_eq!((networks, nodes, fold.0), (675, 1710, -1_239_690_098));
+        }
+
+        /// Extreme and negative continent cells, through the continents' own river caches (`getRivermap`), which
+        /// build the ids the oracle passes `generateRivers`.
         #[test]
         fn extreme_cells_match_engine() {
             const CELLS: [(i32, i32); 4] = [
@@ -4787,17 +4844,13 @@ mod tests {
                 (-3001, 77),
             ];
             let registry = Arc::new(TerrainRegistry::new());
-            let (world, _) = settings(0);
             let mut fold = Fold(17);
             let (mut networks, mut nodes) = (0, 0);
-            let mut fold_maps = |generate: &dyn Fn(i32, i32, i64) -> Rivermap, legacy_id: bool| {
+            for kind in 0..3 {
+                let continent = continent(kind, -98_765, 0, &registry);
                 for (x, z) in CELLS {
-                    let id = if legacy_id {
-                        (i64::from(z) << 32) | (i64::from(x) & 0xffff_ffff)
-                    } else {
-                        pack(x, z)
-                    };
-                    let map = generate(x, z, id);
+                    let map = continent.rivermap(x, z);
+                    assert!(Arc::ptr_eq(&map, &continent.rivermap(x, z)));
                     fold.mix(map.x());
                     fold.mix(map.z());
                     fold.mix(map.networks.len() as i32);
@@ -4806,31 +4859,19 @@ mod tests {
                         nodes += mix_network(&mut fold, network);
                     }
                 }
-            };
-            for kind in 0..2 {
-                let mut seed = Seed::new(-98_765);
-                let continent = if kind == 0 {
-                    SimpleContinentGenerator::multi(&mut seed, world)
-                } else {
-                    SimpleContinentGenerator::single(&mut seed, world)
-                };
-                let generator = generator(&continent, 0, &registry);
-                fold_maps(&|x, z, id| generator.generate_rivers(x, z, id), true);
             }
-            let continent = AdvancedContinentGenerator::new(&mut Seed::new(-98_765), world);
-            let generator = generator(&continent, 0, &registry);
-            fold_maps(&|x, z, id| generator.generate_rivers(x, z, id), false);
             assert_eq!((networks, nodes, fold.0), (96, 96, 1_391_867_816));
         }
 
         #[test]
         fn samples_match_engine() {
             let registry = Arc::new(TerrainRegistry::new());
-            let (world, _) = settings(0);
-            let continent = SimpleContinentGenerator::multi(&mut Seed::new(12_345), world);
+            let Continent::Simple(continent) = continent(0, 12_345, 0, &registry) else {
+                unreachable!()
+            };
             let center = continent.nearest_center(1000.0, -2000.0);
             let (x, z) = (unpack_left(center), unpack_right(center));
-            let map = generator(&continent, 0, &registry).generate_rivers(
+            let map = continent.river_generator().generate_rivers(
                 x,
                 z,
                 (i64::from(z) << 32) | (i64::from(x) & 0xffff_ffff),

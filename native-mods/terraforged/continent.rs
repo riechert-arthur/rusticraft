@@ -28,11 +28,14 @@ use super::{
         SourceKind, cell_vector, floor, map, value_coord_2d,
     },
     terraforged_engine::{
-        Cell, ContinentShape, ControlPoints, Seed, TerrainRegistry, WorldSettings,
+        Cell, ContinentShape, ControlPoints, Levels, RiverSettings, Seed, TerrainRegistry,
+        WorldSettings,
     },
     terraforged_populator::Populator,
+    terraforged_river::{LegacyRiverCache, Rivermap, SimpleRiverGenerator},
     terraforged_util::{pack, unpack_left, unpack_right},
 };
+use std::sync::Arc;
 
 /// The nearest jittered cell of a [`SimpleContinentGenerator::search`], in cell units.
 struct Search {
@@ -46,8 +49,8 @@ struct Search {
 
 /// Engine's simple continent generator (`ContinentGenerator`, `MultiContinentGenerator`,
 /// `SingleContinentGenerator`): continents are jittered cells of a warped cellular lattice, shaped by a simplex
-/// mask near their edges. Its river map (`getRivermap`, built from `SimpleRiverGenerator`) is not ported yet;
-/// building it draws no seeds.
+/// mask near their edges. Its [`LegacyRiverCache`] holds the river maps of its [`SimpleRiverGenerator`]
+/// (`getRivermap`); building it draws no seeds.
 pub struct SimpleContinentGenerator {
     seed: i32,
     frequency: f32,
@@ -61,20 +64,53 @@ pub struct SimpleContinentGenerator {
     warp: Domain,
     shape: Module,
     single_center: Option<(i32, i32)>,
+    river_cache: LegacyRiverCache,
+    /// What `ContinentGenerator` builds its `SimpleRiverGenerator` from: the `GeneratorContext`'s seed root, world
+    /// and river settings and levels, and the world's terrain registry.
+    river_root_seed: i32,
+    world: WorldSettings,
+    rivers: RiverSettings,
+    levels: Levels,
+    registry: Arc<TerrainRegistry>,
 }
 
 impl SimpleContinentGenerator {
-    /// `MultiContinentGenerator`: draws four seeds (generator, two warps, shape) from `seed`.
-    pub fn multi(seed: &mut Seed, settings: WorldSettings) -> Self {
-        Self::new(seed, settings, false)
+    /// `new MultiContinentGenerator(seed, context)`: draws four seeds (generator, two warps, shape) from `seed`.
+    /// The rest is what Engine reads from the `GeneratorContext` for the river generator: `root_seed` is
+    /// `context.seed.root()`, `levels` is `context.levels`, and `registry` is the world's terrain registry.
+    pub fn multi(
+        seed: &mut Seed,
+        root_seed: i32,
+        settings: WorldSettings,
+        rivers: RiverSettings,
+        levels: Levels,
+        registry: Arc<TerrainRegistry>,
+    ) -> Self {
+        Self::new(seed, root_seed, settings, rivers, levels, registry, false)
     }
 
-    /// `SingleContinentGenerator`: as [`Self::multi`], keeping only the continent nearest to (0, 0).
-    pub fn single(seed: &mut Seed, settings: WorldSettings) -> Self {
-        Self::new(seed, settings, true)
+    /// `new SingleContinentGenerator(seed, context)`: as [`Self::multi`], keeping only the continent nearest to
+    /// (0, 0).
+    pub fn single(
+        seed: &mut Seed,
+        root_seed: i32,
+        settings: WorldSettings,
+        rivers: RiverSettings,
+        levels: Levels,
+        registry: Arc<TerrainRegistry>,
+    ) -> Self {
+        Self::new(seed, root_seed, settings, rivers, levels, registry, true)
     }
 
-    fn new(seed: &mut Seed, settings: WorldSettings, single: bool) -> Self {
+    fn new(
+        seed: &mut Seed,
+        root_seed: i32,
+        settings: WorldSettings,
+        rivers: RiverSettings,
+        levels: Levels,
+        registry: Arc<TerrainRegistry>,
+        single: bool,
+    ) -> Self {
         let tectonic_scale = settings.continent.continent_scale.wrapping_mul(4);
         let continent_scale = settings.continent.continent_scale / 2;
         let generator_seed = seed.next();
@@ -112,12 +148,39 @@ impl SimpleContinentGenerator {
             warp: first_warp.compound(second_warp),
             shape,
             single_center: None,
+            river_cache: LegacyRiverCache::new(),
+            river_root_seed: root_seed,
+            world: settings,
+            rivers,
+            levels,
+            registry,
         };
         if single {
             let center = generator.nearest_center(0.0, 0.0);
             generator.single_center = Some((unpack_left(center), unpack_right(center)));
         }
         generator
+    }
+
+    /// The `SimpleRiverGenerator` `ContinentGenerator` holds. It is stateless, so building one per call is the same
+    /// as Engine's single instance.
+    pub fn river_generator(&self) -> SimpleRiverGenerator<&Self> {
+        SimpleRiverGenerator::new(
+            self,
+            self.river_root_seed,
+            &self.world,
+            &self.rivers,
+            self.levels,
+            Arc::clone(&self.registry),
+        )
+    }
+
+    /// `getRivermap(x, z)`: the river map of continent cell (`x`, `z`) from the legacy river cache, generated with
+    /// id `NoiseUtil.seed(x, z)` on a miss.
+    pub fn rivermap(&self, x: i32, z: i32) -> Arc<Rivermap> {
+        self.river_cache.get_rivers(x, z, |x, z, id| {
+            self.river_generator().generate_rivers(x, z, id)
+        })
     }
 
     /// `getEdgeValue`: the shaped continent edge at a block position. Unlike [`Populator::value`], a
@@ -392,6 +455,23 @@ pub(super) mod tests {
         cell
     }
 
+    /// A generator for continent-only tests: default rivers, a throwaway registry.
+    fn continent_only(
+        seed: &mut Seed,
+        settings: WorldSettings,
+        single: bool,
+    ) -> SimpleContinentGenerator {
+        SimpleContinentGenerator::new(
+            seed,
+            seed.root(),
+            settings,
+            RiverSettings::default(),
+            Levels::from_properties(settings.properties),
+            Arc::new(TerrainRegistry::new()),
+            single,
+        )
+    }
+
     // Zeros, grid points, huge values, ±inf, NaN, the `(int)` saturation edges and the smallest subnormal.
     #[rustfmt::skip]
     pub(crate) const XS: [f32; 19] = [
@@ -452,9 +532,9 @@ pub(super) mod tests {
         let (single, seed_value, settings) = config(index);
         let mut seed = Seed::new(seed_value);
         let generator = if single {
-            SimpleContinentGenerator::single(&mut seed, settings)
+            continent_only(&mut seed, settings, true)
         } else {
-            SimpleContinentGenerator::multi(&mut seed, settings)
+            continent_only(&mut seed, settings, false)
         };
         mix(h, i64::from(seed.get()));
         for x in XS {
@@ -511,9 +591,9 @@ pub(super) mod tests {
         let registry = TerrainRegistry::new();
         let settings = config(0).2;
         let mut seed = Seed::new(12_345);
-        let multi = SimpleContinentGenerator::multi(&mut seed, settings);
+        let multi = continent_only(&mut seed, settings, false);
         let mut seed = Seed::new(12_345);
-        let single = SimpleContinentGenerator::single(&mut seed, settings);
+        let single = continent_only(&mut seed, settings, true);
         // (x, z, continentId, continentEdge, continentX, continentZ) after `apply` on a fresh cell; the single
         // generator zeroes all four outside the continent around (0, 0).
         for (generator, expected) in [
