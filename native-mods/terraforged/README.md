@@ -768,6 +768,9 @@ filters (`WorldFilters::apply_tile`) and the tile generator are later layers. It
 borderless ones, and one whose slots hold aliasing chunks made before the fill) with stub stages: the stage trace with
 every coordinate and lookup, every cell of the backing and every chunk read afterwards.
 
+Cached tile traversal delegates each integer block to TerraForged's contextual heightmap cache, copying
+completed cells on hits without rerunning base, river, lookup, or climate stages.
+
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views and the tile heightmap fill. They change nothing in the game, so there is

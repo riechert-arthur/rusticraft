@@ -25,6 +25,7 @@
 use super::{
     terraforged_engine::{Cell, TerrainRegistry},
     terraforged_filters::Filterable,
+    terraforged_heightmap::HeightmapCache,
     terraforged_river::Rivermap,
     terraforged_util::{pack, unpack_left, unpack_right},
 };
@@ -271,6 +272,44 @@ impl Tile {
                         apply_rivers(cell, x, z, &rivermap);
                         apply_climate(cell, x, z);
                         current = Some(rivermap);
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn generate_cached_heightmap(
+        &mut self,
+        cache: &HeightmapCache,
+        mut apply_base: impl FnMut(&mut Cell, f32, f32),
+        mut lookup_rivermap: impl FnMut(i32, i32) -> Arc<Rivermap>,
+        mut apply_rivers: impl FnMut(&mut Cell, f32, f32, &Rivermap),
+        mut apply_climate: impl FnMut(&mut Cell, f32, f32),
+    ) {
+        let mut current = None;
+        for chunk_z in 0..self.chunk_size.total {
+            let world_chunk_z = self.chunk_z.wrapping_add(chunk_z).wrapping_sub(self.border);
+            let region_block_z = chunk_z.wrapping_shl(4);
+            for chunk_x in 0..self.chunk_size.total {
+                let world_chunk_x = self.chunk_x.wrapping_add(chunk_x).wrapping_sub(self.border);
+                let region_block_x = chunk_x.wrapping_shl(4);
+                for delta_z in 0..16 {
+                    let region_z = region_block_z.wrapping_add(delta_z);
+                    let world_z = world_chunk_z.wrapping_shl(4).wrapping_add(delta_z);
+                    for delta_x in 0..16 {
+                        let region_x = region_block_x.wrapping_add(delta_x);
+                        let world_x = world_chunk_x.wrapping_shl(4).wrapping_add(delta_x);
+                        let index = self.block_size.index_of(region_x, region_z) as usize;
+                        current = cache.generate(
+                            &mut self.blocks[index],
+                            world_x,
+                            world_z,
+                            current,
+                            |cell, x, z| apply_base(cell, x, z),
+                            &mut lookup_rivermap,
+                            |cell, x, z, map| apply_rivers(cell, x, z, map),
+                            |cell, x, z| apply_climate(cell, x, z),
+                        );
                     }
                 }
             }
@@ -547,6 +586,7 @@ impl ChunkWriter<'_> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::terraforged_engine::Levels;
     use super::super::terraforged_filters::java_cell_raw;
     use super::super::terraforged_river::GenWarp;
     use super::*;
@@ -1362,5 +1402,57 @@ h 5 394 a824e4624bec2cf6 a63ce1c7f0e710c1 53f9d0616309a431
             out += &format!("h {run} {lookups} {trace:x} {cells:x} {chunks:x}\n");
         }
         assert_eq!(out, ORACLE_HEIGHTMAP);
+    }
+
+    #[test]
+    fn cached_tile_heightmap_generation_matches_engine_0_3_0() {
+        let terrains = Arc::new(TerrainRegistry::new());
+        let cache =
+            HeightmapCache::with_capacity(Levels::new(256, 63), Arc::clone(&terrains), 8_192);
+        let base_calls = AtomicUsize::new(0);
+        let river_calls = AtomicUsize::new(0);
+        let climate_calls = AtomicUsize::new(0);
+        let lookups = AtomicUsize::new(0);
+        let generate = |tile: &mut Tile| {
+            tile.generate_cached_heightmap(
+                &cache,
+                |cell, x, z| {
+                    base_calls.fetch_add(1, Ordering::Relaxed);
+                    cell.value = x * 1_000.0 + z;
+                    cell.continent_x = 7;
+                    cell.continent_z = -9;
+                },
+                |x, z| {
+                    lookups.fetch_add(1, Ordering::Relaxed);
+                    Arc::new(Rivermap::new(x, z, Vec::new(), GenWarp::direct()))
+                },
+                |cell, _, _, _| {
+                    river_calls.fetch_add(1, Ordering::Relaxed);
+                    cell.river_mask = 0.25;
+                },
+                |cell, _, _| {
+                    climate_calls.fetch_add(1, Ordering::Relaxed);
+                    cell.temperature = 0.75;
+                },
+            );
+        };
+
+        let mut first = Tile::new(0, 0, 1, 1, &terrains);
+        generate(&mut first);
+        let mut second = Tile::new(0, 0, 1, 1, &terrains);
+        generate(&mut second);
+
+        assert_eq!(base_calls.load(Ordering::Relaxed), 4_096);
+        assert_eq!(river_calls.load(Ordering::Relaxed), 4_096);
+        assert_eq!(climate_calls.load(Ordering::Relaxed), 4_096);
+        assert_eq!(lookups.load(Ordering::Relaxed), 1);
+        for tile in [&first, &second] {
+            let first_cell = tile.raw_cell(0, 0).unwrap();
+            let last_cell = tile.raw_cell(63, 63).unwrap();
+            assert_eq!(first_cell.value, -16_016.0);
+            assert_eq!(last_cell.value, 47_047.0);
+            assert_eq!(first_cell.river_mask.to_bits(), 0x3e800000);
+            assert_eq!(last_cell.temperature.to_bits(), 0x3f400000);
+        }
     }
 }
