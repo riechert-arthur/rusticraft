@@ -39,6 +39,9 @@ minimum and subtraction nodes, including the original combiner bound calculation
 The cache layer adds TerraForged's shared single-coordinate memoization while remaining safe for
 Rusticraft's parallel world-generation workers.
 
+The cellular primitive layer adds TerraForged's pinned feature-point table, distance metrics and
+nearest/second-nearest cell searches used by cell value and edge sources.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
