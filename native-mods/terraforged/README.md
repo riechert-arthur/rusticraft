@@ -108,6 +108,9 @@ pipe demotion with exact Engine seed consumption and terrain identity behavior.
 The standard-provider layer registers every LandForm and volcano variant, builds all weighted terrain
 composites, preserves variant fallback and performs Java-compatible deterministic shuffling.
 
+The heightmap-blending layer adds module- and populator-controlled terrain blending plus two- and
+three-way continent interpolation with exact boundary and terrain-tag behavior.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:

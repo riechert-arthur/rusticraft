@@ -30,7 +30,7 @@ pub enum Interpolation {
 }
 
 impl Interpolation {
-    fn apply(self, value: f32) -> f32 {
+    pub fn apply(self, value: f32) -> f32 {
         match self {
             Self::Linear => value,
             Self::Curve3 => value * value * (3.0 - 2.0 * value),
