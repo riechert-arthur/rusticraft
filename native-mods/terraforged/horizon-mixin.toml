@@ -355,3 +355,10 @@ file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_surface_bindings"
 source = "surface_bindings.rs"
 visibility = "pub"
+
+[[module]]
+id = "surface_height_cache"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_surface_height_cache"
+source = "surface_height_cache.rs"
+visibility = "pub"

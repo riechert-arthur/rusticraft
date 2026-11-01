@@ -159,6 +159,21 @@ impl TerraForgedGenerator {
         self.terrain.remove(self.seed(), x, z);
     }
 
+    pub fn initialize_surface_cache(
+        &self,
+        chunk: horizon_core::position::ChunkPos,
+        cache: &mut std::collections::BTreeMap<i64, i32>,
+    ) {
+        if !cache.is_empty() {
+            return;
+        }
+        let terrain = self.chunk_data(chunk.x, chunk.z);
+        let data = terrain.read();
+        super::terraforged_surface_height_cache::initialize(cache, chunk, |x, z| {
+            data.height_at(x, z)
+        });
+    }
+
     pub fn base_height(&self, x: i32, z: i32, heightmap: TerraHeightmap) -> i32 {
         let seed = self.seed();
         let sample = self.terrain.noise_sample(seed, x, z);
@@ -429,6 +444,30 @@ mod tests {
         let ocean = generator.base_height(8, -11, TerraHeightmap::OceanFloor);
         assert!(surface >= ocean);
         generator.drop_chunk(-2, 3);
+    }
+
+    #[test]
+    fn surface_cache_reads_structure_adjusted_shared_heights() {
+        use super::super::terraforged_surface_height_cache::column_key;
+        let generator = generator();
+        generator.capture_seed(7);
+        let data = generator.chunk_data(-1, 2);
+        {
+            let mut terrain = data.write();
+            for z in 0..16 {
+                for x in 0..16 {
+                    terrain.set_height_at(x, z, 70 + x - z * 2);
+                }
+            }
+        }
+        let mut cache = std::collections::BTreeMap::new();
+        generator.initialize_surface_cache(ChunkPos::new(-1, 2), &mut cache);
+        assert_eq!(cache.len(), 144);
+        assert_eq!(cache[&column_key(-16, 32)], 70);
+        assert_eq!(cache[&column_key(-32, 32)], 46);
+        data.write().set_height_at(0, 0, 200);
+        generator.initialize_surface_cache(ChunkPos::new(-1, 2), &mut cache);
+        assert_eq!(cache[&column_key(-16, 32)], 70);
     }
 
     #[test]

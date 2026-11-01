@@ -521,6 +521,11 @@ already-resolved dirt/snow tags, and preserves unrelated properties when setting
 Snow-layer class membership is supplied separately from tags so custom snow-layer states can be
 classified without confusing tag membership with Java class identity. Missing states fail explicitly;
 the complete game pipeline still needs to supply its registry, tags, class sets and region access.
+Preliminary surface-cache initialization now samples the shared, structure-adjusted terrain at the
+original sixteen quart-grid positions and pads the surrounding 3-by-3 chunk area with their minimum.
+Nonempty caches remain untouched without joining terrain generation. Java fixtures check all 144
+packed-coordinate entries, negative coordinates and wrapping chunk origins. Connecting this cache to
+Horizon’s vanilla surface-rule evaluation remains pending.
 The original Java method oracle checks ordered block edits and resulting heights across six columns.
 
 Biome chunk filling samples one 4-by-4 biome buffer at quart y=-1 in Java call order and repeats
