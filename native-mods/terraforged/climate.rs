@@ -22,9 +22,18 @@
  * SOFTWARE.
  */
 
-use super::terraforged::{
-    Module, Source, SourceConfig, SourceKind, clamp, copy_sign, java_max, java_min, map, pow_int,
-    sin,
+use std::sync::Arc;
+
+use super::{
+    terraforged::{
+        CellFunction, DistanceFunction, Domain, EdgeFunction, Module, Source, SourceConfig,
+        SourceKind, cell_vector, clamp, copy_sign, floor, java_max, java_min, map, pow_int, sin,
+        value_coord_2d,
+    },
+    terraforged_engine::{
+        BiomeType, Cell, ControlPoints, Seed, Terrain, TerrainProperties, TerrainRegistry,
+        WorldControlPoints,
+    },
 };
 
 /// Engine's `ClimateSettings.RangeValue`: one climate axis (temperature or moisture). `Default` is Engine's
@@ -324,6 +333,251 @@ impl Moisture {
     /// As a graph node, with the `Noise` default bounds 0..1.
     pub fn module(self) -> Module {
         Module::custom(0.0, 1.0, move |x, y| self.value(x, y))
+    }
+}
+
+pub trait LandValue: Send + Sync {
+    fn land_value(&self, x: f32, z: f32) -> f32;
+}
+
+impl<F> LandValue for F
+where
+    F: Fn(f32, f32) -> f32 + Send + Sync,
+{
+    fn land_value(&self, x: f32, z: f32) -> f32 {
+        self(x, z)
+    }
+}
+
+pub struct ClimateModule {
+    seed: i32,
+    edge_clamp: f32,
+    edge_scale: f32,
+    biome_frequency: f32,
+    warp_strength: f32,
+    warp_x: Module,
+    warp_z: Module,
+    moisture: Module,
+    temperature: Module,
+    macro_biome_noise: Module,
+    continent: Arc<dyn LandValue>,
+    control_points: ControlPoints,
+    coast: Terrain,
+}
+
+impl ClimateModule {
+    pub fn new(
+        continent: Arc<dyn LandValue>,
+        seed: &mut Seed,
+        settings: ClimateSettings,
+        control_points: WorldControlPoints,
+    ) -> Self {
+        let biome_size = settings.biome_shape.biome_size;
+        let temperature_scaler = settings.temperature.scale as f32;
+        let moisture_scaler = settings.moisture.scale as f32 * 2.5;
+        let biome_frequency = 1.0 / biome_size as f32;
+        let moisture_size = moisture_scaler * biome_size as f32;
+        let temperature_size = temperature_scaler * biome_size as f32;
+        let moisture_scale = round(moisture_size * biome_frequency);
+        let temperature_scale = round(temperature_size * biome_frequency);
+        let warp_scale = settings.biome_shape.biome_warp_scale;
+        let module_seed = seed.next();
+        let warp_x = simplex(seed.next(), warp_scale, 2).bias(Module::constant(-0.5));
+        let warp_z = simplex(seed.next(), warp_scale, 2).bias(Module::constant(-0.5));
+
+        let mut moisture_seed = seed.offset(settings.moisture.seed_offset);
+        let moisture = Moisture::new(
+            moisture_seed.next(),
+            moisture_scale,
+            settings.moisture.falloff,
+        )
+        .module();
+        let moisture = settings
+            .moisture
+            .apply(moisture)
+            .warp(noise_warp(
+                moisture_seed.next(),
+                (moisture_scale / 2).max(1),
+                1,
+                moisture_scale as f32 / 4.0,
+            ))
+            .warp(noise_warp(
+                moisture_seed.next(),
+                (moisture_scale / 6).max(1),
+                2,
+                moisture_scale as f32 / 12.0,
+            ));
+
+        let mut temperature_seed = seed.offset(settings.temperature.seed_offset);
+        let temperature =
+            Temperature::new(1.0 / temperature_scale as f32, settings.temperature.falloff).module();
+        let temperature = settings
+            .temperature
+            .apply(temperature)
+            .warp(noise_warp(
+                temperature_seed.next(),
+                temperature_scale.wrapping_mul(4),
+                2,
+                temperature_scale.wrapping_mul(4) as f32,
+            ))
+            .warp(noise_warp(
+                temperature_seed.next(),
+                temperature_scale,
+                1,
+                temperature_scale as f32,
+            ));
+
+        let macro_biome_noise = Module::cell_source(
+            SourceConfig {
+                seed: seed.next(),
+                frequency: 1.0 / settings.biome_shape.macro_noise_size as f32,
+                ..SourceConfig::default()
+            },
+            1.0,
+            CellFunction::CellValue,
+            DistanceFunction::Euclidean,
+            Module::constant(0.0),
+        );
+
+        Self {
+            seed: module_seed,
+            edge_clamp: 1.0,
+            edge_scale: 1.0,
+            biome_frequency,
+            warp_strength: settings.biome_shape.biome_warp_strength as f32,
+            warp_x,
+            warp_z,
+            moisture,
+            temperature,
+            macro_biome_noise,
+            continent,
+            control_points: ControlPoints::new(control_points),
+            coast: TerrainRegistry::new().get_by_id(3),
+        }
+    }
+
+    pub fn apply(&self, cell: &mut Cell, x: f32, z: f32) {
+        self.apply_masked(cell, x, z, true);
+    }
+
+    pub fn apply_masked(&self, cell: &mut Cell, mut x: f32, mut z: f32, mask: bool) {
+        let offset_x = self.warp_x.value(x, z) * self.warp_strength;
+        let offset_z = self.warp_z.value(x, z) * self.warp_strength;
+        x = (x + offset_x) * self.biome_frequency;
+        z = (z + offset_z) * self.biome_frequency;
+        let x_region = floor(x);
+        let z_region = floor(z);
+        let mut cell_x = x_region;
+        let mut cell_z = z_region;
+        let mut center_x = x;
+        let mut center_z = z;
+        let mut edge_distance = 999_999.0;
+        let mut edge_distance2 = 999_999.0;
+        for delta_z in -1_i32..=1 {
+            for delta_x in -1_i32..=1 {
+                let candidate_x = x_region.wrapping_add(delta_x);
+                let candidate_z = z_region.wrapping_add(delta_z);
+                let vector = cell_vector(self.seed, candidate_x, candidate_z);
+                let candidate_center_x = candidate_x as f32 + vector[0];
+                let candidate_center_z = candidate_z as f32 + vector[1];
+                let distance = DistanceFunction::Euclidean
+                    .apply(candidate_center_x - x, candidate_center_z - z);
+                if distance < edge_distance {
+                    edge_distance2 = edge_distance;
+                    edge_distance = distance;
+                    center_x = candidate_center_x;
+                    center_z = candidate_center_z;
+                    cell_x = candidate_x;
+                    cell_z = candidate_z;
+                } else if distance < edge_distance2 {
+                    edge_distance2 = distance;
+                }
+            }
+        }
+
+        cell.biome_region_id = map(value_coord_2d(self.seed, cell_x, cell_z), -1.0, 1.0, 2.0);
+        cell.moisture = self.moisture.value(center_x, center_z);
+        cell.temperature = self.temperature.value(center_x, center_z);
+        cell.macro_biome_id = self.macro_biome_noise.value(center_x, center_z);
+        let position_x = floor(center_x / self.biome_frequency);
+        let position_z = floor(center_z / self.biome_frequency);
+        let continent_edge = self
+            .continent
+            .land_value(position_x as f32, position_z as f32);
+        if mask {
+            cell.biome_region_edge = self.edge_value(edge_distance, edge_distance2);
+            self.modify_terrain(cell, continent_edge);
+        }
+        self.modify_moisture(cell, continent_edge);
+        cell.biome = BiomeType::at_climate(cell.temperature, cell.moisture);
+    }
+
+    fn modify_moisture(&self, cell: &mut Cell, continent_edge: f32) {
+        let limit = 0.75;
+        let range = 1.0 - limit;
+        if continent_edge < limit {
+            let alpha = (limit - continent_edge) / range;
+            let multiplier = 1.0 + alpha * range;
+            cell.moisture = (cell.moisture * multiplier).clamp(0.0, 1.0);
+        } else {
+            let alpha = (continent_edge - limit) / range;
+            let multiplier = 1.0 - alpha * range;
+            cell.moisture *= multiplier;
+        }
+    }
+
+    fn modify_terrain(&self, cell: &mut Cell, continent_edge: f32) {
+        if cell.terrain.is_overground()
+            && !cell.terrain.overrides_coast()
+            && continent_edge <= self.control_points.coast_marker
+        {
+            cell.terrain = self.coast.clone();
+        }
+    }
+
+    fn edge_value(&self, distance: f32, distance2: f32) -> f32 {
+        let value = EdgeFunction::Distance2Div.apply(distance, distance2);
+        1.0 - map(value, -1.0, 0.0, 1.0) * self.edge_scale / self.edge_clamp
+    }
+}
+
+fn simplex(seed: i32, scale: i32, octaves: usize) -> Module {
+    Module::source(Source::new(
+        SourceKind::Simplex,
+        SourceConfig {
+            seed,
+            octaves,
+            frequency: 1.0 / scale as f32,
+            ..SourceConfig::default()
+        },
+    ))
+}
+
+fn noise_warp(seed: i32, scale: i32, octaves: usize, strength: f32) -> Domain {
+    Domain::domain_warp(
+        source(SourceKind::Perlin, seed, scale, octaves),
+        source(SourceKind::Perlin, seed.wrapping_add(1), scale, octaves),
+        Module::constant(strength),
+    )
+}
+
+fn source(kind: SourceKind, seed: i32, scale: i32, octaves: usize) -> Module {
+    Module::source(Source::new(
+        kind,
+        SourceConfig {
+            seed,
+            octaves,
+            frequency: 1.0 / scale as f32,
+            ..SourceConfig::default()
+        },
+    ))
+}
+
+fn round(value: f32) -> i32 {
+    if value >= 0.0 {
+        (value + 0.5) as i32
+    } else {
+        (value - 0.5) as i32
     }
 }
 
@@ -702,5 +956,77 @@ x 0 bdd59d54 3e314904 bea34c20 be89fdf4
         for (x, y) in [(0.0, 0.0), (5.0, -3.0)] {
             assert_eq!(hex(negative.value(x, y)), hex(none.value(x, y)));
         }
+    }
+
+    #[test]
+    fn climate_module_matches_engine_0_3_0() {
+        let registry = TerrainRegistry::new();
+        let mut seed = Seed::new(1234);
+        let module = ClimateModule::new(
+            Arc::new(|_, _| 0.3),
+            &mut seed,
+            ClimateSettings::default(),
+            WorldControlPoints::default(),
+        );
+        let points = [
+            (
+                0.0,
+                0.0,
+                [0x3f1ca982, 0x3e271000, 0x3f26aa2b, 0x3f0694a9, 0x3f7847c6],
+                4,
+            ),
+            (
+                12.25,
+                -98.75,
+                [0x3f1ca982, 0x3da128c0, 0x3f26aa2b, 0x3f0694a9, 0x3f7847c6],
+                4,
+            ),
+            (
+                -4096.5,
+                8192.25,
+                [0x3effacc8, 0x3e269bd8, 0x3f20d217, 0x3f065de6, 0x3eb78122],
+                4,
+            ),
+            (
+                100_000.0,
+                -100_000.0,
+                [0x3e2fd59e, 0x3f4be9bb, 0x3f800000, 0x3f69dff4, 0x3f25bb1a],
+                0,
+            ),
+        ];
+        for (x, z, expected, biome) in points {
+            let mut cell = Cell::new(&registry);
+            cell.terrain = registry.get_by_id(8);
+            module.apply(&mut cell, x, z);
+            assert_eq!(
+                [
+                    cell.biome_region_id.to_bits(),
+                    cell.biome_region_edge.to_bits(),
+                    cell.moisture.to_bits(),
+                    cell.temperature.to_bits(),
+                    cell.macro_biome_id.to_bits(),
+                ],
+                expected
+            );
+            assert_eq!(cell.biome.id(), biome);
+            assert_eq!(cell.terrain.name(), "coast");
+        }
+
+        let mut cell = Cell::new(&registry);
+        cell.biome_region_edge = 0.25;
+        cell.terrain = registry.get_by_id(8);
+        module.apply_masked(&mut cell, 12.25, -98.75, false);
+        assert_eq!(
+            [
+                cell.biome_region_id.to_bits(),
+                cell.biome_region_edge.to_bits(),
+                cell.moisture.to_bits(),
+                cell.temperature.to_bits(),
+                cell.macro_biome_id.to_bits(),
+            ],
+            [0x3f1ca982, 0x3e800000, 0x3f26aa2b, 0x3f0694a9, 0x3f7847c6]
+        );
+        assert_eq!(cell.biome.id(), 4);
+        assert_eq!(cell.terrain.name(), "flats");
     }
 }
