@@ -29,6 +29,79 @@ use super::{
 };
 use crate::{heightmap::HeightmapType, registry::BlockStateId};
 
+pub trait SnowBlocks {
+    fn is_air(&self, state: BlockStateId) -> bool;
+    fn is_snow_layer(&self, state: BlockStateId) -> bool;
+    fn is_snow(&self, state: BlockStateId) -> bool;
+    fn is_erodible(&self, state: BlockStateId) -> bool;
+    fn with_layers(&self, state: BlockStateId, layers: i32) -> Result<BlockStateId, TerrainError>;
+    fn air(&self) -> BlockStateId;
+    fn stone(&self) -> BlockStateId;
+}
+
+pub fn apply_post<B: TerrainBlockStates>(
+    terrain: &TerrainData,
+    chunk: &mut TerrainChunk<'_, B>,
+    gen_depth: i32,
+    blocks: &impl SnowBlocks,
+) -> Result<(), TerrainError> {
+    let norm = 70.0 * (gen_depth as f32 / 255.0);
+    let kind = HeightmapType::MotionBlockingNoLeaves;
+    if chunk.heightmap(kind).is_none() {
+        chunk.prime_heightmaps(&[kind])?;
+    }
+    for z in 0..16 {
+        for x in 0..16 {
+            let mut y = chunk
+                .heightmap(kind)
+                .expect("snow heightmap primed")
+                .highest_taken(x, z)?
+                .wrapping_add(1);
+            let mut state = chunk.block(x, y, z);
+            let gradient = terrain.normalized_gradient(x, z, norm);
+            if gradient < 0.625 {
+                if blocks.is_snow_layer(state) {
+                    let height = terrain.height().get(x, z);
+                    let delta = height - terrain.levels().height(height) as f32;
+                    let layers = 1i32.wrapping_add(super::terraforged::floor(delta * 7.9999));
+                    let snow = blocks.with_layers(state, layers)?;
+                    set_post_block(chunk, x, y, z, snow)?;
+                }
+            } else {
+                if blocks.is_air(state) {
+                    y = y.wrapping_sub(1);
+                    state = chunk.block(x, y, z);
+                }
+                if blocks.is_snow(state) {
+                    set_post_block(chunk, x, y, z, blocks.air())?;
+                    let bottom = 0.max(y.wrapping_sub(15));
+                    y = y.wrapping_sub(1);
+                    while y > bottom {
+                        if !blocks.is_erodible(chunk.block(x, y, z)) {
+                            break;
+                        }
+                        set_post_block(chunk, x, y, z, blocks.stone())?;
+                        y -= 1;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn set_post_block<B: TerrainBlockStates>(
+    chunk: &mut TerrainChunk<'_, B>,
+    x: i32,
+    y: i32,
+    z: i32,
+    state: BlockStateId,
+) -> Result<(), TerrainError> {
+    chunk.set_block_worldgen(x, y, z, state)?;
+    chunk.update_heightmap(HeightmapType::MotionBlockingNoLeaves, x, y, z, state)?;
+    Ok(())
+}
+
 pub fn smooth_water<B: TerrainBlockStates>(
     terrain: &TerrainData,
     chunk: &mut TerrainChunk<'_, B>,

@@ -502,7 +502,7 @@ Invocation from the complete game-generation pipeline is still pending.
 The surface erosion pass now applies the original depth-scaled gradient threshold and sea-level
 cutoff to real chunk storage. It searches strictly above max(0, surface-20), preserves the first
 non-erodible material (including air or fluid), and leaves cached terrain heights unchanged.
-The caller supplies dirt/snow tag membership; vanilla surface rules, snow/water postprocessing and
+The caller supplies dirt/snow tag membership; vanilla surface rules, production state bindings and
 game-pipeline invocation remain pending. Eleven original-Java column fixtures cover the search
 boundaries, low terrain, material replacement and threshold decisions.
 Water-edge smoothing now limits eligibility to river/lake terrain with an exactly zero river mask
@@ -510,7 +510,12 @@ and source water. It searches the radius-six disk in original row order, reads l
 and neighboring chunks through the supplied region lookup, then writes level-two water on the first
 air hit. Java fixtures check ordered neighboring reads, negative chunk coordinates, boundary points,
 non-source water, negative zero and NaN masks. Production water-state bindings and region wiring are
-still pending, alongside snow postprocessing and full game integration.
+still pending, alongside full game integration.
+Snow postprocessing now smooths layers using the original fractional-height formula and Noise2D
+floor behavior, and erodes steep snow with the original air fallback and strict 15-block/zero-height
+scan bounds. Thirteen Java fixtures cover fractional and negative heights, snow blocks versus layers,
+non-snow surfaces, early stopping and low terrain. Production block-class/tag/property bindings and
+full surface-pipeline invocation remain pending.
 The original Java method oracle checks ordered block edits and resulting heights across six columns.
 
 Biome chunk filling samples one 4-by-4 biome buffer at quart y=-1 in Java call order and repeats
