@@ -2489,6 +2489,35 @@ impl Module {
                     value
                 }
             }
+            ModuleKind::LegacyTerrace {
+                source,
+                lower_curve,
+                upper_curve,
+                steps,
+                max_index,
+                ..
+            } => {
+                let noise_value = clamp(sample(source)?, 0.0, 1.0);
+                let index = round(noise_value * *max_index as f32) as usize;
+                let step = &steps[index];
+                if noise_value < step.lower_bound && index > 0 {
+                    let lower = &steps[index - 1];
+                    let alpha =
+                        (noise_value - lower.upper_bound) / (step.lower_bound - lower.upper_bound);
+                    let alpha = 1.0 - Interpolation::Curve3.apply(alpha);
+                    let range = step.value - lower.value;
+                    step.value - alpha * range * sample(upper_curve)?
+                } else if noise_value > step.upper_bound && (index as i32) < *max_index {
+                    let upper = &steps[index + 1];
+                    let alpha =
+                        (noise_value - step.upper_bound) / (upper.lower_bound - step.upper_bound);
+                    let alpha = Interpolation::Curve3.apply(alpha);
+                    let range = upper.value - step.value;
+                    step.value + alpha * range * sample(lower_curve)?
+                } else {
+                    step.value
+                }
+            }
             // Noise2D 2cb4843's `Cache` keeps one entry per thread keyed by `x == this.x && y == this.y` alone, so a
             // repeated point at another runtime seed returns the first seed's sample. The port keys the shared entry
             // by the seed too (and by the coordinates' bits, as the seedless path does): a hit is always the sample
@@ -7825,6 +7854,62 @@ mod tests {
         }
         assert!(terrace(0.25, &c(0.4), &c(0.7), &unsupported).is_ok());
         assert!(terrace(0.34, &c(0.4), &c(0.7), &unsupported).is_err());
+    }
+
+    #[test]
+    fn runtime_seeded_legacy_terrace_matches_current_noise2d() {
+        let source = Module::source(Source::new(
+            SourceKind::Simplex,
+            SourceConfig {
+                seed: i32::MAX,
+                octaves: 3,
+                gain: 0.65,
+                frequency: 0.125,
+                lacunarity: 2.0,
+                interpolation: Interpolation::Curve3,
+            },
+        ));
+        let lower = Module::source(Source::new(
+            SourceKind::Perlin2,
+            SourceConfig {
+                seed: -91,
+                octaves: 2,
+                gain: 0.5,
+                frequency: 0.25,
+                lacunarity: 2.0,
+                interpolation: Interpolation::Curve3,
+            },
+        ));
+        let upper = Module::source(Source::new(
+            SourceKind::Simplex2,
+            SourceConfig {
+                seed: 17,
+                octaves: 2,
+                gain: 0.5,
+                frequency: 0.0625,
+                lacunarity: 2.0,
+                interpolation: Interpolation::Curve3,
+            },
+        ));
+        let terrace = source.legacy_terrace(lower, upper, 7, 0.35);
+        for (seed, expected) in [0, 17, -91, i32::MAX].into_iter().zip([
+            0x4f7a00177771432e,
+            0x89d50db38b44a5ba,
+            0xa98eef2a5f901194,
+            0x2e30f88545dd8f60,
+        ]) {
+            let mut hash = 0xcbf29ce484222325u64;
+            for (x, y) in [
+                (0.0, 0.0),
+                (0.125, -0.75),
+                (12.34, 56.78),
+                (-1234.5, 987.25),
+            ] {
+                hash ^= u64::from(terrace.try_value_seed_first(seed, x, y).unwrap().to_bits());
+                hash = hash.wrapping_mul(0x100000001b3);
+            }
+            assert_eq!(hash, expected, "seed {seed}");
+        }
     }
 
     #[test]
