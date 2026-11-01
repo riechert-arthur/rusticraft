@@ -401,8 +401,8 @@ Runtime-seeded scalar graphs now propagate the seed through constants, octave so
 value, alpha, bias, clamp, inversion, mapping, powers, scaling, thresholds and all five arithmetic
 combiners. `Module::try_value_seed_first` returns an error for nodes not ported to runtime seeding;
 it never silently falls back to legacy sampling. Legacy sampling and serialized reseeding remain
-unchanged. Custom and erosion-ridge nodes still need this path
-before current-source terrain blending can use it.
+unchanged. Custom closure nodes intentionally remain unsupported because their callback has no seed
+parameter; all serializable graph nodes now support this path for current-source terrain blending.
 
 Legacy terraces now propagate runtime seeds through the source and asymmetric lower/upper curve
 modules while preserving cubic interpolation and branch-lazy curve sampling. The current Noise2D
@@ -425,6 +425,9 @@ sample the original coordinates before axis interpolation.
 
 Line sources now propagate runtime seeds through radius and fade modules while preserving endpoint
 short-circuits, fade ordering, radius evaluation and feathering.
+
+Erosion ridge now applies runtime seeds to both its cell lattice and every nested source sample,
+preserving octave cache reuse and matching recursive serialized reseeding bit-for-bit.
 
 The scalar graph fixtures cover 15 graphs, four seeds and four coordinates (240 Java samples),
 including wrapped seed addition and mixed Perlin/seed-sensitive sources. Regenerate their hashes

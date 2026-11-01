@@ -562,6 +562,23 @@ impl ErosionRidge {
         )
     }
 
+    pub fn try_value_seed_first(
+        self,
+        seed: i32,
+        x: f32,
+        y: f32,
+        source: &Module,
+    ) -> Result<f32, &'static str> {
+        let mut cache = [0.0; 25];
+        let value = source.try_value_seed_first(seed, x, y)?;
+        let erosion = self.try_erosion_value_with_cache(seed, x, y, source, &mut cache)?;
+        Ok(lerp(
+            erosion,
+            value,
+            self.blend_mode.blend(value, erosion, self.strength),
+        ))
+    }
+
     pub fn erosion_value(self, x: f32, y: f32, source: &Module) -> f32 {
         self.erosion_value_with_cache(x, y, source, &mut [0.0; 25])
     }
@@ -587,6 +604,30 @@ impl ErosionRidge {
             y *= self.lacunarity;
         }
         sum / max
+    }
+
+    fn try_erosion_value_with_cache(
+        self,
+        seed: i32,
+        mut x: f32,
+        mut y: f32,
+        source: &Module,
+        cache: &mut [f32; 25],
+    ) -> Result<f32, &'static str> {
+        let mut sum = 0.0;
+        let mut max = 0.0;
+        let mut gain = 1.0;
+        let mut distance = self.grid_size;
+        for _ in 0..self.octaves {
+            let value = self.try_single_erosion_value(seed, x, y, distance, source, cache)?;
+            sum += value * gain;
+            max += gain;
+            gain *= self.amplitude;
+            distance *= self.distance_falloff;
+            x *= self.lacunarity;
+            y *= self.lacunarity;
+        }
+        Ok(sum / max)
     }
 
     fn single_erosion_value(
@@ -643,6 +684,68 @@ impl ErosionRidge {
             }
         }
         clamp((f64::from(min_height2).sqrt() as f32) / grid_size, 0.0, 1.0)
+    }
+
+    fn try_single_erosion_value(
+        self,
+        seed: i32,
+        x: f32,
+        y: f32,
+        grid_size: f32,
+        source: &Module,
+        cache: &mut [f32; 25],
+    ) -> Result<f32, &'static str> {
+        cache.fill(-1.0);
+        let effective_seed = self.seed.wrapping_add(seed);
+        let pixel_x = floor(x / grid_size);
+        let pixel_y = floor(y / grid_size);
+        let mut min_height2 = f32::MAX;
+        for delta_y1 in -1_i32..=1 {
+            for delta_x1 in -1_i32..=1 {
+                let point_a_x = pixel_x.wrapping_add(delta_x1);
+                let point_a_y = pixel_y.wrapping_add(delta_y1);
+                let vector_a = cell_vector(effective_seed, point_a_x, point_a_y);
+                let ax = (point_a_x as f32 + vector_a[0]) * grid_size;
+                let ay = (point_a_y as f32 + vector_a[1]) * grid_size;
+                let mut bx = ax;
+                let mut by = ay;
+                let mut lowest_neighbour = f32::MAX;
+                for delta_y2 in -1_i32..=1 {
+                    for delta_x2 in -1_i32..=1 {
+                        let point_b_x = point_a_x.wrapping_add(delta_x2);
+                        let point_b_y = point_a_y.wrapping_add(delta_y2);
+                        let vector_b = if point_b_x == point_a_x && point_b_y == point_a_y {
+                            vector_a
+                        } else {
+                            cell_vector(effective_seed, point_b_x, point_b_y)
+                        };
+                        let candidate_x = (point_b_x as f32 + vector_b[0]) * grid_size;
+                        let candidate_y = (point_b_y as f32 + vector_b[1]) * grid_size;
+                        let index =
+                            ((delta_y1 + delta_y2 + 2) * 5 + delta_x1 + delta_x2 + 2) as usize;
+                        let mut height = cache[index];
+                        if height == -1.0 {
+                            height = source.try_value_seed_first(seed, candidate_x, candidate_y)?;
+                            cache[index] = height;
+                        }
+                        if height < lowest_neighbour {
+                            lowest_neighbour = height;
+                            bx = candidate_x;
+                            by = candidate_y;
+                        }
+                    }
+                }
+                let height2 = segment_distance2(x, y, ax, ay, bx, by);
+                if height2 < min_height2 {
+                    min_height2 = height2;
+                }
+            }
+        }
+        Ok(clamp(
+            (f64::from(min_height2).sqrt() as f32) / grid_size,
+            0.0,
+            1.0,
+        ))
     }
 }
 
@@ -2351,6 +2454,9 @@ impl Module {
         Ok(match self.0.as_ref() {
             ModuleKind::Constant(value) => *value,
             ModuleKind::Source(source) => source.value_seed_first(seed, x, y),
+            ModuleKind::ErosionRidge { ridge, source } => {
+                ridge.try_value_seed_first(seed, x, y, source)?
+            }
             ModuleKind::CellSource {
                 config,
                 displacement,
@@ -5565,6 +5671,52 @@ mod tests {
                 hash = hash.wrapping_mul(0x100000001b3);
             }
             assert_eq!(hash, expected, "seed {seed}");
+        }
+    }
+
+    #[test]
+    fn runtime_seeded_erosion_ridge_matches_recursive_reseeding() {
+        let source = |seed, frequency| {
+            Module::source(Source::new(
+                SourceKind::Simplex,
+                SourceConfig {
+                    seed,
+                    octaves: 3,
+                    gain: 0.5,
+                    frequency,
+                    lacunarity: 2.0,
+                    interpolation: Interpolation::Curve3,
+                },
+            ))
+        };
+        let terrain = source(1501, 1.0 / 160.0).warp(Domain::domain_warp(
+            source(1502, 1.0 / 48.0),
+            source(1503, 1.0 / 48.0),
+            Module::constant(18.0),
+        ));
+        let graphs = [
+            ErosionRidge::full(1504, 2, 0.65, 96.0, 0.15, 3.1, 0.8, ErosionMode::Constant)
+                .wrap(terrain.clone()),
+            ErosionRidge::with_octaves(1505, 3, 0.4, 80.0, ErosionMode::InputLinear)
+                .wrap(terrain.clone()),
+            ErosionRidge::with_octaves(1506, 2, 0.8, 64.0, ErosionMode::OutputLinear).wrap(terrain),
+        ];
+        for graph in graphs {
+            for seed in [0, 17, -91, i32::MAX] {
+                let reseeded = graph.with_seed(i64::from(seed));
+                for (x, y) in [
+                    (0.0, 0.0),
+                    (0.125, -0.75),
+                    (12.34, 56.78),
+                    (-1234.5, 987.25),
+                ] {
+                    assert_eq!(
+                        graph.try_value_seed_first(seed, x, y).unwrap().to_bits(),
+                        reseeded.value(x, y).to_bits(),
+                        "seed {seed} at ({x}, {y})"
+                    );
+                }
+            }
         }
     }
 
