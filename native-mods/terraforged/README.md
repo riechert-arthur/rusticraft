@@ -401,7 +401,7 @@ Runtime-seeded scalar graphs now propagate the seed through constants, octave so
 value, alpha, bias, clamp, inversion, mapping, powers, scaling, thresholds and all five arithmetic
 combiners. `Module::try_value_seed_first` returns an error for nodes not ported to runtime seeding;
 it never silently falls back to legacy sampling. Legacy sampling and serialized reseeding remain
-unchanged. Specialized source and modifier nodes still need this path
+unchanged. Custom, line and erosion-ridge nodes still need this path
 before current-source terrain blending can use it.
 
 Legacy terraces now propagate runtime seeds through the source and asymmetric lower/upper curve
@@ -418,6 +418,10 @@ while retaining the current Noise2D curve functions and Java floating-point oper
 Step, frequency, gradient and coordinate-modulation nodes now propagate runtime seeds through all
 children while preserving original-coordinate controls, transformed source coordinates and lazy
 gradient bounds.
+
+Boost, cellular value/lookup, cellular edge and sine sources now support runtime-seeded sampling.
+Cell seeds use Java wrapping addition, lookup children retain the runtime seed, and sine controls
+sample the original coordinates before axis interpolation.
 
 The scalar graph fixtures cover 15 graphs, four seeds and four coordinates (240 Java samples),
 including wrapped seed addition and mixed Perlin/seed-sensitive sources. Regenerate their hashes
