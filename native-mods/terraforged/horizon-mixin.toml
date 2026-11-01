@@ -397,3 +397,10 @@ file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_terrain_asset"
 source = "terrain_asset.rs"
 visibility = "pub"
+
+[[module]]
+id = "terrain_asset_registry"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_terrain_asset_registry"
+source = "terrain_asset_registry.rs"
+visibility = "pub"

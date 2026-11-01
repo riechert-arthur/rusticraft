@@ -545,6 +545,9 @@ while retaining branch-lazy child evaluation and exact step boundaries. The dire
 Current terrain assets now decode their complete recursive Cereal graph schema into Rust noise
 modules, including source, modifier, selector, combiner, curve, and domain nodes.
 
+Terrain-type and terrain-noise registries now preserve keyed lookup, deterministic ordering,
+built-in identity, custom parent delegation, and current Java's unknown-parent fallback behavior.
+
 The noise layer is ordinary Rust and can be tested without Minecraft resources:
 
 ```sh
