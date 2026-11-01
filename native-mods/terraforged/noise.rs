@@ -2604,6 +2604,69 @@ impl Module {
                 };
                 noise_map(value, *min, *max, *range)
             }
+            ModuleKind::Steps {
+                source,
+                steps,
+                slope_min,
+                slope_max,
+                curve,
+            } => {
+                let noise_value = sample(source)?;
+                let min = sample(slope_min)?;
+                let max = sample(slope_max)?;
+                let step_count = sample(steps)?;
+                let range = max - min;
+                if range <= 0.0 {
+                    (noise_value * step_count) as i32 as f32 / step_count
+                } else {
+                    let inverted = 1.0 - noise_value;
+                    let value = (inverted * step_count) as i32 as f32 / step_count;
+                    let delta = inverted - value;
+                    let alpha = noise_map(delta * step_count, min, max, range);
+                    1.0 - lerp(value, inverted, curve.apply(alpha))
+                }
+            }
+            ModuleKind::Frequency {
+                source,
+                x: x_frequency,
+                y: y_frequency,
+            } => {
+                let x_frequency = sample(x_frequency)?;
+                let y_frequency = sample(y_frequency)?;
+                source.try_value_seed_first(seed, x * x_frequency, y * y_frequency)?
+            }
+            ModuleKind::Gradient {
+                source,
+                lower,
+                upper,
+                strength,
+            } => {
+                let noise_value = sample(source)?;
+                let upper_bound = sample(upper)?;
+                if noise_value > upper_bound {
+                    noise_value
+                } else {
+                    let amount = sample(strength)?;
+                    let lower_bound = sample(lower)?;
+                    if noise_value < lower_bound {
+                        java_pow(noise_value, 1.0 - amount)
+                    } else {
+                        let alpha = 1.0 - (noise_value - lower_bound) / (upper_bound - lower_bound);
+                        java_pow(noise_value, 1.0 - amount * alpha)
+                    }
+                }
+            }
+            ModuleKind::Modulate {
+                source,
+                direction,
+                strength,
+            } => {
+                let angle = sample(direction)? * java_pi2();
+                let strength = sample(strength)?;
+                let dx = sin_lookup(angle) * strength;
+                let dy = sin_lookup(angle + COS_OFFSET) * strength;
+                source.try_value_seed_first(seed, x + dx, y + dy)?
+            }
             ModuleKind::Cache { source, value } => {
                 let mut cached = value.lock().expect("TerraForged cache lock poisoned");
                 if !cached.empty && x == cached.x && y == cached.y {
@@ -3482,12 +3545,7 @@ mod tests {
     }
 
     fn unsupported_seeded_node(value: f32) -> Module {
-        Module::constant(value).steps(
-            Module::constant(4.0),
-            Module::constant(0.25),
-            Module::constant(0.75),
-            CurveFunction::Interpolation(Interpolation::Curve3),
-        )
+        Module::custom(value, value, move |_, _| value)
     }
 
     #[test]
@@ -5140,6 +5198,80 @@ mod tests {
                 0x71b0b05f4e543d5c,
             ],
             [0xf87ba5b74029c866; 4],
+        ];
+        for (graph, hashes) in graphs.iter().zip(expected) {
+            for (seed, expected) in [0, 17, -91, i32::MAX].into_iter().zip(hashes) {
+                let mut hash = 0xcbf29ce484222325u64;
+                for (x, y) in [
+                    (0.0, 0.0),
+                    (0.125, -0.75),
+                    (12.34, 56.78),
+                    (-1234.5, 987.25),
+                ] {
+                    hash ^= u64::from(graph.try_value_seed_first(seed, x, y).unwrap().to_bits());
+                    hash = hash.wrapping_mul(0x100000001b3);
+                }
+                assert_eq!(hash, expected, "seed {seed}");
+            }
+        }
+    }
+
+    #[test]
+    fn runtime_seeded_transforms_match_current_noise2d() {
+        let source = |kind, seed, frequency, octaves, gain| {
+            Module::source(Source::new(
+                kind,
+                SourceConfig {
+                    seed,
+                    octaves,
+                    gain,
+                    frequency,
+                    lacunarity: 2.0,
+                    interpolation: Interpolation::Curve3,
+                },
+            ))
+        };
+        let base = source(SourceKind::Perlin, 1001, 1.0 / 96.0, 4, 0.5);
+        let simplex = source(SourceKind::Simplex, 1002, 1.0 / 80.0, 3, 0.5);
+        let ridge = source(SourceKind::Ridge, 1003, 1.0 / 128.0, 2, 0.975);
+        let perlin2 = source(SourceKind::Perlin2, 1004, 1.0 / 64.0, 2, 0.5);
+        let graphs = [
+            base.clone().steps(
+                simplex.clone(),
+                Module::constant(0.2),
+                ridge.clone(),
+                CurveFunction::Interpolation(Interpolation::Linear),
+            ),
+            base.clone().frequency(simplex.clone(), ridge.clone()),
+            base.clone()
+                .gradient(simplex.clone(), ridge.clone(), perlin2),
+            base.modulate(simplex, ridge),
+        ];
+        let expected = [
+            [
+                0x9f745b5614915957,
+                0x6c683937178c790d,
+                0x74a80d94932da15f,
+                0xa18cd68140e13a4b,
+            ],
+            [
+                0xd73e35f81bbfafdf,
+                0xbb7d3fa76cc7677a,
+                0xa9df7d00157a964b,
+                0x808cb808658362f0,
+            ],
+            [
+                0xc3d0d844aeb558ad,
+                0x2277c180ca2f135f,
+                0x03706f82c69daf2b,
+                0x4f1d0987ae38d539,
+            ],
+            [
+                0xbf826dcb75996b52,
+                0x2639ab937c91bfef,
+                0x14f548b29c1b99bb,
+                0x961c25513e62a41f,
+            ],
         ];
         for (graph, hashes) in graphs.iter().zip(expected) {
             for (seed, expected) in [0, 17, -91, i32::MAX].into_iter().zip(hashes) {

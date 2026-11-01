@@ -19,6 +19,7 @@ ORIGINAL_TERRAFORGED_ORACLES = {
     "tools/terraforged/TerraForgedSeededLegacyTerraceOracle.java",
     "tools/terraforged/TerraForgedSeededAdvancedTerraceOracle.java",
     "tools/terraforged/TerraForgedSeededCurveOracle.java",
+    "tools/terraforged/TerraForgedSeededTransformOracle.java",
 }
 
 
