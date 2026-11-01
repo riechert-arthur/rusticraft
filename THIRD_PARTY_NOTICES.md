@@ -8,6 +8,10 @@ and its Engine 0.3.0/Noise2D dependencies by TerraForged. The unavailable depend
 recovered from bytecode shipped in TerraForged's official 0.3.1 alpha 2 jar. The code is licensed
 under MIT; its notice is preserved in `native-mods/terraforged/LICENSE-TERRAFORGED`.
 
+Current-version behavior also follows [TerraForged Reimagined commit
+`a24d450`](https://github.com/Romoslayer/TerraForged-Reimagined/tree/a24d4503064780790e975cd17495866ae13eef11),
+MIT, copyright (c) 2020 TerraForged and (c) 2026 Romoslayer.
+
 The seed-first source API additionally follows
 [Noise2D 2cb48431148a321f74319d7ef0ea61b26bf8e59c](https://github.com/TerraForged/Noise2D/tree/2cb48431148a321f74319d7ef0ea61b26bf8e59c),
 MIT, copyright (c) 2018 dags and (c) 2020 TerraForged. Its license is preserved in
