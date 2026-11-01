@@ -240,6 +240,9 @@ selecting direct generation unless a positive batch size requests batched or str
 Cache entries now wrap TerraForged's lazy computation with completion reporting and refresh their
 millisecond access timestamp on every `get`, providing the expiration primitive used by tile caches.
 
+The bounded long-key map now preserves insertion-order eviction during compute-only insertion, while
+the cache wrapper supports explicit close-on-remove and strict timestamp expiration sweeps.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
