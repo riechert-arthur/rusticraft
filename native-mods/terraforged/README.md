@@ -445,6 +445,10 @@ including wrapping chunk-coordinate arithmetic, before exposing the populated no
 Nearest-terrain search now follows the warped terrain-region spiral, skips zero sentinels and
 rejects ocean/coast or river-adjacent candidates exactly like the current generator.
 
+The current erosion pipeline's noise-tile geometry now preserves Java overflow arithmetic,
+relative indexing, default dimensions and diagnostic formatting. Its standalone Java fixture is
+`tools/terraforged/TerraForgedNoiseTileSizeOracle.java`.
+
 The scalar graph fixtures cover 15 graphs, four seeds and four coordinates (240 Java samples),
 including wrapped seed addition and mixed Perlin/seed-sensitive sources. Regenerate their hashes
 with `tools/terraforged/TerraForgedSeededGraphOracle.java` on a classpath containing compiled
