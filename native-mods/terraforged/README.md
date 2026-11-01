@@ -300,6 +300,9 @@ generation, scales direct height queries, and preserves TerraForged's object-poo
 Terrain blending utilities now preserve weighted noise bands, identity-keyed sample caching, hashed
 random selection, and square-spiral terrain searches from TerraForged's current source.
 
+The concrete terrain blender now reproduces TerraForged's warped nine-cell terrain selection,
+minimum-noise bias, identity-cached terrain sampling, and squared border-weight blending.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
