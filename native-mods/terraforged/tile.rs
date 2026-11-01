@@ -24,13 +24,15 @@
 
 use super::{
     terraforged::floor,
+    terraforged_concurrent::DisposeListener,
     terraforged_engine::{Cell, TerrainRegistry},
     terraforged_filters::Filterable,
     terraforged_heightmap::HeightmapCache,
     terraforged_river::Rivermap,
     terraforged_util::{pack, unpack_left, unpack_right},
 };
-use std::sync::Arc;
+use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::{Arc, Weak};
 
 /// Engine 0.3.0's tile `Size` (`com.terraforged.engine.tile.Size`): `size` cells per edge plus
 /// `border` on each side (`total`), stored in a `total * total` array. `mask` assumes `size` is a
@@ -107,9 +109,15 @@ impl Size {
 /// pooled arrays fill their cells lazily, `computeCell`, and may be longer than the tile needs when
 /// a larger pooled array is reused; neither is observable once a tile is generated). Its chunk
 /// array holds the `GenChunk`s `chunk_writer` and the heightmap fills create, as Engine's does.
-/// Disposal and resource pools are not ported. A negative array size (only from absurd sizes or
-/// borders) gives an empty backing where Java throws.
-#[derive(Clone)]
+/// A negative array size (only from absurd sizes or borders) gives an empty backing where Java
+/// throws.
+///
+/// Disposal is Engine's: [`Self::dispose`] counts, and once the count reaches `size * size` (the
+/// chunks without the border) every call tells the listener the tile was built with;
+/// [`Self::open_chunk`]/[`Self::close_chunk`] count open readers, and [`Self::close`] marks the
+/// tile closed only when none is open. Engine's `close` also resets the cells and hands the arrays
+/// back to its `TileResources` pools, which are not ported: here the cells stay as they are and
+/// are freed with the tile.
 pub struct Tile {
     region_x: i32,
     region_z: i32,
@@ -123,17 +131,40 @@ pub struct Tile {
     chunk_size: Size,
     blocks: Vec<Cell>,
     chunks: Vec<Option<GenChunk>>,
+    /// Engine's `chunkCount` field: `size * size` of the chunk size, the border left out (not
+    /// [`Self::chunk_count`], `getChunkCount()`, the bordered array length).
+    disposal_threshold: i32,
+    /// Engine's `active`: open readers, `-1` once closed.
+    active: AtomicI32,
+    /// Engine's `disposed`.
+    disposed: AtomicI32,
+    /// Engine's `listener`; `None` for `TileGenerator`'s default (`r -> {}`). Weak, so a cache's
+    /// tiles do not keep the cache alive.
+    listener: Option<Weak<dyn DisposeListener<Tile>>>,
 }
 
 impl Tile {
-    /// `new Tile(regionX, regionZ, size, borderChunks, resources, listener)`; `terrains` is the
-    /// world's registry, which every cell starts from (`Cell::new`).
+    /// `new Tile(regionX, regionZ, size, borderChunks, resources, listener)` with no listener (a
+    /// `dispose` tells no one); `terrains` is the world's registry, which every cell starts from
+    /// (`Cell::new`).
     pub fn new(
         region_x: i32,
         region_z: i32,
         size: i32,
         border_chunks: i32,
         terrains: &TerrainRegistry,
+    ) -> Self {
+        Self::with_listener(region_x, region_z, size, border_chunks, terrains, None)
+    }
+
+    /// [`Self::new`] with the listener [`Self::dispose`] tells (if it is still alive).
+    pub fn with_listener(
+        region_x: i32,
+        region_z: i32,
+        size: i32,
+        border_chunks: i32,
+        terrains: &TerrainRegistry,
+        listener: Option<Weak<dyn DisposeListener<Tile>>>,
     ) -> Self {
         // Java's `<<` takes its count modulo 32, as `wrapping_shl` does.
         let chunk_x = region_x.wrapping_shl(size as u32);
@@ -155,7 +186,57 @@ impl Tile {
             chunk_size,
             blocks: vec![Cell::new(terrains); cells],
             chunks: vec![None; chunks],
+            disposal_threshold: chunk_size.size.wrapping_mul(chunk_size.size),
+            active: AtomicI32::new(0),
+            disposed: AtomicI32::new(0),
+            listener,
         }
+    }
+
+    /// `dispose()`: counts one disposal (Java `int`, wrapping) and, once the count is at least
+    /// [`Self::disposal_threshold`], tells the listener, on this thread and holding no lock, on
+    /// every call from then on.
+    pub fn dispose(&self) {
+        let disposed = self.disposed.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
+        if disposed >= self.disposal_threshold
+            && let Some(listener) = self.listener.as_ref().and_then(Weak::upgrade)
+        {
+            listener.on_dispose(self);
+        }
+    }
+
+    /// `close()`: closes the tile if no reader is open (`active` from 0 to -1); does nothing
+    /// otherwise, or once closed. Engine's pooled cells are not ported (see [`Tile`]).
+    pub fn close(&self) {
+        let _ = self
+            .active
+            .compare_exchange(0, -1, Ordering::AcqRel, Ordering::Acquire);
+    }
+
+    /// `GenChunk.open()`'s count: one more open reader.
+    pub fn open_chunk(&self) {
+        self.active.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// `GenChunk.close()`: one open reader fewer (Java `int`; Engine does not check the count).
+    pub fn close_chunk(&self) {
+        self.active.fetch_sub(1, Ordering::AcqRel);
+    }
+
+    /// Engine's `active`: how many readers are open, `-1` once [`Self::close`] has closed the tile.
+    pub fn active(&self) -> i32 {
+        self.active.load(Ordering::Acquire)
+    }
+
+    /// Engine's `disposed`: how many times [`Self::dispose`] ran.
+    pub fn disposed(&self) -> i32 {
+        self.disposed.load(Ordering::Acquire)
+    }
+
+    /// Engine's `chunkCount` field, the disposals that tell the listener: the chunks without the
+    /// border, `chunk_size().size` squared (Java `int`).
+    pub const fn disposal_threshold(&self) -> i32 {
+        self.disposal_threshold
     }
 
     /// `getGenerationSize()`: the size factor the tile was built with.
@@ -757,8 +838,9 @@ impl BatchChunk {
     }
 }
 
-/// Engine's `ChunkReader` (a `GenChunk` from `Tile::chunk`): reads a chunk's cells. Engine's
-/// `open`/`close` reference count belongs to its disposal, which is not ported.
+/// Engine's `ChunkReader` (a `GenChunk` from `Tile::chunk`): reads a chunk's cells. It borrows the
+/// tile and does not count as open (Engine's `Tile.getChunk` opens the chunk: here the tile cache's
+/// [`CachedChunk`](super::terraforged_tile_generator::CachedChunk) does).
 pub struct ChunkReader<'tile> {
     tile: &'tile Tile,
     chunk: GenChunk,

@@ -111,6 +111,13 @@ pub trait ExpiringEntry {
     fn close(&self) {}
 }
 
+/// Engine 0.3.0's `Disposable.Listener` (`com.terraforged.engine.concurrent`): told when a value is
+/// disposed of. A `Tile` calls it from `dispose`, on the disposing thread, holding no lock.
+pub trait DisposeListener<T>: Send + Sync {
+    /// `onDispose(value)`.
+    fn on_dispose(&self, value: &T);
+}
+
 /// What Engine's `Future` records of the entry's task: whether it ended and, if it panicked
 /// (Engine: threw), its message.
 #[derive(Default)]
@@ -243,6 +250,8 @@ pub struct CacheEntry<'a, T> {
     clock: fn() -> i64,
     outcome: Arc<TaskOutcome>,
     value: LazyCallable<T, Task<'a, T>>,
+    /// What `close` runs on the value ([`Self::closing`]).
+    on_close: Option<fn(&T)>,
 }
 
 impl<'a, T> CacheEntry<'a, T> {
@@ -275,7 +284,17 @@ impl<'a, T> CacheEntry<'a, T> {
             clock,
             outcome,
             value: LazyCallable::new(create),
+            on_close: None,
         }
+    }
+
+    /// The entry with `close` as its value's `close()`: Engine's `CacheEntry.close` closes a value
+    /// that is `SafeCloseable` (or `AutoCloseable`); Rust has no `instanceof`, so the entry's maker
+    /// names it (the tile cache passes [`Tile::close`](super::terraforged_tile::Tile::close)).
+    #[must_use]
+    pub fn closing(mut self, close: fn(&T)) -> Self {
+        self.on_close = Some(close);
+        self
     }
 
     /// `get()`: stamps the access time, then returns the value, running the task first if no caller
@@ -388,9 +407,13 @@ impl<T> ExpiringEntry for CacheEntry<'_, T> {
         self.timestamp.load(Ordering::Acquire)
     }
 
-    /// Engine closes a `SafeCloseable` or `AutoCloseable` value here (a `Tile` hands its cells back to
-    /// Engine's resource pools, which are not ported). Here the value is dropped with the entry.
-    fn close(&self) {}
+    /// `close()`: closes the value with [`Self::closing`]'s function, if the task has produced it
+    /// (Engine reads the callable's value, still `null` while the task has not run or is running).
+    fn close(&self) {
+        if let (Some(close), Some(value)) = (self.on_close, self.value.value.get()) {
+            close(value);
+        }
+    }
 }
 
 /// `Rivermap implements ExpiringEntry`: its creation time; `close` does nothing.
