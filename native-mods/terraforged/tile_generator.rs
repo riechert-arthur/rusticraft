@@ -23,7 +23,7 @@
  */
 
 use super::{
-    terraforged_concurrent::LazyCallable,
+    terraforged_concurrent::{Cache, CacheEntry, LazyCallable},
     terraforged_engine::Cell,
     terraforged_filters::WorldFilters,
     terraforged_river::Rivermap,
@@ -91,6 +91,78 @@ pub struct TileGeneratorBuilder<H, F> {
     batch_size: i32,
     striped: bool,
     generator: Option<WorldGenerator<H, F>>,
+}
+
+pub struct TileCache<H, F> {
+    can_queue: bool,
+    generator: Arc<TileGenerator<H, F>>,
+    cache: Cache<CacheEntry<Tile>>,
+}
+
+impl<H, F> TileCache<H, F>
+where
+    H: HeightmapSource + Send + Sync + 'static,
+    F: TileFilters + Send + Sync + 'static,
+{
+    pub const QUEUING_MIN_POOL_SIZE: usize = 4;
+    const CAPACITY: usize = 256;
+    const LIFETIME_MILLIS: u64 = 60_000;
+
+    pub fn new(generator: Arc<TileGenerator<H, F>>, worker_count: usize) -> Self {
+        Self {
+            can_queue: worker_count > Self::QUEUING_MIN_POOL_SIZE,
+            generator,
+            cache: Cache::new("TileCache", Self::CAPACITY, Self::LIFETIME_MILLIS),
+        }
+    }
+
+    pub fn chunk_to_region(&self, coordinate: i32) -> i32 {
+        self.generator.chunk_to_region(coordinate)
+    }
+
+    pub fn get(&self, id: i64) -> Option<Arc<CacheEntry<Tile>>> {
+        self.cache.get(id)
+    }
+
+    pub fn get_or_compute(&self, id: i64) -> Arc<CacheEntry<Tile>> {
+        self.cache.compute_if_absent(id, |id| {
+            let region_x = Tile::region_x_from(id);
+            let region_z = Tile::region_z_from(id);
+            let generator = Arc::clone(&self.generator);
+            CacheEntry::compute_async(move || generator.generate_region(region_x, region_z))
+        })
+    }
+
+    pub fn get_tile(&self, id: i64) -> Arc<CacheEntry<Tile>> {
+        let entry = self.get_or_compute(id);
+        entry.get();
+        entry
+    }
+
+    pub fn get_tile_at(&self, region_x: i32, region_z: i32) -> Arc<CacheEntry<Tile>> {
+        self.get_tile(Tile::region_id_for(region_x, region_z))
+    }
+
+    pub fn get_tile_if_present(&self, id: i64) -> Option<Arc<CacheEntry<Tile>>> {
+        let entry = self.get(id)?;
+        if entry.is_done() { Some(entry) } else { None }
+    }
+
+    pub fn queue_chunk(&self, chunk_x: i32, chunk_z: i32) {
+        if self.can_queue {
+            self.queue_region(self.chunk_to_region(chunk_x), self.chunk_to_region(chunk_z));
+        }
+    }
+
+    pub fn queue_region(&self, region_x: i32, region_z: i32) {
+        if self.can_queue {
+            self.get_or_compute(Tile::region_id_for(region_x, region_z));
+        }
+    }
+
+    pub fn expire(&self) -> usize {
+        self.cache.run()
+    }
 }
 
 impl<H, F> Default for TileGeneratorBuilder<H, F> {
@@ -387,6 +459,16 @@ where
     }
 }
 
+impl<H, F> TileGenerator<H, F>
+where
+    H: HeightmapSource + Send + Sync + 'static,
+    F: TileFilters + Send + Sync + 'static,
+{
+    pub fn cached(self: Arc<Self>, worker_count: usize) -> TileCache<H, F> {
+        TileCache::new(self, worker_count)
+    }
+}
+
 #[derive(Clone, Copy)]
 enum SampleTransform {
     Direct,
@@ -601,6 +683,41 @@ mod tests {
             .build();
         assert_eq!(striped.style, GenerationStyle::Striped);
         assert_eq!(striped.generate_region(1, -1).cell(31, 31).value, 62_999.0);
+    }
+
+    #[test]
+    fn tile_cache_matches_engine_0_3_0() {
+        let filters = Arc::new(Mutex::new(Vec::new()));
+        let heightmap = TestHeightmap {
+            map: Arc::new(Rivermap::new(7, -9, Vec::new(), GenWarp::direct())),
+            events: Arc::new(Mutex::new(Vec::new())),
+        };
+        let generator = Arc::new(TileGenerator::new(
+            1,
+            0,
+            0,
+            WorldGenerator::new(heightmap, TestFilters(Arc::clone(&filters))),
+        ));
+        let cache = Arc::clone(&generator).cached(5);
+
+        cache.queue_region(2, -3);
+        let id = Tile::region_id_for(2, -3);
+        let queued = cache.get(id).unwrap();
+        while !queued.is_done() {
+            std::thread::yield_now();
+        }
+        assert_eq!((queued.get().region_x(), queued.get().region_z()), (2, -3));
+        assert!(Arc::ptr_eq(&queued, &cache.get_or_compute(id)));
+        assert_eq!(filters.lock().unwrap().len(), 1);
+
+        cache.queue_chunk(8, -12);
+        assert!(cache.get(Tile::region_id_for(4, -6)).is_some());
+        let direct = cache.get_tile_at(-1, 3);
+        assert_eq!((direct.get().region_x(), direct.get().region_z()), (-1, 3));
+
+        let disabled = generator.cached(4);
+        disabled.queue_region(9, 9);
+        assert!(disabled.get(Tile::region_id_for(9, 9)).is_none());
     }
 
     fn rivermap_events(events: &Mutex<Vec<&'static str>>) -> usize {

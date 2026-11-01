@@ -246,6 +246,9 @@ the value is requested, and block `get` on the in-flight result like TerraForged
 The bounded long-key map now preserves insertion-order eviction during compute-only insertion, while
 the cache wrapper supports explicit close-on-remove and strict timestamp expiration sweeps.
 
+The tile cache now keys asynchronous generation by packed region coordinates, reuses in-flight and
+completed entries, supports blocking and present-only lookup, and gates queueing above four workers.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
