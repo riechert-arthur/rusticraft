@@ -22,6 +22,12 @@
  * SOFTWARE.
  */
 
+use super::{
+    terraforged_engine::{Cell, TerrainRegistry},
+    terraforged_filters::Filterable,
+    terraforged_util::{pack, unpack_left, unpack_right},
+};
+
 /// Engine 0.3.0's tile `Size` (`com.terraforged.engine.tile.Size`): `size` cells per edge plus
 /// `border` on each side (`total`), stored in a `total * total` array. `mask` assumes `size` is a
 /// power of two, as `chunks`/`blocks` make it. All of it is Java `int` math: sums and products
@@ -88,6 +94,198 @@ impl Size {
     pub const fn blocks(factor: i32, border_chunks: i32) -> Self {
         let chunks = 1_i32.wrapping_shl(factor as u32);
         Self::new(chunks.wrapping_shl(4), border_chunks.wrapping_shl(4))
+    }
+}
+
+/// Engine 0.3.0's `Tile`: the cells of one region of `1 << size` chunks (plus `border_chunks` chunks
+/// of border on each side), at chunk `region << size` and block `chunk << 4`. Its block backing is
+/// `block_size().array_size` cells, all allocated up front with the world's registry (Engine's
+/// pooled arrays fill their cells lazily, `computeCell`, and may be longer than the tile needs when
+/// a larger pooled array is reused; neither is observable once a tile is generated). The chunk
+/// views, generation, disposal and resource pools are later layers. A negative array size (only
+/// from absurd sizes or borders) gives an empty backing where Java throws.
+#[derive(Clone)]
+pub struct Tile {
+    region_x: i32,
+    region_z: i32,
+    chunk_x: i32,
+    chunk_z: i32,
+    block_x: i32,
+    block_z: i32,
+    border: i32,
+    size: i32,
+    block_size: Size,
+    chunk_size: Size,
+    blocks: Vec<Cell>,
+}
+
+impl Tile {
+    /// `new Tile(regionX, regionZ, size, borderChunks, resources, listener)`; `terrains` is the
+    /// world's registry, which every cell starts from (`Cell::new`).
+    pub fn new(
+        region_x: i32,
+        region_z: i32,
+        size: i32,
+        border_chunks: i32,
+        terrains: &TerrainRegistry,
+    ) -> Self {
+        // Java's `<<` takes its count modulo 32, as `wrapping_shl` does.
+        let chunk_x = region_x.wrapping_shl(size as u32);
+        let chunk_z = region_z.wrapping_shl(size as u32);
+        let block_size = Size::blocks(size, border_chunks);
+        let chunk_size = Size::chunks(size, border_chunks);
+        let cells = usize::try_from(block_size.array_size).unwrap_or(0);
+        Self {
+            region_x,
+            region_z,
+            chunk_x,
+            chunk_z,
+            block_x: Size::chunk_to_block(chunk_x),
+            block_z: Size::chunk_to_block(chunk_z),
+            border: border_chunks,
+            size,
+            block_size,
+            chunk_size,
+            blocks: (0..cells).map(|_| Cell::new(terrains)).collect(),
+        }
+    }
+
+    /// `getGenerationSize()`: the size factor the tile was built with.
+    pub const fn generation_size(&self) -> i32 {
+        self.size
+    }
+
+    /// `getRegionId()`: `PosUtil.pack(regionX, regionZ)`.
+    pub fn region_id(&self) -> i64 {
+        Self::region_id_for(self.region_x, self.region_z)
+    }
+
+    pub const fn region_x(&self) -> i32 {
+        self.region_x
+    }
+
+    pub const fn region_z(&self) -> i32 {
+        self.region_z
+    }
+
+    pub const fn chunk_x(&self) -> i32 {
+        self.chunk_x
+    }
+
+    pub const fn chunk_z(&self) -> i32 {
+        self.chunk_z
+    }
+
+    /// `getBlockX()`: the block position of the tile's first non-border cell.
+    pub const fn block_x(&self) -> i32 {
+        self.block_x
+    }
+
+    pub const fn block_z(&self) -> i32 {
+        self.block_z
+    }
+
+    /// `getOffsetChunks()`: the border, in chunks.
+    pub const fn offset_chunks(&self) -> i32 {
+        self.border
+    }
+
+    /// `getChunkCount()`: the length of Engine's chunk array, `chunk_size().array_size`.
+    pub const fn chunk_count(&self) -> i32 {
+        self.chunk_size.array_size
+    }
+
+    /// `getBlockCount()`: the length of the block backing.
+    pub fn block_count(&self) -> i32 {
+        self.blocks.len() as i32
+    }
+
+    pub const fn chunk_size(&self) -> Size {
+        self.chunk_size
+    }
+
+    pub const fn block_size(&self) -> Size {
+        self.block_size
+    }
+
+    /// `filterable()`: the tile's cells as a `Filterable`, for `WorldFilters::apply`.
+    pub fn filterable(&mut self) -> FilterRegion<'_> {
+        FilterRegion { tile: self }
+    }
+
+    /// `border + mask(block)` on both axes: the index `getCell` reads, always inside the backing.
+    fn masked_index(&self, block_x: i32, block_z: i32) -> usize {
+        let size = self.block_size;
+        let x = size.border.wrapping_add(size.mask(block_x));
+        let z = size.border.wrapping_add(size.mask(block_z));
+        size.index_of(x, z) as usize
+    }
+
+    /// `getCell(blockX, blockZ)`: the non-border cell at a world block position, wrapped into the
+    /// tile with `mask`.
+    pub fn cell(&self, block_x: i32, block_z: i32) -> &Cell {
+        &self.blocks[self.masked_index(block_x, block_z)]
+    }
+
+    pub fn cell_mut(&mut self, block_x: i32, block_z: i32) -> &mut Cell {
+        let index = self.masked_index(block_x, block_z);
+        &mut self.blocks[index]
+    }
+
+    /// `getRawCell(x, z)`: the cell at `indexOf(x, z)` (border included, Java `int` math). Engine
+    /// throws `ArrayIndexOutOfBoundsException` for an index outside the backing; this returns `None`.
+    pub fn raw_cell(&self, x: i32, z: i32) -> Option<&Cell> {
+        usize::try_from(self.block_size.index_of(x, z))
+            .ok()
+            .and_then(|index| self.blocks.get(index))
+    }
+
+    /// `Tile.getRegionId(regionX, regionZ)`.
+    pub fn region_id_for(region_x: i32, region_z: i32) -> i64 {
+        pack(region_x, region_z)
+    }
+
+    /// `Tile.getRegionX(id)`.
+    pub fn region_x_from(id: i64) -> i32 {
+        unpack_left(id)
+    }
+
+    /// `Tile.getRegionZ(id)`.
+    pub fn region_z_from(id: i64) -> i32 {
+        unpack_right(id)
+    }
+}
+
+/// Engine's `Tile.FilterRegion`: the tile's block backing, block position and block size as the
+/// filters see them. The filters' `getCellRaw` (`java_cell_raw` in filters.rs) indexes it in Java
+/// `int` math and treats an index outside `[0, arraySize)` as `Cell.empty()`, as this class does.
+pub struct FilterRegion<'tile> {
+    tile: &'tile mut Tile,
+}
+
+impl Filterable for FilterRegion<'_> {
+    fn block_x(&self) -> i32 {
+        self.tile.block_x
+    }
+
+    fn block_z(&self) -> i32 {
+        self.tile.block_z
+    }
+
+    fn total_size(&self) -> usize {
+        self.tile.block_size.total as usize
+    }
+
+    fn border_size(&self) -> usize {
+        self.tile.block_size.border as usize
+    }
+
+    fn backing(&self) -> &[Cell] {
+        &self.tile.blocks
+    }
+
+    fn backing_mut(&mut self) -> &mut [Cell] {
+        &mut self.tile.blocks
     }
 }
 
@@ -270,5 +468,53 @@ mod tests {
              f 2147483647 0 64 6d2e3e641d4afca7 d4fbe486a8eaa67e\n\
              f -2147483648 16 80 5402ebd2dfd3889a f468072fbb4bd97e\n"
         );
+    }
+
+    #[test]
+    fn tile_filter_region_matches_engine_0_3_0() {
+        let terrains = TerrainRegistry::new();
+        let mut tile = Tile::new(-2, 3, 2, 1, &terrains);
+        assert_eq!(
+            (
+                tile.generation_size(),
+                tile.region_x(),
+                tile.region_z(),
+                tile.chunk_x(),
+                tile.chunk_z(),
+                tile.block_x(),
+                tile.block_z(),
+                tile.offset_chunks(),
+                tile.chunk_count(),
+                tile.block_count(),
+            ),
+            (2, -2, 3, -8, 12, -128, 192, 1, 36, 9_216)
+        );
+        assert_eq!(tile.chunk_size(), Size::new(4, 1));
+        assert_eq!(tile.block_size(), Size::new(64, 16));
+        assert_eq!(tile.region_id() as u64, 0xffff_fffe_0000_0003);
+        assert_eq!(Tile::region_x_from(tile.region_id()), -2);
+        assert_eq!(Tile::region_z_from(tile.region_id()), 3);
+        assert!(
+            tile.blocks
+                .iter()
+                .all(|cell| cell.terrain.is_same(&terrains.get_by_id(0)))
+        );
+
+        for (index, cell) in tile.blocks.iter_mut().enumerate() {
+            cell.value = index as f32;
+        }
+        assert_eq!(tile.cell(0, 0).value, 1_552.0);
+        assert_eq!(tile.cell(-1, -1).value, 7_663.0);
+        tile.cell_mut(64, 64).value = 3.0;
+        assert_eq!(tile.blocks[1_552].value, 3.0);
+        assert_eq!(tile.raw_cell(5, 7).unwrap().value, 677.0);
+        assert!(tile.raw_cell(-1, 0).is_none());
+
+        let mut filter = tile.filterable();
+        assert_eq!((filter.block_x(), filter.block_z()), (-128, 192));
+        assert_eq!((filter.total_size(), filter.border_size()), (96, 16));
+        assert_eq!(filter.backing()[677].value, 677.0);
+        filter.backing_mut()[677].value = -1.0;
+        assert_eq!(tile.blocks[677].value, -1.0);
     }
 }
