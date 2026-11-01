@@ -305,6 +305,294 @@ struct EdgeBrush {
     weights: Box<[f32]>,
 }
 
+#[derive(Default)]
+pub struct ErosionResource {
+    gradient1: [f32; 3],
+    gradient2: [f32; 3],
+}
+
+pub struct ErosionFilter {
+    erode_speed: f32,
+    deposit_speed: f32,
+    initial_speed: f32,
+    initial_water_volume: f32,
+    max_droplet_lifetime: i32,
+    iterations: i32,
+    brushes: ErosionBrushes,
+}
+
+impl ErosionFilter {
+    const HEIGHT_FALL_OFF: f32 = 0.4;
+    const INERTIA: f32 = 0.005;
+    const SEDIMENT_CAPACITY_FACTOR: f32 = 7.0;
+    const MIN_SEDIMENT_CAPACITY: f32 = 0.008;
+    const EVAPORATE_SPEED: f32 = 0.35;
+    const GRAVITY: f32 = 2.5;
+
+    pub fn new(map_size: i32, settings: ErosionFilterSettings) -> Self {
+        Self {
+            erode_speed: settings.erosion_rate,
+            deposit_speed: settings.deposit_rate,
+            initial_speed: settings.droplet_velocity,
+            initial_water_volume: settings.droplet_volume,
+            max_droplet_lifetime: settings.droplet_lifetime,
+            iterations: settings.droplets_per_chunk,
+            brushes: ErosionBrushes::new(map_size),
+        }
+    }
+
+    pub fn apply_region(
+        &self,
+        seed: i32,
+        origin_chunk_x: i32,
+        origin_chunk_z: i32,
+        chunks_across: i32,
+        map_size: i32,
+        resource: &mut ErosionResource,
+        map: &mut [f32],
+    ) {
+        let max_index = map_size.wrapping_sub(2);
+        for iteration in 0..self.iterations {
+            let iteration_seed = pack_seed(seed, iteration);
+            for chunk_z in 0..chunks_across {
+                let start_z = chunk_z.wrapping_shl(4);
+                for chunk_x in 0..chunks_across {
+                    let start_x = chunk_x.wrapping_shl(4);
+                    let chunk_seed = pack_seed(
+                        origin_chunk_x.wrapping_add(chunk_x),
+                        origin_chunk_z.wrapping_add(chunk_z),
+                    );
+                    let mut random =
+                        super::terraforged_filters::FastRandom::seeded(chunk_seed, iteration_seed);
+                    let x = clamp_i32(
+                        start_x.wrapping_add(random.next_int(NoiseTileSize::CHUNK_SIZE)),
+                        1,
+                        max_index,
+                    );
+                    let z = clamp_i32(
+                        start_z.wrapping_add(random.next_int(NoiseTileSize::CHUNK_SIZE)),
+                        1,
+                        max_index,
+                    );
+                    self.apply_drop(x as f32, z as f32, map, map_size, resource);
+                }
+            }
+        }
+    }
+
+    pub fn apply_tile(
+        &self,
+        seed: i32,
+        chunk_x: i32,
+        chunk_z: i32,
+        size: NoiseTileSize,
+        resource: &mut ErosionResource,
+        map: &mut [f32],
+    ) {
+        let max_index = size.region_length.wrapping_sub(2);
+        for iteration in 0..self.iterations {
+            let iteration_seed = pack_seed(seed, iteration);
+            for delta_z in size.chunk_min..size.chunk_max {
+                let start_z = delta_z.wrapping_sub(size.chunk_min).wrapping_shl(4);
+                for delta_x in size.chunk_min..size.chunk_max {
+                    let start_x = delta_x.wrapping_sub(size.chunk_min).wrapping_shl(4);
+                    let chunk_seed =
+                        pack_seed(chunk_x.wrapping_add(delta_x), chunk_z.wrapping_add(delta_z));
+                    let mut random =
+                        super::terraforged_filters::FastRandom::seeded(chunk_seed, iteration_seed);
+                    let x = clamp_i32(
+                        start_x.wrapping_add(random.next_int(NoiseTileSize::CHUNK_SIZE)),
+                        1,
+                        max_index,
+                    );
+                    let z = clamp_i32(
+                        start_z.wrapping_add(random.next_int(NoiseTileSize::CHUNK_SIZE)),
+                        1,
+                        max_index,
+                    );
+                    self.apply_drop(x as f32, z as f32, map, size.region_length, resource);
+                }
+            }
+        }
+    }
+
+    fn apply_drop(
+        &self,
+        mut position_x: f32,
+        mut position_y: f32,
+        map: &mut [f32],
+        map_size: i32,
+        resource: &mut ErosionResource,
+    ) {
+        let mut direction_x = 0.0_f32;
+        let mut direction_y = 0.0_f32;
+        let mut sediment = 0.0_f32;
+        let mut speed = self.initial_speed;
+        let mut water = self.initial_water_volume;
+        for _ in 0..self.max_droplet_lifetime {
+            let node_x = position_x as i32;
+            let node_y = position_y as i32;
+            let droplet_index = node_y.wrapping_mul(map_size).wrapping_add(node_x);
+            let cell_offset_x = position_x - node_x as f32;
+            let cell_offset_y = position_y - node_y as f32;
+            gradient(
+                map,
+                map_size,
+                position_x,
+                position_y,
+                &mut resource.gradient1,
+            );
+            let first = resource.gradient1;
+            direction_x = direction_x * Self::INERTIA - first[1] * (1.0 - Self::INERTIA);
+            direction_y = direction_y * Self::INERTIA - first[2] * (1.0 - Self::INERTIA);
+            let length_squared = direction_x * direction_x + direction_y * direction_y;
+            if length_squared == 0.0 {
+                return;
+            }
+            let length = f64::from(length_squared).sqrt() as f32;
+            direction_x /= length;
+            direction_y /= length;
+            position_x += direction_x;
+            position_y += direction_y;
+            if (direction_x == 0.0 && direction_y == 0.0)
+                || position_x < 0.0
+                || position_x >= map_size.wrapping_sub(1) as f32
+                || position_y < 0.0
+                || position_y >= map_size.wrapping_sub(1) as f32
+            {
+                return;
+            }
+            let falloff = height_falloff(map[droplet_index as usize]);
+            gradient(
+                map,
+                map_size,
+                position_x,
+                position_y,
+                &mut resource.gradient2,
+            );
+            let delta_height = (resource.gradient2[0] - first[0]) * falloff;
+            let sediment_capacity = java_max(
+                -delta_height * speed * water * Self::SEDIMENT_CAPACITY_FACTOR,
+                Self::MIN_SEDIMENT_CAPACITY,
+            );
+            if sediment > sediment_capacity || delta_height > 0.0 {
+                let deposit = if delta_height > 0.0 {
+                    java_min(delta_height, sediment)
+                } else {
+                    (sediment - sediment_capacity) * self.deposit_speed
+                };
+                sediment -= deposit;
+                let index = droplet_index as usize;
+                let width = map_size as usize;
+                map[index] += deposit * (1.0 - cell_offset_x) * (1.0 - cell_offset_y);
+                map[index + 1] += deposit * cell_offset_x * (1.0 - cell_offset_y);
+                map[index + width] += deposit * (1.0 - cell_offset_x) * cell_offset_y;
+                map[index + width + 1] += deposit * cell_offset_x * cell_offset_y;
+            } else {
+                let erosion = java_min(
+                    (sediment_capacity - sediment) * self.erode_speed,
+                    -delta_height,
+                );
+                let (offsets, weights) = self.brushes.brush(droplet_index as usize);
+                for (&offset, &weight) in offsets.iter().zip(weights) {
+                    let index = droplet_index.wrapping_add(offset) as usize;
+                    let amount = erosion * weight;
+                    let sediment_delta = java_min(map[index], amount);
+                    map[index] -= sediment_delta;
+                    sediment += sediment_delta;
+                }
+            }
+            let speed_squared = speed * speed + delta_height * Self::GRAVITY;
+            if speed_squared <= 0.0 {
+                return;
+            }
+            speed = f64::from(speed_squared).sqrt() as f32;
+            water *= 1.0 - Self::EVAPORATE_SPEED;
+        }
+    }
+}
+
+fn gradient(map: &[f32], map_size: i32, position_x: f32, position_y: f32, output: &mut [f32; 3]) {
+    let x_coordinate = position_x as i32;
+    let y_coordinate = position_y as i32;
+    let x = position_x - x_coordinate as f32;
+    let y = position_y - y_coordinate as f32;
+    let northwest = y_coordinate
+        .wrapping_mul(map_size)
+        .wrapping_add(x_coordinate) as usize;
+    let width = map_size as usize;
+    let height_northwest = map[northwest];
+    let height_northeast = map[northwest + 1];
+    let height_southwest = map[northwest + width];
+    let height_southeast = map[northwest + width + 1];
+    output[0] = height_northwest * (1.0 - x) * (1.0 - y)
+        + height_northeast * x * (1.0 - y)
+        + height_southwest * (1.0 - x) * y
+        + height_southeast * x * y;
+    output[1] = (height_northeast - height_northwest) * (1.0 - y)
+        + (height_southeast - height_southwest) * y;
+    output[2] = (height_southwest - height_northwest) * (1.0 - x)
+        + (height_southeast - height_northeast) * x;
+}
+
+fn height_falloff(height: f32) -> f32 {
+    if height >= ErosionFilter::HEIGHT_FALL_OFF {
+        1.0
+    } else {
+        height / ErosionFilter::HEIGHT_FALL_OFF
+    }
+}
+
+fn pack_seed(x: i32, z: i32) -> i64 {
+    (u64::from(x as u32) | (u64::from(z as u32) << 32)) as i64
+}
+
+fn clamp_i32(value: i32, minimum: i32, maximum: i32) -> i32 {
+    if value < minimum {
+        minimum
+    } else if value > maximum {
+        maximum
+    } else {
+        value
+    }
+}
+
+fn java_max(first: f32, second: f32) -> f32 {
+    if first.is_nan() {
+        first
+    } else if second.is_nan() {
+        second
+    } else if first == 0.0 && second == 0.0 {
+        if first.is_sign_positive() || second.is_sign_positive() {
+            0.0
+        } else {
+            -0.0
+        }
+    } else if first >= second {
+        first
+    } else {
+        second
+    }
+}
+
+fn java_min(first: f32, second: f32) -> f32 {
+    if first.is_nan() {
+        first
+    } else if second.is_nan() {
+        second
+    } else if first == 0.0 && second == 0.0 {
+        if first.is_sign_negative() || second.is_sign_negative() {
+            -0.0
+        } else {
+            0.0
+        }
+    } else if first <= second {
+        first
+    } else {
+        second
+    }
+}
+
 impl ErosionBrushes {
     /// `ErosionFilter.erosionRadius`.
     pub const RADIUS: i32 = 7;
@@ -886,5 +1174,49 @@ pub(crate) mod tests {
     fn erosion_brushes_panic_where_java_throws() {
         // 46341² wraps to a negative `int`: Java's array allocation throws.
         ErosionBrushes::new(46341);
+    }
+
+    fn erosion_map(length: i32) -> Vec<f32> {
+        (0..length.wrapping_mul(length))
+            .map(|index| {
+                let x = index % length;
+                let z = index / length;
+                0.2 + (x.wrapping_mul(13).wrapping_add(z.wrapping_mul(7)) % 31) as f32 / 100.0
+                    + x as f32 / 1000.0
+            })
+            .collect()
+    }
+
+    #[test]
+    fn current_erosion_filter_matches_java_maps() {
+        let settings = ErosionFilterSettings {
+            droplets_per_chunk: 3,
+            droplet_lifetime: 10,
+            ..ErosionFilterSettings::default()
+        };
+        let size = NoiseTileSize::DEFAULT;
+        let filter = ErosionFilter::new(size.region_length, settings);
+        let mut tile_map = erosion_map(size.region_length);
+        filter.apply_tile(
+            42,
+            -3,
+            5,
+            size,
+            &mut ErosionResource::default(),
+            &mut tile_map,
+        );
+        assert_eq!(hash(&tile_map), 0xb36ecb2fd97ba171);
+
+        let mut region_map = erosion_map(size.region_length);
+        filter.apply_region(
+            -17,
+            8,
+            -11,
+            size.chunk_length,
+            size.region_length,
+            &mut ErosionResource::default(),
+            &mut region_map,
+        );
+        assert_eq!(hash(&region_map), 0x293bedd53953eb33);
     }
 }
