@@ -22,7 +22,13 @@
  * SOFTWARE.
  */
 
-use std::sync::{Mutex, OnceLock, PoisonError};
+use std::{
+    sync::{
+        Mutex, OnceLock, PoisonError,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 /// Engine 0.3.0's `LazyCallable` (`com.terraforged.engine.concurrent.task`), the deferred value
 /// behind `TileGenerator.getTile` (`CallableTile`, `CallableZoomTile`): `create` runs on the first
@@ -94,6 +100,52 @@ where
         drop(self.lock.lock().unwrap_or_else(PoisonError::into_inner));
         self.value.get().is_some()
     }
+}
+
+pub trait ExpiringEntry {
+    fn timestamp(&self) -> u64;
+
+    fn close(&self) {}
+}
+
+pub struct CacheEntry<T, F> {
+    timestamp: AtomicU64,
+    value: LazyCallable<T, F>,
+}
+
+impl<T, F> CacheEntry<T, F>
+where
+    F: Fn() -> T,
+{
+    pub fn new(create: F) -> Self {
+        Self {
+            timestamp: AtomicU64::new(current_time_millis()),
+            value: LazyCallable::new(create),
+        }
+    }
+
+    pub fn get(&self) -> &T {
+        self.timestamp
+            .store(current_time_millis(), Ordering::Release);
+        self.value.get()
+    }
+
+    pub fn is_done(&self) -> bool {
+        self.value.is_done()
+    }
+}
+
+impl<T, F> ExpiringEntry for CacheEntry<T, F> {
+    fn timestamp(&self) -> u64 {
+        self.timestamp.load(Ordering::Acquire)
+    }
+}
+
+fn current_time_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 #[cfg(test)]
@@ -259,4 +311,23 @@ d 0 true true
 d 1 true false
 w true true 102 2
 ";
+
+    #[test]
+    fn cache_entry_matches_engine_0_3_0() {
+        let calls = AtomicUsize::new(0);
+        let entry = CacheEntry::new(|| {
+            calls.fetch_add(1, Ordering::Relaxed);
+            42
+        });
+        let created = entry.timestamp();
+
+        assert!(!entry.is_done());
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        assert_eq!(*entry.get(), 42);
+        assert!(entry.is_done());
+        assert!(entry.timestamp() > created);
+        assert_eq!(*entry.get(), 42);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        entry.close();
+    }
 }
