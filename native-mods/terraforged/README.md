@@ -267,6 +267,9 @@ ranges, display colors, curved and linear sampling, and direct cell application 
 Climate settings now preserve TerraForged's temperature and moisture ranges, biome shape defaults,
 range clamping and biasing, and configurable edge-noise module construction.
 
+The climate module now reproduces warped biome cells, region identity and edges, macro grouping,
+continent-adjusted moisture, biome classification, and coastal terrain masking.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
