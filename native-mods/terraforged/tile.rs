@@ -294,7 +294,38 @@ impl Tile {
         });
     }
 
-    /// The loop both heightmap fills share: every tile-local chunk, z rows then x (border
+    /// `generate(Heightmap, offsetX, offsetZ, zoom)`: [`Self::generate_heightmap`] with each cell's
+    /// world block position scaled by `zoom` and shifted by the offset less half the zoomed tile
+    /// width before the stages see it. As in Engine, in `float` math, left to right:
+    /// `translate = offset - (float) blockSize.size * zoom / 2`, then `(float) block * zoom +
+    /// translate` for x and z (any zoom, NaN and infinities included). The same chunk and cell
+    /// order, river-map reuse (the lookup gets the cell's continent cell) and panics.
+    #[allow(clippy::too_many_arguments)]
+    pub fn generate_zoomed_heightmap(
+        &mut self,
+        offset_x: f32,
+        offset_z: f32,
+        zoom: f32,
+        mut apply_base: impl FnMut(&mut Cell, f32, f32),
+        mut lookup: impl FnMut(i32, i32) -> Arc<Rivermap>,
+        mut apply_rivers: impl FnMut(&mut Cell, f32, f32, &Rivermap),
+        mut apply_climate: impl FnMut(&mut Cell, f32, f32),
+    ) {
+        let translate_x = offset_x - self.block_size.size as f32 * zoom / 2.0;
+        let translate_z = offset_z - self.block_size.size as f32 * zoom / 2.0;
+        let mut current = None;
+        self.fill_cells(|cell, x, z| {
+            let x = x as f32 * zoom + translate_x;
+            let z = z as f32 * zoom + translate_z;
+            apply_base(cell, x, z);
+            let rivermap = Rivermap::get_for_cell(cell, current.take(), &mut lookup);
+            apply_rivers(cell, x, z, &rivermap);
+            apply_climate(cell, x, z);
+            current = Some(rivermap);
+        });
+    }
+
+    /// The loop the heightmap fills share: every tile-local chunk, z rows then x (border
     /// included), taken as [`Self::chunk_writer`] does (`computeChunk`), then its cells in
     /// [`ChunkWriter::generate`]'s order with their world block position.
     fn fill_cells(&mut self, mut fill: impl FnMut(&mut Cell, i32, i32)) {
@@ -1434,5 +1465,36 @@ r 4 0 11 3d61aa1f75ddd511 d5f772aa44118431
         }
         let (lookups, trace) = (lookups.get(), trace.get());
         format!("{tag} {run} {lookups} {trace:x} {cells:x} {chunks:x}\n")
+    }
+
+    #[test]
+    fn zoomed_tile_heightmap_generation_matches_engine_0_3_0() {
+        let terrains = TerrainRegistry::new();
+        let mut tile = Tile::new(0, 0, 1, 1, &terrains);
+        let lookups = std::cell::Cell::new(0);
+        tile.generate_zoomed_heightmap(
+            100.0,
+            -50.0,
+            0.5,
+            |cell, x, z| {
+                cell.value = x * 1_000.0 + z;
+                cell.continent_x = 7;
+                cell.continent_z = -9;
+            },
+            |x, z| {
+                lookups.set(lookups.get() + 1);
+                Arc::new(Rivermap::new(x, z, Vec::new(), GenWarp::direct()))
+            },
+            |cell, _, _, _| cell.river_mask = 0.25,
+            |cell, x, z| cell.temperature = (x - z).abs(),
+        );
+
+        assert_eq!(lookups.get(), 1);
+        let first = tile.raw_cell(0, 0).unwrap();
+        let last = tile.raw_cell(63, 63).unwrap();
+        assert_eq!(first.value, 83_934.0);
+        assert_eq!(last.value, 115_465.5);
+        assert_eq!(first.temperature, 150.0);
+        assert_eq!(last.temperature, 150.0);
     }
 }

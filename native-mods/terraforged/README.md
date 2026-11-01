@@ -779,9 +779,14 @@ caches snapshots, so such a block reads its first values. The oracle leaves out 
 its cache is large enough that nothing is evicted (Engine evicts per map section, and the sections follow the processor
 count).
 
+`generate_zoomed_heightmap` is Engine's `Tile.generate(Heightmap, offsetX, offsetZ, zoom)`: the same fill as
+`generate_heightmap`, but the stages get each cell's world block position scaled by the zoom and shifted by the offset
+less half the zoomed tile width (`block * zoom + offset - size * zoom / 2`, in Engine's `float` order). Its cached
+variant and the tile generator's zoomed region are later layers (#78, #80).
+
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views and the tile heightmap fill (direct and through the heightmap cache). They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views and the tile heightmap fill (direct, through the heightmap cache and zoomed). They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
