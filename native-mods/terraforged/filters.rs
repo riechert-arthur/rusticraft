@@ -24,7 +24,7 @@
 
 use std::sync::{Arc, RwLock};
 
-use super::terraforged::{lerp, map, round};
+use super::terraforged::{java_max, java_min, lerp, map, round};
 use super::terraforged_engine::{Cell, Levels, TerrainProperties};
 
 /// Engine's `FilterSettings.Smoothing` (defaults: one iteration, radius 1.8, rate 0.9). Engine's
@@ -200,6 +200,59 @@ impl Smoothing {
                         .expect("filter coordinates are in bounds")
                         .value -= adjustment;
                 }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Steepness {
+    radius: isize,
+    scaler: f32,
+    water_level: f32,
+    _max_beach_level: f32,
+}
+
+impl Steepness {
+    pub fn new(radius: i32, scaler: f32, levels: Levels) -> Self {
+        Self {
+            radius: radius as isize,
+            scaler,
+            water_level: levels.water,
+            _max_beach_level: levels.water(6),
+        }
+    }
+
+    pub fn apply(&self, map: &mut impl Filterable, _seed_x: i32, _seed_z: i32, _iterations: i32) {
+        let total = map.total_size();
+        for z in 0..total {
+            for x in 0..total {
+                let cell_value = map
+                    .cell_raw(x, z)
+                    .expect("filter coordinates are in bounds")
+                    .value;
+                let mut total_height_difference = 0.0_f32;
+                for dz in -1_isize..=2 {
+                    for dx in -1_isize..=2 {
+                        if dx == 0 && dz == 0 {
+                            continue;
+                        }
+                        let Some(neighbour) = map.cell_raw(
+                            x.wrapping_add_signed(dx * self.radius),
+                            z.wrapping_add_signed(dz * self.radius),
+                        ) else {
+                            continue;
+                        };
+                        if neighbour.is_absent() {
+                            continue;
+                        }
+                        let height = java_max(neighbour.value, self.water_level);
+                        total_height_difference += (cell_value - height).abs() / self.radius as f32;
+                    }
+                }
+                map.cell_raw_mut(x, z)
+                    .expect("filter coordinates are in bounds")
+                    .gradient = java_min(1.0, total_height_difference * self.scaler);
             }
         }
     }
@@ -385,6 +438,35 @@ mod tests {
              9 9669758e74e9a8c9 3fa185f0 3f7507c9 3e22e48f 3eb47e28 bde538f0 bda5bc02 3f527a0f 3fa0d35a be0793de\n\
              10 e596f2904148f08e 3eac9ba6 3d56bb94 3f90a4a8 3f48538f 3fa786c2 3e932ca6 3fb6acda bd59999c 3f262b6b\n"
         );
+    }
+
+    #[test]
+    fn steepness_matches_engine_0_3_0() {
+        let registry = TerrainRegistry::new();
+        let total = 6;
+        let cells = (0..total * total)
+            .map(|index| {
+                let mut cell = Cell::new(&registry);
+                cell.value = 0.25 + ((index * 29 + 7) % 97) as f32 / 32_768.0;
+                cell
+            })
+            .collect();
+        let mut map = TestMap { total, cells };
+
+        Steepness::new(1, 10.0, Levels::new(256, 63)).apply(&mut map, 123, -456, 99);
+
+        let expected = [
+            (0, 0x3e0c0000),
+            (1, 0x3dd7a000),
+            (7, 0x3e3a9000),
+            (14, 0x3e165000),
+            (21, 0x3e0a2000),
+            (28, 0x3da96000),
+            (35, 0x3d1c4000),
+        ];
+        for (index, bits) in expected {
+            assert_eq!(map.cells[index].gradient.to_bits(), bits, "cell {index}");
+        }
     }
 
     #[test]

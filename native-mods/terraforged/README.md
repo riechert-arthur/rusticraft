@@ -668,6 +668,9 @@ the tile map are not ported). Its tests replay `SmoothingOracle.java` in `.local
 which runs Engine's `Smoothing.apply` on the same 14x14 maps for 11 radius, rate, level and iteration cases and
 prints every cell's value bits folded together.
 
+The steepness filter measures each cell against TerraForged's asymmetric sixteen-sample neighborhood,
+clamps submerged neighbors to water level, and records the scaled result as terrain gradient.
+
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache and the smoothing filter. They change nothing in the game, so there is
