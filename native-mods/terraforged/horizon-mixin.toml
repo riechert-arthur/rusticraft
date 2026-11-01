@@ -224,6 +224,13 @@ source = "cave_biome_sampler.rs"
 visibility = "pub"
 
 [[module]]
+id = "biome_map"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_biome_map"
+source = "biome_map.rs"
+visibility = "pub"
+
+[[module]]
 id = "continent_points"
 file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_continent_points"

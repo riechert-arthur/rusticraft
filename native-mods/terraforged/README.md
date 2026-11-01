@@ -489,6 +489,8 @@ Biome chunk filling now precomputes TerraForged's surface and optional cave 4-by
 call order, repeats them through whole sections, and keeps the surface layer above the y=0 cave band.
 The cave-biome sampler now reproduces the coarse coverage mask, independent biome-choice noise,
 equal-weight selection, non-surface fallback, and Java-width seed offsets used by that deep layer.
+Empty surface and highland climate pools now borrow the nearest original non-empty pool using
+TerraForged's temperature-biased climate distance without order-dependent multi-hop borrowing.
 
 The scalar graph fixtures cover 15 graphs, four seeds and four coordinates (240 Java samples),
 including wrapped seed addition and mixed Perlin/seed-sensitive sources. Regenerate their hashes
