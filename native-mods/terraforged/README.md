@@ -213,6 +213,9 @@ in TerraForged's chunk-major order while reusing the current continent's riverma
 Cached tile traversal delegates each integer block to TerraForged's contextual heightmap cache, copying
 completed cells on hits without rerunning base, river, lookup, or climate stages.
 
+World filters now accept real TerraForged tiles, borrow their filter region, and use the tile's region
+coordinates for optional and required passes exactly like the Java `WorldFilters.apply` entry point.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:

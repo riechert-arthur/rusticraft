@@ -27,6 +27,7 @@ use std::sync::{Arc, RwLock};
 use super::terraforged_engine::{
     Cell, ControlPoints, Levels, Terrain, TerrainProperties, TerrainRegistry,
 };
+use super::terraforged_tile::Tile;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SmoothingSettings {
@@ -789,6 +790,12 @@ impl WorldFilters {
         self.apply_required(map, region_x, region_z);
     }
 
+    pub fn apply_tile(&self, tile: &mut Tile, optional: bool) {
+        let region_x = tile.region_x();
+        let region_z = tile.region_z();
+        self.apply(&mut tile.filterable(), region_x, region_z, optional);
+    }
+
     pub fn apply_required(&self, map: &mut impl Filterable, seed_x: i32, seed_z: i32) {
         self.steepness.apply(map, seed_x, seed_z, 1);
         self.beach.apply(map, seed_x, seed_z, 1);
@@ -1194,6 +1201,64 @@ mod tests {
                     cell.terrain.id(),
                 ),
                 (value, erosion, sediment, gradient, terrain),
+                "cell {index}"
+            );
+        }
+    }
+
+    #[test]
+    fn world_filters_apply_to_tiles() {
+        let terrains = TerrainRegistry::new();
+        let settings = FilterSettings {
+            erosion: ErosionSettings {
+                droplets_per_chunk: 2,
+                ..ErosionSettings::default()
+            },
+            smoothing: SmoothingSettings::default(),
+        };
+        let filters = WorldFilters::new(
+            0,
+            settings,
+            Levels::new(256, 63),
+            ControlPoints::default(),
+            &terrains,
+        );
+        let mut tile = Tile::new(-2, 3, 0, 1);
+        {
+            let mut map = tile.filterable();
+            for z in 0..map.total_size() {
+                for x in 0..map.total_size() {
+                    let index = z * map.total_size() + x;
+                    let cell = map.cell_raw_mut(x, z).unwrap();
+                    cell.value = 0.28 + ((x * 13 + z * 7 + x * z) % 31) as f32 / 1_000.0;
+                    cell.continent_edge = 0.2;
+                    if index % 11 == 0 {
+                        cell.terrain = terrains.get_by_id(3);
+                    }
+                    cell.erosion_mask = index % 113 == 0;
+                }
+            }
+        }
+
+        filters.apply_tile(&mut tile, true);
+
+        let map = tile.filterable();
+        for (index, value, erosion, gradient, terrain) in [
+            (0, 0x3e8f5c29, 0, 0x3f800000, 4),
+            (11, 0x3e991687, 0, 0x3f50b209, 4),
+            (511, 0x3e94b44c, 0xb8f1d340, 0x3f255b54, 0),
+            (1024, 0x3e950493, 0xb8bdffce, 0x3f149f6c, 0),
+            (2299, 0x3e9cac08, 0, 0x3f667981, 4),
+        ] {
+            let cell = &map.backing()[index];
+            assert_eq!(
+                (
+                    cell.value.to_bits(),
+                    cell.erosion.to_bits(),
+                    cell.gradient.to_bits(),
+                    cell.terrain.id(),
+                ),
+                (value, erosion, gradient, terrain),
                 "cell {index}"
             );
         }
