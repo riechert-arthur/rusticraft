@@ -150,6 +150,9 @@ branches, including aggregate bounds and TerraForged's branch-overlap checks.
 The rivermap layer applies paired generation warps and dispatches terrain samples to bounded river
 networks while retaining continent coordinates and cache timestamps.
 
+The base-river-generator layer adds deterministic root shuffling, recursive forks, overlap rejection,
+lake and wetland placement, and complete rivermap assembly from Java-compatible random streams.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
