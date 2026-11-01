@@ -717,6 +717,83 @@ pub struct WorldSettings {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TerrainFormSettings {
+    pub weight: f32,
+    pub base_scale: f32,
+    pub vertical_scale: f32,
+    pub horizontal_scale: f32,
+}
+
+impl TerrainFormSettings {
+    pub const fn new(weight: f32, vertical_scale: f32, horizontal_scale: f32) -> Self {
+        Self {
+            weight,
+            base_scale: 1.0,
+            vertical_scale,
+            horizontal_scale,
+        }
+    }
+}
+
+impl Default for TerrainFormSettings {
+    fn default() -> Self {
+        Self::new(1.0, 1.0, 1.0)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GeneralTerrainSettings {
+    pub terrain_seed_offset: i32,
+    pub terrain_region_size: i32,
+    pub global_vertical_scale: f32,
+    pub global_horizontal_scale: f32,
+    pub fancy_mountains: bool,
+}
+
+impl Default for GeneralTerrainSettings {
+    fn default() -> Self {
+        Self {
+            terrain_seed_offset: 0,
+            terrain_region_size: 1_200,
+            global_vertical_scale: 0.98,
+            global_horizontal_scale: 1.0,
+            fancy_mountains: true,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TerrainSettings {
+    pub general: GeneralTerrainSettings,
+    pub steppe: TerrainFormSettings,
+    pub plains: TerrainFormSettings,
+    pub hills: TerrainFormSettings,
+    pub dales: TerrainFormSettings,
+    pub plateau: TerrainFormSettings,
+    pub badlands: TerrainFormSettings,
+    pub torridonian: TerrainFormSettings,
+    pub mountains: TerrainFormSettings,
+    pub volcano: TerrainFormSettings,
+}
+
+impl Default for TerrainSettings {
+    fn default() -> Self {
+        Self {
+            general: GeneralTerrainSettings::default(),
+            steppe: TerrainFormSettings::new(1.0, 1.0, 1.0),
+            plains: TerrainFormSettings::new(2.0, 1.0, 1.0),
+            hills: TerrainFormSettings::new(2.0, 1.0, 1.0),
+            dales: TerrainFormSettings::new(1.5, 1.0, 1.0),
+            plateau: TerrainFormSettings::new(1.5, 1.0, 1.0),
+            badlands: TerrainFormSettings::new(1.0, 1.0, 1.0),
+            torridonian: TerrainFormSettings::new(2.0, 1.0, 1.0),
+            mountains: TerrainFormSettings::new(2.5, 1.0, 1.0),
+            volcano: TerrainFormSettings::new(5.0, 1.0, 1.0),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ControlPoints {
     pub deep_ocean: f32,
     pub shallow_ocean: f32,
@@ -1253,5 +1330,41 @@ mod tests {
         assert_eq!(ContinentType::Single.index(), 1);
         assert_eq!(ContinentType::MultiImproved.index(), 2);
         assert_eq!(ContinentType::Fancy.index(), 3);
+    }
+
+    #[test]
+    fn terrain_settings_match_engine_0_3_0() {
+        let settings = TerrainSettings::default();
+        assert_eq!(settings.general.terrain_seed_offset, 0);
+        assert_eq!(settings.general.terrain_region_size, 1_200);
+        assert_eq!(settings.general.global_vertical_scale.to_bits(), 0x3f7ae148);
+        assert_eq!(
+            settings.general.global_horizontal_scale.to_bits(),
+            0x3f800000
+        );
+        assert!(settings.general.fancy_mountains);
+        let forms = [
+            settings.steppe,
+            settings.plains,
+            settings.hills,
+            settings.dales,
+            settings.plateau,
+            settings.badlands,
+            settings.torridonian,
+            settings.mountains,
+            settings.volcano,
+        ];
+        assert_eq!(
+            forms.map(|form| form.weight.to_bits()),
+            [
+                0x3f800000, 0x40000000, 0x40000000, 0x3fc00000, 0x3fc00000, 0x3f800000, 0x40000000,
+                0x40200000, 0x40a00000,
+            ]
+        );
+        for form in forms {
+            assert_eq!(form.base_scale.to_bits(), 0x3f800000);
+            assert_eq!(form.vertical_scale.to_bits(), 0x3f800000);
+            assert_eq!(form.horizontal_scale.to_bits(), 0x3f800000);
+        }
     }
 }

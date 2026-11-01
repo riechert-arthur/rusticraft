@@ -66,6 +66,9 @@ the exact normalized block-level conversions used by TerraForged's heightmap pip
 The world-settings layer completes TerraForged's root settings object with continent generator mode,
 shape, scale, jitter, skipping, size variance and octave-distortion defaults.
 
+The terrain-settings layer adds exact global and per-landform weights plus vertical, horizontal and
+base scaling controls consumed by TerraForged's terrain distribution and LandForms graph.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
