@@ -471,6 +471,10 @@ Bordered chunk emission now preserves the raw base, continent and terrain metada
 height from the cached eroded region, then applies rivers. Scratch chunks and samples are pooled per
 call so a blocked worker cannot let nested work overwrite its in-flight generation data.
 
+The current terrain cache now starts one shared asynchronous generation task per seed and chunk,
+supports readiness probes and eager hints, and removes completed entries after decoration. Shared
+terrain handles defer pool restoration until their final concurrent reader releases the data.
+
 The scalar graph fixtures cover 15 graphs, four seeds and four coordinates (240 Java samples),
 including wrapped seed addition and mixed Perlin/seed-sensitive sources. Regenerate their hashes
 with `tools/terraforged/TerraForgedSeededGraphOracle.java` on a classpath containing compiled

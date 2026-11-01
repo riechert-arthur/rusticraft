@@ -83,6 +83,23 @@ impl ErodedNoiseGenerator {
         &self.generator
     }
 
+    pub fn noise_sample(&self, seed: i32, x: i32, z: i32) -> NoiseSample {
+        let mut sample = NoiseSample::default();
+        self.sample(seed, x, z, &mut sample);
+        sample
+    }
+
+    pub fn sample<'a>(
+        &self,
+        seed: i32,
+        x: i32,
+        z: i32,
+        sample: &'a mut NoiseSample,
+    ) -> &'a mut NoiseSample {
+        let mut blender = self.generator.blender_resource();
+        self.generator.sample(seed, x, z, sample, &mut blender)
+    }
+
     pub fn eroded_height_noise(&self, seed: i32, x: i32, z: i32) -> f32 {
         let mut sample = NoiseSample::default();
         let frequency = self.generator.levels().noise_levels.frequency;
