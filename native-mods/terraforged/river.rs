@@ -110,6 +110,71 @@ pub struct Range {
     pub max: f32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Boundsf {
+    pub min_x: f32,
+    pub min_y: f32,
+    pub max_x: f32,
+    pub max_y: f32,
+}
+
+impl Boundsf {
+    pub const NONE: Self = Self::new(1.0, 1.0, -1.0, -1.0);
+
+    pub const fn new(min_x: f32, min_y: f32, max_x: f32, max_y: f32) -> Self {
+        Self {
+            min_x,
+            min_y,
+            max_x,
+            max_y,
+        }
+    }
+
+    pub const fn contains(self, x: f32, y: f32) -> bool {
+        x >= self.min_x && x <= self.max_x && y >= self.min_y && y <= self.max_y
+    }
+
+    pub const fn builder() -> BoundsfBuilder {
+        BoundsfBuilder::new()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BoundsfBuilder {
+    min_x: f32,
+    min_y: f32,
+    max_x: f32,
+    max_y: f32,
+}
+
+impl BoundsfBuilder {
+    pub const fn new() -> Self {
+        Self {
+            min_x: f32::MAX,
+            min_y: f32::MAX,
+            max_x: f32::MIN_POSITIVE,
+            max_y: f32::MIN_POSITIVE,
+        }
+    }
+
+    pub fn record(&mut self, x: f32, y: f32) {
+        self.min_x = self.min_x.min(x);
+        self.min_y = self.min_y.min(y);
+        self.max_x = self.max_x.max(x);
+        self.max_y = self.max_y.max(y);
+    }
+
+    pub const fn build(self) -> Boundsf {
+        Boundsf::new(self.min_x, self.min_y, self.max_x, self.max_y)
+    }
+}
+
+impl Default for BoundsfBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Range {
     pub const fn new(min: f32, max: f32) -> Self {
         Self { min, max }
@@ -750,6 +815,102 @@ pub struct LakeConfig {
     pub distance_max: f32,
 }
 
+pub struct LakeCarver {
+    valley: f32,
+    valley2: f32,
+    lake_distance2: f32,
+    valley_distance2: f32,
+    bank_alpha_min: f32,
+    bank_alpha_max: f32,
+    bank_alpha_range: f32,
+    depth: f32,
+    bank_min: f32,
+    bank_max: f32,
+    center: Vec2f,
+    lake_terrain: Terrain,
+}
+
+impl LakeCarver {
+    pub fn new(center: Vec2f, radius: f32, multiplier: f32, config: LakeConfig) -> Self {
+        let lake = radius * multiplier;
+        let valley = 275.0 * multiplier;
+        let valley2 = valley * valley;
+        let lake_distance2 = lake * lake;
+        let bank_alpha_min = config.bank_min;
+        let bank_alpha_max = 1.0_f32.min(bank_alpha_min + 0.275);
+        Self {
+            valley,
+            valley2,
+            lake_distance2,
+            valley_distance2: valley2 - lake_distance2,
+            bank_alpha_min,
+            bank_alpha_max,
+            bank_alpha_range: bank_alpha_max - bank_alpha_min,
+            depth: config.depth,
+            bank_min: config.bank_min,
+            bank_max: config.bank_max,
+            center,
+            lake_terrain: TerrainRegistry::new().get_by_id(6),
+        }
+    }
+
+    pub fn apply(&self, cell: &mut Cell, x: f32, z: f32) {
+        let distance2 = self.distance2(x, z);
+        if distance2 > self.valley2 {
+            return;
+        }
+        let bank_height = self.bank_height(cell);
+        if distance2 > self.lake_distance2 {
+            if cell.value < bank_height {
+                return;
+            }
+            let valley_alpha = clamp(
+                1.0 - (distance2 - self.lake_distance2) / self.valley_distance2,
+                0.0,
+                1.0,
+            );
+            cell.value = lerp(cell.value, bank_height, valley_alpha);
+            cell.river_mask *= 1.0 - valley_alpha;
+            cell.river_mask = cell.river_mask.min(1.0 - valley_alpha);
+            return;
+        }
+        cell.value = bank_height.min(cell.value);
+        if distance2 < self.lake_distance2 {
+            let depth_alpha = clamp(1.0 - distance2 / self.lake_distance2, 0.0, 1.0);
+            let lake_depth = cell.value.min(self.depth);
+            cell.value = lerp(cell.value, lake_depth, depth_alpha);
+            cell.terrain = self.lake_terrain.clone();
+            cell.river_mask = cell.river_mask.min(1.0 - depth_alpha);
+        }
+    }
+
+    pub fn record_bounds(&self, builder: &mut BoundsfBuilder) {
+        let radius = self.valley * 1.2;
+        builder.record(self.center.x - radius, self.center.y - radius);
+        builder.record(self.center.x + radius, self.center.y + radius);
+    }
+
+    pub fn overlaps(&self, x: f32, z: f32, radius2: f32) -> bool {
+        self.distance2(x, z) < self.lake_distance2 + radius2
+    }
+
+    fn distance2(&self, x: f32, z: f32) -> f32 {
+        let dx = self.center.x - x;
+        let dz = self.center.y - z;
+        dx * dx + dz * dz
+    }
+
+    fn bank_height(&self, cell: &Cell) -> f32 {
+        let alpha = noise_map(
+            cell.value,
+            self.bank_alpha_min,
+            self.bank_alpha_max,
+            self.bank_alpha_range,
+        );
+        lerp(self.bank_min, self.bank_max, alpha)
+    }
+}
+
 impl LakeConfig {
     pub fn new(settings: Lake, levels: Levels) -> Self {
         Self {
@@ -1111,5 +1272,47 @@ mod tests {
                 0x3e9837f0, 0x3e9837f0, 0x3c3504f3, 0x3deac0c7, 0x3e9837f0, 0x3e9837f0
             ]
         );
+    }
+
+    #[test]
+    fn lake_carver_matches_engine_0_3_0() {
+        let levels = Levels::new(256, 63);
+        let config = LakeConfig::new(DefaultRiverSettings::default().lakes, levels);
+        let lake = LakeCarver::new(Vec2f::new(100.0, -50.0), 75.0, 0.8, config);
+        assert_eq!(
+            [100.0, 130.0, 160.0, 175.0, 200.0, 300.0, 321.0].map(|x| {
+                let mut cell = Cell::default();
+                cell.value = 0.6;
+                cell.river_mask = 1.0;
+                lake.apply(&mut cell, x, -50.0);
+                (
+                    cell.value.to_bits(),
+                    cell.river_mask.to_bits(),
+                    cell.terrain.id(),
+                )
+            }),
+            [
+                (0x3e500000, 0, 6),
+                (0x3e640000, 0x3e800000, 6),
+                (0x3e900000, 0x3f800000, 0),
+                (0x3e976075, 0x3d392490, 0),
+                (0x3ea75075, 0x3e124924, 0),
+                (0x3f0a4ccd, 0x3f500000, 0),
+                (0x3f19999a, 0x3f800000, 0),
+            ]
+        );
+        let mut builder = Boundsf::builder();
+        lake.record_bounds(&mut builder);
+        let bounds = builder.build();
+        assert_eq!(
+            [bounds.min_x, bounds.min_y, bounds.max_x, bounds.max_y].map(f32::to_bits),
+            [0xc3240000, 0xc39d0000, 0x43b60000, 0x43560000]
+        );
+        assert_eq!(
+            [100.0, 160.0, 175.0, 200.0, 300.0].map(|x| lake.overlaps(x, -50.0, 400.0)),
+            [true, true, false, false, false]
+        );
+        assert!(bounds.contains(100.0, -50.0));
+        assert!(!Boundsf::NONE.contains(0.0, 0.0));
     }
 }

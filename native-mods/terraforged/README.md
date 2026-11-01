@@ -138,6 +138,9 @@ position sampling and simplex-driven local warping with the original endpoint an
 The river-carver layer adds tapered valley, bank and bed shaping, mouth scaling, terrain tagging,
 fork-profile derivation and Java-random valley curves with exact normalized height behavior.
 
+The lake layer adds circular beds, depth blending, shoreline valleys, bank-height interpolation,
+river-mask shaping, overlap checks and the float bounds accumulator used by river networks.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
