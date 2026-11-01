@@ -25,8 +25,9 @@
 use std::{
     collections::{HashMap, VecDeque},
     sync::{
-        Arc, OnceLock, RwLock,
-        atomic::{AtomicU64, Ordering},
+        Arc, Mutex, OnceLock, RwLock,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        mpsc,
     },
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -74,34 +75,71 @@ pub trait ExpiringEntry {
     fn close(&self) {}
 }
 
-pub struct CacheEntry<T, F> {
+pub struct CacheEntry<T> {
     timestamp: AtomicU64,
-    value: LazyCallable<T, F>,
+    value: OnceLock<T>,
+    create: Mutex<Option<Box<dyn FnOnce() -> T + Send>>>,
+    done: Arc<AtomicBool>,
 }
 
-impl<T, F> CacheEntry<T, F>
-where
-    F: Fn() -> T,
-{
-    pub fn new(create: F) -> Self {
+impl<T> CacheEntry<T> {
+    pub fn new(create: impl FnOnce() -> T + Send + 'static) -> Self {
+        let done = Arc::new(AtomicBool::new(false));
+        let complete = Arc::clone(&done);
         Self {
             timestamp: AtomicU64::new(current_time_millis()),
-            value: LazyCallable::new(create),
+            value: OnceLock::new(),
+            create: Mutex::new(Some(Box::new(move || {
+                let value = create();
+                complete.store(true, Ordering::Release);
+                value
+            }))),
+            done,
+        }
+    }
+
+    pub fn compute_async(create: impl FnOnce() -> T + Send + 'static) -> Self
+    where
+        T: Send + 'static,
+    {
+        let done = Arc::new(AtomicBool::new(false));
+        let complete = Arc::clone(&done);
+        let (sender, receiver) = mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            let value = create();
+            let _ = sender.send(value);
+            complete.store(true, Ordering::Release);
+        });
+        Self {
+            timestamp: AtomicU64::new(current_time_millis()),
+            value: OnceLock::new(),
+            create: Mutex::new(Some(Box::new(move || {
+                receiver
+                    .recv()
+                    .expect("asynchronous cache entry task disconnected")
+            }))),
+            done,
         }
     }
 
     pub fn get(&self) -> &T {
         self.timestamp
             .store(current_time_millis(), Ordering::Release);
-        self.value.get()
+        self.value.get_or_init(|| {
+            self.create
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take()
+                .expect("cache entry initializer was already consumed")()
+        })
     }
 
     pub fn is_done(&self) -> bool {
-        self.value.is_done()
+        self.done.load(Ordering::Acquire)
     }
 }
 
-impl<T, F> ExpiringEntry for CacheEntry<T, F> {
+impl<T> ExpiringEntry for CacheEntry<T> {
     fn timestamp(&self) -> u64 {
         self.timestamp.load(Ordering::Acquire)
     }
@@ -300,7 +338,10 @@ impl<T: ExpiringEntry> Cache<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
 
     #[test]
     fn lazy_callable_matches_engine_0_3_0() {
@@ -325,9 +366,10 @@ mod tests {
 
     #[test]
     fn cache_entry_matches_engine_0_3_0() {
-        let calls = AtomicUsize::new(0);
-        let entry = CacheEntry::new(|| {
-            calls.fetch_add(1, Ordering::Relaxed);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let create_calls = Arc::clone(&calls);
+        let entry = CacheEntry::new(move || {
+            create_calls.fetch_add(1, Ordering::Relaxed);
             42
         });
         let created = entry.timestamp();
@@ -340,6 +382,21 @@ mod tests {
         assert_eq!(*entry.get(), 42);
         assert_eq!(calls.load(Ordering::Relaxed), 1);
         entry.close();
+    }
+
+    #[test]
+    fn asynchronous_cache_entry_matches_engine_0_3_0() {
+        let (release, wait) = mpsc::sync_channel(1);
+        let entry = CacheEntry::compute_async(move || {
+            wait.recv().unwrap();
+            73
+        });
+        assert!(!entry.is_done());
+        release.send(()).unwrap();
+        while !entry.is_done() {
+            std::thread::yield_now();
+        }
+        assert_eq!(*entry.get(), 73);
     }
 
     struct TestEntry {

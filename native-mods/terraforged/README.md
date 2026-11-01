@@ -240,6 +240,9 @@ selecting direct generation unless a positive batch size requests batched or str
 Cache entries now wrap TerraForged's lazy computation with completion reporting and refresh their
 millisecond access timestamp on every `get`, providing the expiration primitive used by tile caches.
 
+Cache entries can now start computation immediately on a worker thread, report task completion before
+the value is requested, and block `get` on the in-flight result like TerraForged's future-backed entry.
+
 The bounded long-key map now preserves insertion-order eviction during compute-only insertion, while
 the cache wrapper supports explicit close-on-remove and strict timestamp expiration sweeps.
 
