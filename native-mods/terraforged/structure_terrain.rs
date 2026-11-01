@@ -23,6 +23,45 @@
  */
 
 use super::terraforged::{clamp, java_max, java_pow, lerp, round};
+use super::{
+    super::terrain::{TerrainBlockStates, TerrainChunk, TerrainError},
+    terraforged_terrain_data::TerrainData,
+};
+use crate::{heightmap::HeightmapType, registry::BlockStateId};
+
+struct ChunkColumns<'a, 'r, B: TerrainBlockStates> {
+    chunk: &'a mut TerrainChunk<'r, B>,
+    stone: BlockStateId,
+    air: BlockStateId,
+}
+
+impl<B: TerrainBlockStates> Columns for ChunkColumns<'_, '_, B> {
+    type Error = TerrainError;
+
+    fn ocean_floor(&self, x: i32, z: i32) -> i32 {
+        self.chunk
+            .heightmap(HeightmapType::OceanFloorWg)
+            .expect("structure heightmap primed")
+            .highest_taken(x & 15, z & 15)
+            .expect("masked chunk coordinates")
+    }
+
+    fn set(&mut self, x: i32, y: i32, z: i32, fill: Fill) -> Result<(), Self::Error> {
+        if y < self.chunk.min_y() || y >= self.chunk.min_y() + self.chunk.height() {
+            return Ok(());
+        }
+        let state = match fill {
+            Fill::Stone => self.stone,
+            Fill::Air => self.air,
+        };
+        self.chunk.set_block_worldgen(x & 15, y, z & 15, state)?;
+        for kind in [HeightmapType::OceanFloorWg, HeightmapType::WorldSurfaceWg] {
+            self.chunk
+                .update_heightmap(kind, x & 15, y, z & 15, state)?;
+        }
+        Ok(())
+    }
+}
 
 /// A structure piece's `BoundingBox` (inclusive block bounds).
 #[derive(Clone, Copy, Debug)]
@@ -72,6 +111,32 @@ pub struct StructureTerrain {
 }
 
 impl StructureTerrain {
+    pub fn modify_chunk<B: TerrainBlockStates>(
+        &self,
+        chunk: &mut TerrainChunk<'_, B>,
+        terrain: &mut TerrainData,
+        stone: BlockStateId,
+        air: BlockStateId,
+    ) -> Result<(), TerrainError> {
+        for kind in [HeightmapType::OceanFloorWg, HeightmapType::WorldSurfaceWg] {
+            if chunk.heightmap(kind).is_none() {
+                chunk.prime_heightmaps(&[kind])?;
+            }
+        }
+        let origin = chunk.position();
+        let mut columns = ChunkColumns { chunk, stone, air };
+        for dz in 0..16 {
+            for dx in 0..16 {
+                let x = origin.x.wrapping_shl(4).wrapping_add(dx);
+                let z = origin.z.wrapping_shl(4).wrapping_add(dz);
+                if let Some(height) = self.modify(x, z, &mut columns)? {
+                    terrain.set_height_at(x, z, height);
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// The constructor's `rigids.sort(PIECE_SORTER)`: pieces by box `minY`, stable (fastutil's sort), from the
     /// pieces the caller collected (BEARD_BOX/BEARD_THIN starts, close to the chunk, rigid pool elements).
     pub fn from_rigid_pieces(mut pieces: Vec<Piece>) -> Self {

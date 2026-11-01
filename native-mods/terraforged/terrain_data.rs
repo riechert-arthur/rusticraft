@@ -342,6 +342,10 @@ impl TerrainData {
         self.levels.height(self.height.get(x, z))
     }
 
+    pub fn set_height_at(&mut self, x: i32, z: i32, height: i32) {
+        self.height.set(x, z, height as f32);
+    }
+
     pub fn base_height_at(&self, x: i32, z: i32) -> i32 {
         self.levels.height(self.base_height.get(x, z))
     }
