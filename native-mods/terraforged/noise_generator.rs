@@ -23,14 +23,15 @@
  */
 
 use super::{
-    terraforged::{Module, Source, SourceConfig, SourceKind},
+    terraforged::{Module, Source, SourceConfig, SourceKind, floor},
     terraforged_continent_noise::ContinentNoise,
     terraforged_continent_points::{BEACH, COAST, SHALLOW_OCEAN},
-    terraforged_engine::{ControlPoints, Terrain, TerrainRegistry},
+    terraforged_engine::{ControlPoints, Terrain, TerrainProperties, TerrainRegistry},
     terraforged_terrain_blender::{Blender, TerrainBlender},
     terraforged_terrain_data::{NoiseData, NoiseSample},
     terraforged_terrain_generator::NoiseGenerator as NoiseGeneratorContract,
     terraforged_terrain_levels::{NoiseLevels, TerrainLevels},
+    terraforged_util::{pack, unpack_left_float, unpack_right_float},
 };
 
 const OCEAN_OFFSET: i32 = 8_763_214;
@@ -112,6 +113,49 @@ impl NoiseGenerator {
 
     pub fn blender_resource(&self) -> Blender {
         self.land.blender_resource()
+    }
+
+    pub fn find(
+        &self,
+        seed: i32,
+        x: i32,
+        z: i32,
+        min_radius: i32,
+        max_radius: i32,
+        terrain: &Terrain,
+    ) -> i64 {
+        if !terrain.is_overground() {
+            return 0;
+        }
+        let frequency = self.levels.noise_levels.frequency;
+        let noise_x = x as f32 * frequency;
+        let noise_z = z as f32 * frequency;
+        let Some(mut finder) = self
+            .land
+            .find_nearest(seed, noise_x, noise_z, min_radius, max_radius, terrain)
+        else {
+            return 0;
+        };
+        let mut sample = NoiseSample::default();
+        for position in &mut finder {
+            if position == 0 {
+                continue;
+            }
+            let point_x = unpack_left_float(position) / frequency;
+            let point_z = unpack_right_float(position) / frequency;
+            self.continent
+                .sample_continent(seed, point_x, point_z, &mut sample);
+            if sample.continent_noise < BEACH {
+                continue;
+            }
+            self.continent
+                .sample_river(seed, point_x, point_z, &mut sample);
+            if !terrain.is_river() && sample.river_noise < 0.75 {
+                continue;
+            }
+            return pack(floor(point_x), floor(point_z));
+        }
+        0
     }
 
     pub fn sample<'a>(
@@ -325,5 +369,27 @@ mod tests {
             NoiseGeneratorContract::height_noise(&generator(), seed, 48, -80).to_bits(),
             direct.height_noise.to_bits()
         );
+    }
+
+    #[test]
+    fn nearest_terrain_search_applies_coast_and_river_filters() {
+        let generator = generator();
+        let terrains = TerrainRegistry::new();
+        assert_eq!(generator.find(42, 0, 0, 1, 8, &terrains.get_by_id(1)), 0);
+        assert_eq!(generator.find(42, 0, 0, 1, 8, &terrains.get_by_id(8)), 0);
+
+        let position = generator.find(42, 0, 0, 1, 32, &terrains.get_by_name("hills").unwrap());
+        assert_ne!(position, 0);
+        let point_x = super::super::terraforged_util::unpack_left(position);
+        let point_z = super::super::terraforged_util::unpack_right(position);
+        let mut sample = NoiseSample::default();
+        generator
+            .continent()
+            .sample_continent(42, point_x as f32, point_z as f32, &mut sample);
+        assert!(sample.continent_noise >= BEACH);
+        generator
+            .continent()
+            .sample_river(42, point_x as f32, point_z as f32, &mut sample);
+        assert!(sample.river_noise >= 0.75);
     }
 }

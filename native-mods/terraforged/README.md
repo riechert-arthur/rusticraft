@@ -442,6 +442,9 @@ The sampler implements the terrain-generator contract with isolated per-call sam
 resources. Chunk generation visits TerraForged's complete bordered 18-by-18 grid in Java loop order,
 including wrapping chunk-coordinate arithmetic, before exposing the populated noise data once.
 
+Nearest-terrain search now follows the warped terrain-region spiral, skips zero sentinels and
+rejects ocean/coast or river-adjacent candidates exactly like the current generator.
+
 The scalar graph fixtures cover 15 graphs, four seeds and four coordinates (240 Java samples),
 including wrapped seed addition and mixed Perlin/seed-sensitive sources. Regenerate their hashes
 with `tools/terraforged/TerraForgedSeededGraphOracle.java` on a classpath containing compiled
