@@ -102,7 +102,7 @@ impl EdgeFunction {
 }
 
 impl CurveFunction {
-    fn apply(self, value: f32) -> f32 {
+    pub fn apply(self, value: f32) -> f32 {
         match self {
             Self::Interpolation(interpolation) => interpolation.apply(value),
             Self::Midpoint {
