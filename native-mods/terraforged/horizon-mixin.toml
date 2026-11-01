@@ -217,6 +217,13 @@ source = "biome_chunk_fill.rs"
 visibility = "pub"
 
 [[module]]
+id = "cave_biome_sampler"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_cave_biome_sampler"
+source = "cave_biome_sampler.rs"
+visibility = "pub"
+
+[[module]]
 id = "continent_points"
 file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_continent_points"

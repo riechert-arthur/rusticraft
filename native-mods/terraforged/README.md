@@ -487,6 +487,8 @@ storage, and returns the same pooled handle so the remaining terrain stages can 
 
 Biome chunk filling now precomputes TerraForged's surface and optional cave 4-by-4 layers in Java
 call order, repeats them through whole sections, and keeps the surface layer above the y=0 cave band.
+The cave-biome sampler now reproduces the coarse coverage mask, independent biome-choice noise,
+equal-weight selection, non-surface fallback, and Java-width seed offsets used by that deep layer.
 
 The scalar graph fixtures cover 15 graphs, four seeds and four coordinates (240 Java samples),
 including wrapped seed addition and mixed Perlin/seed-sensitive sources. Regenerate their hashes

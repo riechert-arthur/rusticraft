@@ -30,6 +30,7 @@ ORIGINAL_TERRAFORGED_ORACLES = {
     "tools/terraforged/TerraForgedErosionRegionOracle.java",
     "tools/terraforged/TerraForgedGeneratorQueryOracle.java",
     "tools/terraforged/TerraForgedBiomeChunkFillOracle.java",
+    "tools/terraforged/TerraForgedCaveBiomeSamplerOracle.java",
 }
 
 
