@@ -237,6 +237,9 @@ context, clipped final tasks, centered zoom transforms, and post-processing flag
 The tile-generator builder now mirrors TerraForged's factor, border, batch, and striped configuration,
 selecting direct generation unless a positive batch size requests batched or striped traversal.
 
+Cache entries now wrap TerraForged's lazy computation with completion reporting and refresh their
+millisecond access timestamp on every `get`, providing the expiration primitive used by tile caches.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
