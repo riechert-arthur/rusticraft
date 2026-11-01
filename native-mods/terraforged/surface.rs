@@ -24,9 +24,71 @@
 
 use super::{
     super::terrain::{TerrainBlockStates, TerrainChunk, TerrainError},
+    terraforged_engine::TerrainProperties,
     terraforged_terrain_data::TerrainData,
 };
 use crate::{heightmap::HeightmapType, registry::BlockStateId};
+
+pub fn smooth_water<B: TerrainBlockStates>(
+    terrain: &TerrainData,
+    chunk: &mut TerrainChunk<'_, B>,
+    source_water: BlockStateId,
+    level_two_water: BlockStateId,
+    mut is_air: impl FnMut(BlockStateId) -> bool,
+    mut region_block: impl FnMut(i32, i32, i32) -> Result<BlockStateId, TerrainError>,
+) -> Result<(), TerrainError> {
+    let kind = HeightmapType::MotionBlockingNoLeaves;
+    if chunk.heightmap(kind).is_none() {
+        chunk.prime_heightmaps(&[kind])?;
+    }
+    let position = chunk.position();
+    let min_x = position.x.wrapping_shl(4);
+    let min_z = position.z.wrapping_shl(4);
+    for dz in 0..16 {
+        for dx in 0..16 {
+            let land = terrain
+                .terrain()
+                .get(dx, dz)
+                .expect("generated terrain type");
+            if !(land.is_river() || land.is_lake()) || terrain.river().get(dx, dz) != 0.0 {
+                continue;
+            }
+            let y = chunk
+                .heightmap(kind)
+                .expect("water heightmap primed")
+                .highest_taken(dx, dz)?;
+            if chunk.block(dx, y, dz) != source_water {
+                continue;
+            }
+            let x = min_x.wrapping_add(dx);
+            let z = min_z.wrapping_add(dz);
+            let mut smooth = false;
+            'search: for offset_z in -6i32..=6 {
+                for offset_x in -6i32..=6 {
+                    let distance = offset_x * offset_x + offset_z * offset_z;
+                    if distance == 0 || distance > 36 {
+                        continue;
+                    }
+                    let sample_x = x.wrapping_add(offset_x);
+                    let sample_z = z.wrapping_add(offset_z);
+                    let state = if sample_x >> 4 == position.x && sample_z >> 4 == position.z {
+                        chunk.block(sample_x & 15, y, sample_z & 15)
+                    } else {
+                        region_block(sample_x, y, sample_z)?
+                    };
+                    if is_air(state) {
+                        smooth = true;
+                        break 'search;
+                    }
+                }
+            }
+            if smooth {
+                chunk.set_block_worldgen(dx, y, dz, level_two_water)?;
+            }
+        }
+    }
+    Ok(())
+}
 
 pub fn apply<B: TerrainBlockStates>(
     terrain: &TerrainData,

@@ -505,6 +505,12 @@ non-erodible material (including air or fluid), and leaves cached terrain height
 The caller supplies dirt/snow tag membership; vanilla surface rules, snow/water postprocessing and
 game-pipeline invocation remain pending. Eleven original-Java column fixtures cover the search
 boundaries, low terrain, material replacement and threshold decisions.
+Water-edge smoothing now limits eligibility to river/lake terrain with an exactly zero river mask
+and source water. It searches the radius-six disk in original row order, reads local blocks directly
+and neighboring chunks through the supplied region lookup, then writes level-two water on the first
+air hit. Java fixtures check ordered neighboring reads, negative chunk coordinates, boundary points,
+non-source water, negative zero and NaN masks. Production water-state bindings and region wiring are
+still pending, alongside snow postprocessing and full game integration.
 The original Java method oracle checks ordered block edits and resulting heights across six columns.
 
 Biome chunk filling samples one 4-by-4 biome buffer at quart y=-1 in Java call order and repeats
