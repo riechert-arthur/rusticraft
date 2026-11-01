@@ -79,6 +79,10 @@ impl TerrainNoise {
         &self.noise
     }
 
+    pub fn weight(&self) -> f32 {
+        self.weight
+    }
+
     /// `withSeed(seed)`: a new terrain noise with the same terrain and weight and the noise reseeded
     /// ([`Module::with_seed`]), through the constructor again. Reseeding reads a raised noise's bias back as 0, so
     /// the clamped result reports a minimum of 0 and is raised once more.
