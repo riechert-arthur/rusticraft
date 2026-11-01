@@ -1014,6 +1014,148 @@ impl LakeCarver {
     }
 }
 
+pub struct WetlandCarver {
+    start: Vec2f,
+    end: Vec2f,
+    radius: f32,
+    radius2: f32,
+    bed: f32,
+    banks: f32,
+    mound_min: f32,
+    mound_max: f32,
+    mound_variance: f32,
+    mound_shape: Module,
+    mound_height: Module,
+    terrain_edge: Module,
+    wetland_terrain: Terrain,
+}
+
+impl WetlandCarver {
+    pub fn new(mut seed: i32, start: Vec2f, end: Vec2f, radius: f32, levels: Levels) -> Self {
+        let bed = levels.water(-1) - 0.5 / levels.world_height as f32;
+        let banks = levels.ground(3);
+        let mound_min = levels.water(1);
+        let mound_max = levels.water(2);
+        seed = seed.wrapping_add(1);
+        let mound_shape = wetland_source(SourceKind::Perlin, seed, 10)
+            .clamp(Module::constant(0.3), Module::constant(0.6))
+            .map(Module::constant(0.0), Module::constant(1.0));
+        seed = seed.wrapping_add(1);
+        let mound_height = wetland_source(SourceKind::Simplex, seed, 20)
+            .clamp(Module::constant(0.0), Module::constant(0.3))
+            .map(Module::constant(0.0), Module::constant(1.0));
+        seed = seed.wrapping_add(1);
+        let terrain_edge = wetland_source(SourceKind::Perlin, seed, 8)
+            .clamp(Module::constant(0.2), Module::constant(0.8))
+            .map(Module::constant(0.0), Module::constant(0.9));
+        Self {
+            start,
+            end,
+            radius,
+            radius2: radius * radius,
+            bed,
+            banks,
+            mound_min,
+            mound_max,
+            mound_variance: mound_max - mound_min,
+            mound_shape,
+            mound_height,
+            terrain_edge,
+            wetland_terrain: TerrainRegistry::new().get_by_id(7),
+        }
+    }
+
+    pub fn apply(&self, cell: &mut Cell, x: f32, z: f32) {
+        self.apply_warped(cell, x, z, x, z);
+    }
+
+    pub fn apply_warped(&self, cell: &mut Cell, river_x: f32, river_z: f32, x: f32, z: f32) {
+        if cell.value < self.bed {
+            return;
+        }
+        let t = Line::distance_on_line(
+            river_x,
+            river_z,
+            self.start.x,
+            self.start.y,
+            self.end.x,
+            self.end.y,
+        );
+        let distance2 = line_distance2(
+            river_x,
+            river_z,
+            self.start.x,
+            self.start.y,
+            self.end.x,
+            self.end.y,
+            t,
+        );
+        if distance2 > self.radius2 {
+            return;
+        }
+        let distance = 1.0 - distance2 / self.radius2;
+        if distance <= 0.0 {
+            return;
+        }
+        let valley_alpha = noise_map(distance, 0.0, 0.65, 0.65);
+        if cell.value > self.banks {
+            cell.value = lerp(cell.value, self.banks, valley_alpha);
+        }
+        let pools_alpha = noise_map(distance, 0.65, 0.7, 0.050000012);
+        if cell.value > self.bed && cell.value <= self.banks {
+            cell.value = lerp(cell.value, self.bed, pools_alpha);
+        }
+        if pools_alpha >= 1.0 {
+            cell.erosion_mask = true;
+        }
+        if distance > 0.65 && pools_alpha > self.terrain_edge.value(x, z) {
+            cell.terrain = self.wetland_terrain.clone();
+        }
+        if cell.value >= self.bed && cell.value < self.mound_max {
+            let shape_alpha = self.mound_shape.value(x, z) * pools_alpha;
+            let mounds = self.mound_min + self.mound_height.value(x, z) * self.mound_variance;
+            cell.value = lerp(cell.value, mounds, shape_alpha);
+        }
+        cell.river_mask = cell.river_mask.min(1.0 - valley_alpha);
+    }
+
+    pub fn record_bounds(&self, builder: &mut BoundsfBuilder) {
+        builder.record(
+            self.start.x.min(self.end.x) - self.radius,
+            self.start.y.min(self.end.y) - self.radius,
+        );
+        builder.record(
+            self.start.x.max(self.end.x) + self.radius,
+            self.start.y.max(self.end.y) + self.radius,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn line_distance2(x: f32, y: f32, ax: f32, ay: f32, bx: f32, by: f32, t: f32) -> f32 {
+    if t <= 0.0 {
+        Line::dist2(x, y, ax, ay)
+    } else if t >= 1.0 {
+        Line::dist2(x, y, bx, by)
+    } else {
+        Line::dist2(x, y, ax + t * (bx - ax), ay + t * (by - ay))
+    }
+}
+
+fn wetland_source(kind: SourceKind, seed: i32, scale: i32) -> Module {
+    Module::source(Source::new(
+        kind,
+        SourceConfig {
+            seed,
+            octaves: 1,
+            gain: 0.5,
+            frequency: 1.0 / scale as f32,
+            lacunarity: 2.0,
+            interpolation: Interpolation::Curve3,
+        },
+    ))
+}
+
 impl LakeConfig {
     pub fn new(settings: Lake, levels: Levels) -> Self {
         let size_min = settings.size_min as f32;
@@ -2489,5 +2631,57 @@ mod tests {
                 ]
             );
         }
+    }
+
+    #[test]
+    fn wetland_carver_matches_engine_0_3_0() {
+        let wetland = WetlandCarver::new(
+            12_345,
+            Vec2f::new(0.0, 0.0),
+            Vec2f::new(500.0, 200.0),
+            100.0,
+            Levels::new(256, 63),
+        );
+        let sample = |river_x, river_z, x, z, value| {
+            let mut cell = Cell::default();
+            cell.value = value;
+            cell.river_mask = 1.0;
+            wetland.apply_warped(&mut cell, river_x, river_z, x, z);
+            (
+                cell.value.to_bits(),
+                cell.river_mask.to_bits(),
+                cell.erosion_mask,
+                cell.terrain.id(),
+            )
+        };
+        assert_eq!(
+            [
+                sample(0.0, 0.0, 0.0, 0.0, 0.6),
+                sample(250.0, 100.0, 250.0, 100.0, 0.6),
+                sample(250.0, 150.0, 250.0, 150.0, 0.6),
+                sample(250.0, 190.0, 250.0, 190.0, 0.6),
+                sample(250.0, 210.0, 250.0, 210.0, 0.6),
+                sample(550.0, 220.0, 550.0, 220.0, 0.6),
+                sample(250.0, 100.0, 1000.0, -1000.0, 0.6),
+                sample(250.0, 100.0, 250.0, 100.0, 0.1),
+            ],
+            [
+                (0x3e7b5555, 0, true, 7),
+                (0x3e7b5555, 0, true, 7),
+                (0x3e7b5555, 0, true, 7),
+                (0x3ee1dfaf, 0x3f092ac9, false, 0),
+                (0x3f19999a, 0x3f800000, false, 0),
+                (0x3e7b5555, 0, true, 7),
+                (0x3e7b5555, 0, true, 7),
+                (0x3dcccccd, 0x3f800000, false, 0),
+            ]
+        );
+        let mut builder = Boundsf::builder();
+        wetland.record_bounds(&mut builder);
+        let bounds = builder.build();
+        assert_eq!(
+            [bounds.min_x, bounds.min_y, bounds.max_x, bounds.max_y].map(f32::to_bits),
+            [0xc2c80000, 0xc2c80000, 0x44160000, 0x43960000]
+        );
     }
 }

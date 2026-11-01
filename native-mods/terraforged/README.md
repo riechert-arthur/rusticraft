@@ -498,9 +498,12 @@ negative, NaN and infinite sizes), for eight lake configs (wrapping `int` settin
 `Levels` (TerraForged's swapped `Levels(63, 255)` among them), plus bounds built from NaN, -0 and infinite records,
 against a Java oracle running Engine's classes, `LakeOracle.java` in `.local/terraforged/oracles/river/`.
 
+The wetland layer adds line-bounded valleys, pools, banks and seeded mound noise, including separate
+warped geometry and terrain-noise coordinates plus exact wetland tagging and erosion masks.
+
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver and its lakes. They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes and its wetlands. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
