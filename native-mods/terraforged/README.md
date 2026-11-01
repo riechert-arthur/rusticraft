@@ -87,6 +87,9 @@ threads never wait on one another and a busy cache simply samples its source. Un
 with `==`, the cache compares their bits: -0.0 does not hit +0.0's entry (and a NaN coordinate can hit), so a cached
 sample is always the sample of the same input, whichever coordinate another thread sampled last.
 
+The cellular primitive layer adds TerraForged's pinned feature-point table, distance metrics and
+nearest/second-nearest cell searches used by cell value and edge sources.
+
 ## Status: development only
 
 This layer only adds the noise functions. It changes nothing in the game, so there is nothing for players to install
