@@ -249,6 +249,9 @@ pub enum SourceKind {
     Simplex,
     Simplex2,
     Cubic,
+    Ridge,
+    Billow,
+    SimplexRidge,
 }
 
 #[derive(Clone, Copy)]
@@ -262,27 +265,42 @@ pub struct Source {
 
 impl Source {
     pub fn new(kind: SourceKind, config: SourceConfig) -> Self {
-        let bound = match kind {
-            SourceKind::Perlin | SourceKind::Perlin2 => octave_bound(
-                &[1.0, 0.9, 0.83, 0.75, 0.64, 0.62, 0.61],
-                config,
-                config.gain,
-            ),
-            SourceKind::Simplex | SourceKind::Simplex2 => {
-                octave_bound(&[1.0, 0.989, 0.81, 0.781, 0.708, 0.702, 0.696], config, 1.0)
+        let (min, max) = match kind {
+            SourceKind::Perlin | SourceKind::Perlin2 => {
+                let bound = octave_bound(
+                    &[1.0, 0.9, 0.83, 0.75, 0.64, 0.62, 0.61],
+                    config,
+                    config.gain,
+                );
+                (-bound, bound)
             }
-            SourceKind::Cubic => cubic_bound(0.75, config.octaves, config.gain),
+            SourceKind::Simplex | SourceKind::Simplex2 => {
+                let bound =
+                    octave_bound(&[1.0, 0.989, 0.81, 0.781, 0.708, 0.702, 0.696], config, 1.0);
+                (-bound, bound)
+            }
+            SourceKind::Cubic => {
+                let bound = cubic_bound(0.75, config.octaves, config.gain);
+                (-bound, bound)
+            }
+            SourceKind::Ridge | SourceKind::Billow => (0.0, ridge_bound(config)),
+            SourceKind::SimplexRidge => {
+                let bound =
+                    octave_bound(&[1.0, 0.989, 0.81, 0.781, 0.708, 0.702, 0.696], config, 1.0);
+                (0.0, bound)
+            }
         };
-        let range = bound - -bound;
+        let range = max - min;
         Self {
             config,
             kind,
-            min: -bound,
-            max: bound,
-            // PerlinNoise and PerlinNoise2 take `Math.abs`: their bound is negative for a negative gain.
+            min,
+            max,
+            // PerlinNoise, PerlinNoise2, RidgeNoise (so BillowNoise) and SimplexRidgeNoise take `Math.abs`:
+            // their bound is negative for a negative gain (or, for the ridged ones, a negative lacunarity).
             range: match kind {
-                SourceKind::Perlin | SourceKind::Perlin2 => range.abs(),
-                _ => range,
+                SourceKind::Simplex | SourceKind::Simplex2 | SourceKind::Cubic => range,
+                _ => range.abs(),
             },
         }
     }
@@ -328,6 +346,38 @@ impl Source {
             }
             return map(sum, self.min, self.max, self.range);
         }
+        if matches!(
+            self.kind,
+            SourceKind::Ridge | SourceKind::Billow | SourceKind::SimplexRidge
+        ) {
+            let mut value = 0.0;
+            let mut weight = 1.0;
+            let mut amplitude = 2.0;
+            let mut spectral_frequency = 1.0_f32;
+            for octave in 0..self.config.octaves {
+                let octave_seed = seed.wrapping_add(octave as i32);
+                let mut signal = if matches!(self.kind, SourceKind::SimplexRidge) {
+                    simplex(x, y, octave_seed)
+                } else {
+                    perlin(x, y, octave_seed, self.config.interpolation)
+                };
+                signal = 1.0 - signal.abs();
+                signal *= signal;
+                signal *= weight;
+                weight = clamp(signal * amplitude, 0.0, 1.0);
+                value += signal * spectral_frequency.powf(-1.0);
+                spectral_frequency *= self.config.lacunarity;
+                x *= self.config.lacunarity;
+                y *= self.config.lacunarity;
+                amplitude *= self.config.gain;
+            }
+            let result = map(value, self.min, self.max, self.range);
+            return if matches!(self.kind, SourceKind::Billow) {
+                1.0 - result
+            } else {
+                result
+            };
+        }
 
         let mut sum = 0.0;
         let mut amplitude = if matches!(self.kind, SourceKind::Perlin | SourceKind::Perlin2) {
@@ -346,6 +396,7 @@ impl Source {
                 SourceKind::Simplex => legacy_simplex(x, y, octave_seed),
                 SourceKind::Simplex2 => simplex(x, y, octave_seed),
                 SourceKind::Cubic => unreachable!(),
+                SourceKind::Ridge | SourceKind::Billow | SourceKind::SimplexRidge => unreachable!(),
             };
             sum += signal * amplitude;
             x *= self.config.lacunarity;
@@ -376,20 +427,92 @@ fn cubic_bound(signal: f32, octaves: usize, gain: f32) -> f32 {
     value
 }
 
-fn map(value: f32, min: f32, max: f32, range: f32) -> f32 {
-    let clamped = if value < min {
+fn ridge_bound(config: SourceConfig) -> f32 {
+    let mut value = 0.0;
+    let mut weight = 1.0;
+    let mut amplitude = 2.0;
+    let mut spectral_frequency = 1.0_f32;
+    for _ in 0..config.octaves {
+        let mut noise = 1.0;
+        noise *= noise;
+        noise *= weight;
+        weight = clamp(noise * amplitude, 0.0, 1.0);
+        value += noise * spectral_frequency.powf(-1.0);
+        spectral_frequency *= config.lacunarity;
+        amplitude *= config.gain;
+    }
+    value
+}
+
+fn clamp(value: f32, min: f32, max: f32) -> f32 {
+    if value < min {
         min
     } else if value > max {
         max
     } else {
         value
-    };
+    }
+}
+
+fn map(value: f32, min: f32, max: f32, range: f32) -> f32 {
+    let clamped = clamp(value, min, max);
     let difference = clamped - min;
     if difference > range {
         1.0
     } else {
         difference / range
     }
+}
+
+#[derive(Clone, Copy)]
+pub struct Rand {
+    seed: i32,
+    frequency: f32,
+}
+
+impl Rand {
+    pub fn new(seed: i32, frequency: f32) -> Self {
+        Self { seed, frequency }
+    }
+
+    pub fn value(self, mut x: f32, mut y: f32) -> f32 {
+        x *= self.frequency;
+        y *= self.frequency;
+        white(x, y, self.seed).abs()
+    }
+
+    pub fn value_seeded(self, x: f32, y: f32, child_seed: i32) -> f32 {
+        white(x, y, hash(self.seed, child_seed))
+    }
+
+    pub fn next_int(self, x: f32, y: f32, range: i32) -> i32 {
+        round(range as f32 * self.value(x, y) / range.wrapping_add(range) as f32)
+    }
+
+    pub fn next_int_seeded(self, x: f32, y: f32, child_seed: i32, range: i32) -> i32 {
+        round(range as f32 * self.value_seeded(x, y, child_seed) / range.wrapping_add(range) as f32)
+    }
+}
+
+fn white(x: f32, y: f32, seed: i32) -> f32 {
+    value_coord_2d(seed, round(x), round(y))
+}
+
+fn round(value: f32) -> i32 {
+    if value >= 0.0 {
+        (value + 0.5) as i32
+    } else {
+        (value - 0.5) as i32
+    }
+}
+
+fn hash(x: i32, y: i32) -> i32 {
+    let mut hash = x ^ 31337_i32.wrapping_mul(y);
+    hash = hash
+        .wrapping_mul(hash)
+        .wrapping_mul(hash)
+        .wrapping_mul(60493);
+    (hash >> 13) ^ hash
 }
 
 #[cfg(test)]
@@ -686,5 +809,63 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn ridged_and_random_sources_match_engine_0_3_0() {
+        let config = SourceConfig {
+            seed: -7391,
+            octaves: 6,
+            gain: 0.83,
+            frequency: 0.00390625,
+            lacunarity: 2.25,
+            interpolation: Interpolation::Curve3,
+        };
+        let points = [
+            (0.0, 0.0),
+            (12.25, -98.75),
+            (-4096.5, 8192.25),
+            (123456.75, -0.125),
+        ];
+        let cases = [
+            (
+                SourceKind::Ridge,
+                [0x3f800000, 0x3f4e3bad, 0x3f6e7958, 0x3f0119da],
+                [0x3f800000, 0x3f58fe28, 0x3f784536, 0x3f51f9ce],
+            ),
+            (
+                SourceKind::Billow,
+                [0, 0x3e47114c, 0x3d8c3540, 0x3efdcc4c],
+                [0, 0x3e1c0760, 0x3cf75940, 0x3e3818c8],
+            ),
+            (
+                SourceKind::SimplexRidge,
+                [0x3f25da6e, 0x3e8542ea, 0x3ddba237, 0x3e609c6f],
+                [0x3f25da6e, 0x3e7e4e32, 0x3e116da0, 0x3df253c5],
+            ),
+        ];
+        for (kind, expected, expected_seeded) in cases {
+            let source = Source::new(kind, config);
+            assert_eq!(bits(points.map(|(x, y)| source.value(x, y))), expected);
+            assert_eq!(
+                bits(points.map(|(x, y)| source.value_seeded(x, y, 991))),
+                expected_seeded
+            );
+        }
+
+        let rand = Rand::new(5519, 0.125);
+        assert_eq!(
+            bits(points.map(|(x, y)| rand.value(x, y))),
+            [0x3f0322bd, 0x3f1d629d, 0x3ee51611, 0x3e86b835]
+        );
+        assert_eq!(
+            bits(points.map(|(x, y)| rand.value_seeded(x, y, -17))),
+            [0x3e4239b0, 0x3f64c89d, 0xbe335bca, 0x3f33d648]
+        );
+        assert_eq!(points.map(|(x, y)| rand.next_int(x, y, 19)), [0; 4]);
+        assert_eq!(
+            points.map(|(x, y)| rand.next_int_seeded(x, y, -17, 19)),
+            [0; 4]
+        );
     }
 }
