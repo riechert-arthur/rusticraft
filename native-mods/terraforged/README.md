@@ -307,6 +307,9 @@ grid of negative, large, NaN and infinite coordinates against a Java oracle runn
 cells, for `Heightmap`'s configuration and for overflowing seeds and zero, negative and huge scales and strengths; the
 oracle lives outside Git, in `.local/terraforged/oracles/region/`.
 
+The region-selection layer adds weighted populator slot expansion and edge interpolation, preserving
+zero-weight fallback, Engine rounding and the upper region's terrain identity during blends.
+
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model and its terrain populators. They change nothing in the game, so there is
