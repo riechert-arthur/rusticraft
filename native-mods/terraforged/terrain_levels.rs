@@ -547,4 +547,25 @@ X odd 7fc00000 7fc00000 7fc00000 7fc00000 7fc00000 bb5a740e 00000000 7fc00000 7f
             TerrainLevels::default().noise_levels
         );
     }
+
+    #[test]
+    fn height_rounding_matches_noise_util_oracle() {
+        let levels = TerrainLevels::default();
+        for (value, expected) in [
+            (-480.0, -481),
+            (-1.0, -2),
+            (-1.25, -2),
+            (-0.0, 0),
+            (0.0, 0),
+            (1.0, 1),
+            (f32::NAN, -1),
+            (f32::NEG_INFINITY, i32::MAX),
+            (f32::INFINITY, i32::MAX),
+        ] {
+            assert_eq!(levels.height(value), expected, "{value}");
+        }
+        let noise = NoiseLevels::new(false, 1.0, 62, 22, 256, 128);
+        assert_eq!(noise.floor(-0.25).to_bits(), 0xbe820000);
+        assert_eq!(noise.ceil(-0.25).to_bits(), 0xbe800000);
+    }
 }
