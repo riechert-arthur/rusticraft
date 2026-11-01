@@ -194,3 +194,10 @@ file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_cave_noise"
 source = "cave_noise.rs"
 visibility = "pub"
+
+[[module]]
+id = "biome_viability"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_biome_viability"
+source = "biome_viability.rs"
+visibility = "pub"

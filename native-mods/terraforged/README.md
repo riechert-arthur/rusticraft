@@ -312,6 +312,9 @@ every nested source, domain, erosion node, and cached branch, completing terrain
 Cave-noise assets now preserve global and unique cave modes, recursively reseeded elevation, shape,
 and floor modules, integer cave scaling, and TerraForged's jittered cellular cave distribution.
 
+Biome viability now composes edge, height, noise, saturation, and slope fitness through TerraForged's
+ordered multiply and weighted-sum rules, including the original scaling and falloff formulas.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
