@@ -48,6 +48,9 @@ Engine's single-frequency sampling, feature-point lookup coordinates and reporte
 The sine source layer adds axis-selectable and blended wave sampling using TerraForged's exact sine
 lookup table behavior and `0..1` remapping.
 
+The line source layer adds dynamic radius, endpoint fading, feathering, clipping, intersection and
+distance helpers for TerraForged's finite line masks.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
