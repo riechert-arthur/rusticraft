@@ -217,6 +217,9 @@ wraps, and a vertical scale whose product with 0.475 is exactly 1. The other lan
 TerraForged's `RandSeed` (ModTerrains builds its landforms from a `SplittableRandom` seed rather than Engine's
 counter) are not ported yet.
 
+The terraced LandForms layer adds badlands and torridonian graphs with masks, dual step detail,
+modulation, linear and Curve3 slopes, advanced terracing and final boost shaping.
+
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings and its first landforms. They change nothing in the game, so there is

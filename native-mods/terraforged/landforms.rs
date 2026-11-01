@@ -23,7 +23,7 @@
  */
 
 use super::{
-    terraforged::{Domain, Interpolation, Module, Source, SourceConfig, SourceKind},
+    terraforged::{CurveFunction, Domain, Interpolation, Module, Source, SourceConfig, SourceKind},
     terraforged_engine::{Seed, TerrainSettings},
 };
 
@@ -161,6 +161,93 @@ impl LandForms {
         Module::add(vec![terraced, surface]).scale(Module::constant(
             (0.475_f64 * f64::from(self.settings.general.global_vertical_scale)) as f32,
         ))
+    }
+
+    pub fn badlands(&self, seed: &mut Seed) -> Module {
+        let mask = perlin(seed.next(), 270, 3, 2.0)
+            .clamp(Module::constant(0.35), Module::constant(0.65))
+            .map(Module::constant(0.0), Module::constant(1.0));
+        let hills = source(SourceKind::Ridge, seed.next(), 275, 4, 0.975, 2.0)
+            .warp(noise_warp(seed.next(), 400, 2, 100.0))
+            .warp(noise_warp(seed.next(), 18, 1, 20.0));
+        let hills = Module::multiply(vec![hills, mask]);
+        let modulation = 0.4;
+        let alpha = 1.0 - modulation;
+        let mod1 = hills
+            .clone()
+            .warp(noise_warp(seed.next(), 100, 1, 50.0))
+            .scale(Module::constant(modulation));
+        let low_frequency = Module::add(vec![
+            hills
+                .clone()
+                .steps(
+                    Module::constant(4.0),
+                    Module::constant(0.6),
+                    Module::constant(0.7),
+                    CurveFunction::Interpolation(Interpolation::Linear),
+                )
+                .scale(Module::constant(alpha)),
+            mod1.clone(),
+        ]);
+        let high_frequency = Module::add(vec![
+            hills
+                .clone()
+                .steps(
+                    Module::constant(10.0),
+                    Module::constant(0.6),
+                    Module::constant(0.7),
+                    CurveFunction::Interpolation(Interpolation::Linear),
+                )
+                .scale(Module::constant(alpha)),
+            mod1,
+        ]);
+        let detail = Module::add(vec![low_frequency, high_frequency]);
+        let mod2 = Module::multiply(vec![
+            hills.clone(),
+            perlin(seed.next(), 200, 3, 2.0).scale(Module::constant(modulation)),
+        ]);
+        let shape = Module::add(vec![
+            hills
+                .steps(
+                    Module::constant(4.0),
+                    Module::constant(0.65),
+                    Module::constant(0.75),
+                    CurveFunction::Interpolation(Interpolation::Curve3),
+                )
+                .scale(Module::constant(alpha)),
+            mod2,
+        ])
+        .scale(Module::constant(alpha));
+        Module::multiply(vec![shape, detail.alpha(Module::constant(0.5))])
+            .scale(Module::constant(0.55))
+            .bias(Module::constant(0.025))
+    }
+
+    pub fn torridonian(&self, seed: &mut Seed) -> Module {
+        let plains = perlin(seed.next(), 100, 3, 2.0)
+            .warp(noise_warp(seed.next(), 300, 1, 150.0))
+            .warp(noise_warp(seed.next(), 20, 1, 40.0))
+            .scale(Module::constant(0.15));
+        let hills = perlin(seed.next(), 150, 4, 2.0)
+            .warp(noise_warp(seed.next(), 300, 1, 200.0))
+            .warp(noise_warp(seed.next(), 20, 2, 20.0))
+            .boost(1);
+        let module =
+            perlin(seed.next(), 200, 3, 2.0).blend(plains, hills, 0.6, 0.6, Interpolation::Linear);
+        module
+            .advanced_terrace(
+                perlin(seed.next(), 120, 1, 2.0).scale(Module::constant(0.25)),
+                perlin(seed.next(), 200, 1, 2.0)
+                    .scale(Module::constant(0.5))
+                    .bias(Module::constant(0.5)),
+                Module::constant(0.5),
+                0.0,
+                0.3,
+                6,
+                1,
+            )
+            .boost(1)
+            .scale(Module::constant(0.5))
     }
 }
 
@@ -446,5 +533,49 @@ mod tests {
             );
             assert_eq!(got, (after, min, max, hash), "{name} {kind} {start}");
         }
+    }
+
+    #[test]
+    fn badlands_matches_engine_0_3_0() {
+        let forms = LandForms::new(TerrainSettings::default());
+        let mut seed = Seed::new(777);
+        let badlands = forms.badlands(&mut seed);
+        assert_eq!(seed.get(), 783);
+        assert_eq!(badlands.min_value().to_bits(), 0x3ccccccd);
+        assert_eq!(badlands.max_value().to_bits(), 0x3f2f5c29);
+        assert_eq!(
+            bits(&badlands),
+            [0x3e20c49e, 0x3d77e3d4, 0x3e7fca05, 0x3e097a48]
+        );
+
+        let mut seed = Seed::new(i32::MAX - 7);
+        let badlands = forms.badlands(&mut seed);
+        assert_eq!(seed.get(), i32::MAX - 1);
+        assert_eq!(
+            bits(&badlands),
+            [0x3e20c49e, 0x3cff1ff8, 0x3ccccccd, 0x3e0732a5]
+        );
+    }
+
+    #[test]
+    fn torridonian_matches_engine_0_3_0() {
+        let forms = LandForms::new(TerrainSettings::default());
+        let mut seed = Seed::new(-222);
+        let torridonian = forms.torridonian(&mut seed);
+        assert_eq!(seed.get(), -213);
+        assert_eq!(torridonian.min_value().to_bits(), 0x00000000);
+        assert_eq!(torridonian.max_value().to_bits(), 0x3f000000);
+        assert_eq!(
+            bits(&torridonian),
+            [0x3e738a24, 0x3d5a2f19, 0x3eb11487, 0x3e6d83ad]
+        );
+
+        let mut seed = Seed::new(i32::MIN + 7);
+        let torridonian = forms.torridonian(&mut seed);
+        assert_eq!(seed.get(), i32::MIN + 16);
+        assert_eq!(
+            bits(&torridonian),
+            [0x3e738a24, 0x3e531467, 0x3d3dae7e, 0x3eb1a779]
+        );
     }
 }
