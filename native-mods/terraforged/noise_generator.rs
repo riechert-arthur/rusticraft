@@ -28,8 +28,9 @@ use super::{
     terraforged_continent_points::{BEACH, COAST, SHALLOW_OCEAN},
     terraforged_engine::{ControlPoints, Terrain, TerrainRegistry},
     terraforged_terrain_blender::{Blender, TerrainBlender},
-    terraforged_terrain_data::NoiseSample,
-    terraforged_terrain_levels::TerrainLevels,
+    terraforged_terrain_data::{NoiseData, NoiseSample},
+    terraforged_terrain_generator::NoiseGenerator as NoiseGeneratorContract,
+    terraforged_terrain_levels::{NoiseLevels, TerrainLevels},
 };
 
 const OCEAN_OFFSET: i32 = 8_763_214;
@@ -42,6 +43,46 @@ pub struct NoiseGenerator {
     continent: ContinentNoise,
     control_points: ControlPoints,
     deep_ocean: Terrain,
+}
+
+impl NoiseGeneratorContract for NoiseGenerator {
+    fn levels(&self) -> NoiseLevels {
+        self.levels.noise_levels
+    }
+
+    fn terrain_levels(&self) -> TerrainLevels {
+        self.levels
+    }
+
+    fn height_noise(&self, seed: i32, x: i32, z: i32) -> f32 {
+        let mut sample = NoiseSample::default();
+        let mut blender = self.blender_resource();
+        self.sample(seed, x, z, &mut sample, &mut blender)
+            .height_noise
+    }
+
+    fn generate(
+        &self,
+        seed: i32,
+        chunk_x: i32,
+        chunk_z: i32,
+        consumer: &mut dyn FnMut(&NoiseData),
+    ) {
+        let mut noise_data = NoiseData::new();
+        let mut blender = self.blender_resource();
+        let mut sample = NoiseSample::default();
+        let start_x = chunk_x.wrapping_shl(4);
+        let start_z = chunk_z.wrapping_shl(4);
+        for delta_z in NoiseData::MIN..NoiseData::MAX {
+            for delta_x in NoiseData::MIN..NoiseData::MAX {
+                let x = start_x.wrapping_add(delta_x);
+                let z = start_z.wrapping_add(delta_z);
+                self.sample(seed, x, z, &mut sample, &mut blender);
+                noise_data.set_noise(delta_x, delta_z, &sample);
+            }
+        }
+        consumer(&noise_data);
+    }
 }
 
 impl NoiseGenerator {
@@ -221,5 +262,68 @@ mod tests {
             assert_eq!(sample.height_noise.to_bits(), expected_height);
             assert_eq!(sample.terrain_type.name(), expected_terrain);
         }
+    }
+
+    #[test]
+    fn bordered_chunk_generation_matches_direct_samples() {
+        let seed = -17;
+        let chunk_x: i32 = 3;
+        let chunk_z: i32 = -5;
+        let expected_generator = generator();
+        let mut expected = Vec::new();
+        let mut blender = expected_generator.blender_resource();
+        let mut sample = NoiseSample::default();
+        for delta_z in NoiseData::MIN..NoiseData::MAX {
+            for delta_x in NoiseData::MIN..NoiseData::MAX {
+                expected_generator.sample(
+                    seed,
+                    chunk_x.wrapping_shl(4).wrapping_add(delta_x),
+                    chunk_z.wrapping_shl(4).wrapping_add(delta_z),
+                    &mut sample,
+                    &mut blender,
+                );
+                if [(-1, -1), (0, 0), (16, 16)].contains(&(delta_x, delta_z)) {
+                    expected.push((delta_x, delta_z, sample.clone()));
+                }
+            }
+        }
+        let actual_generator = generator();
+        let mut calls = 0;
+        NoiseGeneratorContract::generate(&actual_generator, seed, chunk_x, chunk_z, &mut |data| {
+            calls += 1;
+            for (x, z, sample) in &expected {
+                assert_eq!(
+                    data.height().get(*x, *z).to_bits(),
+                    sample.height_noise.to_bits()
+                );
+                assert_eq!(
+                    data.base().get(*x, *z).to_bits(),
+                    sample.base_noise.to_bits()
+                );
+                assert_eq!(
+                    data.river().get(*x, *z).to_bits(),
+                    sample.river_noise.to_bits()
+                );
+                assert_eq!(
+                    data.terrain().get(*x, *z).unwrap().name(),
+                    sample.terrain_type.name()
+                );
+            }
+        });
+        assert_eq!(calls, 1);
+
+        let direct_generator = generator();
+        let mut direct = NoiseSample::default();
+        direct_generator.sample(
+            seed,
+            48,
+            -80,
+            &mut direct,
+            &mut direct_generator.blender_resource(),
+        );
+        assert_eq!(
+            NoiseGeneratorContract::height_noise(&generator(), seed, 48, -80).to_bits(),
+            direct.height_noise.to_bits()
+        );
     }
 }

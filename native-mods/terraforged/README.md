@@ -438,6 +438,10 @@ Java float interpolation order, the 1.2 land-height multiplier and branch-specif
 `tools/terraforged/TerraForgedNoiseHeightOracle.java` records direct current-source Java bits for
 all four branches.
 
+The sampler implements the terrain-generator contract with isolated per-call sample and blender
+resources. Chunk generation visits TerraForged's complete bordered 18-by-18 grid in Java loop order,
+including wrapping chunk-coordinate arithmetic, before exposing the populated noise data once.
+
 The scalar graph fixtures cover 15 graphs, four seeds and four coordinates (240 Java samples),
 including wrapped seed addition and mixed Perlin/seed-sensitive sources. Regenerate their hashes
 with `tools/terraforged/TerraForgedSeededGraphOracle.java` on a classpath containing compiled
