@@ -180,3 +180,10 @@ file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_terrain_blend_util"
 source = "terrain_blend_util.rs"
 visibility = "pub"
+
+[[module]]
+id = "terrain_blender"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_terrain_blender"
+source = "terrain_blender.rs"
+visibility = "pub"
