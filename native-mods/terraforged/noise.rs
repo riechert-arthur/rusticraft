@@ -537,6 +537,13 @@ struct Node {
     max: f32,
 }
 
+/// A `MultiBlend` slot: its source and the `[min, max]` of the selector range where it is used alone.
+struct BlendNode {
+    source: Module,
+    min: f32,
+    max: f32,
+}
+
 enum ModuleKind {
     Constant(f32),
     Source(Source),
@@ -579,6 +586,14 @@ enum ModuleKind {
         midpoint: f32,
         min_blend: f32,
         max_blend: f32,
+        interpolation: Interpolation,
+    },
+    /// `MultiBlend`: the slots, `maxIndex` and `blendRange`, fixed in the constructor.
+    MultiBlend {
+        control: Module,
+        nodes: Vec<BlendNode>,
+        max_index: i32,
+        blend_range: f32,
         interpolation: Interpolation,
     },
     /// `Select`: `lower_curve`/`upper_curve` hold Engine's `(curveMin, curveMax, curveRange)` per bound, fixed in the
@@ -739,6 +754,34 @@ impl Module {
                 lerp(
                     lower.value(x, y),
                     upper.value(x, y),
+                    interpolation.apply(alpha),
+                )
+            }
+            ModuleKind::MultiBlend {
+                control,
+                nodes,
+                max_index,
+                blend_range,
+                interpolation,
+            } => {
+                let selector = control.value(x, y);
+                let index = round(selector * *max_index as f32);
+                let mut min = multi_blend_slot(nodes, Some(index));
+                let mut max = min;
+                if *blend_range == 0.0 {
+                    return min.source.value(x, y);
+                }
+                if selector > min.max {
+                    max = multi_blend_slot(nodes, index.checked_add(1));
+                } else if selector < min.min {
+                    min = multi_blend_slot(nodes, index.checked_sub(1));
+                } else {
+                    return min.source.value(x, y);
+                }
+                let alpha = clamp((selector - min.max) / *blend_range, 0.0, 1.0);
+                lerp(
+                    min.source.value(x, y),
+                    max.source.value(x, y),
                     interpolation.apply(alpha),
                 )
             }
@@ -972,6 +1015,50 @@ impl Module {
         Self::node(kind, low, high)
     }
 
+    /// `Module.blend(blend, Interpolation, sources...)` (`MultiBlend`; Engine's two-argument form uses
+    /// `Interpolation.LINEAR`). Splits the control's 0..1 range into one evenly spaced slot per source and blends
+    /// neighbouring slots. Reports the smallest minimum and largest maximum of the sources (0 and 0 when empty).
+    pub fn multi_blend(self, blend: f32, interpolation: Interpolation, sources: Vec<Self>) -> Self {
+        let spacing = 1.0 / sources.len() as f32;
+        let radius = spacing / 2.0;
+        let blend_range = radius * blend;
+        let cell_radius = (radius - blend_range) / 2.0;
+        // Java's `int maxIndex = sources.length - 1`: -1 without sources.
+        let max_index = sources.len() as i32 - 1;
+        let low = fold_bounds(&sources, Self::min_value, |a, b| java_min(a, b.min_value()));
+        let high = fold_bounds(&sources, Self::max_value, |a, b| java_max(a, b.max_value()));
+        let nodes = sources
+            .into_iter()
+            .enumerate()
+            .map(|(index, source)| {
+                let position = index as f32 * spacing + radius;
+                let min = if index == 0 {
+                    0.0
+                } else {
+                    position - cell_radius
+                };
+                let max = if index as i32 == max_index {
+                    1.0
+                } else {
+                    position + cell_radius
+                };
+                BlendNode {
+                    source,
+                    min: java_max(0.0, min),
+                    max: java_min(1.0, max),
+                }
+            })
+            .collect();
+        let kind = ModuleKind::MultiBlend {
+            control: self,
+            nodes,
+            max_index,
+            blend_range,
+            interpolation,
+        };
+        Self::node(kind, low, high)
+    }
+
     /// `Module.select(Module, Module, lowerBound, upperBound, falloff, Interpolation)` (Engine's five-argument
     /// form uses `Interpolation.CURVE3`).
     pub fn select(
@@ -1159,7 +1246,15 @@ fn combine(sources: &[Module], x: f32, y: f32, operation: impl Fn(f32, f32) -> f
     })
 }
 
-/// `Combiner`'s constructor: the first source's bound, then `minTotal`/`maxTotal` over the rest; 0 when empty.
+/// `MultiBlend`'s `nodes[index]`. Engine throws `ArrayIndexOutOfBoundsException` when the control leaves 0..1 far
+/// enough to pick a slot that does not exist (or has no sources); this port panics there instead of inventing a value.
+fn multi_blend_slot(nodes: &[BlendNode], index: Option<i32>) -> &BlendNode {
+    index
+        .and_then(|index| usize::try_from(index).ok())
+        .and_then(|index| nodes.get(index))
+        .expect("MultiBlend control selects a slot outside its sources, where Engine throws")
+}
+
 /// `Selector`'s `Combiner` bounds over `{lower, upper}`: `Math.min` of the minima, `Math.max` of the maxima.
 fn selector_bounds(lower: &Module, upper: &Module) -> (f32, f32) {
     (
@@ -1168,6 +1263,7 @@ fn selector_bounds(lower: &Module, upper: &Module) -> (f32, f32) {
     )
 }
 
+/// `Combiner`'s constructor: the first source's bound, then `minTotal`/`maxTotal` over the rest; 0 when empty.
 fn fold_bounds(
     sources: &[Module],
     first: impl Fn(&Module) -> f32,
@@ -2514,5 +2610,75 @@ basectl 0xbe800000 0x3f800000 | 0x3eb98c02 0x3e32940c 0x3ebc62d2 0x3da4e1f8";
             l().base(control, 0.4, Interpolation::Curve4),
         );
         assert_eq!(lines, EXPECTED.lines().collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn multi_blend_matches_engine_0_3_0() {
+        let sources = || {
+            vec![
+                Module::constant(-1.0),
+                Module::constant(0.25),
+                Module::constant(2.0),
+            ]
+        };
+        let points = [
+            (0.0, 0.0),
+            (12.25, -98.75),
+            (-4096.5, 8192.25),
+            (123456.75, -0.125),
+            (64.0, 64.0),
+            (-128.0, 32.0),
+            (777.0, -333.0),
+            (-1024.0, -2048.0),
+        ];
+        let control = Module::source(Source::new(
+            SourceKind::Perlin,
+            SourceConfig {
+                seed: 501,
+                octaves: 3,
+                gain: 0.5,
+                frequency: 1.0 / 80.0,
+                lacunarity: 2.0,
+                interpolation: Interpolation::Curve3,
+            },
+        ));
+        let module = control.multi_blend(0.4, Interpolation::Curve3, sources());
+        assert_eq!(
+            [module.min_value().to_bits(), module.max_value().to_bits()],
+            [0xbf800000, 0x40000000]
+        );
+        assert_eq!(
+            bits(points.map(|(x, y)| module.value(x, y))),
+            [
+                0x3e800000, 0x3e800000, 0x3e800000, 0x3fb9d3fa, 0x3e800000, 0x3ffd47bb, 0x3ece61c4,
+                0x3e800000,
+            ]
+        );
+
+        let selectors = [
+            0.0, 0.21666665, 0.21666667, 0.25, 0.2833333, 0.28333336, 0.5, 0.55, 0.5833333,
+            0.6166666, 0.6166667, 0.75, 1.0,
+        ];
+        assert_eq!(
+            selectors.map(|selector| {
+                Module::constant(selector)
+                    .multi_blend(0.4, Interpolation::Curve3, sources())
+                    .value(0.0, 0.0)
+                    .to_bits()
+            }),
+            [
+                0xbf800000, 0xbf800000, 0xbf800000, 0xbec00004, 0x3e800000, 0x3e800000, 0x3e800000,
+                0x3e800000, 0x3f8ffff4, 0x40000000, 0x40000000, 0x40000000, 0x40000000,
+            ]
+        );
+        assert_eq!(
+            [0.49, 0.5, 0.51].map(|selector| {
+                Module::constant(selector)
+                    .multi_blend(0.0, Interpolation::Curve3, sources())
+                    .value(0.0, 0.0)
+                    .to_bits()
+            }),
+            [0x3e800000; 3]
+        );
     }
 }

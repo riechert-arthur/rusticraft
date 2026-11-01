@@ -30,7 +30,12 @@ The selector layer adds Engine's `Base`, `Blend`, `VariableBlend` (`blendVar`) a
 Engine reports for them: `Base` keeps its base's minimum and the larger maximum, the others the smaller minimum and
 larger maximum of their two sources. Its tests check raw bits, including Engine's quirks: with a zero falloff `Select`
 only picks its upper source above `upperBound`, and `Blend` fixes its blend window from the control's bounds when it is
-built. `MultiBlend` (`Module.blend(blend, sources...)`) is not ported yet.
+built.
+
+The multi-blend layer adds `MultiBlend` (`Module.blend(blend, sources...)`): it splits the control's 0..1 range into
+one evenly spaced slot per source and blends neighbouring slots, with Engine's slot edges, `NoiseUtil.round` slot
+lookup and reported bounds (the smallest minimum and largest maximum of the sources). A control far enough outside
+0..1 to pick a slot that does not exist makes Engine throw; this port panics there.
 
 ## Status: development only
 
