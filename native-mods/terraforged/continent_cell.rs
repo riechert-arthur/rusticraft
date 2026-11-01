@@ -101,7 +101,7 @@ fn position(hash: i32, cell: i32, prime: i32, jitter: f32) -> f32 {
     cell as f32 + random(hash_1d(hash, prime)) * jitter
 }
 
-fn hash_1d(seed: i32, x: i32) -> i32 {
+pub(crate) fn hash_1d(seed: i32, x: i32) -> i32 {
     let mut hash = seed ^ Y_PRIME.wrapping_mul(x);
     hash = hash
         .wrapping_mul(hash)
@@ -111,7 +111,7 @@ fn hash_1d(seed: i32, x: i32) -> i32 {
 }
 
 #[allow(clippy::manual_clamp)]
-fn random(mut value: i32) -> f32 {
+pub(crate) fn random(mut value: i32) -> f32 {
     value ^= X_PRIME;
     value ^= Y_PRIME;
     let value = value

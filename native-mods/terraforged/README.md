@@ -340,6 +340,11 @@ generator, and keep the mod enabled for that world's unexplored chunks.
 
 ## Development
 
+Current-source river networks now generate downhill connections, displaced segments, ocean
+extensions, and source lakes. Six 13×13-cell Java-source grids check counts and a checksum of every
+node's raw float bits across both layouts and all noise sources. Network caching and warped
+sampling remain separate integration steps.
+
 The current-source river carver now applies valley/bank/bed shaping, erosion modifiers, coastline
 clipping, and river-then-lake precedence. Seven Java-source fixtures use an explicitly supplied
 erosion value; erosion-noise graph wiring is deliberately separate until the differing dependency
