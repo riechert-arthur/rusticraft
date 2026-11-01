@@ -1588,6 +1588,197 @@ impl Line {
 }
 
 impl Module {
+    pub fn with_seed(&self, seed: i64) -> Self {
+        let mut module = self.clone();
+        module.offset_seed(seed as i32);
+        module
+    }
+
+    fn offset_seed(&mut self, seed: i32) {
+        match self.0.as_mut() {
+            ModuleKind::Constant(_) | ModuleKind::Custom { .. } => {}
+            ModuleKind::Source(source) => {
+                source.config.seed = source.config.seed.wrapping_add(seed);
+            }
+            ModuleKind::ErosionRidge { ridge, source } => {
+                ridge.seed = ridge.seed.wrapping_add(seed);
+                source.offset_seed(seed);
+            }
+            ModuleKind::CellSource { config, lookup, .. } => {
+                config.seed = config.seed.wrapping_add(seed);
+                lookup.offset_seed(seed);
+            }
+            ModuleKind::CellEdgeSource { config, .. } => {
+                config.seed = config.seed.wrapping_add(seed);
+            }
+            ModuleKind::SineSource { alpha, .. } => alpha.offset_seed(seed),
+            ModuleKind::Line(line) => {
+                line.radius.offset_seed(seed);
+                line.fade_in.offset_seed(seed);
+                line.fade_out.offset_seed(seed);
+            }
+            ModuleKind::Abs(source)
+            | ModuleKind::Boost(source, _)
+            | ModuleKind::Invert(source)
+            | ModuleKind::PowerCurve { source, .. }
+            | ModuleKind::Curve { source, .. } => source.offset_seed(seed),
+            ModuleKind::Alpha(source, alpha)
+            | ModuleKind::Power(source, alpha)
+            | ModuleKind::Threshold(source, alpha) => {
+                source.offset_seed(seed);
+                alpha.offset_seed(seed);
+            }
+            ModuleKind::Bias(source, bias) => {
+                source.offset_seed(seed);
+                *bias = Module::constant(0.0);
+            }
+            ModuleKind::Clamp(source, min, max) | ModuleKind::Map(source, min, max) => {
+                source.offset_seed(seed);
+                min.offset_seed(seed);
+                max.offset_seed(seed);
+            }
+            ModuleKind::Scale(source, scale, ..) => {
+                source.offset_seed(seed);
+                scale.offset_seed(seed);
+            }
+            ModuleKind::Warp(source, domain) => {
+                source.offset_seed(seed);
+                domain.offset_seed(seed);
+            }
+            ModuleKind::Base { base, source, .. } => {
+                base.offset_seed(seed);
+                source.offset_seed(seed);
+            }
+            ModuleKind::Blend {
+                control,
+                lower,
+                upper,
+                ..
+            }
+            | ModuleKind::Select {
+                control,
+                lower,
+                upper,
+                ..
+            } => {
+                control.offset_seed(seed);
+                lower.offset_seed(seed);
+                upper.offset_seed(seed);
+            }
+            ModuleKind::VariableBlend {
+                control,
+                variable,
+                lower,
+                upper,
+                ..
+            } => {
+                control.offset_seed(seed);
+                variable.offset_seed(seed);
+                lower.offset_seed(seed);
+                upper.offset_seed(seed);
+            }
+            ModuleKind::MultiBlend { control, nodes, .. } => {
+                control.offset_seed(seed);
+                for node in nodes {
+                    node.source.offset_seed(seed);
+                }
+            }
+            ModuleKind::Terrace {
+                source,
+                ramp,
+                cliff,
+                ramp_height,
+                ..
+            } => {
+                source.offset_seed(seed);
+                ramp.offset_seed(seed);
+                cliff.offset_seed(seed);
+                ramp_height.offset_seed(seed);
+            }
+            ModuleKind::LegacyTerrace {
+                source,
+                lower_curve,
+                upper_curve,
+                ..
+            } => {
+                source.offset_seed(seed);
+                lower_curve.offset_seed(seed);
+                upper_curve.offset_seed(seed);
+            }
+            ModuleKind::AdvancedTerrace {
+                source,
+                modulation,
+                mask,
+                slope,
+                ..
+            } => {
+                source.offset_seed(seed);
+                modulation.offset_seed(seed);
+                mask.offset_seed(seed);
+                slope.offset_seed(seed);
+            }
+            ModuleKind::VariableCurve {
+                source,
+                midpoint,
+                gradient,
+            } => {
+                source.offset_seed(seed);
+                midpoint.offset_seed(seed);
+                gradient.offset_seed(seed);
+            }
+            ModuleKind::Steps {
+                source,
+                steps,
+                slope_min,
+                slope_max,
+                ..
+            } => {
+                source.offset_seed(seed);
+                steps.offset_seed(seed);
+                slope_min.offset_seed(seed);
+                slope_max.offset_seed(seed);
+            }
+            ModuleKind::Frequency { source, x, y } => {
+                source.offset_seed(seed);
+                x.offset_seed(seed);
+                y.offset_seed(seed);
+            }
+            ModuleKind::Gradient {
+                source,
+                lower,
+                upper,
+                strength,
+            } => {
+                source.offset_seed(seed);
+                lower.offset_seed(seed);
+                upper.offset_seed(seed);
+                strength.offset_seed(seed);
+            }
+            ModuleKind::Modulate {
+                source,
+                direction,
+                strength,
+            } => {
+                source.offset_seed(seed);
+                direction.offset_seed(seed);
+                strength.offset_seed(seed);
+            }
+            ModuleKind::Cache { source, value } => {
+                source.offset_seed(seed);
+                *value = std::sync::Arc::new(std::sync::Mutex::new(CacheValue::default()));
+            }
+            ModuleKind::Add(sources)
+            | ModuleKind::Multiply(sources)
+            | ModuleKind::Max(sources)
+            | ModuleKind::Min(sources)
+            | ModuleKind::Subtract(sources) => {
+                for source in sources {
+                    source.offset_seed(seed);
+                }
+            }
+        }
+    }
+
     pub fn constant(value: f32) -> Self {
         Self(Box::new(ModuleKind::Constant(value)))
     }
@@ -2656,6 +2847,30 @@ enum DomainKind {
 }
 
 impl Domain {
+    fn offset_seed(&mut self, seed: i32) {
+        match self.0.as_mut() {
+            DomainKind::Direct => {}
+            DomainKind::DomainWarp { x, y, distance } => {
+                x.offset_seed(seed);
+                y.offset_seed(seed);
+                distance.offset_seed(seed);
+            }
+            DomainKind::Direction {
+                direction,
+                strength,
+            } => {
+                direction.offset_seed(seed);
+                strength.offset_seed(seed);
+            }
+            DomainKind::Add(first, second)
+            | DomainKind::Compound(first, second)
+            | DomainKind::Cumulative(first, second) => {
+                first.offset_seed(seed);
+                second.offset_seed(seed);
+            }
+        }
+    }
+
     pub fn direct() -> Self {
         Self(Box::new(DomainKind::Direct))
     }
@@ -4255,5 +4470,59 @@ mod tests {
             [0x44424000, 0xc3a68000]
         );
         assert_eq!(cached.value.to_bits(), 0x3eea770a);
+    }
+
+    #[test]
+    fn recursive_reseeding_matches_cereal_context() {
+        let source = |kind, seed, scale: f32, octaves| {
+            Module::source(Source::new(
+                kind,
+                SourceConfig {
+                    seed,
+                    octaves,
+                    frequency: 1.0 / scale,
+                    ..SourceConfig::default()
+                },
+            ))
+        };
+        let graph = source(SourceKind::Perlin, 12, 80.0, 3)
+            .bias(source(SourceKind::Simplex, -4, 45.0, 2))
+            .warp(Domain::domain_warp(
+                source(SourceKind::Simplex, 7, 100.0, 2),
+                source(SourceKind::Simplex, 8, 100.0, 2),
+                Module::constant(25.0),
+            ));
+        let reseeded = graph.with_seed(99);
+        let ModuleKind::Warp(reseeded_source, _) = reseeded.0.as_ref() else {
+            unreachable!()
+        };
+        let ModuleKind::Bias(reseeded_perlin, reseeded_bias) = reseeded_source.0.as_ref() else {
+            unreachable!()
+        };
+        let ModuleKind::Source(reseeded_perlin) = reseeded_perlin.0.as_ref() else {
+            unreachable!()
+        };
+        let ModuleKind::Constant(reseeded_bias) = reseeded_bias.0.as_ref() else {
+            unreachable!()
+        };
+        assert_eq!(reseeded_perlin.config.seed, 111);
+        assert_eq!(*reseeded_bias, 0.0);
+        let points = [(0.0, 0.0), (17.25, -9.5), (-341.75, 888.125)];
+        assert_eq!(
+            bits(points.map(|(x, y)| graph.value(x, y))),
+            [0x3f800000, 0x3f527f30, 0x3f9d9dbc]
+        );
+        assert_eq!(
+            bits(points.map(|(x, y)| reseeded.value(x, y))),
+            [0x3f000000, 0x3eda521d, 0x3f0f1506]
+        );
+
+        let cached = graph.cache();
+        cached.value(1.0, 2.0);
+        let reseeded_cache = cached.with_seed(99);
+        let ModuleKind::Cache { value, .. } = reseeded_cache.0.as_ref() else {
+            unreachable!()
+        };
+        assert!(value.lock().unwrap().empty);
     }
 }

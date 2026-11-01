@@ -306,6 +306,9 @@ minimum-noise bias, identity-cached terrain sampling, and squared border-weight 
 Terrain searches now traverse TerraForged's warped square spiral, filter weighted terrain bands by
 name, jitter matching region cells, and return world-scaled nearest positions.
 
+Noise graphs now support TerraForged's Cereal-style recursive reseeding by adding the context seed to
+every nested source, domain, erosion node, and cached branch, completing terrain-blender `withSeed`.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:

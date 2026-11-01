@@ -65,6 +65,14 @@ impl TerrainNoise {
     pub fn noise(&self) -> &Module {
         &self.noise
     }
+
+    pub fn with_seed(&self, seed: i64) -> Self {
+        Self::new(
+            self.terrain.clone(),
+            self.weight,
+            self.noise.with_seed(seed),
+        )
+    }
 }
 
 impl Weighted for TerrainNoise {
@@ -118,6 +126,16 @@ impl TerrainBlender {
 
     pub fn scale(&self) -> i32 {
         self.scale
+    }
+
+    pub fn with_seed(&self, seed: i64) -> Self {
+        let terrains = self
+            .terrains
+            .values()
+            .iter()
+            .map(|terrain| Arc::new(terrain.with_seed(seed)))
+            .collect();
+        Self::new(seed, self.scale, self.jitter, self.blending, terrains)
     }
 
     pub fn value(&self, seed: i32, x: f32, z: f32) -> f32 {
