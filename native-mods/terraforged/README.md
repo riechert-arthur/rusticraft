@@ -563,6 +563,9 @@ seed offset with chance-1 lakes and wetlands, a 384/62 world, continent scales 1
 three ids, plus the first roots and direct samples, against a Java oracle running Engine's classes,
 `FancyRiverGeneratorOracle.java` in `.local/terraforged/oracles/river/`.
 
+The river-cache layer memoizes packed continent coordinates with TerraForged's five-minute expiry,
+preserves the legacy seed layout, and exposes cached fancy-continent rivermaps through shared handles.
+
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator and the fancy river generator. They change nothing in the game, so there is

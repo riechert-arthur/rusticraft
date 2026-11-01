@@ -52,8 +52,11 @@ use horizon_core::{
     jmath,
     random::{LegacyRandom, RandomSource},
 };
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 /// Engine's `rivermap.gen.GenWarp`: the lake and river domain warps a river map carves its networks with.
 /// `BaseRiverGenerator` and `FancyRiverGenerator` build one per continent from `(int) id`.
@@ -1339,20 +1342,24 @@ pub struct Rivermap {
     timestamp: i64,
 }
 
+/// `System.currentTimeMillis()`.
+fn current_time_millis() -> i64 {
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(since) => i64::try_from(since.as_millis()).unwrap_or(i64::MAX),
+        Err(before) => i64::try_from(before.duration().as_millis()).map_or(i64::MIN, |ms| -ms),
+    }
+}
+
 impl Rivermap {
     /// `new Rivermap(x, z, networks, warp)`; the timestamp is `System.currentTimeMillis()`.
     pub fn new(x: i32, z: i32, networks: Vec<RiverNetwork>, warp: GenWarp) -> Self {
-        let timestamp = match SystemTime::now().duration_since(UNIX_EPOCH) {
-            Ok(since) => i64::try_from(since.as_millis()).unwrap_or(i64::MAX),
-            Err(before) => i64::try_from(before.duration().as_millis()).map_or(i64::MIN, |ms| -ms),
-        };
         Self {
             x,
             z,
             lake_warp: warp.lake,
             river_warp: warp.river,
             networks,
-            timestamp,
+            timestamp: current_time_millis(),
         }
     }
 
@@ -1384,9 +1391,85 @@ impl Rivermap {
     }
 }
 
+pub struct RiverCache {
+    entries: Mutex<HashMap<i64, Arc<Rivermap>>>,
+}
+
+impl RiverCache {
+    const EXPIRY_MILLIS: i64 = 5 * 60 * 1_000;
+
+    pub fn new() -> Self {
+        Self {
+            entries: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub fn get_rivers(
+        &self,
+        x: i32,
+        z: i32,
+        generate: impl FnOnce(i32, i32, i64) -> Rivermap,
+    ) -> Arc<Rivermap> {
+        self.get_or_generate(super::terraforged_util::pack(x, z), x, z, generate)
+    }
+
+    fn get_or_generate(
+        &self,
+        id: i64,
+        x: i32,
+        z: i32,
+        generate: impl FnOnce(i32, i32, i64) -> Rivermap,
+    ) -> Arc<Rivermap> {
+        let now = current_time_millis();
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        entries.retain(|_, map| now.saturating_sub(map.timestamp()) < Self::EXPIRY_MILLIS);
+        Arc::clone(
+            entries
+                .entry(id)
+                .or_insert_with(|| Arc::new(generate(x, z, id))),
+        )
+    }
+}
+
+impl Default for RiverCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Default)]
+pub struct LegacyRiverCache {
+    cache: RiverCache,
+}
+
+impl LegacyRiverCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn get_rivers(
+        &self,
+        x: i32,
+        z: i32,
+        generate: impl FnOnce(i32, i32, i64) -> Rivermap,
+    ) -> Arc<Rivermap> {
+        let id = (i64::from(z) << 32) | (i64::from(x) & 0xffff_ffff);
+        self.cache.get_or_generate(id, x, z, generate)
+    }
+}
+
 /// The part of Engine's `Continent` the river generators read: `getEdgeValue(x, z)`.
 pub trait ContinentSampler {
     fn edge_value(&self, x: f32, z: f32) -> f32;
+}
+
+impl<T: ContinentSampler + ?Sized> ContinentSampler for &T {
+    fn edge_value(&self, x: f32, z: f32) -> f32 {
+        T::edge_value(self, x, z)
+    }
 }
 
 impl ContinentSampler for super::terraforged_fancy::FancyContinentGenerator {
@@ -3768,6 +3851,30 @@ mod tests {
         }
     }
 
+    #[test]
+    fn river_caches_match_engine_0_3_0() {
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let id = std::sync::Mutex::new(0_i64);
+        let cache = RiverCache::new();
+        let first = cache.get_rivers(-7, 9, |x, z, next_id| {
+            calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            *id.lock().unwrap() = next_id;
+            Rivermap::new(x, z, Vec::new(), GenWarp::direct())
+        });
+        let second = cache.get_rivers(-7, 9, |_, _, _| unreachable!());
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(*id.lock().unwrap() as u64, 0xfffffff900000009);
+
+        let legacy = LegacyRiverCache::new();
+        let map = legacy.get_rivers(-7, 9, |x, z, next_id| {
+            *id.lock().unwrap() = next_id;
+            Rivermap::new(x, z, Vec::new(), GenWarp::direct())
+        });
+        assert_eq!((map.x(), map.z()), (-7, 9));
+        assert_eq!(*id.lock().unwrap() as u64, 0x00000009fffffff9);
+    }
+
     /// Engine 0.3.0's `BaseRiverGenerator` against `BaseRiverGeneratorOracle.java` (in the maintainer's
     /// `.local/terraforged/oracles/river/`), which runs Engine's class through a subclass with radial roots.
     mod base_river_generator_oracle {
@@ -4093,9 +4200,7 @@ mod tests {
 
     mod fancy_river_generator_oracle {
         use super::super::super::terraforged_engine::Seed;
-        use super::super::super::terraforged_fancy::{
-            FancyContinentGenerator, FancyRiverGenerator,
-        };
+        use super::super::super::terraforged_fancy::FancyContinentGenerator;
         use super::base_river_generator_oracle::mix_network;
         use super::lake_oracle::{Fold, fill_from};
         use super::network_oracle::FILLS;
@@ -4131,25 +4236,24 @@ mod tests {
             (world, rivers)
         }
 
-        /// `new FancyContinentGenerator(new Seed(continent_seed), context)` and the `FancyRiverGenerator` its
-        /// `FancyContinent` builds from the same `GeneratorContext`.
-        fn generator(
+        /// `new FancyContinentGenerator(new Seed(continent_seed), context)`, whose `FancyContinent` builds its
+        /// `FancyRiverGenerator` from the same `GeneratorContext` (seed root `world.seed`).
+        fn continent(
             variant: i32,
             continent_seed: i32,
             registry: &Arc<TerrainRegistry>,
-        ) -> (FancyRiverGenerator, i32) {
+        ) -> (FancyContinentGenerator, i32) {
             let (world, rivers) = settings(variant);
-            let continent = FancyContinentGenerator::new(&mut Seed::new(continent_seed), world);
             let levels = Levels::new(world.properties.world_height, world.properties.sea_level);
-            let generator = FancyRiverGenerator::new(
-                continent,
+            let continent = FancyContinentGenerator::new(
+                &mut Seed::new(continent_seed),
                 world.seed as i32,
-                &world,
-                &rivers,
+                world,
+                rivers,
                 levels,
                 Arc::clone(registry),
             );
-            (generator, world.continent.continent_scale)
+            (continent, world.continent.continent_scale)
         }
 
         #[test]
@@ -4160,7 +4264,8 @@ mod tests {
             let (mut applies, mut networks, mut nodes) = (0, 0, 0);
             for variant in 0..5 {
                 for continent_seed in [12_345, -98_765] {
-                    let (generator, scale) = generator(variant, continent_seed, &registry);
+                    let (continent, scale) = continent(variant, continent_seed, &registry);
+                    let generator = continent.river_generator();
                     for (i, id) in (0..).zip(ids) {
                         let (x, z) = (200 * i - 300, 150 - 100 * i);
                         let map = generator.generate_rivers(x, z, id);
@@ -4196,7 +4301,8 @@ mod tests {
         #[test]
         fn samples_match_engine() {
             let registry = Arc::new(TerrainRegistry::new());
-            let (generator, _) = generator(0, 12_345, &registry);
+            let (continent, _) = continent(0, 12_345, &registry);
+            let generator = continent.river_generator();
             let map = generator.generate_rivers(17, -9, 0x1234_5678);
             assert_eq!(map.networks.len(), 38);
             let roots: Vec<_> = map
