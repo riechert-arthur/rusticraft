@@ -1138,10 +1138,17 @@ overworld ends at 320), sea level 62 (water up to Y 62, as vanilla's sea level 6
 automatic horizontal frequency `194 / (max_y - sea_level) * scale`. The settings codec is not ported; `getWaterLevel` (it reads
 `TerrainData`) came with the next layer. Its test replays `TerrainLevelsOracle.java` (in
 `.local/terraforged/oracles/terrain_levels/`), which runs TerraForged's own classes from the mod jar, stubbing only
-`DimensionType` and the logger: 19 constructed levels and their copies, the default and no-argument levels,
+`DimensionType` and the logger: 36 constructed levels and their copies, the default and no-argument levels,
 `calcFrequency` and every transform over signed zeros, subnormals, huge values, infinities and NaN, plus a rounding
 sweep of `height`, `floor` and `ceil` (halves and negative halves, negative fractions and whole numbers, the `int`
-limits), bit for bit.
+limits), bit for bit. The constructed levels include a sweep of the constructor's bounds: `max_y` arguments of 0, -1,
+`Integer.MIN_VALUE` and `Integer.MAX_VALUE` (a zero or negative one gives a sea level of 0 or below, and the sea floor
+then clamps below it), `max_y >> 1` below 32 (an inverted sea-level pair: a requested level above it gets `max_y >>
+1`, one below 32 gets 32), each limit's endpoints and one past them, and the sea floor and base height at their
+bounds. TerraForged's newer source tree (6dd607eb) builds these levels the same way: its `TerrainLevels`
+constructor, `copy()` and transforms, `NoiseLevels` and `MathUtil` compile to the jar's bytecode (only the settings
+codec, which is not ported, and `toString` differ; `.local/terraforged/oracles/terrain_levels/version/compare.sh`
+checks it).
 
 The terrain-data layer (`terrain_data.rs`, again the mod's classes) adds the per-chunk storage TerraForged's
 generator fills: `Index` (`CHUNK` masks x and z into the chunk, so world coordinates of any chunk, negative ones
