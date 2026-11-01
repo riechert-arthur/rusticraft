@@ -71,18 +71,74 @@ impl LandForms {
             ))
             .bias(Module::constant(-0.02))
     }
+
+    pub fn hills1(&self, seed: &mut Seed) -> Module {
+        let hills = Module::multiply(vec![
+            perlin(seed.next(), 200, 3, 2.0),
+            source(SourceKind::Billow, seed.next(), 400, 3, 0.5, 2.0).alpha(Module::constant(0.5)),
+        ]);
+        hills
+            .warp(noise_warp(seed.next(), 30, 3, 20.0))
+            .warp(noise_warp(seed.next(), 400, 3, 200.0))
+            .scale(Module::constant(
+                0.6 * self.settings.general.global_vertical_scale,
+            ))
+    }
+
+    pub fn hills2(&self, seed: &mut Seed) -> Module {
+        let hills = Module::multiply(vec![
+            source(SourceKind::Cubic, seed.next(), 128, 2, 0.5, 2.0),
+            perlin(seed.next(), 32, 4, 2.0).alpha(Module::constant(0.075)),
+        ])
+        .warp(noise_warp(seed.next(), 30, 3, 20.0))
+        .warp(noise_warp(seed.next(), 400, 3, 200.0));
+        Module::multiply(vec![
+            hills,
+            source(SourceKind::Ridge, seed.next(), 512, 2, 0.5, 2.0).alpha(Module::constant(0.8)),
+        ])
+        .scale(Module::constant(
+            0.55 * self.settings.general.global_vertical_scale,
+        ))
+    }
+
+    pub fn dales(&self, seed: &mut Seed) -> Module {
+        let hills1 = source(SourceKind::Billow, seed.next(), 300, 4, 0.8, 4.0)
+            .power_curve(0.5)
+            .scale(Module::constant(0.75));
+        let hills2 =
+            source(SourceKind::Billow, seed.next(), 350, 3, 0.8, 4.0).power(Module::constant(1.25));
+        let combined = perlin(seed.next(), 400, 1, 2.0)
+            .clamp(Module::constant(0.3), Module::constant(0.6))
+            .map(Module::constant(0.0), Module::constant(1.0))
+            .blend(hills1, hills2, 0.4, 0.75, Interpolation::Linear);
+        combined
+            .power(Module::constant(1.125))
+            .warp(noise_warp(seed.next(), 300, 1, 100.0))
+            .scale(Module::constant(0.4))
+    }
 }
 
 fn perlin(seed: i32, scale: i32, octaves: usize, lacunarity: f32) -> Module {
+    source(SourceKind::Perlin, seed, scale, octaves, 0.5, lacunarity)
+}
+
+fn source(
+    kind: SourceKind,
+    seed: i32,
+    scale: i32,
+    octaves: usize,
+    gain: f32,
+    lacunarity: f32,
+) -> Module {
     Module::source(Source::new(
-        SourceKind::Perlin,
+        kind,
         SourceConfig {
             seed,
             octaves,
+            gain,
             frequency: 1.0 / scale as f32,
             lacunarity,
             interpolation: Interpolation::Curve3,
-            ..SourceConfig::default()
         },
     ))
 }
@@ -163,6 +219,68 @@ mod tests {
         assert_eq!(
             bits(&plains),
             [0x3ba3a2a0, 0x3b056338, 0xbbfff534, 0x3bcfdf6c]
+        );
+    }
+
+    #[test]
+    fn hills_match_engine_0_3_0() {
+        let forms = LandForms::new(TerrainSettings::default());
+        let mut hills1_seed = Seed::new(321);
+        let hills1 = forms.hills1(&mut hills1_seed);
+        assert_eq!(hills1_seed.get(), 325);
+        assert_eq!(hills1.min_value().to_bits(), 0x00000000);
+        assert_eq!(hills1.max_value().to_bits(), 0x3f16872c);
+        assert_eq!(
+            bits(&hills1),
+            [0x3e16872c, 0x3e2a41f1, 0x3e4e8c02, 0x3e68e25a]
+        );
+
+        let mut hills2_seed = Seed::new(-45);
+        let hills2 = forms.hills2(&mut hills2_seed);
+        assert_eq!(hills2_seed.get(), -40);
+        assert_eq!(hills2.min_value().to_bits(), 0x80000000);
+        assert_eq!(hills2.max_value().to_bits(), 0x3f1b3b65);
+        assert_eq!(
+            bits(&hills2),
+            [0x3e3929fe, 0x3e4b287b, 0x3e5b0922, 0x3e61f05e]
+        );
+    }
+
+    #[test]
+    fn dales_matches_engine_0_3_0() {
+        let forms = LandForms::new(TerrainSettings::default());
+        let mut seed = Seed::new(987_654);
+        let dales = forms.dales(&mut seed);
+        assert_eq!(seed.get(), 987_658);
+        assert_eq!(dales.min_value().to_bits(), 0x00000000);
+        assert_eq!(dales.max_value().to_bits(), 0x3ecccccd);
+        assert_eq!(
+            bits(&dales),
+            [0x00000000, 0x3de86058, 0x3c1e05a0, 0x3ccd7073]
+        );
+    }
+
+    #[test]
+    fn scaled_hills_match_engine_0_3_0() {
+        let mut settings = TerrainSettings::default();
+        settings.general.global_vertical_scale = 0.37;
+        let forms = LandForms::new(settings);
+        let mut hills1_seed = Seed::new(i32::MAX - 3);
+        let hills1 = forms.hills1(&mut hills1_seed);
+        assert_eq!(hills1_seed.get(), i32::MIN);
+        assert_eq!(hills1.max_value().to_bits(), 0x3e6353f9);
+        assert_eq!(
+            bits(&hills1),
+            [0x3d6353f9, 0x3db9159e, 0x3d882819, 0x3dd855d4]
+        );
+
+        let mut hills2_seed = Seed::new(i32::MIN + 3);
+        let hills2 = forms.hills2(&mut hills2_seed);
+        assert_eq!(hills2_seed.get(), i32::MIN + 8);
+        assert_eq!(hills2.max_value().to_bits(), 0x3e6a6e98);
+        assert_eq!(
+            bits(&hills2),
+            [0x3d72ed88, 0x3d4b6714, 0x3dafad6e, 0x3dd98c72]
         );
     }
 }

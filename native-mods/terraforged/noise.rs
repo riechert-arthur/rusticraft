@@ -749,11 +749,19 @@ impl Source {
     }
 
     pub fn min_value(self) -> f32 {
-        0.0
+        if matches!(self.kind, SourceKind::Cubic) {
+            self.min
+        } else {
+            0.0
+        }
     }
 
     pub fn max_value(self) -> f32 {
-        1.0
+        if matches!(self.kind, SourceKind::Cubic) {
+            self.max
+        } else {
+            1.0
+        }
     }
 
     fn evaluate(self, mut x: f32, mut y: f32, seed: i32, explicit_seed: bool) -> f32 {
@@ -2708,6 +2716,12 @@ mod tests {
                 expected_seeded
             );
         }
+        let cubic = Source::new(SourceKind::Cubic, config);
+        assert_eq!(cubic.min_value().to_bits(), 0xbfb0fa58);
+        assert_eq!(cubic.max_value().to_bits(), 0x3fb0fa58);
+        let perlin = Source::new(SourceKind::Perlin, config);
+        assert_eq!(perlin.min_value().to_bits(), 0);
+        assert_eq!(perlin.max_value().to_bits(), 0x3f800000);
     }
 
     #[test]

@@ -72,6 +72,9 @@ base scaling controls consumed by TerraForged's terrain distribution and LandFor
 The first LandForms layer adds executable steppe and plains graphs with exact octave configuration,
 seed consumption, erosion alpha, axis warping, large-scale warping and final vertical scaling.
 
+The hill LandForms layer adds both warped hill variants and the blended dales graph, preserving gain,
+lacunarity, alpha, curve, power, clamp, map and global vertical-scale behavior.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
