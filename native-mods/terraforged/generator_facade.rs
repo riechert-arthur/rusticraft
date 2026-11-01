@@ -43,6 +43,7 @@ use super::{
     terraforged_current_surface_biomes::CurrentSurfaceBiomeSampler,
     terraforged_eroded_noise_generator::ErodedNoiseGenerator,
     terraforged_noise_generator::NoiseGenerator,
+    terraforged_structure_terrain::StructureTerrain,
     terraforged_terrain_cache::{TerrainCache, TerrainDataHandle, TerrainTask},
     terraforged_terrain_levels::TerrainLevels,
 };
@@ -190,8 +191,8 @@ impl TerraForgedGenerator {
     /// and fills there (same data, same blocks). Like Java it neither hints nor drops: the entry stays cached until
     /// [`Self::drop_chunk`] (`applyBiomeDecoration`). The fill writes inside `chunk`'s own build range
     /// (`min_y()`..`min_y() + height()`), clipping terrain outside it ([`fill_chunk`]); TerraForged's levels are not
-    /// rescaled to it. Not ported here: the rest of Java's `fillFromNoise` (`buildStructureTerrain`, Deep Caves,
-    /// Strata) and the stage's surface and carver steps.
+    /// rescaled to it. [`Self::fill_from_noise_with_structures`] adds `buildStructureTerrain`; not ported here: Deep
+    /// Caves, Strata and the stage's surface and carver steps.
     ///
     /// `Err` where the chunk refuses a write ([`fill_chunk`]). Panics where Java's future completes exceptionally: a
     /// chunk whose region build failed (the cache task panicked; see [`TerrainCache::get_now`]). A failure after the
@@ -205,7 +206,45 @@ impl TerraForgedGenerator {
     ) -> Result<TerrainDataHandle<ErodedNoiseGenerator>, TerrainError> {
         let position = chunk.position();
         let terrain = self.chunk_data(self.seed(), position.x, position.z);
-        fill_chunk(self.sea_level(), chunk, &terrain, stone, water)?;
+        fill_chunk(
+            self.sea_level(),
+            chunk,
+            &terrain.read(),
+            stone,
+            water,
+        )?;
+        Ok(terrain)
+    }
+
+    /// TerraForged 6dd607eb's whole `fillFromNoise` continuation: [`Self::fill_from_noise`], then
+    /// `ChunkUtil.buildStructureTerrain(chunk, terrainData, structureManager)` ([`StructureTerrain::modify_chunk`]),
+    /// which edits the chunk's blocks and writes the edited columns' OCEAN_FLOOR_WG heights into the entry's
+    /// `TerrainData`. The returned handle (and every other handle of the entry: [`Self::chunk_data`] for the same seed
+    /// and chunk until [`Self::drop_chunk`]) then reads those heights, as Java's surface, carver and decoration stages
+    /// read the same `TerrainData` object. The fill and the structure edits run under one write guard, so no reader
+    /// sees a half-adjusted chunk.
+    ///
+    /// `structures` is Java's `new StructureTerrain(chunk, structureManager)`: build it with
+    /// [`StructureTerrain::from_starts`] over the generator's `references(..)` for this chunk (the beardifier's list)
+    /// and `chunk.position()`. `stone`, `water` and `air` are the default states of `minecraft:stone`, `minecraft:water`
+    /// and `minecraft:air` (`ChunkUtil.FILLER` and `StructureTerrain`'s `solid`/`air`).
+    ///
+    /// `Err` where the chunk refuses a write, in either step; panics as [`Self::fill_from_noise`] does.
+    pub fn fill_from_noise_with_structures<B: TerrainBlockStates>(
+        &self,
+        chunk: &mut TerrainChunk<'_, B>,
+        stone: BlockStateId,
+        water: BlockStateId,
+        air: BlockStateId,
+        structures: &StructureTerrain,
+    ) -> Result<TerrainDataHandle<ErodedNoiseGenerator>, TerrainError> {
+        let position = chunk.position();
+        let terrain = self.chunk_data(self.seed(), position.x, position.z);
+        {
+            let mut data = terrain.write();
+            fill_chunk(self.sea_level(), chunk, &data, stone, water)?;
+            structures.modify_chunk(chunk, &mut data, stone, air)?;
+        }
         Ok(terrain)
     }
 
@@ -795,10 +834,11 @@ q 3 -770 1240 3eafbae6 3f060470 135 135 134 134 134 0
         let terrain = g.fill_from_noise(&mut chunk, STONE, WATER).unwrap();
         assert!(terrain.ptr_eq(&g.chunk_data(7, -2, 3)));
         assert!(!terrain.ptr_eq(&g.chunk_data(7, 3, -2)));
+        let data = terrain.read();
         for z in 0..16 {
             for x in 0..16 {
-                let height = terrain.height_at(x, z);
-                let water = TerrainLevels::water_level(x, z, g.sea_level(), &terrain);
+                let height = data.height_at(x, z);
+                let water = TerrainLevels::water_level(x, z, g.sea_level(), &data);
                 let top = height.max(water);
                 assert_eq!(chunk.block(x, height, z), STONE);
                 assert_eq!(
@@ -808,8 +848,96 @@ q 3 -770 1240 3eafbae6 3f060470 135 135 134 134 134 0
                 assert_eq!(chunk.block(x, top + 1, z), AIR);
             }
         }
+        drop(data);
         g.drop_chunk(7, -2, 3);
         assert!(!terrain.ptr_eq(&g.chunk_data(7, -2, 3)));
+    }
+
+    /// Every column's height and every block and heightmap of `chunk` (for comparing whole terrain stages).
+    fn stage_state(
+        terrain: &TerrainDataHandle<ErodedNoiseGenerator>,
+        chunk: &TerrainChunk<'_, Properties>,
+    ) -> (Vec<i32>, u64) {
+        let data = terrain.read();
+        let heights = (0..16)
+            .flat_map(|z| (0..16).map(move |x| (x, z)))
+            .map(|(x, z)| data.height_at(x, z))
+            .collect();
+        (heights, digest(chunk))
+    }
+
+    /// The structure stage is `fill_chunk` then `modify_chunk` on the entry's own `TerrainData` (6dd607eb's
+    /// `fillFromNoise`): the chunk at its position gets the structure's blocks and OCEAN_FLOOR_WG, and every handle of
+    /// the entry the edited heights, with the extrema unchanged.
+    #[test]
+    fn structure_stage_shares_its_heights() {
+        use super::super::terraforged_structure_terrain::{Bounds, Piece};
+        use crate::heightmap::HeightmapType;
+
+        let g = facade(0, 0, 0, 25, 0);
+        g.capture_seed((5_i64 << 32) | 7);
+        let blocks = registry();
+        let position = ChunkPos::new(-2, 3);
+        let new_chunk = || TerrainChunk::new(position, -64, 544, &blocks, Properties).unwrap();
+        let cached = g.chunk_data(7, -2, 3);
+        let extrema = |terrain: &TerrainDataHandle<ErodedNoiseGenerator>| {
+            let data = terrain.read();
+            (data.min(), data.max(), data.max_base())
+        };
+        let generated = extrema(&cached);
+        let floor = generated.1 + 10;
+        // Over block x -32..=-20, z 48..=60 of chunk (-2, 3), above all its terrain.
+        let structures = StructureTerrain::from_rigid_pieces(vec![Piece {
+            bounds: Bounds {
+                min_x: -32,
+                min_y: floor,
+                min_z: 48,
+                max_x: -20,
+                max_y: floor + 5,
+                max_z: 60,
+            },
+            ground_delta: 0,
+        }]);
+
+        let mut plain = new_chunk();
+        let plain_terrain = g.fill_from_noise(&mut plain, STONE, WATER).unwrap();
+        let plain_state = stage_state(&plain_terrain, &plain);
+
+        let mut chunk = new_chunk();
+        let terrain = g
+            .fill_from_noise_with_structures(&mut chunk, STONE, WATER, AIR, &structures)
+            .unwrap();
+        assert!(terrain.ptr_eq(&cached));
+        let state = stage_state(&terrain, &chunk);
+        assert_ne!(state, plain_state);
+        // Block (-30, 50) is chunk column (2, 2): raised to the piece's floor, air from there.
+        assert_eq!(cached.read().height_at(-30, 50), floor - 1);
+        assert_eq!(chunk.block(2, floor - 1, 2), STONE);
+        assert_eq!(chunk.block(2, floor, 2), AIR);
+        assert_eq!(
+            chunk
+                .heightmap(HeightmapType::OceanFloorWg)
+                .unwrap()
+                .highest_taken(2, 2)
+                .ok(),
+            Some(floor - 1)
+        );
+        assert_eq!(extrema(&g.chunk_data(7, -2, 3)), generated);
+
+        // The same two steps by hand on a freshly generated entry.
+        g.drop_chunk(7, -2, 3);
+        let fresh = g.chunk_data(7, -2, 3);
+        assert!(!fresh.ptr_eq(&cached));
+        let mut direct = new_chunk();
+        {
+            let mut data = fresh.write();
+            fill_chunk(g.sea_level(), &mut direct, &data, STONE, WATER).unwrap();
+            structures
+                .modify_chunk(&mut direct, &mut data, STONE, AIR)
+                .unwrap();
+        }
+        assert_eq!(stage_state(&fresh, &direct), state);
+        g.drop_chunk(7, -2, 3);
     }
 
     /// `TerrainStageOracle` cases (`oracles/generator_facade/run-stage.sh`): levels, terrain set, captured seed,
@@ -890,12 +1018,15 @@ f 3 -1875000 1874999 128 64 3bed1c90e336aeb8 same
             assert_eq!(g.seed(), seed);
             for &(cx, cz) in chunks {
                 let terrain = g.chunk_data(seed, cx, cz);
-                let line = format!(
-                    "t {case} {cx} {cz} {} {} {}",
-                    terrain.min(),
-                    terrain.max(),
-                    terrain.max_base()
-                );
+                let line = {
+                    let data = terrain.read();
+                    format!(
+                        "t {case} {cx} {cz} {} {} {}",
+                        data.min(),
+                        data.max(),
+                        data.max_base()
+                    )
+                };
                 assert_eq!(java.next(), Some(line.as_str()));
                 for (min_y, height) in STAGE_RANGES {
                     let mut chunk = TerrainChunk::new(

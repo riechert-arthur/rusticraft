@@ -2060,6 +2060,8 @@ compiles Reimagined's real `TerrainCache` against a recording generator stub on 
 readiness, sharing, removal, regeneration, seeds and `int`-limit chunks, interpreted and JIT-compiled alike; the test
 replays the trace on one task thread. Others check that cached chunks equal uncached ones bit for bit for four seeds
 on eight threads, that a running task is shared and reported not ready, and that a failed generation is not rerun.
+An entry's `TerrainData` is one shared, mutable value, as Java's single object is: handles read it with `read()` and
+write it with `write()` (an `RwLock`, so a write serializes with every reader and every handle sees it).
 
 The generator queries (`generator_facade.rs`, `TerraForgedGenerator`) are TerraForged Reimagined's
 `worldgen.Generator` (a24d450, MIT, as above) over its terrain cache: `createState`'s seed capture (`Seeds.get`, the
@@ -2104,10 +2106,17 @@ The terrain stage hand-off (`TerraForgedGenerator::fill_from_noise`) is Reimagin
 for the later steps; like Java it neither hints nor drops the entry (`drop_chunk`, after decoration, does). Java runs
 the fill as a continuation on its executor; the port waits for the cache task on the calling thread and fills there.
 The chunk's own build range is what the fill clips to (below). A region build that fails panics where Java's
-future fails; a later sample failure leaves the data unfilled and the chunk is filled from it, as in Java. Not yet
-ported: the rest of `fillFromNoise` (calling `buildStructureTerrain`, whose piece collection is `from_starts` and whose
-column loop is `modify_chunk` below, Deep Caves, Strata), the surface and carver steps, and
-the registration that would let Horizon call the stage.
+future fails; a later sample failure leaves the data unfilled and the chunk is filled from it, as in Java.
+
+`TerraForgedGenerator::fill_from_noise_with_structures` is the rest of 6dd607eb's `fillFromNoise` continuation:
+the same fill, then `ChunkUtil.buildStructureTerrain` (`StructureTerrain::modify_chunk`, below) with the default
+states of `minecraft:stone` and `minecraft:air`. The caller builds the `StructureTerrain` with
+`StructureTerrain::from_starts` over the generator's `references(..)` for the chunk (the beardifier's list), as
+Java's constructor reads them from the `StructureManager`. The structure edits write their OCEAN_FLOOR_WG heights into
+the cache entry's own `TerrainData`, so the later stages that read the entry (surface, carvers, decoration, each at
+the chunk's own position, until `drop_chunk`) see the structure-adjusted heights, as they read Java's one object. The
+fill and the edits run under one write guard: no reader sees a half-adjusted chunk. Not yet ported: Deep Caves, Strata, the surface and carver steps,
+and the registration that would let Horizon call the stage.
 
 The structure terrain columns (`structure_terrain.rs`, `StructureTerrain`) are TerraForged 6dd607eb's
 `worldgen.terrain.StructureTerrain.modify` and its helpers (MIT, as above), the per-column part of `fillFromNoise`'s
@@ -2132,8 +2141,8 @@ whose box is within 20 blocks of the chunk (`isCloseToChunk(pos, 20)`, Java `int
 element is not RIGID (the empty element is terrain-matching), takes a pool piece's ground-level delta (0 for other
 pieces) and sorts by `minY`, stable. Within a structure 26.3 visits the starts in its references' `LongOpenHashSet`
 order (which `references` reproduces); across structures in a `HashMap`'s identity-hash order, so Java does not fix
-the order of tied-`minY` pieces from different structures either. Not ported here: calling
-`from_starts` and `modify_chunk` from the terrain stage. Reimagined a24d450 changes the blend radius (`clamp(length *
+the order of tied-`minY` pieces from different structures either. The terrain stage calls `modify_chunk` (above);
+building the pieces with `from_starts` from the generator's references is the caller's job. Reimagined a24d450 changes the blend radius (`clamp(length *
 0.75, 8, 24)`, collection radius 32) and skips buried structures; the port keeps 6dd607eb's. `StructureTerrainOracle.java`
 (`.local/terraforged/oracles/structure_terrain/`, `run.sh`) compiles 6dd607eb's `StructureTerrain.java` unchanged, with
 fastutil's `ObjectArrayList` and Noise2D's `NoiseUtil`, over stub chunks and runs `buildStructureTerrain`'s column loop
@@ -2581,7 +2590,7 @@ heights either way. The noise, weight and bounds match, so the test pins the two
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives, the biome climate types, the climate settings, the climate module, the climate stage, the continent factory, the generator context, the heightmap, the world generator factory, TerraForged's terrain levels, its terrain data, its terrain generator, its terrain-blend utilities, its terrain blender with its nearest-terrain search (and the newer source's seed-first blender), noise-graph reseeding, the cave noise primitives, the biome viability rules, the biome overrides (and TerraForged Reimagined's wider beach band), the continent control points, the continent cell primitives, the continent configuration, the continent shape blending, the continent cell generator with its spawn-offset search, the continent river nodes, the continent river carver's arithmetic, the continent river networks with their nearest-node sampling and their warped, carved river sampling, the newer source's seed-first noise sources, scalar noise graphs, domain warps, selectors, graph caches, terraces, legacy terraces, advanced terraces, curves, transforms (steps, frequency, gradient and modulation), special sources (boost, cell, cell edge and sine) and lines, and its bounded concurrent lossy cache with the continent's cell and
 river-piece caches on it, the continent noise module that joins the continent layers, the newer source's terrain height sampler with its bordered chunk generation and its nearest-terrain search, its biome chunk fill, cave biome sampler and chunk biome hook, the erosion tile geometry, and TerraForged Reimagined's heightmap smoothing, erosion brushes, hydraulic erosion filter, eroded-region cache, eroded region build, eroded chunk generation, terrain cache, generator queries, chunk fill, the terrain stage hand-off to it, the biome pool fallback, the surface-biome decisions, the initial biome selection, the current climate noise, the biome sampler bridge, the surface biome sampler, the biome registry pools, their live biome bindings, the biome settings, the terrain overrides, the terrain asset decoder, the terrain-type and terrain-noise registries, the bundled terrain types and all 14 bundled terrain noises, and 6dd607eb's structure terrain columns with their
-chunk adapter and piece selection. They change nothing in the game, so there is
+chunk adapter, piece selection and structure-aware terrain stage. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development

@@ -36,8 +36,7 @@ use super::{
 };
 use std::{
     collections::HashMap,
-    ops::Deref,
-    sync::{Arc, Mutex, MutexGuard, PoisonError},
+    sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
 
 /// Java's `CacheKey`: the runtime seed and the chunk position. A hit needs all three.
@@ -51,15 +50,35 @@ struct CacheKey {
 /// One generated chunk's `TerrainData`, given back to the generator's pool (`generator.restore`) once nothing holds
 /// it any more. Java restores it in `drop`, even while another reader may still hold it; its pool never hands a
 /// restored value out again (`ObjectPool.take` always builds a new one), so restoring later changes nothing.
+///
+/// Java's stages share one mutable `TerrainData`: `fillFromNoise`'s `buildStructureTerrain` writes the structure
+/// heights into it and the later stages of the chunk read them. The port keeps it behind an `RwLock` (a write
+/// serializes with every reader).
 struct PooledTerrain<N: NoiseGenerator> {
-    data: Option<TerrainData>,
+    data: Option<RwLock<TerrainData>>,
     generator: Arc<TerrainGenerator<N>>,
+}
+
+impl<N: NoiseGenerator> PooledTerrain<N> {
+    fn new(data: TerrainData, generator: Arc<TerrainGenerator<N>>) -> Self {
+        Self {
+            data: Some(RwLock::new(data)),
+            generator,
+        }
+    }
+
+    fn lock(&self) -> &RwLock<TerrainData> {
+        self.data
+            .as_ref()
+            .expect("the data stays until the last handle is dropped")
+    }
 }
 
 impl<N: NoiseGenerator> Drop for PooledTerrain<N> {
     fn drop(&mut self) {
         if let Some(data) = self.data.take() {
-            self.generator.restore(data);
+            self.generator
+                .restore(data.into_inner().unwrap_or_else(PoisonError::into_inner));
         }
     }
 }
@@ -80,14 +99,19 @@ impl<N: NoiseGenerator> TerrainDataHandle<N> {
     }
 }
 
-impl<N: NoiseGenerator> Deref for TerrainDataHandle<N> {
-    type Target = TerrainData;
+impl<N: NoiseGenerator> TerrainDataHandle<N> {
+    /// Reads the shared data (Java's plain field reads), waiting for a writer. A panic under a write guard does not
+    /// poison it.
+    pub fn read(&self) -> RwLockReadGuard<'_, TerrainData> {
+        self.0.lock().read().unwrap_or_else(PoisonError::into_inner)
+    }
 
-    fn deref(&self) -> &TerrainData {
+    /// Writes the shared data in place (Java's `terrainData.getHeight().set(..)`); every handle of the entry sees it.
+    pub fn write(&self) -> RwLockWriteGuard<'_, TerrainData> {
         self.0
-            .data
-            .as_ref()
-            .expect("the data stays until the last handle is dropped")
+            .lock()
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -205,10 +229,10 @@ impl<N: NoiseGenerator + 'static> TerrainCache<N> {
                 let generator = Arc::clone(&self.generator);
                 TerrainTask(Arc::new(CacheEntry::compute_async(
                     move || {
-                        Arc::new(PooledTerrain {
-                            data: Some(generator.generate(seed, x, z)),
-                            generator: Arc::clone(&generator),
-                        })
+                        Arc::new(PooledTerrain::new(
+                            generator.generate(seed, x, z),
+                            Arc::clone(&generator),
+                        ))
                     },
                     &self.pool,
                 )))
@@ -352,7 +376,7 @@ mod tests {
     fn serial(data: Option<TerrainDataHandle<Recorder>>) -> String {
         data.map_or_else(
             || "none".to_owned(),
-            |data| (data.river().get(0, 0) as i32).to_string(),
+            |data| (data.read().river().get(0, 0) as i32).to_string(),
         )
     }
 
@@ -471,6 +495,38 @@ call 7 5 1 2
         assert_eq!(calls.lock().unwrap().len(), 1);
     }
 
+    /// Every handle of an entry shares one `TerrainData` (Java's one object): writes from several threads serialize
+    /// and every handle sees them; a removed entry's data stays with its handles while a new entry is generated
+    /// afresh.
+    #[test]
+    fn handles_share_writes() {
+        let noise = Recorder::new();
+        let cache = TerrainCache::with_pool(noise.levels, noise, ThreadPool::create(2));
+        let handle = cache.get_now(7, 2, -1);
+        let generated = handle.read().height_at(3, 4);
+        thread::scope(|scope| {
+            for _ in 0..4 {
+                let handle = handle.clone();
+                scope.spawn(move || {
+                    for _ in 0..20 {
+                        let mut data = handle.write();
+                        let height = data.height_at(3, 4);
+                        data.set_height_at(3, 4, height + 1);
+                    }
+                });
+            }
+        });
+        let raised = generated + 80;
+        assert_eq!(cache.get_now(7, 2, -1).read().height_at(3, 4), raised);
+        assert_eq!(handle.read().height_at(4, 3), generated);
+        cache.remove(7, 2, -1);
+        assert_eq!(handle.read().height_at(3, 4), raised);
+        let fresh = cache.get_now(7, 2, -1);
+        assert!(!fresh.ptr_eq(&handle));
+        assert_eq!(serial(Some(fresh.clone())), "1");
+        assert_eq!(fresh.read().height_at(3, 4), generated);
+    }
+
     #[test]
     fn failed_generation_panics_every_reader_and_runs_once() {
         let noise = Recorder::new();
@@ -543,7 +599,7 @@ call 7 5 1 2
                             cache.hint(seed, x, z);
                         }
                         assert_eq!(
-                            fold(&cache.get_now(seed, x, z)),
+                            fold(&cache.get_now(seed, x, z).read()),
                             expected[index],
                             "{seed} {x} {z}"
                         );
@@ -554,7 +610,10 @@ call 7 5 1 2
         assert_eq!(cache.len(), expected.len());
         // A removed chunk is generated again, equal to the first.
         cache.remove(42, -1, 3);
-        assert_eq!(fold(&cache.get_now(42, -1, 3)), expected[CHUNKS.len() + 1]);
+        assert_eq!(
+            fold(&cache.get_now(42, -1, 3).read()),
+            expected[CHUNKS.len() + 1]
+        );
     }
 
     #[test]
@@ -600,7 +659,7 @@ call 7 5 1 2
         );
         let uncached = TerrainGenerator::new(levels, eroded());
         assert_eq!(
-            fold(&cache.get_now(3, 0, 0)),
+            fold(&cache.get_now(3, 0, 0).read()),
             fold(&uncached.generate(3, 0, 0))
         );
     }
