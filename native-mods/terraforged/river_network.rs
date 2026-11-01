@@ -27,7 +27,7 @@ use super::{
     terraforged_continent_cell::CellPoint,
     terraforged_continent_config::ContinentConfig,
     terraforged_continent_shape::{ContinentCells, ShapeGenerator},
-    terraforged_river_nodes::{RiverNode, RiverPieces},
+    terraforged_river_nodes::{CarverSample, NodeSample, RiverNode, RiverPieces},
     terraforged_terrain_blend_util::random,
 };
 
@@ -113,6 +113,44 @@ impl<'a, Cells: ContinentCells> RiverNetwork<'a, Cells> {
             });
         }
         pieces
+    }
+
+    pub fn sample_nodes(&self, seed: i32, x: f32, y: f32, sample: &mut CarverSample) {
+        sample.reset();
+        let (center_x, center_y) = self.continent.nearest_cell(seed, x, y);
+        let x = self.continent.cell_shape().adjust_x(x);
+        let y = self.continent.cell_shape().adjust_y(y);
+        let mut river = None;
+        let mut lake = None;
+        for delta_y in -1..=1 {
+            for delta_x in -1..=1 {
+                let pieces = self.compute_nodes(
+                    seed,
+                    center_x.wrapping_add(delta_x),
+                    center_y.wrapping_add(delta_y),
+                );
+                for node in pieces.rivers {
+                    sample_node(x, y, node, &mut river, &mut sample.river);
+                }
+                for node in pieces.lakes {
+                    sample_node(x, y, node, &mut lake, &mut sample.lake);
+                }
+            }
+        }
+        self.record_node(river, &mut sample.river);
+        self.record_node(lake, &mut sample.lake);
+    }
+
+    fn record_node(&self, node: Option<RiverNode>, sample: &mut NodeSample) {
+        if let Some(node) = node {
+            let level = node.height(sample.projection);
+            let radius = node.radius(sample.projection);
+            sample.distance = (sample.distance as f64).sqrt() as f32;
+            sample.position = radius;
+            sample.level = self.shape.base_noise(level);
+        } else {
+            sample.invalidate();
+        }
     }
 
     /// `addRiverNodes`: a segment from `origin` to a point displaced sideways off the first quarter of the
@@ -233,6 +271,22 @@ impl<'a, Cells: ContinentCells> RiverNetwork<'a, Cells> {
     }
 }
 
+fn sample_node(
+    x: f32,
+    y: f32,
+    node: RiverNode,
+    nearest: &mut Option<RiverNode>,
+    sample: &mut NodeSample,
+) {
+    let projection = node.projection(x, y);
+    let distance = node.distance_squared(x, y, projection);
+    if distance < sample.distance {
+        *nearest = Some(node);
+        sample.distance = distance;
+        sample.projection = projection;
+    }
+}
+
 /// `getRadius`: `1 - NoiseUtil.map(noise, 0.5, 0.7, 0.7 - 0.5)` (the range in `float`, as Java).
 fn radius(noise: f32) -> f32 {
     1.0 - map(noise, 0.5, 0.7, 0.7 - 0.5)
@@ -246,7 +300,7 @@ mod tests {
     use super::super::{
         terraforged_continent_cell::{CellShape, CellSource},
         terraforged_continent_cells::CellGenerator,
-        terraforged_engine::{ControlPoints, WorldControlPoints},
+        terraforged_engine::{ControlPoints, TerrainRegistry, WorldControlPoints},
     };
     use super::*;
 
@@ -355,6 +409,84 @@ mod tests {
 
     fn span(radius: i32) -> Vec<i32> {
         (-radius..=radius).collect()
+    }
+
+    #[test]
+    fn sampling_grids_match_current_java_source() {
+        let expected = [
+            (0x52afc5b1e3a9ae12, 48),
+            (0x05fddf6070b941a3, 33),
+            (0x92698081257698e4, 16),
+            (0x1b335ab677b76f83, 49),
+            (0x53e66569aa7e1d11, 33),
+            (0xf9e6c2ecefc8b5e9, 19),
+        ];
+        for (shape_index, shape) in [CellShape::Square, CellShape::Hexagon]
+            .into_iter()
+            .enumerate()
+        {
+            for (source_index, source) in
+                [CellSource::Perlin, CellSource::Simplex, CellSource::Cubic]
+                    .into_iter()
+                    .enumerate()
+            {
+                let mut config = ContinentConfig::default();
+                config.shape.cell_shape = shape;
+                config.shape.cell_source = source;
+                let cells = CellGenerator::new(config);
+                let shape =
+                    ShapeGenerator::new(config, ControlPoints::new(WorldControlPoints::default()));
+                let network = RiverNetwork::new(&cells, &shape, config);
+                let mut sample = CarverSample::new(&TerrainRegistry::default());
+                let mut fold = Fold::new();
+                let mut invalid = 0;
+                for sample_y in -3..=3 {
+                    for sample_x in -3..=3 {
+                        network.sample_nodes(
+                            42,
+                            sample_x as f32 + 0.125,
+                            sample_y as f32 - 0.375,
+                            &mut sample,
+                        );
+                        for node in [&sample.river, &sample.lake] {
+                            invalid += usize::from(node.is_invalid());
+                            for value in [node.projection, node.distance, node.position, node.level]
+                            {
+                                fold.float(value);
+                            }
+                        }
+                    }
+                }
+                assert_eq!(
+                    (fold.hash, invalid),
+                    expected[shape_index * 3 + source_index]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn equal_distance_keeps_first_node() {
+        let first = RiverNode {
+            ax: 0.0,
+            ay: 0.0,
+            bx: 1.0,
+            by: 0.0,
+            ah: 0.2,
+            bh: 0.3,
+            ar: 0.5,
+            br: 1.0,
+            displacement: 0.0,
+        };
+        let second = RiverNode { ah: 0.9, ..first };
+        let mut samples = CarverSample::new(&TerrainRegistry::default());
+        samples.reset();
+        let mut nearest = None;
+        sample_node(0.5, 0.25, first, &mut nearest, &mut samples.river);
+        sample_node(0.5, 0.25, second, &mut nearest, &mut samples.river);
+        assert_eq!(nearest.map(|node| node.ah), Some(first.ah));
+        assert_eq!(samples.river.distance, 0.0625);
+        assert_eq!(samples.river.projection, 0.5);
     }
 
     #[test]
