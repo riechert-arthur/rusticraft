@@ -1494,7 +1494,7 @@ range`), so a zero range (0 octaves) or an infinite one (a huge gain) gives 1 in
 path uses that `map` (`map_current`), and `Source::value`/`value_seeded` keep the jar's. Reseeding (`Module::with_seed`,
 above) stays the jar's mechanism: a reseeded source gives the seed-first bits for the same seed where the two maps
 agree, except for Perlin and Perlin2 (reseeding changes their seed; seed-first sampling does not). The eight octave sources,
-the scalar graph nodes, the domain warps, the five selectors, `Cache`, `Terrace`, `LegacyTerrace`, `AdvancedTerrace`, the curves, `Steps`/`Freq`/`Grad`/`Modulate`, `Boost`, the cell, cell-edge and sine sources and `Line` (below) are seed-first so far; custom modules and Engine's erosion `Ridge` are not. `SeedFirstOracle.java` and `JarSeedOracle.java`
+the scalar graph nodes, the domain warps, the five selectors, `Cache`, `Terrace`, `LegacyTerrace`, `AdvancedTerrace`, the curves, `Steps`/`Freq`/`Grad`/`Modulate`, `Boost`, the cell, cell-edge and sine sources, `Line` and Engine's erosion `Ridge` (below) are seed-first; only custom modules are not (their closure has no seed parameter). `SeedFirstOracle.java` and `JarSeedOracle.java`
 (`.local/terraforged/oracles/seed_first/`, outside Git; `run.sh` compiles Noise2D 2cb4843 from source) fold every
 kind over seven configs (0 octaves, negative gain and lacunarity, an infinite range), five config seeds, eight runtime
 seeds (both `int` extremes) and ten points (NaN, infinity, -0); the tests match both tables bit for bit in debug and
@@ -1505,8 +1505,9 @@ the octave sources, `Abs`, `Alpha`, `Bias`, `Clamp`, `Invert`, `Map`, `Power`, `
 (`Add`, `Multiply`, `Max`, `Min`, `Sub`). Each passes the call's seed unchanged to its children (only the octave sources
 add their own seed), and their arithmetic is the jar's: in 2cb4843 these classes behave as the jar's apart from the seed
 parameter. None of them calls `NoiseUtil.map` (`Map` divides by the source range fixed in its constructor), so the newer
-map only shows through the sources (a 0-octave source inside a graph gives 1, not NaN). Any other node (custom modules and Engine's erosion `Ridge`) returns an error
-instead of falling back to the seedless `value`, which would ignore the seed; later layers add them. The jar path
+map only shows through the sources (a 0-octave source inside a graph gives 1, not NaN). A custom module (the only node left
+unported; later layers below add the rest) returns an error instead of falling back to the seedless `value`, which
+would ignore the seed. The jar path
 (`value`) and reseeding (`with_seed`) are unchanged. Reseeding gives the same bits only where it seeds the same sources:
 not through Perlin/Perlin2, a `Bias`'s bias (reseeding drops it) a combiner's sources (reseeding leaves them
 unseeded) or a zero or infinite source range (where the two maps differ). `TerraForgedSeededGraphOracle.java` (15 graphs, four seeds, four points) and `SeededGraphEdgeOracle.java` (23
@@ -1714,6 +1715,25 @@ zero and negative radii and fades, feathers 0, 1 and NaN, zero-length, underflow
 line and a wide seeded radius, over seven seeds including both `int` extremes and 38 points: endpoints, projections at,
 one ulp beside and past 0 and 1 on and off the segment, NaN, ±inf, ±0, `Float.MAX_VALUE` and subnormal points) run in
 the same `run-graphs.sh`; the tests match both bit for bit in debug and release.
+
+Engine's erosion `Ridge` (`Valley`, `ErosionRidge::wrap`) is seed-first too, and with it every node but custom modules
+(a custom module's closure has no seed parameter, so it still returns an error). There is no Java reference for this
+one: Engine 0.3.0's `Ridge.Noise` implements only the jar's `getValue(x, y)` (on the 2cb4843 classes it would not
+even link), and no seed-first Engine is public. The port follows Noise2D 2cb4843's convention for seeded nodes: the
+cell lattice (`NoiseUtil.cell`) uses the ridge's own seed plus the call's seed (`int` wrap), and the source is read
+with the call's seed (the centre sample first, then each octave's 5x5 neighbourhood through the `-1`-filled cache, as
+Engine does). The octave loop, gain, lacunarity, fall-off, segment distance (`(float) Math.sqrt` in f64) and blend
+modes are Engine's, shared with the seedless path by one helper; no `NoiseUtil.map` is involved, so the newer map shows
+only through the sources. So seed-first at seed `s` equals the jar's ridge built with seed `own + s` over sources built
+with their seeds plus `s` wherever those agree (non-Perlin sources with finite, nonzero ranges); a test checks that
+against the oracle-tested seedless ridge. Reseeding differs: the `Valley` spec reads its seed and source back without
+the context, so `with_seed` leaves the ridge's bits unchanged. `SeededErosionRidgeEdgeOracle.java` (Engine 0.3.0's
+`Ridge` transcribed onto the 2cb4843 classes; 31 families: 0, 1, many and negative octaves, zero, negative, NaN and
+infinite amplitudes, lacunarities, fall-offs, grid sizes and strengths, a 1e30 lacunarity, Perlin, 0-octave, constant
+-1 and NaN sources, a nested ridge and own seeds at both `int` extremes, over seven seeds and 15 points with NaN, ±inf,
+±0, `Float.MAX_VALUE`, subnormals and grid-cell edges) runs in the same `run-graphs.sh`; the tests match it bit for bit
+in debug and release. The river carver's erosion (#125) is a `RidgeNoise` source, not this node; a test checks that
+its inline build equals the generic seed-first graph path.
 
 The bounded concurrent lossy cache (`lossy_cache.rs`, `ConcurrentLossyCache`) ports the newer source tree's
 `LossyCache.Concurrent` and its `LossyCache.Stamped` buckets (`com.terraforged.mod.util.storage`, 6dd607eb). The

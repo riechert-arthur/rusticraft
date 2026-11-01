@@ -579,34 +579,73 @@ impl ErosionRidge {
 
     /// `Ridge.getValue(x, y, source)`: the source sample, then the erosion, blended by the mode.
     pub fn value(self, x: f32, y: f32, source: &Module) -> f32 {
-        let mut cache = [0.0; 25];
-        let value = source.value(x, y);
-        let erosion = self.erosion_value_with_cache(x, y, source, &mut cache);
-        lerp(
-            erosion,
-            value,
-            self.blend_mode.blend(value, erosion, self.strength),
-        )
+        let Ok(value) =
+            self.value_with::<std::convert::Infallible>(self.seed, x, y, &mut |px, py| {
+                Ok(source.value(px, py))
+            });
+        value
+    }
+
+    /// Seed-first `Ridge.Noise.getValue(seed, x, y)`, following Noise2D 2cb4843's convention for seeded nodes (Engine
+    /// 0.3.0 has no seed-first `Ridge`): the cell lattice uses the ridge's own seed plus `seed` (`int` wrap), and every
+    /// source sample (the centre first, then the octaves' neighbours) is read seed-first with `seed` itself. No
+    /// `NoiseUtil.map` is involved. An unsupported node in `source` returns its error.
+    pub fn try_value_seed_first(
+        self,
+        seed: i32,
+        x: f32,
+        y: f32,
+        source: &Module,
+    ) -> Result<f32, &'static str> {
+        self.value_with(self.seed.wrapping_add(seed), x, y, &mut |px, py| {
+            source.try_value_seed_first(seed, px, py)
+        })
     }
 
     /// `Ridge.getErosionValue`: the octaves' gain-weighted mean (NaN for zero or negative octaves).
     pub fn erosion_value(self, x: f32, y: f32, source: &Module) -> f32 {
-        self.erosion_value_with_cache(x, y, source, &mut [0.0; 25])
+        let Ok(value) = self.erosion_value_with::<std::convert::Infallible>(
+            self.seed,
+            x,
+            y,
+            &mut |px, py| Ok(source.value(px, py)),
+            &mut [0.0; 25],
+        );
+        value
     }
 
-    fn erosion_value_with_cache(
+    /// `getValue(x, y, source, cache)` with the lattice seed and the source sampler given: shared by the seedless and
+    /// seed-first paths.
+    fn value_with<E>(
         self,
+        lattice_seed: i32,
+        x: f32,
+        y: f32,
+        sample: &mut impl FnMut(f32, f32) -> Result<f32, E>,
+    ) -> Result<f32, E> {
+        let value = sample(x, y)?;
+        let erosion = self.erosion_value_with(lattice_seed, x, y, sample, &mut [0.0; 25])?;
+        Ok(lerp(
+            erosion,
+            value,
+            self.blend_mode.blend(value, erosion, self.strength),
+        ))
+    }
+
+    fn erosion_value_with<E>(
+        self,
+        lattice_seed: i32,
         mut x: f32,
         mut y: f32,
-        source: &Module,
+        sample: &mut impl FnMut(f32, f32) -> Result<f32, E>,
         cache: &mut [f32; 25],
-    ) -> f32 {
+    ) -> Result<f32, E> {
         let mut sum = 0.0;
         let mut max = 0.0;
         let mut gain = 1.0;
         let mut distance = self.grid_size;
         for _ in 0..self.octaves {
-            let value = self.single_erosion_value(x, y, distance, source, cache);
+            let value = single_erosion_value(lattice_seed, x, y, distance, sample, cache)?;
             sum += value * gain;
             max += gain;
             gain *= self.amplitude;
@@ -614,64 +653,69 @@ impl ErosionRidge {
             x *= self.lacunarity;
             y *= self.lacunarity;
         }
-        sum / max
+        Ok(sum / max)
     }
+}
 
-    fn single_erosion_value(
-        self,
-        x: f32,
-        y: f32,
-        grid_size: f32,
-        source: &Module,
-        cache: &mut [f32; 25],
-    ) -> f32 {
-        cache.fill(-1.0);
-        let pixel_x = floor(x / grid_size);
-        let pixel_y = floor(y / grid_size);
-        let mut min_height2 = f32::MAX;
-        for delta_y1 in -1_i32..=1 {
-            for delta_x1 in -1_i32..=1 {
-                let point_a_x = pixel_x.wrapping_add(delta_x1);
-                let point_a_y = pixel_y.wrapping_add(delta_y1);
-                let vector_a = cell_vector(self.seed, point_a_x, point_a_y);
-                let ax = (point_a_x as f32 + vector_a[0]) * grid_size;
-                let ay = (point_a_y as f32 + vector_a[1]) * grid_size;
-                let mut bx = ax;
-                let mut by = ay;
-                let mut lowest_neighbour = f32::MAX;
-                for delta_y2 in -1_i32..=1 {
-                    for delta_x2 in -1_i32..=1 {
-                        let point_b_x = point_a_x.wrapping_add(delta_x2);
-                        let point_b_y = point_a_y.wrapping_add(delta_y2);
-                        let vector_b = if point_b_x == point_a_x && point_b_y == point_a_y {
-                            vector_a
-                        } else {
-                            cell_vector(self.seed, point_b_x, point_b_y)
-                        };
-                        let candidate_x = (point_b_x as f32 + vector_b[0]) * grid_size;
-                        let candidate_y = (point_b_y as f32 + vector_b[1]) * grid_size;
-                        let index =
-                            ((delta_y1 + delta_y2 + 2) * 5 + delta_x1 + delta_x2 + 2) as usize;
-                        let mut height = cache[index];
-                        if height == -1.0 {
-                            height = source.value(candidate_x, candidate_y);
-                            cache[index] = height;
-                        }
-                        if height < lowest_neighbour {
-                            lowest_neighbour = height;
-                            bx = candidate_x;
-                            by = candidate_y;
-                        }
+/// `Ridge.getSingleErosionValue` over the lattice `seed`; `cache` holds the 5x5 neighbourhood's source samples
+/// (`-1` = not read yet, as Java: a sample of exactly -1 is read again).
+fn single_erosion_value<E>(
+    seed: i32,
+    x: f32,
+    y: f32,
+    grid_size: f32,
+    sample: &mut impl FnMut(f32, f32) -> Result<f32, E>,
+    cache: &mut [f32; 25],
+) -> Result<f32, E> {
+    cache.fill(-1.0);
+    let pixel_x = floor(x / grid_size);
+    let pixel_y = floor(y / grid_size);
+    let mut min_height2 = f32::MAX;
+    for delta_y1 in -1_i32..=1 {
+        for delta_x1 in -1_i32..=1 {
+            let point_a_x = pixel_x.wrapping_add(delta_x1);
+            let point_a_y = pixel_y.wrapping_add(delta_y1);
+            let vector_a = cell_vector(seed, point_a_x, point_a_y);
+            let ax = (point_a_x as f32 + vector_a[0]) * grid_size;
+            let ay = (point_a_y as f32 + vector_a[1]) * grid_size;
+            let mut bx = ax;
+            let mut by = ay;
+            let mut lowest_neighbour = f32::MAX;
+            for delta_y2 in -1_i32..=1 {
+                for delta_x2 in -1_i32..=1 {
+                    let point_b_x = point_a_x.wrapping_add(delta_x2);
+                    let point_b_y = point_a_y.wrapping_add(delta_y2);
+                    let vector_b = if point_b_x == point_a_x && point_b_y == point_a_y {
+                        vector_a
+                    } else {
+                        cell_vector(seed, point_b_x, point_b_y)
+                    };
+                    let candidate_x = (point_b_x as f32 + vector_b[0]) * grid_size;
+                    let candidate_y = (point_b_y as f32 + vector_b[1]) * grid_size;
+                    let index = ((delta_y1 + delta_y2 + 2) * 5 + delta_x1 + delta_x2 + 2) as usize;
+                    let mut height = cache[index];
+                    if height == -1.0 {
+                        height = sample(candidate_x, candidate_y)?;
+                        cache[index] = height;
+                    }
+                    if height < lowest_neighbour {
+                        lowest_neighbour = height;
+                        bx = candidate_x;
+                        by = candidate_y;
                     }
                 }
-                let height2 = segment_distance2(x, y, ax, ay, bx, by);
-                if height2 < min_height2 {
-                    min_height2 = height2;
-                }
+            }
+            let height2 = segment_distance2(x, y, ax, ay, bx, by);
+            if height2 < min_height2 {
+                min_height2 = height2;
             }
         }
-        clamp((f64::from(min_height2).sqrt() as f32) / grid_size, 0.0, 1.0)
     }
+    Ok(clamp(
+        (f64::from(min_height2).sqrt() as f32) / grid_size,
+        0.0,
+        1.0,
+    ))
 }
 
 fn segment_distance2(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
@@ -2152,11 +2196,12 @@ impl Module {
         }
     }
 
-    /// Noise2D 2cb4843's `getValue(int seed, float x, float y)` for every node but custom modules and Engine's erosion
-    /// `Ridge` (the scalar nodes, `Warp`, the selectors, `Cache`, the terraces, curves and transforms, `Boost`, the
-    /// cell, cell-edge and sine sources and `Line`): every node passes the call's seed unchanged to its children, except
+    /// Noise2D 2cb4843's `getValue(int seed, float x, float y)` for every node but custom modules (the scalar nodes,
+    /// `Warp`, the selectors, `Cache`, the terraces, curves and transforms, `Boost`, the cell, cell-edge and sine
+    /// sources, `Line` and Engine's erosion `Ridge`): every node passes the call's seed unchanged to its children, except
     /// that the octave, cell and cell-edge sources add their own seed (see [`Source::value_seed_first`]) and a cell's
-    /// lookup and a sine's alpha get that sum (a sine's own seed is the builder default, 1337); their arithmetic and
+    /// lookup and a sine's alpha get that sum (a sine's own seed is the builder default, 1337; the erosion `Ridge` adds
+    /// its own seed for its cell lattice only, see [`ErosionRidge::try_value_seed_first`]); their arithmetic and
     /// evaluation order are the jar's, and where 2cb4843 calls `NoiseUtil.map` this maps with [`map_current`]
     /// (`Cache` also keys its entry by the seed). `Warp` samples its source at the domain's seed-first coordinates
     /// ([`Domain::try_x_seed_first`]). Nodes not yet ported to seed-first sampling return an error instead of falling
@@ -2173,6 +2218,9 @@ impl Module {
         Ok(match &self.0.kind {
             ModuleKind::Constant(value) => *value,
             ModuleKind::Source(source) => source.value_seed_first(seed, x, y),
+            ModuleKind::ErosionRidge { ridge, source } => {
+                ridge.try_value_seed_first(seed, x, y, source)?
+            }
             // Noise2D 2cb4843's `CellFunc.CELL_VALUE`, `CellEdgeNoise` and `Sin` map with its own `NoiseUtil.map`
             // (their ranges are fixed and finite, so it gives the jar's bits here too).
             ModuleKind::CellSource { .. }
@@ -9987,6 +10035,244 @@ mod tests {
             seeded.try_value_seed_first(17, x, y).unwrap().to_bits(),
             unseeded.to_bits()
         );
+    }
+
+    #[test]
+    fn runtime_seeded_erosion_ridge_edges_match_current_noise2d() {
+        // `SeededErosionRidgeEdgeOracle.java` (`.local/terraforged/oracles/seed_first/`): Engine 0.3.0's Ridge
+        // transcribed onto Noise2D 2cb4843 (lattice seed own + call), 31 families x 7 seeds x 15 points, canonical NaN
+        // bits; (family, nonzero non-NaN samples, fold), then the raw bits of families 0..2 at four seeds and points.
+        let (nan, inf) = (f32::NAN, f32::INFINITY);
+        let src = |kind, seed, frequency, octaves, gain| {
+            Module::source(Source::new(
+                kind,
+                SourceConfig {
+                    seed,
+                    frequency,
+                    octaves,
+                    gain,
+                    ..SourceConfig::default()
+                },
+            ))
+        };
+        let simplex = src(SourceKind::Simplex, 1501, 1.0 / 160.0, 3, 0.5);
+        let perlin = src(SourceKind::Perlin, 1507, 1.0 / 64.0, 2, 0.5);
+        let zero = src(SourceKind::Simplex, 1508, 1.0, 0, 0.5);
+        let ridged = src(SourceKind::Ridge, 1509, 1.0 / 128.0, 2, 0.975);
+        let (c, i, o) = (
+            ErosionMode::Constant,
+            ErosionMode::InputLinear,
+            ErosionMode::OutputLinear,
+        );
+        let oct = ErosionRidge::with_octaves;
+        let full = |seed, amplitude, lacunarity, falloff, mode| {
+            ErosionRidge::full(seed, 3, 0.5, 64.0, amplitude, lacunarity, falloff, mode)
+        };
+        let inner = oct(1510, 2, 0.5, 48.0, o).wrap(simplex.clone());
+        #[rustfmt::skip]
+        let graphs: [(ErosionRidge, &Module); 31] = [
+            (ErosionRidge::full(1504, 2, 0.65, 96.0, 0.15, 3.1, 0.8, c), &simplex),
+            (oct(1505, 3, 0.4, 80.0, i), &simplex),
+            (oct(1506, 2, 0.8, 64.0, o), &simplex),
+            (ErosionRidge::full(1511, 0, 0.5, 64.0, 0.5, 2.25, 0.75, c), &simplex),
+            (oct(1512, -1, 0.5, 64.0, c), &simplex),
+            (oct(1513, 1, 0.5, 64.0, i), &simplex),
+            (oct(1514, 8, 0.5, 400.0, o), &simplex),
+            (full(1515, 0.0, 2.25, 0.75, c), &simplex),
+            (full(1516, -1.0, 2.25, 0.75, o), &simplex),
+            (full(1517, nan, 2.25, 0.75, c), &simplex),
+            (full(1518, inf, 2.25, 0.75, o), &simplex),
+            (full(1519, 0.5, 0.0, 0.75, c), &simplex),
+            (full(1520, 0.5, -2.25, 0.75, i), &simplex),
+            (full(1521, 0.5, nan, 0.75, c), &simplex),
+            (full(1522, 0.5, inf, 0.75, o), &simplex),
+            (full(1523, 0.5, 1e30, 0.75, c), &simplex),
+            (full(1524, 0.5, 2.25, 0.0, c), &simplex),
+            (full(1525, 0.5, 2.25, nan, o), &simplex),
+            (oct(1526, 2, 0.5, 0.0, c), &simplex),
+            (oct(1527, 2, 0.5, -50.0, o), &simplex),
+            (oct(1528, 2, 0.5, nan, c), &simplex),
+            (oct(1529, 2, 0.5, inf, i), &simplex),
+            (oct(1530, 2, nan, 64.0, c), &simplex),
+            (oct(1531, 2, inf, 64.0, o), &simplex),
+            (oct(1532, 2, 0.6, 32.0, i), &perlin),
+            (oct(1533, 2, 0.6, 32.0, o), &zero),
+            (oct(1534, 2, 0.6, 32.0, i), &Module::constant(-1.0)),
+            (oct(1535, 2, 0.6, 32.0, o), &Module::constant(nan)),
+            (oct(1536, 2, 0.6, 96.0, i), &inner),
+            (oct(i32::MAX, 2, 0.6, 64.0, o), &ridged),
+            (oct(i32::MIN, 2, 0.6, 64.0, c), &ridged),
+        ];
+        let expected: [(usize, u64); 31] = [
+            (91, 0x75122bfbd3a16fe9),
+            (91, 0x2b8183ef7c1acdd0),
+            (91, 0xab5b38b6ac1d5971),
+            (0, 0xdf1d2a5da26b483f),
+            (0, 0xdf1d2a5da26b483f),
+            (91, 0x78580b15593f6095),
+            (91, 0xcfa235728e42fe5d),
+            (91, 0x4288d727b6198df9),
+            (91, 0x7d6f623aea561242),
+            (0, 0xdf1d2a5da26b483f),
+            (0, 0xdf1d2a5da26b483f),
+            (91, 0x611326511d415db3),
+            (91, 0x95be6030df3a0052),
+            (91, 0x6027ec82a01c598b),
+            (91, 0x89f53dd6f0ce389c),
+            (91, 0x5197dbe3bbf24d8c),
+            (91, 0xddb3b1f628a9424b),
+            (0, 0xdf1d2a5da26b483f),
+            (91, 0x162e6c0e80848aff),
+            (91, 0x7b958bea57338a3f),
+            (0, 0xdf1d2a5da26b483f),
+            (91, 0x26b7d45527671e1d),
+            (0, 0xdf1d2a5da26b483f),
+            (91, 0xd0174882bfab483f),
+            (70, 0x1b1e9b5db78508db),
+            (105, 0x22ddeda3a75978bb),
+            (105, 0xa102e86cf4bbe4e7),
+            (0, 0xdf1d2a5da26b483f),
+            (91, 0x753a72451dcb831e),
+            (70, 0x26d66095fe1c1d1b),
+            (70, 0x9aa2261e7b0d3123),
+        ];
+        let points = [
+            (0.0, 0.0),
+            (-0.0, -0.0),
+            (0.125, -0.75),
+            (12.34, 56.78),
+            (-1234.5, 987.25),
+            (1e6, -1e6),
+            (nan, 1.0),
+            (1.0, nan),
+            (inf, 2.0),
+            (-inf, -2.0),
+            (f32::MAX, -f32::MAX),
+            (f32::from_bits(1), 0.0),
+            (64.0, 128.0),
+            (-64.0, -0.0),
+            (96f32.next_down(), (-96f32).next_up()),
+        ];
+        let seeds = [0, 1, -1, 17, i32::MAX, i32::MIN, -987654321];
+        for (index, ((ridge, source), expected)) in graphs.iter().zip(expected).enumerate() {
+            let graph = ridge.wrap((*source).clone());
+            let (mut live, mut hash) = (0, 0xcbf29ce484222325u64);
+            for seed in seeds {
+                for (x, y) in points {
+                    let value = graph.try_value_seed_first(seed, x, y).unwrap();
+                    live += usize::from(value != 0.0 && !value.is_nan());
+                    let bits = if value.is_nan() {
+                        0x7fc0_0000
+                    } else {
+                        value.to_bits()
+                    };
+                    hash = (hash ^ u64::from(bits)).wrapping_mul(0x100000001b3);
+                }
+            }
+            assert_eq!((live, hash), expected, "family {index}");
+        }
+        let raw: [[[u32; 4]; 4]; 3] = [
+            [
+                [0x3f1bb085, 0x3f1ae679, 0x3eaa7c80, 0x3f08f334],
+                [0x3f295b16, 0x3f30e8b8, 0x3ecb0e90, 0x3ef12744],
+                [0x3f2438b5, 0x3f22d5cd, 0x3eb530bd, 0x3e7710fe],
+                [0x3efceabc, 0x3efbb850, 0x3edf57de, 0x3f1be6c8],
+            ],
+            [
+                [0x3ef454a2, 0x3ef15114, 0x3f0a9514, 0x3ef0ad06],
+                [0x3ed86ffa, 0x3ed7c006, 0x3f25eeae, 0x3f0c9934],
+                [0x3ee47a36, 0x3ee1709f, 0x3eca4dee, 0x3e895f9c],
+                [0x3edea296, 0x3edbb22e, 0x3f1cddac, 0x3f06ff86],
+            ],
+            [
+                [0x3ee66c44, 0x3ee08a9e, 0x3f1a7e55, 0x3f099835],
+                [0x3ee6a145, 0x3ee53203, 0x3f2d584e, 0x3f050d4f],
+                [0x3eef4947, 0x3eeba48b, 0x3f1b2a16, 0x3ea4bed7],
+                [0x3ee9d886, 0x3ee61117, 0x3f3745a8, 0x3ef4e4e2],
+            ],
+        ];
+        for (index, raw) in raw.iter().enumerate() {
+            let (ridge, source) = &graphs[index];
+            let graph = ridge.wrap((*source).clone());
+            for (seed, expected) in [0, 17, -91, i32::MAX].into_iter().zip(raw) {
+                let got = [
+                    (0.0, 0.0),
+                    (0.125, -0.75),
+                    (12.34, 56.78),
+                    (-1234.5, 987.25),
+                ]
+                .map(|(x, y)| graph.try_value_seed_first(seed, x, y).unwrap().to_bits());
+                assert_eq!(&got, expected, "graph {index} seed {seed}");
+            }
+        }
+    }
+
+    #[test]
+    fn seeded_erosion_ridge_is_the_engine_ridge_with_seeds_added() {
+        // Seed-first at `s` = the jar's (Engine 0.3.0, oracle-tested) ridge built with seed `own + s` over sources built
+        // with `config + s`, where the two maps agree (non-Perlin sources with finite, nonzero ranges).
+        let source = |seed: i32, frequency| {
+            Module::source(Source::new(
+                SourceKind::Simplex,
+                SourceConfig {
+                    seed,
+                    octaves: 3,
+                    frequency,
+                    ..SourceConfig::default()
+                },
+            ))
+        };
+        let terrain = |s: i32| {
+            source(1501_i32.wrapping_add(s), 1.0 / 160.0).warp(Domain::domain_warp(
+                source(1502_i32.wrapping_add(s), 1.0 / 48.0),
+                source(1503_i32.wrapping_add(s), 1.0 / 48.0),
+                Module::constant(18.0),
+            ))
+        };
+        let ridges = |own: i32| {
+            [
+                ErosionRidge::full(own, 2, 0.65, 96.0, 0.15, 3.1, 0.8, ErosionMode::Constant),
+                ErosionRidge::with_octaves(own, 3, 0.4, 80.0, ErosionMode::InputLinear),
+                ErosionRidge::with_octaves(own, 6, 0.8, 64.0, ErosionMode::OutputLinear),
+            ]
+        };
+        for own in [1504, i32::MAX, i32::MIN] {
+            for (index, ridge) in ridges(own).into_iter().enumerate() {
+                let graph = ridge.wrap(terrain(0));
+                for seed in [0, 17, -91, i32::MAX, i32::MIN] {
+                    let jar = ridges(own.wrapping_add(seed))[index].wrap(terrain(seed));
+                    for (x, y) in [
+                        (0.0, 0.0),
+                        (-0.0, 0.125),
+                        (12.34, 56.78),
+                        (-1234.5, 987.25),
+                        (1e7, -3e6),
+                    ] {
+                        assert_eq!(
+                            graph.try_value_seed_first(seed, x, y).unwrap().to_bits(),
+                            jar.value(x, y).to_bits(),
+                            "own {own} ridge {index} seed {seed} at ({x}, {y})"
+                        );
+                    }
+                }
+            }
+        }
+        // Reseeding keeps the `Valley` spec's own seed and reads its source back without the context (#109), so it
+        // leaves every bit as it was; seed-first sampling at a nonzero seed changes them.
+        let graph = ridges(1504)[0].wrap(terrain(0));
+        let (x, y) = (12.34, 56.78);
+        assert_eq!(
+            graph.with_seed(17).value(x, y).to_bits(),
+            graph.value(x, y).to_bits()
+        );
+        assert_ne!(
+            graph.try_value_seed_first(17, x, y).unwrap().to_bits(),
+            graph.value(x, y).to_bits()
+        );
+        // The source is always read, so an unsupported source errors at every point.
+        let bad = ridges(1504)[1].wrap(unsupported_seeded_node(0.5));
+        assert!(bad.try_value_seed_first(0, 0.0, 0.0).is_err());
+        assert!(bad.try_value_seed_first(5, -1e6, 3.5).is_err());
     }
 
     #[test]
