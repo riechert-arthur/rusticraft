@@ -23,6 +23,7 @@
  */
 
 use horizon_core::random::{LegacyRandom, RandomSource};
+use std::sync::Arc;
 
 use super::{
     terraforged::{
@@ -32,8 +33,8 @@ use super::{
     terraforged_engine::{Cell, ControlPoints, Levels, RiverSettings, Seed, WorldSettings},
     terraforged_populator::Populator,
     terraforged_river::{
-        BaseRiverGenerator, GenWarp, River, RiverCarver, RiverCarverSettings, RiverNetwork,
-        RiverNetworkBuilder, RiverWarp, Rivermap, Variance,
+        BaseRiverGenerator, GenWarp, River, RiverCache, RiverCarver, RiverCarverSettings,
+        RiverNetwork, RiverNetworkBuilder, RiverWarp, Rivermap, Variance,
     },
     terraforged_util::{
         pack, pack_floats, pack_mix_int_float, unpack_left, unpack_left_float, unpack_right_float,
@@ -448,10 +449,30 @@ pub struct FancyContinentGenerator {
     frequency: f32,
     warp: Domain,
     source: FancyContinent,
+    river_cache: RiverCache,
+    river_root_seed: i32,
+    world: WorldSettings,
+    rivers: RiverSettings,
+    levels: Levels,
 }
 
 impl FancyContinentGenerator {
     pub fn new(seed: &mut Seed, settings: WorldSettings) -> Self {
+        Self::with_rivers(
+            seed,
+            settings,
+            RiverSettings::default(),
+            Levels::from_properties(settings.properties),
+        )
+    }
+
+    pub fn with_rivers(
+        seed: &mut Seed,
+        settings: WorldSettings,
+        rivers: RiverSettings,
+        levels: Levels,
+    ) -> Self {
+        let river_root_seed = seed.root();
         let warp_scale = settings.continent.continent_scale / 2;
         let warp_strength = (f64::from(warp_scale) * 0.4) as f32;
         let source = FancyContinent::new(
@@ -474,11 +495,29 @@ impl FancyContinentGenerator {
             frequency,
             warp,
             source,
+            river_cache: RiverCache::new(),
+            river_root_seed,
+            world: settings,
+            rivers,
+            levels,
         }
     }
 
     pub const fn source(&self) -> &FancyContinent {
         &self.source
+    }
+
+    pub fn rivermap(&self, x: i32, z: i32) -> Arc<Rivermap> {
+        self.river_cache.get_rivers(x, z, |x, z, id| {
+            FancyRiverGenerator::new(
+                self,
+                self.river_root_seed,
+                self.world,
+                self.rivers,
+                self.levels,
+            )
+            .generate_rivers(x, z, id)
+        })
     }
 
     pub fn edge_value(&self, x: f32, y: f32) -> f32 {
@@ -505,17 +544,17 @@ impl FancyContinentGenerator {
     }
 }
 
-pub struct FancyRiverGenerator {
-    base: BaseRiverGenerator<FancyContinentGenerator>,
+pub struct FancyRiverGenerator<'a> {
+    base: BaseRiverGenerator<&'a FancyContinentGenerator>,
     frequency: f32,
 }
 
-impl FancyRiverGenerator {
+impl<'a> FancyRiverGenerator<'a> {
     const MAIN_PADDING: Variance = Variance::of(0.05, 0.1);
     const MAIN_JITTER: Variance = Variance::of(-0.2, 0.4);
 
     pub fn new(
-        continent: FancyContinentGenerator,
+        continent: &'a FancyContinentGenerator,
         root_seed: i32,
         world: WorldSettings,
         rivers: RiverSettings,
@@ -936,7 +975,7 @@ mod tests {
         let continent = FancyContinentGenerator::new(&mut seed, world);
         let levels = Levels::from_properties(world.properties);
         let generator =
-            FancyRiverGenerator::new(continent, 12_345, world, RiverSettings::default(), levels);
+            FancyRiverGenerator::new(&continent, 12_345, world, RiverSettings::default(), levels);
         let map = generator.generate_rivers(17, -9, 0x1234_5678);
         assert_eq!((map.x(), map.z(), map.network_count()), (17, -9, 38));
         assert_eq!(
@@ -987,5 +1026,10 @@ mod tests {
             assert_eq!(cell.erosion_mask, erosion);
             assert_eq!(cell.terrain.id(), terrain);
         }
+
+        let cached = continent.rivermap(17, -9);
+        let cached_again = continent.rivermap(17, -9);
+        assert!(Arc::ptr_eq(&cached, &cached_again));
+        assert_eq!((cached.x(), cached.z()), (17, -9));
     }
 }

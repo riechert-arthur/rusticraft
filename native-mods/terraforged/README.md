@@ -156,6 +156,9 @@ lake and wetland placement, and complete rivermap assembly from Java-compatible 
 The fancy-river layer projects roots from island segments and endpoints, extends them through matching
 island IDs, and immediately generates their branches and wetlands in the original Java random order.
 
+The river-cache layer memoizes packed continent coordinates with TerraForged's five-minute expiry,
+preserves the legacy seed layout, and exposes cached fancy-continent rivermaps through shared handles.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:

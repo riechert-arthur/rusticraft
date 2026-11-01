@@ -35,7 +35,11 @@ use super::{
     terraforged_util::{pack_floats, unpack_left_float, unpack_right_float},
 };
 use horizon_core::random::{LegacyRandom, RandomSource};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 #[derive(Clone)]
 pub struct GenWarp {
@@ -1263,8 +1267,87 @@ impl Rivermap {
     }
 }
 
+pub struct RiverCache {
+    entries: Mutex<HashMap<i64, Arc<Rivermap>>>,
+}
+
+impl RiverCache {
+    const EXPIRY_MILLIS: u128 = 5 * 60 * 1_000;
+
+    pub fn new() -> Self {
+        Self {
+            entries: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub fn get_rivers(
+        &self,
+        x: i32,
+        z: i32,
+        generate: impl FnOnce(i32, i32, i64) -> Rivermap,
+    ) -> Arc<Rivermap> {
+        self.get_or_generate(super::terraforged_util::pack(x, z), x, z, generate)
+    }
+
+    fn get_or_generate(
+        &self,
+        id: i64,
+        x: i32,
+        z: i32,
+        generate: impl FnOnce(i32, i32, i64) -> Rivermap,
+    ) -> Arc<Rivermap> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        entries.retain(|_, map| now.saturating_sub(map.timestamp()) < Self::EXPIRY_MILLIS);
+        Arc::clone(
+            entries
+                .entry(id)
+                .or_insert_with(|| Arc::new(generate(x, z, id))),
+        )
+    }
+}
+
+impl Default for RiverCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Default)]
+pub struct LegacyRiverCache {
+    cache: RiverCache,
+}
+
+impl LegacyRiverCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn get_rivers(
+        &self,
+        x: i32,
+        z: i32,
+        generate: impl FnOnce(i32, i32, i64) -> Rivermap,
+    ) -> Arc<Rivermap> {
+        let id = (i64::from(z) << 32) | (i64::from(x) & 0xffff_ffff);
+        self.cache.get_or_generate(id, x, z, generate)
+    }
+}
+
 pub trait ContinentSampler {
     fn edge_value(&self, x: f32, z: f32) -> f32;
+}
+
+impl<T: ContinentSampler + ?Sized> ContinentSampler for &T {
+    fn edge_value(&self, x: f32, z: f32) -> f32 {
+        T::edge_value(self, x, z)
+    }
 }
 
 impl ContinentSampler for super::terraforged_fancy::FancyContinentGenerator {
@@ -2205,6 +2288,30 @@ mod tests {
                 (0x3f19999a, 0x3f800000, false, 0),
             ]
         );
+    }
+
+    #[test]
+    fn river_caches_match_engine_0_3_0() {
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let id = std::sync::Mutex::new(0_i64);
+        let cache = RiverCache::new();
+        let first = cache.get_rivers(-7, 9, |x, z, next_id| {
+            calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            *id.lock().unwrap() = next_id;
+            Rivermap::new(x, z, Vec::new(), GenWarp::direct())
+        });
+        let second = cache.get_rivers(-7, 9, |_, _, _| unreachable!());
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(*id.lock().unwrap() as u64, 0xfffffff900000009);
+
+        let legacy = LegacyRiverCache::new();
+        let map = legacy.get_rivers(-7, 9, |x, z, next_id| {
+            *id.lock().unwrap() = next_id;
+            Rivermap::new(x, z, Vec::new(), GenWarp::direct())
+        });
+        assert_eq!((map.x(), map.z()), (-7, 9));
+        assert_eq!(*id.lock().unwrap() as u64, 0x00000009fffffff9);
     }
 
     #[test]
