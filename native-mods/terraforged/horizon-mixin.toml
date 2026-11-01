@@ -201,3 +201,10 @@ file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_biome_viability"
 source = "biome_viability.rs"
 visibility = "pub"
+
+[[module]]
+id = "biome_sampler"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_biome_sampler"
+source = "biome_sampler.rs"
+visibility = "pub"
