@@ -404,3 +404,17 @@ file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_terrain_asset_registry"
 source = "terrain_asset_registry.rs"
 visibility = "pub"
+
+[[module]]
+id = "data"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_data"
+source = "data.rs"
+visibility = "pub"
+
+[[module]]
+id = "current_terrain_resources"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_current_terrain_resources"
+source = "current_terrain_resources.rs"
+visibility = "pub"
