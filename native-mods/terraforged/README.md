@@ -288,6 +288,9 @@ and climate graph and implements the tile generator's heightmap source contract.
 The world-generator factory now owns and shares the concrete heightmap and filter graph, returning
 lightweight generator views with TerraForged's original factory lifecycle.
 
+The mod terrain-level layer now preserves TerraForged's configurable build, sea-floor, sea-level, and
+base-height bounds plus exact automatic horizontal-frequency and normalized-height transforms.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
