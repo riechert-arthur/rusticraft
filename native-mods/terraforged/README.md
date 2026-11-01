@@ -504,6 +504,8 @@ and the Cereal dependency from the original 0.3.1 artifact.
 The current biome-sampler bridge now scales block coordinates by terrain frequency and composes
 continent, river, and climate sampling in Java order. Climate-only and edge-shape queries preserve
 the caller's terrain sample just like `IBiomeSampler.Sampler`.
+The surface override now uses the current source's full `COAST - BEACH` shoreline band instead of
+the obsolete 0.005 fringe, so coastal columns remain beach candidates through the coast marker.
 
 The scalar graph fixtures cover 15 graphs, four seeds and four coordinates (240 Java samples),
 including wrapped seed addition and mixed Perlin/seed-sensitive sources. Regenerate their hashes
