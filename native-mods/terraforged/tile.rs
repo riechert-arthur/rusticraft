@@ -321,7 +321,7 @@ impl Tile {
     /// The stages get the cell's world block position (`chunk block + d`, Java `int` math) as
     /// floats. The map is carried across chunks, from the tile's first cell to its last.
     ///
-    /// `Heightmap` itself is not ported yet, so its stages are closures. Panics where Engine
+    /// The stages are closures (e.g. `Heightmap`'s). Panics where Engine
     /// throws: a slot holding a chunk past the tile's edge whose cells fall outside the backing, or
     /// a size factor so large that the chunk array's Java `int` length wrapped (Engine already
     /// throws building such a tile). A stage that panics leaves the tile partly filled.
