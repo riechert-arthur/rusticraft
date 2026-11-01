@@ -119,6 +119,80 @@ impl std::fmt::Display for NoiseTileSize {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HeightmapSmoothingSettings {
+    pub iterations: i32,
+    pub smoothing_radius: f32,
+    pub smoothing_rate: f32,
+}
+
+impl Default for HeightmapSmoothingSettings {
+    fn default() -> Self {
+        Self {
+            iterations: 0,
+            smoothing_radius: 1.75,
+            smoothing_rate: 0.85,
+        }
+    }
+}
+
+pub struct HeightmapSmoothing;
+
+impl HeightmapSmoothing {
+    pub fn apply(map: &mut [f32], length: i32, settings: HeightmapSmoothingSettings) {
+        let mut iterations = settings.iterations;
+        if iterations <= 0 {
+            return;
+        }
+        let radius_value = settings.smoothing_radius;
+        let radius = java_round(radius_value + 0.5);
+        let radius_squared = radius_value * radius_value;
+        let strength = settings.smoothing_rate;
+        if radius <= 0 || radius_squared <= 0.0 || strength <= 0.0 {
+            return;
+        }
+        while iterations > 0 {
+            for z in radius..length.wrapping_sub(radius) {
+                for x in radius..length.wrapping_sub(radius) {
+                    let mut total = 0.0_f32;
+                    let mut weights = 0.0_f32;
+                    for delta_z in -radius..=radius {
+                        for delta_x in -radius..=radius {
+                            let distance_squared = delta_x
+                                .wrapping_mul(delta_x)
+                                .wrapping_add(delta_z.wrapping_mul(delta_z))
+                                as f32;
+                            if distance_squared > radius_squared {
+                                continue;
+                            }
+                            let weight = 1.0 - distance_squared / radius_squared;
+                            let index = z
+                                .wrapping_add(delta_z)
+                                .wrapping_mul(length)
+                                .wrapping_add(x.wrapping_add(delta_x));
+                            total += map[index as usize] * weight;
+                            weights += weight;
+                        }
+                    }
+                    if weights > 0.0 {
+                        let index = z.wrapping_mul(length).wrapping_add(x) as usize;
+                        map[index] -= (map[index] - total / weights) * strength;
+                    }
+                }
+            }
+            iterations -= 1;
+        }
+    }
+}
+
+fn java_round(value: f32) -> i32 {
+    if value >= 0.0 {
+        (value + 0.5) as i32
+    } else {
+        (value - 0.5) as i32
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,5 +364,55 @@ mod tests {
         });
         assert_eq!(fnv, 0xe62f_61b7_b3c5_c62a);
         assert_eq!(NoiseTileSize::DEFAULT, NoiseTileSize::new(1));
+    }
+
+    fn fixture_map(length: i32) -> Vec<f32> {
+        (0..length.wrapping_mul(length))
+            .map(|index| {
+                (index.wrapping_mul(37) % 101) as f32 / 100.0 + (index / length) as f32 * 0.125
+            })
+            .collect()
+    }
+
+    fn hash(map: &[f32]) -> u64 {
+        map.iter().fold(0xcbf29ce484222325, |hash, value| {
+            (hash ^ u64::from(value.to_bits())).wrapping_mul(1099511628211)
+        })
+    }
+
+    #[test]
+    fn heightmap_smoothing_matches_current_java_source() {
+        let cases = [
+            (HeightmapSmoothingSettings::default(), 0x265dc7ee0ba807f3),
+            (
+                HeightmapSmoothingSettings {
+                    iterations: 2,
+                    smoothing_radius: 1.75,
+                    smoothing_rate: 0.85,
+                },
+                0x9008debe23dcc046,
+            ),
+            (
+                HeightmapSmoothingSettings {
+                    iterations: 1,
+                    smoothing_radius: 2.5,
+                    smoothing_rate: 0.35,
+                },
+                0x7eea390865bcc9ab,
+            ),
+            (
+                HeightmapSmoothingSettings {
+                    iterations: 3,
+                    smoothing_radius: 0.0,
+                    smoothing_rate: 1.0,
+                },
+                0x265dc7ee0ba807f3,
+            ),
+        ];
+        for (settings, expected) in cases {
+            let mut map = fixture_map(9);
+            HeightmapSmoothing::apply(&mut map, 9, settings);
+            assert_eq!(hash(&map), expected);
+        }
     }
 }
