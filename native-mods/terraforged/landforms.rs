@@ -23,7 +23,10 @@
  */
 
 use super::{
-    terraforged::{CurveFunction, Domain, Interpolation, Module, Source, SourceConfig, SourceKind},
+    terraforged::{
+        CurveFunction, DistanceFunction, Domain, EdgeFunction, ErosionMode, ErosionRidge,
+        Interpolation, Module, Source, SourceConfig, SourceKind,
+    },
     terraforged_engine::{Levels, Seed, TerrainSettings},
 };
 
@@ -151,6 +154,67 @@ impl LandForms {
             .scale(Module::constant(0.4))
     }
 
+    pub fn mountains(&self, seed: &mut Seed) -> Module {
+        let scale_h = java_round(410.0 * self.settings.mountains.horizontal_scale);
+        let module = Module::multiply(vec![
+            source(SourceKind::Ridge, seed.next(), scale_h, 4, 1.15, 2.35),
+            perlin(seed.next(), 24, 4, 2.0).alpha(Module::constant(0.075)),
+        ])
+        .warp(noise_warp(seed.next(), 350, 1, 150.0));
+        self.make_fancy(seed, module).scale(Module::constant(
+            (0.7_f64 * f64::from(self.terrain_vertical_scale)) as f32,
+        ))
+    }
+
+    pub fn mountains2(&self, seed: &mut Seed) -> Module {
+        let cell = cell_edge(seed.next(), 360)
+            .scale(Module::constant(1.2))
+            .clamp(Module::constant(0.0), Module::constant(1.0))
+            .warp(noise_warp(seed.next(), 200, 2, 100.0));
+        let blur = perlin(seed.next(), 10, 1, 2.0).alpha(Module::constant(0.025));
+        let surface = source(SourceKind::Ridge, seed.next(), 125, 4, 0.975, 2.0)
+            .alpha(Module::constant(0.37));
+        let mountains = Module::multiply(vec![
+            cell.clamp(Module::constant(0.0), Module::constant(1.0)),
+            blur,
+            surface,
+        ])
+        .power(Module::constant(1.1));
+        self.make_fancy(seed, mountains).scale(Module::constant(
+            (0.645_f64 * f64::from(self.terrain_vertical_scale)) as f32,
+        ))
+    }
+
+    pub fn mountains3(&self, seed: &mut Seed) -> Module {
+        let cell = cell_edge(seed.next(), 400)
+            .scale(Module::constant(1.2))
+            .clamp(Module::constant(0.0), Module::constant(1.0))
+            .warp(noise_warp(seed.next(), 200, 2, 100.0));
+        let blur = perlin(seed.next(), 10, 1, 2.0).alpha(Module::constant(0.025));
+        let surface = source(SourceKind::Ridge, seed.next(), 125, 4, 0.975, 2.0)
+            .alpha(Module::constant(0.37));
+        let mountains = Module::multiply(vec![
+            cell.clamp(Module::constant(0.0), Module::constant(1.0)),
+            blur,
+            surface,
+        ])
+        .power(Module::constant(1.1));
+        let terraced = mountains.advanced_terrace(
+            perlin(seed.next(), 50, 1, 2.0).scale(Module::constant(0.5)),
+            perlin(seed.next(), 100, 1, 2.0)
+                .clamp(Module::constant(0.5), Module::constant(0.95))
+                .map(Module::constant(0.0), Module::constant(1.0)),
+            Module::constant(0.45),
+            0.2,
+            0.45,
+            24,
+            1,
+        );
+        self.make_fancy(seed, terraced).scale(Module::constant(
+            (0.645_f64 * f64::from(self.terrain_vertical_scale)) as f32,
+        ))
+    }
+
     pub fn plateau(&self, seed: &mut Seed) -> Module {
         let valley = source(SourceKind::Ridge, seed.next(), 500, 1, 0.975, 2.0)
             .invert()
@@ -272,6 +336,25 @@ impl LandForms {
             .boost(1)
             .scale(Module::constant(0.5))
     }
+
+    fn make_fancy(&self, seed: &mut Seed, module: Module) -> Module {
+        if !self.settings.general.fancy_mountains {
+            return module;
+        }
+        let warp = Domain::direction(perlin(seed.next(), 10, 1, 2.0), Module::constant(2.0));
+        ErosionRidge::full(
+            seed.next(),
+            2,
+            0.65,
+            128.0,
+            0.15,
+            3.1,
+            0.8,
+            ErosionMode::Constant,
+        )
+        .wrap(module)
+        .warp(warp)
+    }
 }
 
 fn perlin(seed: i32, scale: i32, octaves: usize, lacunarity: f32) -> Module {
@@ -304,6 +387,22 @@ fn noise_warp(seed: i32, scale: i32, octaves: usize, strength: f32) -> Domain {
         perlin(seed, scale, octaves, 2.0),
         perlin(seed.wrapping_add(1), scale, octaves, 2.0),
         Module::constant(strength),
+    )
+}
+
+fn cell_edge(seed: i32, scale: i32) -> Module {
+    Module::cell_edge_source(
+        SourceConfig {
+            seed,
+            octaves: 1,
+            gain: 0.5,
+            frequency: 1.0 / scale as f32,
+            lacunarity: 2.0,
+            interpolation: Interpolation::Curve3,
+        },
+        1.0,
+        EdgeFunction::Distance2,
+        DistanceFunction::Euclidean,
     )
 }
 
@@ -511,6 +610,77 @@ mod tests {
         assert_eq!(
             bits(&torridonian),
             [0x3e738a24, 0x3e531467, 0x3d3dae7e, 0x3eb1a779]
+        );
+    }
+
+    #[test]
+    fn mountains_match_engine_0_3_0() {
+        let forms = make_forms(TerrainSettings::default());
+
+        let mut seed = Seed::new(321);
+        let mountains = forms.mountains(&mut seed);
+        assert_eq!(seed.get(), 326);
+        assert_eq!(mountains.min_value().to_bits(), 0x00000000);
+        assert_eq!(mountains.max_value().to_bits(), 0x3f2f9db2);
+        assert_eq!(
+            bits(&mountains),
+            [0x3e6964f0, 0x3e853d24, 0x3ea800d6, 0x3e46c645]
+        );
+
+        let mut seed = Seed::new(-45);
+        let mountains = forms.mountains2(&mut seed);
+        assert_eq!(seed.get(), -39);
+        assert_eq!(mountains.min_value().to_bits(), 0x00000000);
+        assert_eq!(mountains.max_value().to_bits(), 0x3f21d14e);
+        assert_eq!(
+            bits(&mountains),
+            [0x3e3a452e, 0x3d8b619e, 0x3e2cfdbd, 0x3dab43ab]
+        );
+
+        let mut seed = Seed::new(987_654);
+        let mountains = forms.mountains3(&mut seed);
+        assert_eq!(seed.get(), 987_662);
+        assert_eq!(mountains.min_value().to_bits(), 0x00000000);
+        assert_eq!(mountains.max_value().to_bits(), 0x3f21d14e);
+        assert_eq!(
+            bits(&mountains),
+            [0x3e3f5c77, 0x3e436228, 0x3e0b4962, 0x3dc3cf5c]
+        );
+    }
+
+    #[test]
+    fn plain_scaled_mountains_match_engine_0_3_0() {
+        let mut settings = TerrainSettings::default();
+        settings.general.fancy_mountains = false;
+        settings.general.global_vertical_scale = 0.37;
+        settings.mountains.horizontal_scale = 1.75;
+        let forms = make_forms(settings);
+
+        let mut seed = Seed::new(i32::MAX - 3);
+        let mountains = forms.mountains(&mut seed);
+        assert_eq!(seed.get(), i32::MAX);
+        assert_eq!(mountains.max_value().to_bits(), 0x3e849ba6);
+        assert_eq!(
+            bits(&mountains),
+            [0x3e7f453a, 0x3e21a878, 0x3debb605, 0x3e60fb20]
+        );
+
+        let mut seed = Seed::new(i32::MIN + 3);
+        let mountains = forms.mountains2(&mut seed);
+        assert_eq!(seed.get(), i32::MIN + 7);
+        assert_eq!(mountains.max_value().to_bits(), 0x3e7460ab);
+        assert_eq!(
+            bits(&mountains),
+            [0x3bdf5fa5, 0x3bf07865, 0x3d3f7983, 0x3d98132b]
+        );
+
+        let mut seed = Seed::new(13_579);
+        let mountains = forms.mountains3(&mut seed);
+        assert_eq!(seed.get(), 13_585);
+        assert_eq!(mountains.max_value().to_bits(), 0x3e7460ab);
+        assert_eq!(
+            bits(&mountains),
+            [0x3e0a8674, 0x3dc8c31d, 0x3cf7f1e6, 0x3d08c80f]
         );
     }
 

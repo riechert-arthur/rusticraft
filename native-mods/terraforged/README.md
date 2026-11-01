@@ -87,6 +87,9 @@ deep-ocean hills/canyons blend with its mixed float/double sea-level scaling and
 The erosion Ridge layer adds TerraForged's cellular valley-distance graph node with octave controls,
 source-value caching and constant, input-linear and output-linear blending modes.
 
+The mountain LandForms layer adds all three ridge and cell-edge mountain graphs, including optional
+directional fancy-mountain erosion and the original advanced terrace variant.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
