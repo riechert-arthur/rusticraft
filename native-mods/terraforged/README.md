@@ -2138,8 +2138,7 @@ Writes go through `set_block_worldgen`, so only the chunk stage's heightmaps fol
 `ProtoChunk.setBlockState`: at TERRAIN, where the surface step runs, OCEAN_FLOOR_WG keeps its pre-erosion heights.
 The caller supplies which states are erodible (Java's `isErodible`: `#minecraft:dirt` or `#minecraft:snow`). With
 26.3's tags that leaves grass, podzol, mycelium, moss and mud uneroded (`#minecraft:dirt` held them before 26.x);
-TerraForged Reimagined switches to `#minecraft:substrate_overworld` to keep them, which this port doesn't follow (the
-binding layer decides). The cached terrain data is only read. Snow postprocessing (`applyPost`, below) is ported; the
+TerraForged Reimagined switches to `#minecraft:substrate_overworld` to keep them, and the bindings below follow it. The cached terrain data is only read. Snow postprocessing (`applyPost`, below) is ported; the
 call from the surface decorator is a later layer. The test runs `SurfaceErosionOracle`
 (6dd607eb's three methods, copied verbatim, over real 26.3 ProtoChunks, heightmaps and block tags): 160 generated
 chunks over three build ranges, four persisted statuses, primed and unprimed heightmaps, three gen depths and NaN
@@ -2183,6 +2182,20 @@ over real 26.3 ProtoChunks, heightmaps and block tags; same folder and `run.sh`)
 ranges, four persisted statuses, three priming states and three gen depths, with snow layers, snow and powder snow,
 snow on leaves, cave air and water caps, full columns, columns near y 0 and NaN or infinite heights (6 of them throw).
 It compares every block and all six heightmaps, and also checks Java's SnowLayerBlocks and tag contents.
+
+The surface bindings (`surface_bindings.rs`, `SurfaceBindings`) resolve what the three passes take from the caller,
+once per world, from the 26.3 block registry and its bound block tags (nested tags flattened): `#minecraft:snow`,
+the erodible tags, and the source and level-2 water states (`minecraft:water` with `level=0` and `level=2`, as
+`smoothWater`'s `LEVEL == 0` test and `setValue(LEVEL, 2)` give them). Air, stone and the snow layers come from the
+chunk's own registry inside the passes. By default (`SurfaceBindings::new`) a state is erodible when it is in
+`#minecraft:substrate_overworld` or `#minecraft:snow`, TerraForged Reimagined a24d450's `isErodible` (MIT, as
+above). That departs on purpose from 6dd607eb's literal `#minecraft:dirt` or `#minecraft:snow`: 26.x shrank
+`#minecraft:dirt` to dirt, coarse dirt and rooted dirt and moved grass, podzol, mycelium, moss and mud into
+`#minecraft:substrate_overworld`, so the literal tag would leave grassy slopes uneroded. `substrate_overworld` holds
+what 1.18.2's `#minecraft:dirt` held. `SurfaceBindings::with_erodible_tags` takes any tag list (`JAVA_ERODIBLE_TAGS`
+gives 6dd607eb's); the passes themselves still take the predicate, and their oracles test Java's literal tags. A
+missing tag, water block or water level is an error when the bindings are built. The call from the surface decorator
+and the region lookup for water smoothing are a later layer.
 
 The structure terrain columns (`structure_terrain.rs`, `StructureTerrain`) are TerraForged 6dd607eb's
 `worldgen.terrain.StructureTerrain.modify` and its helpers (MIT, as above), the per-column part of `fillFromNoise`'s
