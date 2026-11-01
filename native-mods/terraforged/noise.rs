@@ -1033,6 +1033,10 @@ enum ModuleKind {
         edge: EdgeFunction,
         distance: DistanceFunction,
     },
+    SineSource {
+        frequency: f32,
+        alpha: Module,
+    },
     Abs(Module),
     Alpha(Module, Module),
     Bias(Module, Module),
@@ -1261,6 +1265,11 @@ impl Module {
         )
     }
 
+    /// `Sin` (`Builder.sin()`, with `frequency` and `source` as `alpha`): reports the `Noise` defaults 0..1.
+    pub fn sine_source(frequency: f32, alpha: Self) -> Self {
+        Self::node(ModuleKind::SineSource { frequency, alpha }, 0.0, 1.0)
+    }
+
     pub fn value(&self, x: f32, y: f32) -> f32 {
         match &self.0.kind {
             ModuleKind::Constant(value) => *value,
@@ -1310,6 +1319,19 @@ impl Module {
                 );
                 let (min, max, range) = edge.bounds();
                 map(value, min, max, range)
+            }
+            ModuleKind::SineSource { frequency, alpha } => {
+                let alpha = alpha.value(x, y);
+                let x = x * *frequency;
+                let y = y * *frequency;
+                let noise = if alpha == 0.0 {
+                    sin(x)
+                } else if alpha == 1.0 {
+                    sin(y)
+                } else {
+                    lerp(sin(x), sin(y), alpha)
+                };
+                map(noise, -1.0, 1.0, 2.0)
             }
             ModuleKind::Abs(source) => source.value(x, y).abs(),
             ModuleKind::Alpha(source, alpha) => {
@@ -3288,6 +3310,61 @@ mod tests {
             0
         );
         lookup(DistanceFunction::Euclidean).value(1e20, 0.0);
+    }
+
+    #[test]
+    fn sine_source_matches_engine_0_3_0() {
+        let points = [
+            (0.0, 0.0),
+            (12.25, -98.75),
+            (-4096.5, 8192.25),
+            (123456.75, -0.125),
+            (64.0, 64.0),
+            (-128.0, 32.0),
+            (777.0, -333.0),
+            (-1024.0, -2048.0),
+        ];
+        let alpha = Module::source(Source::new(
+            SourceKind::Simplex,
+            SourceConfig {
+                seed: 1401,
+                octaves: 3,
+                gain: 0.5,
+                frequency: 1.0 / 96.0,
+                lacunarity: 2.0,
+                interpolation: Interpolation::Curve3,
+            },
+        ));
+        let cases = [
+            (
+                Module::sine_source(1.0 / 64.0, Module::constant(0.0)),
+                [
+                    0x3f000000, 0x3f184c14, 0x3d1eea08, 0x3f0983a1, 0x3f6baa7e, 0x3d381108,
+                    0x3e964994, 0x3f24afba,
+                ],
+            ),
+            (
+                Module::sine_source(1.0 / 64.0, Module::constant(1.0)),
+                [
+                    0x3f000000, 0x396a8800, 0x3f5bf4a8, 0x3effcdc3, 0x3f6baa7e, 0x3f3d49fe,
+                    0x3f710644, 0x3e667e58,
+                ],
+            ),
+            (
+                Module::sine_source(1.0 / 64.0, alpha),
+                [
+                    0x3f000000, 0x3f0c5d95, 0x3ea3ee6e, 0x3f05c011, 0x3f6baa7e, 0x3e89b516,
+                    0x3efbd02a, 0x3f16ecca,
+                ],
+            ),
+        ];
+        for (module, expected) in cases {
+            assert_eq!(
+                [module.min_value().to_bits(), module.max_value().to_bits()],
+                [0, 0x3f800000]
+            );
+            assert_eq!(bits(points.map(|(x, y)| module.value(x, y))), expected);
+        }
     }
 
     #[test]
