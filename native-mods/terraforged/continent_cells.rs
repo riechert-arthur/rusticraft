@@ -27,8 +27,10 @@ use super::{
     terraforged_continent_cell::{CellPoint, CellShape, CellSource},
     terraforged_continent_config::ContinentConfig,
     terraforged_continent_shape::ContinentCells,
+    terraforged_lossy_cache::ConcurrentLossyCache,
     terraforged_terrain_blend_util::SpiralIterator,
-    terraforged_util::{unpack_left, unpack_right},
+    terraforged_terrain_generator::available_processors,
+    terraforged_util::{pack, unpack_left, unpack_right},
 };
 use std::ops::RangeInclusive;
 
@@ -40,11 +42,15 @@ const CONTINENT_SAMPLE_SCALE: f32 = 400.0;
 const SPAWN_SEARCH_RADIUS: i32 = 100_000;
 /// `ContinentGenerator.VALID_SPAWN_RADIUS`.
 const VALID_SPAWN_RADIUS: i32 = 3;
+/// `ContinentGenerator.CELL_POINT_CACHE_SIZE`: the cell cache's capacity.
+const CELL_POINT_CACHE_SIZE: i32 = 2048;
 
 /// The cell half of TerraForged 1.18.2-0.3.1's `worldgen.noise.continent.ContinentGenerator` (the jar has no separate
 /// cell generator): jittered continent cells with their noise, the nearest-cell search and the spawn-offset search.
-/// The jar's lossy cell cache is transparent (it compares whole keys and its pool always hands out fresh points), so
-/// cells are computed directly. The river generator comes later.
+/// `getCell` ([`ContinentCells::cell`]) goes through the newer source's lossy cell cache (2048 cells,
+/// `Environment.CORES` buckets, see `ConcurrentLossyCache`); [`Self::compute_cell`] and the spawn search compute
+/// directly, as the source does. The cache never changes a result: a hit needs the same cell and runtime seed, and no
+/// cell point is pooled or reused. The river generator is `RiverNetwork`.
 ///
 /// Seeds: the jar has no runtime seed. `ContinentNoise.createContinent` binds the world seed by drawing `seed0` and
 /// `seed1` from `GeneratorContext.seed`, and every cell uses those. The `seed` parameters here are the newer source's
@@ -59,11 +65,18 @@ pub struct CellGenerator {
     source: CellSource,
     /// `shapeGenerator.threshold`: the spawn search's land test.
     threshold: f32,
+    cache: ConcurrentLossyCache<CellPoint>,
 }
 
 impl CellGenerator {
     /// `new ContinentGenerator(config, levels, controlPoints)`: the cell fields only.
+    /// The cell cache is `LossyCache.concurrent(CELL_POINT_CACHE_SIZE, ...)`: `Environment.CORES` buckets.
     pub fn new(config: ContinentConfig) -> Self {
+        Self::with_concurrency(config, available_processors())
+    }
+
+    /// [`Self::new`] with the cell cache's bucket count (`concurrency`, Java's `Environment.CORES`) given.
+    pub fn with_concurrency(config: ContinentConfig, concurrency: i32) -> Self {
         Self {
             seed: config.shape.seed0,
             sample_seed: config.shape.seed1.wrapping_add(SAMPLE_SEED_OFFSET),
@@ -71,6 +84,7 @@ impl CellGenerator {
             shape: config.shape.cell_shape,
             source: config.shape.cell_source,
             threshold: config.shape.threshold,
+            cache: ConcurrentLossyCache::new(CELL_POINT_CACHE_SIZE, concurrency),
         }
     }
 
@@ -169,9 +183,13 @@ pub fn window(min: i32) -> Option<RangeInclusive<i32>> {
 }
 
 impl ContinentCells for CellGenerator {
-    /// `getCell`.
+    /// `getCell`: [`CellGenerator::compute_cell`] through the lossy cell cache, keyed by `PosUtil.pack(x, y)`. A hit
+    /// needs the same key and runtime seed (the source's `LongCache` checks only the key), so this always equals
+    /// `compute_cell(seed, x, y)`.
     fn cell(&self, seed: i32, x: i32, y: i32) -> CellPoint {
-        self.compute_cell(seed, x, y)
+        *self.cache.compute_if_absent(seed, pack(x, y), |seed, key| {
+            self.compute_cell(seed, unpack_left(key), unpack_right(key))
+        })
     }
 
     fn cell_shape(&self) -> CellShape {

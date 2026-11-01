@@ -31,10 +31,17 @@ use super::{
     terraforged_continent_config::ContinentConfig,
     terraforged_continent_shape::{ContinentCells, ShapeGenerator},
     terraforged_engine::TerrainRegistry,
+    terraforged_lossy_cache::ConcurrentLossyCache,
     terraforged_river_nodes::{CarverSample, NodeSample, RiverNode, RiverPieces},
     terraforged_terrain_blend_util::random,
     terraforged_terrain_data::NoiseSample,
+    terraforged_terrain_generator::available_processors,
+    terraforged_util::{pack, unpack_left, unpack_right},
 };
+use std::sync::Arc;
+
+/// `RiverGenerator.RIVER_CACHE_SIZE`: the piece cache's capacity.
+const RIVER_CACHE_SIZE: i32 = 1024;
 
 /// `RiverGenerator.DIRS`: the four neighbours, in the order `computeNodes` visits them.
 pub const DIRECTIONS: [(i32, i32); 4] = [(1, 0), (0, 1), (-1, 0), (0, -1)];
@@ -42,7 +49,7 @@ pub const DIRECTIONS: [(i32, i32); 4] = [(1, 0), (0, 1), (-1, 0), (0, -1)];
 /// The newer source tree's `RiverGenerator.computeNodes` (`worldgen.noise.continent.river`): the river and lake
 /// pieces of one continent cell. The 1.18.2-0.3.1 jar draws from `config.rivers.seed` and reads seedless cells; the
 /// newer source (ported here) passes its runtime `seed` to both and never reads `rivers.seed`. [`Self::sample`] is
-/// the warped, carved `sample`; the piece cache is not ported here.
+/// the warped, carved `sample`; [`Self::nodes`] is `getNodes`, the piece cache (seed-checked, see there).
 pub struct RiverNetwork<'a, Cells> {
     continent: &'a Cells,
     shape: &'a ShapeGenerator,
@@ -50,11 +57,23 @@ pub struct RiverNetwork<'a, Cells> {
     /// `riverWarp`'s axes: `Source.builder().seed(X_OFFSET / Y_OFFSET).frequency(30).simplex()`.
     warp_x: Source,
     warp_y: Source,
+    cache: ConcurrentLossyCache<RiverPieces>,
 }
 
 impl<'a, Cells: ContinentCells> RiverNetwork<'a, Cells> {
-    /// `new RiverGenerator(continent, config)` without its `RiverCarver` (passed to [`Self::sample`]) and caches.
+    /// `new RiverGenerator(continent, config)` without its `RiverCarver` (passed to [`Self::sample`]): the piece
+    /// cache is `LossyCache.concurrent(RIVER_CACHE_SIZE, ...)`, `Environment.CORES` buckets.
     pub fn new(continent: &'a Cells, shape: &'a ShapeGenerator, config: ContinentConfig) -> Self {
+        Self::with_concurrency(continent, shape, config, available_processors())
+    }
+
+    /// [`Self::new`] with the piece cache's bucket count (`concurrency`, Java's `Environment.CORES`) given.
+    pub fn with_concurrency(
+        continent: &'a Cells,
+        shape: &'a ShapeGenerator,
+        config: ContinentConfig,
+        concurrency: i32,
+    ) -> Self {
         let warp = |seed| {
             Source::new(
                 SourceKind::Simplex,
@@ -68,6 +87,7 @@ impl<'a, Cells: ContinentCells> RiverNetwork<'a, Cells> {
         Self {
             continent,
             shape,
+            cache: ConcurrentLossyCache::new(RIVER_CACHE_SIZE, concurrency),
             lake_density: config.rivers.lake_density,
             warp_x: warp(8_657_124),
             warp_y: warp(5_123_678),
@@ -135,6 +155,16 @@ impl<'a, Cells: ContinentCells> RiverNetwork<'a, Cells> {
         pieces
     }
 
+    /// `getNodes(seed, x, y)`: [`Self::compute_nodes`] through the lossy piece cache, keyed by `PosUtil.pack(x, y)`.
+    /// The source's `LongCache` hits on the key alone and so returns pieces computed with another runtime seed; the
+    /// port's cache hits only on the same key and seed, so this always equals `compute_nodes(seed, x, y)`.
+    pub fn nodes(&self, seed: i32, cell_x: i32, cell_y: i32) -> Arc<RiverPieces> {
+        self.cache
+            .compute_if_absent(seed, pack(cell_x, cell_y), |seed, key| {
+                self.compute_nodes(seed, unpack_left(key), unpack_right(key))
+            })
+    }
+
     /// `riverWarp.getX(seed, x, y)` and `getY`: `Domain.warp(x, y, constant(0.004))` in Noise2D 2cb4843, seed-first.
     /// `DomainWarp` maps each 0..1 simplex to -0.5..0.5 (`Map`: `-0.5f + (value - 0) / 1 * 1`, which is
     /// `-0.5 + value` bit for bit, unclamped) and scales it by `0.004f`; both axes read the unwarped point.
@@ -170,7 +200,7 @@ impl<'a, Cells: ContinentCells> RiverNetwork<'a, Cells> {
     /// The winners are recorded by [`Self::record_node`]; a sample with no winner is invalidated (distance NaN).
     /// The window follows Java's `int` loop bounds: empty when `centre ± 1` wraps, never-ending (a panic here)
     /// when the upper bound is `Integer.MAX_VALUE`. [`CellGenerator`]'s centres stay far from both, so neither
-    /// happens with it. Pieces are computed directly: the source's lossy piece cache comes later.
+    /// happens with it. Pieces come from [`Self::nodes`] (the piece cache), which equals computing them directly.
     ///
     /// [`CellGenerator`]: super::terraforged_continent_cells::CellGenerator
     pub fn sample_nodes(&self, seed: i32, x: f32, y: f32, sample: &mut CarverSample) {
@@ -194,7 +224,7 @@ impl<'a, Cells: ContinentCells> RiverNetwork<'a, Cells> {
                 );
             };
             for cell_x in columns {
-                let pieces = self.compute_nodes(seed, cell_x, cell_y);
+                let pieces = self.nodes(seed, cell_x, cell_y);
                 for node in &pieces.rivers {
                     sample_node(x, y, node, &mut river, &mut sample.river);
                 }
