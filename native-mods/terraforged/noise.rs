@@ -579,6 +579,25 @@ struct TerraceStep {
     upper_bound: f32,
 }
 
+#[derive(Clone, Copy)]
+struct CacheValue {
+    x: f32,
+    y: f32,
+    value: f32,
+    empty: bool,
+}
+
+impl Default for CacheValue {
+    fn default() -> Self {
+        Self {
+            x: 0.0,
+            y: 0.0,
+            value: 0.0,
+            empty: true,
+        }
+    }
+}
+
 #[derive(Clone)]
 enum ModuleKind {
     Constant(f32),
@@ -695,6 +714,10 @@ enum ModuleKind {
         source: Module,
         direction: Module,
         strength: Module,
+    },
+    Cache {
+        source: Module,
+        value: std::sync::Arc<std::sync::Mutex<CacheValue>>,
     },
     Select {
         control: Module,
@@ -1056,6 +1079,20 @@ impl Module {
                 let dy = sin_lookup(angle + COS_OFFSET) * strength;
                 source.value(x + dx, y + dy)
             }
+            ModuleKind::Cache { source, value } => {
+                let mut cached = value.lock().expect("TerraForged cache lock poisoned");
+                if !cached.empty && x == cached.x && y == cached.y {
+                    return cached.value;
+                }
+                let result = source.value(x, y);
+                *cached = CacheValue {
+                    x,
+                    y,
+                    value: result,
+                    empty: false,
+                };
+                result
+            }
             ModuleKind::Select {
                 control,
                 lower,
@@ -1111,7 +1148,8 @@ impl Module {
             | ModuleKind::Steps { source, .. }
             | ModuleKind::Frequency { source, .. }
             | ModuleKind::Gradient { source, .. }
-            | ModuleKind::Modulate { source, .. } => source.min_value(),
+            | ModuleKind::Modulate { source, .. }
+            | ModuleKind::Cache { source, .. } => source.min_value(),
             ModuleKind::Add(sources) => combine_bounds(sources, true, |a, b| a + b),
             ModuleKind::Multiply(sources) => combine_bounds(sources, true, |a, b| a * b),
             ModuleKind::Max(sources) => {
@@ -1168,7 +1206,8 @@ impl Module {
             | ModuleKind::Steps { source, .. }
             | ModuleKind::Frequency { source, .. }
             | ModuleKind::Gradient { source, .. }
-            | ModuleKind::Modulate { source, .. } => source.max_value(),
+            | ModuleKind::Modulate { source, .. }
+            | ModuleKind::Cache { source, .. } => source.max_value(),
             ModuleKind::Add(sources) => combine_bounds(sources, false, |a, b| a + b),
             ModuleKind::Multiply(sources) => combine_bounds(sources, false, |a, b| a * b),
             ModuleKind::Max(sources) => combine_bounds(sources, false, java_max),
@@ -1525,6 +1564,13 @@ impl Module {
             source: self,
             direction,
             strength,
+        }))
+    }
+
+    pub fn cache(self) -> Self {
+        Self(Box::new(ModuleKind::Cache {
+            source: self,
+            value: std::sync::Arc::new(std::sync::Mutex::new(CacheValue::default())),
         }))
     }
 
@@ -2755,5 +2801,57 @@ mod tests {
                 expected_values
             );
         }
+    }
+
+    #[test]
+    fn cache_matches_engine_0_3_0() {
+        let module = Module::source(Source::new(
+            SourceKind::Perlin,
+            SourceConfig {
+                seed: 1101,
+                octaves: 4,
+                gain: 0.5,
+                frequency: 1.0 / 96.0,
+                lacunarity: 2.0,
+                interpolation: Interpolation::Curve3,
+            },
+        ))
+        .cache();
+        let clone = module.clone();
+        let points = [
+            (0.0, 0.0),
+            (12.25, -98.75),
+            (12.25, -98.75),
+            (0.0, 0.0),
+            (-0.0, 0.0),
+            (777.0, -333.0),
+            (777.0, -333.0),
+        ];
+        assert_eq!(
+            [module.min_value().to_bits(), module.max_value().to_bits()],
+            [0x00000000, 0x3f800000]
+        );
+        assert_eq!(
+            bits(points.map(|(x, y)| module.value(x, y))),
+            [
+                0x3f000000, 0x3edc7fe7, 0x3edc7fe7, 0x3f000000, 0x3f000000, 0x3eea770a, 0x3eea770a,
+            ]
+        );
+        let ModuleKind::Cache { value, .. } = module.0.as_ref() else {
+            unreachable!()
+        };
+        let ModuleKind::Cache {
+            value: clone_value, ..
+        } = clone.0.as_ref()
+        else {
+            unreachable!()
+        };
+        assert!(std::sync::Arc::ptr_eq(value, clone_value));
+        let cached = value.lock().unwrap();
+        assert_eq!(
+            [cached.x.to_bits(), cached.y.to_bits()],
+            [0x44424000, 0xc3a68000]
+        );
+        assert_eq!(cached.value.to_bits(), 0x3eea770a);
     }
 }

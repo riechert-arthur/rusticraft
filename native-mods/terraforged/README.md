@@ -36,6 +36,9 @@ step smoothing with TerraForged's original approximate exponential and mapping b
 The scalar graph layer adds coordinate frequency, gradient shaping, directional modulation,
 minimum and subtraction nodes, including the original combiner bound calculations.
 
+The cache layer adds TerraForged's shared single-coordinate memoization while remaining safe for
+Rusticraft's parallel world-generation workers.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
