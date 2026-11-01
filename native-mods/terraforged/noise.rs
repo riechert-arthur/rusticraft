@@ -1217,6 +1217,11 @@ impl Default for CacheValue {
 #[derive(Clone)]
 enum ModuleKind {
     Constant(f32),
+    Custom {
+        value: std::sync::Arc<dyn Fn(f32, f32) -> f32 + Send + Sync>,
+        min: f32,
+        max: f32,
+    },
     Source(Source),
     ErosionRidge {
         ridge: ErosionRidge,
@@ -1587,6 +1592,18 @@ impl Module {
         Self(Box::new(ModuleKind::Constant(value)))
     }
 
+    pub fn custom(
+        min: f32,
+        max: f32,
+        value: impl Fn(f32, f32) -> f32 + Send + Sync + 'static,
+    ) -> Self {
+        Self(Box::new(ModuleKind::Custom {
+            value: std::sync::Arc::new(value),
+            min,
+            max,
+        }))
+    }
+
     pub fn source(source: Source) -> Self {
         Self(Box::new(ModuleKind::Source(source)))
     }
@@ -1636,6 +1653,7 @@ impl Module {
     pub fn value(&self, x: f32, y: f32) -> f32 {
         match self.0.as_ref() {
             ModuleKind::Constant(value) => *value,
+            ModuleKind::Custom { value, .. } => value(x, y),
             ModuleKind::Source(source) => source.value(x, y),
             ModuleKind::ErosionRidge { ridge, source } => ridge.value(x, y, source),
             ModuleKind::CellSource {
@@ -2068,6 +2086,7 @@ impl Module {
     pub fn min_value(&self) -> f32 {
         match self.0.as_ref() {
             ModuleKind::Constant(value) => *value,
+            ModuleKind::Custom { min, .. } => *min,
             ModuleKind::Source(source) => source.min_value(),
             ModuleKind::ErosionRidge { .. } => 0.0,
             ModuleKind::CellSource { .. }
@@ -2131,6 +2150,7 @@ impl Module {
     pub fn max_value(&self) -> f32 {
         match self.0.as_ref() {
             ModuleKind::Constant(value) => *value,
+            ModuleKind::Custom { max, .. } => *max,
             ModuleKind::Source(source) => source.max_value(),
             ModuleKind::ErosionRidge { .. } => 1.0,
             ModuleKind::CellSource { .. }

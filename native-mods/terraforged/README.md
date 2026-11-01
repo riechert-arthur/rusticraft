@@ -258,6 +258,9 @@ region from its provider cache when the source threshold is reached.
 The async tile-factory wrapper now starts regular and zoomed generation immediately, delegates region
 mapping, remains idempotently asynchronous, and creates tile caches with the same worker configuration.
 
+Climate primitives now include TerraForged's range compressor, latitude temperature curve, and
+frequency-scaled moisture shaping as composable noise modules with Java-oracle raw-bit fixtures.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
