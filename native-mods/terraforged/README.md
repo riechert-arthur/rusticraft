@@ -12,6 +12,10 @@ The ridged sources (Ridge, Billow and SimplexRidge) and the `Rand` white-noise s
 quirks: `Rand.nextInt` divides by `range + range` (so it is almost always 0, and wraps for large ranges), and Engine
 throws for ridged sources with more than 30 octaves, where this port keeps going.
 
+The graph layer translates TerraForged's constants, source nodes, core modifiers and arithmetic
+combiners. Its tests preserve Engine 0.3.0's reported bounds as well as raw sample bits, including
+the original combiner bound behavior.
+
 ## Status: development only
 
 This layer only adds the noise functions. It changes nothing in the game, so there is nothing for players to install
