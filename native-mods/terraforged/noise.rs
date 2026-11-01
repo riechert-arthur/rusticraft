@@ -680,6 +680,22 @@ enum ModuleKind {
         slope_max: Module,
         curve: CurveFunction,
     },
+    Frequency {
+        source: Module,
+        x: Module,
+        y: Module,
+    },
+    Gradient {
+        source: Module,
+        lower: Module,
+        upper: Module,
+        strength: Module,
+    },
+    Modulate {
+        source: Module,
+        direction: Module,
+        strength: Module,
+    },
     Select {
         control: Module,
         lower: Module,
@@ -692,6 +708,8 @@ enum ModuleKind {
     Add(Vec<Module>),
     Multiply(Vec<Module>),
     Max(Vec<Module>),
+    Min(Vec<Module>),
+    Subtract(Vec<Module>),
 }
 
 impl Module {
@@ -999,6 +1017,45 @@ impl Module {
                 let alpha = noise_map(delta * step_count, min, max, range);
                 1.0 - lerp(value, inverted, curve.apply(alpha))
             }
+            ModuleKind::Frequency {
+                source,
+                x: x_frequency,
+                y: y_frequency,
+            } => {
+                let x_frequency = x_frequency.value(x, y);
+                let y_frequency = y_frequency.value(x, y);
+                source.value(x * x_frequency, y * y_frequency)
+            }
+            ModuleKind::Gradient {
+                source,
+                lower,
+                upper,
+                strength,
+            } => {
+                let noise_value = source.value(x, y);
+                let upper_bound = upper.value(x, y);
+                if noise_value > upper_bound {
+                    return noise_value;
+                }
+                let amount = strength.value(x, y);
+                let lower_bound = lower.value(x, y);
+                if noise_value < lower_bound {
+                    return java_pow(noise_value, 1.0 - amount);
+                }
+                let alpha = 1.0 - (noise_value - lower_bound) / (upper_bound - lower_bound);
+                java_pow(noise_value, 1.0 - amount * alpha)
+            }
+            ModuleKind::Modulate {
+                source,
+                direction,
+                strength,
+            } => {
+                let angle = direction.value(x, y) * java_pi2();
+                let strength = strength.value(x, y);
+                let dx = sin_lookup(angle) * strength;
+                let dy = sin_lookup(angle + COS_OFFSET) * strength;
+                source.value(x + dx, y + dy)
+            }
             ModuleKind::Select {
                 control,
                 lower,
@@ -1021,6 +1078,8 @@ impl Module {
             ModuleKind::Add(sources) => combine(sources, x, y, |a, b| a + b),
             ModuleKind::Multiply(sources) => combine(sources, x, y, |a, b| a * b),
             ModuleKind::Max(sources) => combine(sources, x, y, java_max),
+            ModuleKind::Min(sources) => combine(sources, x, y, java_min),
+            ModuleKind::Subtract(sources) => combine(sources, x, y, |a, b| a - b),
         }
     }
 
@@ -1049,7 +1108,10 @@ impl Module {
             | ModuleKind::Curve { source, .. }
             | ModuleKind::VariableCurve { source, .. }
             | ModuleKind::PowerCurve { source, .. }
-            | ModuleKind::Steps { source, .. } => source.min_value(),
+            | ModuleKind::Steps { source, .. }
+            | ModuleKind::Frequency { source, .. }
+            | ModuleKind::Gradient { source, .. }
+            | ModuleKind::Modulate { source, .. } => source.min_value(),
             ModuleKind::Add(sources) => combine_bounds(sources, true, |a, b| a + b),
             ModuleKind::Multiply(sources) => combine_bounds(sources, true, |a, b| a * b),
             ModuleKind::Max(sources) => {
@@ -1058,6 +1120,15 @@ impl Module {
                 };
                 rest.iter().fold(first.min_value(), |value, source| {
                     java_max(value, source.max_value())
+                })
+            }
+            ModuleKind::Min(sources) => combine_bounds(sources, true, java_min),
+            ModuleKind::Subtract(sources) => {
+                let Some((first, rest)) = sources.split_first() else {
+                    return 0.0;
+                };
+                rest.iter().fold(first.min_value(), |value, source| {
+                    value - source.max_value()
                 })
             }
             ModuleKind::Abs(source)
@@ -1094,10 +1165,29 @@ impl Module {
             | ModuleKind::Curve { source, .. }
             | ModuleKind::VariableCurve { source, .. }
             | ModuleKind::PowerCurve { source, .. }
-            | ModuleKind::Steps { source, .. } => source.max_value(),
+            | ModuleKind::Steps { source, .. }
+            | ModuleKind::Frequency { source, .. }
+            | ModuleKind::Gradient { source, .. }
+            | ModuleKind::Modulate { source, .. } => source.max_value(),
             ModuleKind::Add(sources) => combine_bounds(sources, false, |a, b| a + b),
             ModuleKind::Multiply(sources) => combine_bounds(sources, false, |a, b| a * b),
             ModuleKind::Max(sources) => combine_bounds(sources, false, java_max),
+            ModuleKind::Min(sources) => {
+                let Some((first, rest)) = sources.split_first() else {
+                    return 0.0;
+                };
+                rest.iter().fold(first.max_value(), |value, source| {
+                    java_min(value, source.min_value())
+                })
+            }
+            ModuleKind::Subtract(sources) => {
+                let Some((first, rest)) = sources.split_first() else {
+                    return 0.0;
+                };
+                rest.iter().fold(first.max_value(), |value, source| {
+                    value - source.min_value()
+                })
+            }
             ModuleKind::Abs(source)
             | ModuleKind::Alpha(source, _)
             | ModuleKind::Invert(source)
@@ -1417,6 +1507,27 @@ impl Module {
         }))
     }
 
+    pub fn frequency(self, x: Self, y: Self) -> Self {
+        Self(Box::new(ModuleKind::Frequency { source: self, x, y }))
+    }
+
+    pub fn gradient(self, lower: Self, upper: Self, strength: Self) -> Self {
+        Self(Box::new(ModuleKind::Gradient {
+            source: self,
+            lower,
+            upper,
+            strength,
+        }))
+    }
+
+    pub fn modulate(self, direction: Self, strength: Self) -> Self {
+        Self(Box::new(ModuleKind::Modulate {
+            source: self,
+            direction,
+            strength,
+        }))
+    }
+
     pub fn select(
         self,
         lower: Self,
@@ -1447,6 +1558,14 @@ impl Module {
 
     pub fn max(sources: Vec<Self>) -> Self {
         Self(Box::new(ModuleKind::Max(sources)))
+    }
+
+    pub fn min(sources: Vec<Self>) -> Self {
+        Self(Box::new(ModuleKind::Min(sources)))
+    }
+
+    pub fn subtract(sources: Vec<Self>) -> Self {
+        Self(Box::new(ModuleKind::Subtract(sources)))
     }
 }
 
@@ -1584,7 +1703,6 @@ impl Domain {
                 direction,
                 strength,
             } => {
-                const COS_OFFSET: f32 = f32::from_bits(0x3fc9_0ff9);
                 let angle = direction.value(x, y) * java_pi2();
                 sin_lookup(angle + COS_OFFSET) * strength.value(x, y)
             }
@@ -1676,6 +1794,8 @@ fn java_min(first: f32, second: f32) -> f32 {
 fn java_pi2() -> f32 {
     (std::f64::consts::PI * 2.0) as f32
 }
+
+const COS_OFFSET: f32 = f32::from_bits(0x3fc9_0ff9);
 
 fn sin_lookup(radians: f32) -> f32 {
     const SIN_COUNT: f32 = 4096.0;
@@ -2536,6 +2656,104 @@ mod tests {
                 [0x00000000, 0x3f800000]
             );
             assert_eq!(bits(points.map(|(x, y)| module.value(x, y))), expected);
+        }
+    }
+
+    #[test]
+    fn scalar_nodes_match_engine_0_3_0() {
+        let source = |kind, seed, scale: f32, octaves, gain| {
+            Module::source(Source::new(
+                kind,
+                SourceConfig {
+                    seed,
+                    octaves,
+                    gain,
+                    frequency: 1.0 / scale,
+                    lacunarity: 2.0,
+                    interpolation: Interpolation::Curve3,
+                },
+            ))
+        };
+        let base = source(SourceKind::Perlin, 1001, 96.0, 4, 0.5);
+        let a = source(SourceKind::Simplex, 1002, 80.0, 3, 0.5)
+            .scale(Module::constant(1.5))
+            .bias(Module::constant(-0.25));
+        let b = source(SourceKind::Ridge, 1003, 128.0, 2, 0.975)
+            .scale(Module::constant(0.75))
+            .bias(Module::constant(0.1));
+        let points = [
+            (0.0, 0.0),
+            (12.25, -98.75),
+            (-4096.5, 8192.25),
+            (123456.75, -0.125),
+            (64.0, 64.0),
+            (-128.0, 32.0),
+            (777.0, -333.0),
+            (-1024.0, -2048.0),
+        ];
+        let cases = [
+            (
+                base.clone().frequency(
+                    source(SourceKind::Simplex, 1004, 256.0, 2, 0.5)
+                        .map(Module::constant(0.5), Module::constant(2.0)),
+                    source(SourceKind::Ridge, 1005, 192.0, 2, 0.975)
+                        .map(Module::constant(0.25), Module::constant(1.5)),
+                ),
+                [0x00000000, 0x3f800000],
+                [
+                    0x3f000000, 0x3f1f4fc3, 0x3efe6792, 0x3f27efc3, 0x3ea1a4da, 0x3ec0bfaa,
+                    0x3f3665b9, 0x3f11cfe3,
+                ],
+            ),
+            (
+                base.clone().gradient(
+                    Module::constant(0.25),
+                    Module::constant(0.75),
+                    source(SourceKind::Simplex, 1006, 64.0, 2, 0.5),
+                ),
+                [0x00000000, 0x3f800000],
+                [
+                    0x3f1837f0, 0x3f1c2d3b, 0x3f28280d, 0x3f2101f4, 0x3ea5e9fb, 0x3f216958,
+                    0x3f2220ae, 0x3f2daaf5,
+                ],
+            ),
+            (
+                base.clone().modulate(
+                    source(SourceKind::Simplex, 1007, 128.0, 2, 0.5),
+                    source(SourceKind::Ridge, 1008, 96.0, 2, 0.975).scale(Module::constant(12.0)),
+                ),
+                [0x00000000, 0x3f800000],
+                [
+                    0x3efbd555, 0x3f385619, 0x3f17ef60, 0x3ef02b87, 0x3eaf69cd, 0x3f03a960,
+                    0x3f11eaba, 0x3f2fcdb9,
+                ],
+            ),
+            (
+                Module::min(vec![base.clone(), a.clone(), b.clone()]),
+                [0xbe800000, 0xbe800000],
+                [
+                    0x3f000000, 0x3f0a6fd8, 0x3f1c821a, 0x3eb15314, 0x3e913646, 0x3f010131,
+                    0x3f0d912a, 0x3e773ddc,
+                ],
+            ),
+            (
+                Module::subtract(vec![base, a, b]),
+                [0xc0066666, 0x3f933333],
+                [
+                    0xbf59999a, 0xbf1f148d, 0xbf850877, 0xbf0c0260, 0xbf68f8d3, 0xbf0c63aa,
+                    0xbf813c31, 0xbed93fa0,
+                ],
+            ),
+        ];
+        for (module, expected_bounds, expected_values) in cases {
+            assert_eq!(
+                [module.min_value().to_bits(), module.max_value().to_bits()],
+                expected_bounds
+            );
+            assert_eq!(
+                bits(points.map(|(x, y)| module.value(x, y))),
+                expected_values
+            );
         }
     }
 }

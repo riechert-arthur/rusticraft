@@ -33,6 +33,9 @@ original blend thresholds and normalization range.
 The curve layer adds midpoint and S-curves, variable curves, symmetric power curves and configurable
 step smoothing with TerraForged's original approximate exponential and mapping behavior.
 
+The scalar graph layer adds coordinate frequency, gradient shaping, directional modulation,
+minimum and subtraction nodes, including the original combiner bound calculations.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
