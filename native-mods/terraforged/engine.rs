@@ -731,6 +731,61 @@ pub enum SpawnType {
 
 /// Engine's `WorldSettings.Properties`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum ContinentType {
+    Multi = 0,
+    Single = 1,
+    MultiImproved = 2,
+    Fancy = 3,
+}
+
+impl ContinentType {
+    pub const fn index(self) -> i32 {
+        self as i32
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ContinentShape {
+    Euclidean,
+    Manhattan,
+    Natural,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ContinentSettings {
+    pub continent_type: ContinentType,
+    pub continent_shape: ContinentShape,
+    pub continent_scale: i32,
+    pub continent_jitter: f32,
+    pub continent_skipping: f32,
+    pub continent_size_variance: f32,
+    pub continent_noise_octaves: i32,
+    pub continent_noise_gain: f32,
+    pub continent_noise_lacunarity: f32,
+}
+
+impl ContinentSettings {
+    pub const DEFAULT_SCALE: i32 = 3_000;
+}
+
+impl Default for ContinentSettings {
+    fn default() -> Self {
+        Self {
+            continent_type: ContinentType::MultiImproved,
+            continent_shape: ContinentShape::Euclidean,
+            continent_scale: Self::DEFAULT_SCALE,
+            continent_jitter: 0.7,
+            continent_skipping: 0.25,
+            continent_size_variance: 0.25,
+            continent_noise_octaves: 5,
+            continent_noise_gain: 0.26,
+            continent_noise_lacunarity: 4.33,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WorldProperties {
     pub spawn_type: SpawnType,
     pub world_height: i32,
@@ -767,6 +822,14 @@ impl Default for WorldControlPoints {
             inland: 0.502,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WorldSettings {
+    pub seed: i64,
+    pub continent: ContinentSettings,
+    pub control_points: WorldControlPoints,
+    pub properties: WorldProperties,
 }
 
 /// Engine's heightmap `ControlPoints`: the configured points if [`ControlPoints::validate`]
@@ -1915,5 +1978,41 @@ mod tests {
             assert_eq!(ys.map(|y| levels.water(y).to_bits()), case.water);
             assert_eq!(ys.map(|y| levels.ground(y).to_bits()), case.ground);
         }
+    }
+
+    #[test]
+    fn world_settings_match_engine_0_3_0() {
+        let settings = WorldSettings::default();
+        assert_eq!(settings.seed, 0);
+        assert_eq!(
+            settings.continent.continent_type,
+            ContinentType::MultiImproved
+        );
+        assert_eq!(
+            settings.continent.continent_shape,
+            ContinentShape::Euclidean
+        );
+        assert_eq!(settings.continent.continent_scale, 3_000);
+        assert_eq!(settings.continent.continent_jitter.to_bits(), 0x3f333333);
+        assert_eq!(settings.continent.continent_skipping.to_bits(), 0x3e800000);
+        assert_eq!(
+            settings.continent.continent_size_variance.to_bits(),
+            0x3e800000
+        );
+        assert_eq!(settings.continent.continent_noise_octaves, 5);
+        assert_eq!(
+            settings.continent.continent_noise_gain.to_bits(),
+            0x3e851eb8
+        );
+        assert_eq!(
+            settings.continent.continent_noise_lacunarity.to_bits(),
+            0x408a8f5c
+        );
+        assert_eq!(settings.properties, WorldProperties::default());
+        assert_eq!(settings.control_points, WorldControlPoints::default());
+        assert_eq!(ContinentType::Multi.index(), 0);
+        assert_eq!(ContinentType::Single.index(), 1);
+        assert_eq!(ContinentType::MultiImproved.index(), 2);
+        assert_eq!(ContinentType::Fancy.index(), 3);
     }
 }

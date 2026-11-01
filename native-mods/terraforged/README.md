@@ -162,6 +162,9 @@ terrain starts at y = -64. Its tests check every field and conversion against a 
 320 and 384 block heights, `int` overflow of the sea level and of `y - waterY`, and heights beyond 2^24. Engine's
 static `Levels.scale(steps, settings)` is not ported: neither Engine nor TerraForged calls it.
 
+The world-settings layer completes TerraForged's root settings object with continent generator mode,
+shape, scale, jitter, skipping, size variance and octave-distortion defaults.
+
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types and its world levels. They change nothing in the game, so there is
