@@ -2270,7 +2270,7 @@ impl Module {
     }
 
     /// Noise2D 2cb4843's `getValue(int seed, float x, float y)` for the scalar nodes, `Warp` and the `Base`,
-    /// `Blend` and `VariableBlend` selectors: every node passes the call's seed unchanged to its children (only
+    /// `Blend`, `VariableBlend`, `Select` and `MultiBlend` selectors: every node passes the call's seed unchanged to its children (only
     /// octave sources add their own seed, see [`Source::value_seed_first`]); their arithmetic and evaluation order
     /// are the jar's. `Warp` samples its source at the domain's seed-first coordinates ([`Domain::try_x_seed_first`]).
     /// Nodes not yet ported to seed-first sampling return an error instead of falling back to [`Module::value`],
@@ -2391,6 +2391,68 @@ impl Module {
                 }
                 let alpha = (select - min) / (max - min);
                 lerp(sample(lower)?, sample(upper)?, interpolation.apply(alpha))
+            }
+            ModuleKind::Select {
+                control,
+                lower,
+                upper,
+                falloff,
+                lower_curve: (lower_min, lower_max, lower_range),
+                upper_curve: (upper_min, upper_max, upper_range),
+                interpolation,
+                ..
+            } => {
+                let value = sample(control)?;
+                if *falloff == 0.0 {
+                    if value < *lower_max {
+                        sample(lower)?
+                    } else if value > *upper_min {
+                        sample(upper)?
+                    } else {
+                        sample(lower)?
+                    }
+                } else if value < *lower_min {
+                    sample(lower)?
+                } else if value < *lower_max {
+                    let alpha = (value - *lower_min) / *lower_range;
+                    lerp(sample(lower)?, sample(upper)?, interpolation.apply(alpha))
+                } else if value < *upper_min {
+                    sample(upper)?
+                } else if value < *upper_max {
+                    let alpha = (value - *upper_min) / *upper_range;
+                    lerp(sample(upper)?, sample(lower)?, interpolation.apply(alpha))
+                } else {
+                    sample(lower)?
+                }
+            }
+            ModuleKind::MultiBlend {
+                control,
+                nodes,
+                max_index,
+                blend_range,
+                interpolation,
+                ..
+            } => {
+                let selector = sample(control)?;
+                let index = round(selector * *max_index as f32);
+                let mut min = multi_blend_slot(nodes, Some(index));
+                let mut max = min;
+                if *blend_range == 0.0 {
+                    return sample(&min.source);
+                }
+                if selector > min.max {
+                    max = multi_blend_slot(nodes, index.checked_add(1));
+                } else if selector < min.min {
+                    min = multi_blend_slot(nodes, index.checked_sub(1));
+                } else {
+                    return sample(&min.source);
+                }
+                let alpha = clamp((selector - min.max) / *blend_range, 0.0, 1.0);
+                lerp(
+                    sample(&min.source)?,
+                    sample(&max.source)?,
+                    interpolation.apply(alpha),
+                )
             }
             _ => return Err("runtime-seeded sampling is not implemented for this graph node"),
         })
@@ -6673,6 +6735,247 @@ mod tests {
             }
             assert_eq!(hash, expected, "family {index}");
         }
+    }
+
+    #[test]
+    fn runtime_seeded_selection_matches_current_noise2d() {
+        let source = Module::source(Source::new(
+            SourceKind::Simplex,
+            SourceConfig {
+                seed: i32::MAX,
+                frequency: 0.125,
+                octaves: 2,
+                gain: 0.65,
+                ..SourceConfig::default()
+            },
+        ));
+        let control = Module::source(Source::new(
+            SourceKind::Simplex2,
+            SourceConfig {
+                seed: -91,
+                frequency: 0.25,
+                octaves: 2,
+                ..SourceConfig::default()
+            },
+        ));
+        let lower = control.clone().scale(Module::constant(0.35));
+        let upper = source.clone().bias(Module::constant(0.2));
+        let expected: [[u64; 4]; 15] = [
+            [
+                0x454ee30bb501f8ab,
+                0x91167f59a2602b19,
+                0x903487924e71cd82,
+                0xcd4b473be6caf42c,
+            ],
+            [
+                0x57209fa7d34d63c5,
+                0x09bd100dd2bb63b7,
+                0x2e8768c6417d27c1,
+                0x55d8cdb8050840ba,
+            ],
+            [
+                0x57209fa7d34d63c5,
+                0x09bd100dd2bb63b7,
+                0x2e8768c6417d27c1,
+                0x55d8cdb8050840ba,
+            ],
+            [
+                0xd572f200e25732e2,
+                0xb8d31fd8e60b1af6,
+                0x672717bb46dfb212,
+                0x7c9068600a5b1ed0,
+            ],
+            [
+                0xd572f200e25732e2,
+                0xa4d12615eb1ed738,
+                0xcbef9eb5c64f7039,
+                0x450fd4be505a6f55,
+            ],
+            [
+                0x5a12c5215b880dbb,
+                0x95709a59a9c546fa,
+                0x9ee78c913a3e2861,
+                0xdde3d8548c4f2aaf,
+            ],
+            [
+                0x57209fa7d34d63c5,
+                0x09bd100dd2bb63b7,
+                0x2e8768c6417d27c1,
+                0x55d8cdb8050840ba,
+            ],
+            [
+                0x57209fa7d34d63c5,
+                0x09bd100dd2bb63b7,
+                0x2e8768c6417d27c1,
+                0x55d8cdb8050840ba,
+            ],
+            [
+                0xd572f200e25732e2,
+                0xac7116b4dbfa2b20,
+                0xdbb67c1dc1d3be6b,
+                0x46faf1dff18ebd14,
+            ],
+            [
+                0xd572f200e25732e2,
+                0xa4d12615eb1ed738,
+                0xcbef9eb5c64f7039,
+                0x450fd4be505a6f55,
+            ],
+            [
+                0x4a0eaf34a20c8772,
+                0x9704f259ac745882,
+                0x3e0f2991d6cfd738,
+                0x3d98e93d606a694d,
+            ],
+            [
+                0x57209fa7d34d63c5,
+                0x09bd100dd2bb63b7,
+                0x2e8768c6417d27c1,
+                0x55d8cdb8050840ba,
+            ],
+            [
+                0x57209fa7d34d63c5,
+                0x09bd100dd2bb63b7,
+                0x2e8768c6417d27c1,
+                0x55d8cdb8050840ba,
+            ],
+            [
+                0xd572f200e25732e2,
+                0x0d745838d1999f72,
+                0x9f1bd15277ff1be1,
+                0xd14921d7d5e43646,
+            ],
+            [
+                0xd572f200e25732e2,
+                0xa4d12615eb1ed738,
+                0xcbef9eb5c64f7039,
+                0x450fd4be505a6f55,
+            ],
+        ];
+        for (interpolation_index, interpolation) in [
+            Interpolation::Linear,
+            Interpolation::Curve3,
+            Interpolation::Curve4,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let graphs = [
+                control.clone().select(
+                    lower.clone(),
+                    upper.clone(),
+                    0.25,
+                    0.75,
+                    0.125,
+                    interpolation,
+                ),
+                control.clone().select(
+                    lower.clone(),
+                    upper.clone(),
+                    0.25,
+                    0.75,
+                    0.0,
+                    interpolation,
+                ),
+                control.clone().select(
+                    lower.clone(),
+                    upper.clone(),
+                    0.75,
+                    0.25,
+                    0.0,
+                    interpolation,
+                ),
+                control.clone().multi_blend(
+                    0.8,
+                    interpolation,
+                    vec![lower.clone(), source.clone(), upper.clone()],
+                ),
+                control.clone().multi_blend(
+                    0.0,
+                    interpolation,
+                    vec![lower.clone(), source.clone(), upper.clone()],
+                ),
+            ];
+            for (index, graph) in graphs.iter().enumerate() {
+                for (seed, expected) in [0, 17, -91, i32::MAX]
+                    .into_iter()
+                    .zip(expected[interpolation_index * 5 + index])
+                {
+                    let mut hash = 0xcbf29ce484222325u64;
+                    for (x, y) in [
+                        (0.0, 0.0),
+                        (0.125, -0.75),
+                        (12.34, 56.78),
+                        (-1234.5, 987.25),
+                    ] {
+                        hash ^=
+                            u64::from(graph.try_value_seed_first(seed, x, y).unwrap().to_bits());
+                        hash = hash.wrapping_mul(0x100000001b3);
+                    }
+                    assert_eq!(
+                        hash, expected,
+                        "interpolation {interpolation_index}, graph {index}, seed {seed}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn seeded_selection_preserves_boundaries_and_lazy_children() {
+        for (control, expected) in [0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0]
+            .into_iter()
+            .zip([0.25, 0.25, 0.5, 0.75, 0.75, 0.75, 0.5, 0.25, 0.25])
+        {
+            let graph = Module::constant(control).select(
+                Module::constant(0.25),
+                Module::constant(0.75),
+                0.25,
+                0.75,
+                0.125,
+                Interpolation::Linear,
+            );
+            assert_eq!(graph.try_value_seed_first(17, 0.0, 0.0), Ok(expected));
+        }
+        let invalid = Module::constant(0.5).cache();
+        for (control, lower, upper, expected) in [
+            (0.0, Module::constant(0.25), invalid.clone(), 0.25),
+            (0.5, invalid.clone(), Module::constant(0.75), 0.75),
+            (1.0, Module::constant(0.25), invalid.clone(), 0.25),
+        ] {
+            assert_eq!(
+                Module::constant(control)
+                    .select(lower, upper, 0.25, 0.75, 0.125, Interpolation::Linear)
+                    .try_value_seed_first(1, 0.0, 0.0),
+                Ok(expected)
+            );
+        }
+        for blend in [0.0, 0.8] {
+            let graph = Module::constant(0.0).multi_blend(
+                blend,
+                Interpolation::Linear,
+                vec![Module::constant(0.25), invalid.clone(), invalid.clone()],
+            );
+            assert_eq!(graph.try_value_seed_first(1, 0.0, 0.0), Ok(0.25));
+        }
+        let boundary = Module::constant(0.25).select(
+            Module::constant(0.25),
+            invalid.clone(),
+            0.25,
+            0.75,
+            0.125,
+            Interpolation::Linear,
+        );
+        assert!(boundary.try_value_seed_first(1, 0.0, 0.0).is_err());
+        let reversed = Module::constant(0.5).select(
+            Module::constant(0.25),
+            invalid,
+            0.75,
+            0.25,
+            0.0,
+            Interpolation::Linear,
+        );
+        assert_eq!(reversed.try_value_seed_first(1, 0.0, 0.0), Ok(0.25));
     }
 
     #[test]
