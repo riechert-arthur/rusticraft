@@ -8,6 +8,10 @@ modules. It intentionally does not alter world generation yet.
 The next layer adds TerraForged's octave configuration and Perlin, Perlin2, legacy simplex,
 improved simplex and cubic sources, including the original explicit-seed behavior.
 
+The graph layer translates TerraForged's constants, source nodes, core modifiers and arithmetic
+combiners. Its tests preserve Engine 0.3.0's reported bounds as well as raw sample bits, including
+the original combiner bound behavior.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
