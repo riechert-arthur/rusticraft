@@ -124,3 +124,10 @@ file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_concurrent"
 source = "concurrent.rs"
 visibility = "pub"
+
+[[module]]
+id = "climate"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_climate"
+source = "climate.rs"
+visibility = "pub"

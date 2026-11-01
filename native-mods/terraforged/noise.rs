@@ -1247,6 +1247,7 @@ struct CacheValue {
 
 enum ModuleKind {
     Constant(f32),
+    Custom(Arc<dyn Fn(f32, f32) -> f32 + Send + Sync>),
     Source(Source),
     ErosionRidge {
         ridge: ErosionRidge,
@@ -1651,6 +1652,14 @@ impl Module {
         Self::node(ModuleKind::Constant(value), value, value)
     }
 
+    pub fn custom(
+        min: f32,
+        max: f32,
+        value: impl Fn(f32, f32) -> f32 + Send + Sync + 'static,
+    ) -> Self {
+        Self::node(ModuleKind::Custom(Arc::new(value)), min, max)
+    }
+
     pub fn source(source: Source) -> Self {
         Self::node(
             ModuleKind::Source(source),
@@ -1724,6 +1733,7 @@ impl Module {
     pub fn value(&self, x: f32, y: f32) -> f32 {
         match &self.0.kind {
             ModuleKind::Constant(value) => *value,
+            ModuleKind::Custom(value) => value(x, y),
             ModuleKind::Source(source) => source.value(x, y),
             ModuleKind::ErosionRidge { ridge, source } => ridge.value(x, y, source),
             ModuleKind::CellSource {
