@@ -23,6 +23,7 @@
  */
 
 use super::{
+    terraforged_concurrent::LazyCallable,
     terraforged_engine::{Cell, TerrainRegistry},
     terraforged_filters::WorldFilters,
     terraforged_river::Rivermap,
@@ -132,6 +133,24 @@ where
     /// `chunkToRegion(i)`: `i >> factor`, the shift count taken modulo 32 as in Java.
     pub const fn chunk_to_region(&self, chunk: i32) -> i32 {
         chunk.wrapping_shr(self.factor as u32)
+    }
+
+    pub fn get_tile(
+        &self,
+        region_x: i32,
+        region_z: i32,
+    ) -> LazyCallable<Tile, impl Fn() -> Tile + '_> {
+        LazyCallable::new(move || self.generate_region(region_x, region_z))
+    }
+
+    pub fn get_zoomed_tile(
+        &self,
+        center_x: f32,
+        center_z: f32,
+        zoom: f32,
+        filter: bool,
+    ) -> LazyCallable<Tile, impl Fn() -> Tile + '_> {
+        LazyCallable::new(move || self.generate_zoomed_region(center_x, center_z, zoom, filter))
     }
 
     /// `generateRegion(regionX, regionZ)`: an empty region ([`Self::create_empty_region`]), filled

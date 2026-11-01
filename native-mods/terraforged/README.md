@@ -821,6 +821,9 @@ masks, for two filter settings groups and six sizes and regions (borderless, wid
 five zoomed regions on each (fractional, unit, negative, NaN and huge centers and zooms, filters on and off) and
 `chunkToRegion` for shift factors Java masks, folding the stage trace and every cell; debug and release builds agree.
 
+TerraForged's lazy callable now computes exactly once under concurrent access, reports completion and
+non-cancellation like the Java source, and backs lazy regular and zoomed tile generation handles.
+
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors and the tile generator. They change nothing in the game, so there is
