@@ -340,6 +340,12 @@ generator, and keep the mod enabled for that world's unexplored chunks.
 
 ## Development
 
+The current-source continent shape layer now blends the nearest 25 cells, preserving threshold,
+falloff, and separate primary/base noise semantics. Mixed-cell outputs are checked against the
+Java ShapeGenerator bytecode (with a plain NoiseSample holder replacing Minecraft registry setup).
+Its cell-provider interface is ready for the current-source continent generator; this does not yet
+connect the mod to playable world generation.
+
 The noise layer is ordinary Rust and can be tested without Minecraft resources:
 
 ```sh

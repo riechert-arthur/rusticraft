@@ -229,3 +229,10 @@ file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_continent_config"
 source = "continent_config.rs"
 visibility = "pub"
+
+[[module]]
+id = "continent_shape"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_continent_shape"
+source = "continent_shape.rs"
+visibility = "pub"
