@@ -548,6 +548,9 @@ modules, including source, modifier, selector, combiner, curve, and domain nodes
 Terrain-type and terrain-noise registries now preserve keyed lookup, deterministic ordering,
 built-in identity, custom parent delegation, and current Java's unknown-parent fallback behavior.
 
+All eighteen current terrain-type JSON resources are bundled into the native build and decoded from
+their original registry keys without requiring a TerraForged checkout at runtime.
+
 The noise layer is ordinary Rust and can be tested without Minecraft resources:
 
 ```sh
