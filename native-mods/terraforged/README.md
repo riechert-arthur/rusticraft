@@ -132,6 +132,9 @@ river profiles, fork scaling and the original variance semantics used by later n
 The river-warp layer adds the paired lake and channel domain transforms used while carving generated
 networks, including TerraForged's original seed increments and currently unused mega-warp scaling.
 
+The river-geometry layer adds normalized channel segments, expanded bounds, intersections, shortening,
+position sampling and simplex-driven local warping with the original endpoint and wiggle fades.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
