@@ -93,6 +93,9 @@ directional fancy-mountain erosion and the original advanced terrace variant.
 The cell-model layer adds TerraForged's complete terrain sample state, Java defaults, copy/reset and
 absent-cell behavior, plus the ordered biome-type identities carried by each sample.
 
+The terrain-populator layer adds regular and scaled cell population, weight and variance metadata,
+configuration round-tripping, output clamping and Java-compatible NaN behavior.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:

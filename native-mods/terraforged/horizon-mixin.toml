@@ -26,3 +26,10 @@ file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_landforms"
 source = "landforms.rs"
 visibility = "pub"
+
+[[module]]
+id = "populator"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_populator"
+source = "populator.rs"
+visibility = "pub"
