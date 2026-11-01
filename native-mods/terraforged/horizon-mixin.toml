@@ -68,3 +68,10 @@ file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_continent"
 source = "continent.rs"
 visibility = "pub"
+
+[[module]]
+id = "advanced_continent"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_advanced_continent"
+source = "advanced_continent.rs"
+visibility = "pub"

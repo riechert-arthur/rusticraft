@@ -387,9 +387,12 @@ and NaN coordinates for six configs (all three shapes, jitter 0, 1 and NaN, scal
 control points), against a Java oracle running Engine's classes on Engine cells; the oracle lives outside Git, in
 `.local/terraforged/oracles/continent/`.
 
+The advanced-continent layer adds variable-size warped Voronoi continents, skipping, corrected
+centers, cliff and bay shaping, and exact iterative edge and ocean-distance searches.
+
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities and its simple continent generator. They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities and its simple and advanced continent generators. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
