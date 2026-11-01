@@ -21,6 +21,9 @@ Engine 0.3.0's interpolation, edge conditions and reported source bounds.
 The multi-blend layer adds TerraForged's evenly spaced multi-source selector, including its exact
 slot boundaries, Java rounding behavior and interpolation across neighboring sources.
 
+The terrace layer adds TerraForged's ramp, cliff and ramp-height controlled step modifier,
+preserving its original step spacing, clamping and boundary behavior.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
