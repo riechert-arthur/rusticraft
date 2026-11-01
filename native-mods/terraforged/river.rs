@@ -22,7 +22,41 @@
  * SOFTWARE.
  */
 
-use super::terraforged_engine::{Lake, Levels, River, Wetland};
+use super::{
+    terraforged::{Domain, Interpolation, Module, Source, SourceConfig, SourceKind},
+    terraforged_engine::{Lake, Levels, River, Wetland},
+};
+
+#[derive(Clone)]
+pub struct GenWarp {
+    pub lake: Domain,
+    pub river: Domain,
+}
+
+impl GenWarp {
+    pub fn direct() -> Self {
+        Self {
+            lake: Domain::direct(),
+            river: Domain::direct(),
+        }
+    }
+
+    pub fn new(mut seed: i32, _continent_scale: i32) -> Self {
+        seed = seed.wrapping_add(1);
+        let lake = noise_warp(seed, 200, 1, 300.0);
+        seed = seed.wrapping_add(1);
+        let lake = lake.add(noise_warp(seed, 50, 2, 50.0));
+        seed = seed.wrapping_add(1);
+        let river = noise_warp(seed, 95, 1, 25.0);
+        seed = seed.wrapping_add(1);
+        let river = river.add(noise_warp(seed, 16, 1, 5.0));
+        Self { lake, river }
+    }
+
+    pub fn scale_mega_warp(scale: i32) -> i32 {
+        noise_round(scale as f32 / 3000.0 * 1500.0)
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Variance {
@@ -274,6 +308,27 @@ fn noise_round(value: f32) -> i32 {
     (value + 0.5) as i32
 }
 
+fn noise_warp(seed: i32, scale: i32, octaves: usize, strength: f32) -> Domain {
+    let source = |seed| {
+        Module::source(Source::new(
+            SourceKind::Perlin,
+            SourceConfig {
+                seed,
+                octaves,
+                gain: 0.5,
+                frequency: 1.0 / scale as f32,
+                lacunarity: 2.0,
+                interpolation: Interpolation::Curve3,
+            },
+        ))
+    };
+    Domain::domain_warp(
+        source(seed),
+        source(seed.wrapping_add(1)),
+        Module::constant(strength),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::terraforged_engine::RiverSettings;
@@ -346,5 +401,44 @@ mod tests {
             Variance::range(0.25).apply_scaled(0.5, 2.0).to_bits(),
             0x3fe00000
         );
+    }
+
+    #[test]
+    fn generation_warps_match_engine_0_3_0() {
+        let warp = GenWarp::new(12_345, 3_000);
+        assert_eq!(GenWarp::scale_mega_warp(3_000), 1_500);
+        assert_eq!(GenWarp::scale_mega_warp(4_500), 2_250);
+        assert_eq!(
+            [
+                (0.0, 0.0),
+                (12.25, -98.75),
+                (-4096.5, 8192.25),
+                (123456.75, -0.125)
+            ]
+            .map(|(x, z)| [
+                warp.lake.x(x, z).to_bits(),
+                warp.lake.y(x, z).to_bits(),
+                warp.river.x(x, z).to_bits(),
+                warp.river.y(x, z).to_bits(),
+                warp.lake.offset_x(x, z).to_bits(),
+                warp.river.offset_y(x, z).to_bits(),
+            ]),
+            [
+                [0, 0, 0, 0, 0, 0],
+                [
+                    0xc1d41efe, 0xc2b23d7a, 0x4137be2b, 0xc2c129bf, 0xc21b0f7f, 0x400ac828
+                ],
+                [
+                    0xc582a736, 0x45ffbe18, 0xc5802959, 0x45ffe9d0, 0xc2a8cd8f, 0xc0417f7c
+                ],
+                [
+                    0x47f13e31, 0x4175d274, 0x47f123e3, 0x40d4f618, 0x426e8747, 0x40d8f618
+                ],
+            ]
+        );
+
+        let direct = GenWarp::direct();
+        assert_eq!(direct.lake.x(12.25, -98.75).to_bits(), 0x41440000);
+        assert_eq!(direct.river.y(12.25, -98.75).to_bits(), 0xc2c58000);
     }
 }
