@@ -1356,6 +1356,44 @@ impl ContinentSampler for super::terraforged_fancy::FancyContinentGenerator {
     }
 }
 
+pub trait SimpleContinentSampler: ContinentSampler {
+    fn distance_to_ocean(&self, center_x: i32, center_z: i32, dx: f32, dz: f32) -> f32;
+}
+
+impl<T: SimpleContinentSampler + ?Sized> SimpleContinentSampler for &T {
+    fn distance_to_ocean(&self, center_x: i32, center_z: i32, dx: f32, dz: f32) -> f32 {
+        T::distance_to_ocean(*self, center_x, center_z, dx, dz)
+    }
+}
+
+impl ContinentSampler for super::terraforged_continent::SimpleContinentGenerator {
+    fn edge_value(&self, x: f32, z: f32) -> f32 {
+        super::terraforged_continent::SimpleContinentGenerator::edge_value(self, x, z)
+    }
+}
+
+impl SimpleContinentSampler for super::terraforged_continent::SimpleContinentGenerator {
+    fn distance_to_ocean(&self, center_x: i32, center_z: i32, dx: f32, dz: f32) -> f32 {
+        super::terraforged_continent::SimpleContinentGenerator::distance_to_ocean(
+            self, center_x, center_z, dx, dz,
+        )
+    }
+}
+
+impl ContinentSampler for super::terraforged_advanced_continent::AdvancedContinentGenerator {
+    fn edge_value(&self, x: f32, z: f32) -> f32 {
+        super::terraforged_advanced_continent::AdvancedContinentGenerator::edge_value(self, x, z)
+    }
+}
+
+impl SimpleContinentSampler for super::terraforged_advanced_continent::AdvancedContinentGenerator {
+    fn distance_to_ocean(&self, center_x: i32, center_z: i32, dx: f32, dz: f32) -> f32 {
+        super::terraforged_advanced_continent::AdvancedContinentGenerator::distance_to_ocean(
+            self, center_x, center_z, dx, dz,
+        )
+    }
+}
+
 pub struct BaseRiverGenerator<C> {
     pub count: i32,
     pub continent_scale: i32,
@@ -1636,6 +1674,70 @@ impl<C: ContinentSampler> BaseRiverGenerator<C> {
             settings,
             self.levels,
         )
+    }
+}
+
+pub struct SimpleRiverGenerator<C> {
+    base: BaseRiverGenerator<C>,
+}
+
+impl<C: SimpleContinentSampler> SimpleRiverGenerator<C> {
+    pub fn new(
+        continent: C,
+        root_seed: i32,
+        world: super::terraforged_engine::WorldSettings,
+        rivers: super::terraforged_engine::RiverSettings,
+        levels: Levels,
+    ) -> Self {
+        Self {
+            base: BaseRiverGenerator::new(continent, root_seed, world, rivers, levels),
+        }
+    }
+
+    pub fn generate_rivers(&self, x: i32, z: i32, id: i64) -> Rivermap {
+        self.base
+            .generate_rivers(x, z, id, |base, x, z, random, warp| {
+                let start = random.next_float();
+                let spacing = java_pi2() / base.count as f32;
+                let spacing_variance = spacing * 0.75;
+                let spacing_bias = -spacing_variance / 2.0;
+                let mut roots = Vec::with_capacity(base.count as usize);
+                for index in 0..base.count {
+                    let variance = random.next_float() * spacing_variance + spacing_bias;
+                    let angle = start + spacing * index as f32 + variance;
+                    let direction_x = sin_lookup(angle);
+                    let direction_z = cos_lookup(angle);
+                    let start_modifier = 0.05 + random.next_float() * 0.45;
+                    let length = base
+                        .continent
+                        .distance_to_ocean(x, z, direction_x, direction_z);
+                    let start_distance = 400.0_f32.max(start_modifier * length);
+                    let x1 = x as f32 + direction_x * start_distance;
+                    let z1 = z as f32 + direction_z * start_distance;
+                    let x2 = x as f32 + direction_x * length;
+                    let z2 = z as f32 + direction_z * length;
+                    let valley_size = River::VALLEY_WIDTH as f32 * River::MAIN_VALLEY.next(random);
+                    let river = River::new(
+                        x1 as i32 as f32,
+                        z1 as i32 as f32,
+                        x2 as i32 as f32,
+                        z2 as i32 as f32,
+                    );
+                    let settings = RiverCarverSettings {
+                        valley_curve: RiverCarver::valley_type(random),
+                        fade_in: base.main.fade,
+                        valley_size,
+                        connecting: false,
+                    };
+                    let river_warp = RiverWarp::create_range(0.1, 0.85, random);
+                    let carver =
+                        RiverCarver::new(river, river_warp, base.main, settings, base.levels);
+                    let mut branch = RiverNetwork::builder(carver);
+                    base.add_lake(&mut branch, random, warp);
+                    roots.push(branch);
+                }
+                roots
+            })
     }
 }
 
@@ -2312,6 +2414,83 @@ mod tests {
         });
         assert_eq!((map.x(), map.z()), (-7, 9));
         assert_eq!(*id.lock().unwrap() as u64, 0x00000009fffffff9);
+    }
+
+    #[test]
+    fn simple_rivers_match_engine_0_3_0() {
+        let world = WorldSettings {
+            seed: 12_345,
+            ..WorldSettings::default()
+        };
+        let mut seed = super::super::terraforged_engine::Seed::new(12_345);
+        let continent =
+            super::super::terraforged_continent::SimpleContinentGenerator::multi(&mut seed, world);
+        let center = continent.nearest_center(1_000.0, -2_000.0);
+        let x = super::super::terraforged_util::unpack_left(center);
+        let z = super::super::terraforged_util::unpack_right(center);
+        let levels = Levels::from_properties(world.properties);
+        let generator = SimpleRiverGenerator::new(
+            &continent,
+            12_345,
+            world,
+            DefaultRiverSettings::default(),
+            levels,
+        );
+        let id = (i64::from(z) << 32) | (i64::from(x) & 0xffff_ffff);
+        let map = generator.generate_rivers(x, z, id);
+        assert_eq!(
+            (x, z, id as u64, map.network_count()),
+            (538, -8_737, 0xffffdddf0000021a, 8)
+        );
+        assert_eq!(
+            map.root_rivers()
+                .into_iter()
+                .map(|(river, children)| {
+                    (
+                        river.x1.to_bits(),
+                        river.z1.to_bits(),
+                        river.x2.to_bits(),
+                        river.z2.to_bits(),
+                        children,
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                (0x444f0000, 0xc6116400, 0x454c4000, 0xc65bd800, 2),
+                (0x44610000, 0xc6017c00, 0x45988800, 0xc5518000, 2),
+                (0x40400000, 0xc61e3800, 0xc459c000, 0xc641c000, 1),
+                (0xc4954000, 0xc5ff4000, 0xc538e000, 0xc5ed3000, 1),
+                (0x44358000, 0xc5e18800, 0x44abc000, 0xc4f9c000, 2),
+                (0x43500000, 0xc60c9c00, 0xc4d9e000, 0xc624e800, 0),
+                (0x45674000, 0xc610e400, 0x45d75800, 0xc6195800, 3),
+                (0xc4238000, 0xc5f5c800, 0xc5474000, 0xc5bbe000, 1),
+            ]
+        );
+
+        for (sample_x, sample_z, value, mask, erosion, terrain) in [
+            (0x45000000, 0xc6369e00, 0x3e85544f, 0x37b58000, false, 0),
+            (0x4534a800, 0xc5b5dc00, 0x3e855edc, 0x38690000, false, 0),
+            (0xc3d90000, 0xc62ffc00, 0x3e85609e, 0x37eb0000, false, 0),
+            (0xc501c000, 0xc5f63800, 0x3e8561e1, 0x39ff5000, false, 0),
+            (0x44834000, 0xc58ffc00, 0x3e801994, 0x33800000, true, 0),
+            (0xc43fe000, 0xc618c200, 0x3e855895, 0x37580000, false, 0),
+            (0x45a57c00, 0xc6151e00, 0x3e8598d9, 0x3b6fa300, false, 0),
+            (0xc4f02000, 0xc5d8d400, 0x3e854020, 0x379e8000, false, 0),
+        ] {
+            let mut cell = Cell::default();
+            cell.value = 0.6;
+            cell.river_mask = 1.0;
+            cell.continent_edge = 0.4;
+            map.apply(
+                &mut cell,
+                f32::from_bits(sample_x),
+                f32::from_bits(sample_z),
+            );
+            assert_eq!(cell.value.to_bits(), value);
+            assert_eq!(cell.river_mask.to_bits(), mask);
+            assert_eq!(cell.erosion_mask, erosion);
+            assert_eq!(cell.terrain.id(), terrain);
+        }
     }
 
     #[test]

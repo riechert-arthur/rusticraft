@@ -159,6 +159,9 @@ island IDs, and immediately generates their branches and wetlands in the origina
 The river-cache layer memoizes packed continent coordinates with TerraForged's five-minute expiry,
 preserves the legacy seed layout, and exposes cached fancy-continent rivermaps through shared handles.
 
+The simple-river layer distributes integer-ended roots around simple and advanced continent centers,
+then feeds their lakes, forks and wetlands through the shared Java-compatible network generator.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
