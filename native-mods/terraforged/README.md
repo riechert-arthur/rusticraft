@@ -321,6 +321,9 @@ field against a Java oracle running Engine's selector and lerper on Engine cells
 (`RegionModule`, then the lerper) over real landforms with ModTerrains' weights; the oracle lives outside Git, in
 `.local/terraforged/oracles/region_selection/`.
 
+The volcano layer adds cell-driven cone height, inversion throats, lowland blending and river/water
+pipe demotion with exact Engine seed consumption and terrain identity behavior.
+
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators and its terrain regions. They change nothing in the game, so there is
