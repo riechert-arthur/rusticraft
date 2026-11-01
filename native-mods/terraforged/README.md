@@ -144,6 +144,9 @@ river-mask shaping, overlap checks and the float bounds accumulator used by rive
 The wetland layer adds line-bounded valleys, pools, banks and seeded mound noise, including separate
 warped geometry and terrain-noise coordinates plus exact wetland tagging and erosion masks.
 
+The river-network layer recursively composes warped channel carvers, lakes, wetlands and child
+branches, including aggregate bounds and TerraForged's branch-overlap checks.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
