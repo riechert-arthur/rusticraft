@@ -210,6 +210,9 @@ sixteen cell iteration, and mutable generation visitor contract over the tile ba
 Tile heightmap traversal now runs base terrain, contextual rivermap selection, river carving, and climate
 in TerraForged's chunk-major order while reusing the current continent's rivermap across cells.
 
+Cached tile traversal delegates each integer block to TerraForged's contextual heightmap cache, copying
+completed cells on hits without rerunning base, river, lookup, or climate stages.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
