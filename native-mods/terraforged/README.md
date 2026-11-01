@@ -222,6 +222,9 @@ before the same base, rivermap, river, and climate stages.
 Cached zoomed traversal floors transformed samples with TerraForged's Engine 0.3.0 semantics and reuses
 completed cache cells when multiple zoomed blocks resolve to the same integer coordinate.
 
+Tile-wide visitors now traverse only the unbordered generation area with local coordinates, while the
+generation visitor exposes mutable cells and tile batch sizing preserves TerraForged's ceil division.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
