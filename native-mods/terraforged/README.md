@@ -54,6 +54,9 @@ distance helpers for TerraForged's finite line masks.
 The engine type layer begins terrain composition with TerraForged's wrapping seed cursor and full
 terrain-category property model, including dominance ordering and derived override behavior.
 
+The terrain descriptor layer adds delegated, configured, volcanic and composite terrain types,
+preserving Engine 0.3.0's object identity, Java string hues and original composite-dominance quirk.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
