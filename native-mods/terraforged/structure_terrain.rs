@@ -22,12 +22,18 @@
  * SOFTWARE.
  */
 
+use super::super::structure::{
+    jigsaw::Projection,
+    start::{Piece as WorldPiece, StructureRegistry, StructureStart},
+};
 use super::terraforged::{clamp, java_max, java_pow, lerp, round};
 use super::{
     super::terrain::{TerrainBlockStates, TerrainChunk, TerrainError},
     terraforged_terrain_data::TerrainData,
 };
 use crate::{heightmap::HeightmapType, registry::BlockStateId};
+use horizon_core::{density::TerrainAdjustment, position::ChunkPos};
+use std::sync::Arc;
 
 /// A structure piece's `BoundingBox` (inclusive block bounds).
 #[derive(Clone, Copy, Debug)]
@@ -110,6 +116,55 @@ pub struct StructureTerrain {
 }
 
 impl StructureTerrain {
+    pub fn from_starts(
+        registry: &StructureRegistry,
+        starts: &[Arc<StructureStart>],
+        chunk: ChunkPos,
+    ) -> Self {
+        let origin_x = chunk.x.wrapping_shl(4);
+        let origin_z = chunk.z.wrapping_shl(4);
+        let mut pieces = Vec::new();
+        for start in starts {
+            if !matches!(
+                registry.structures[start.structure].terrain,
+                TerrainAdjustment::BeardBox | TerrainAdjustment::BeardThin
+            ) {
+                continue;
+            }
+            for piece in &start.pieces {
+                let bounds = piece.bounding_box();
+                if bounds.max[0] < origin_x.wrapping_sub(20)
+                    || bounds.min[0] > origin_x.wrapping_add(35)
+                    || bounds.max[2] < origin_z.wrapping_sub(20)
+                    || bounds.min[2] > origin_z.wrapping_add(35)
+                {
+                    continue;
+                }
+                let ground_delta = match piece {
+                    WorldPiece::Pool(pool) => {
+                        if pool.element.projection() != Projection::Rigid {
+                            continue;
+                        }
+                        pool.ground_level_delta
+                    }
+                    WorldPiece::Legacy(_) => 0,
+                };
+                pieces.push(Piece {
+                    bounds: Bounds {
+                        min_x: bounds.min[0],
+                        min_y: bounds.min[1],
+                        min_z: bounds.min[2],
+                        max_x: bounds.max[0],
+                        max_y: bounds.max[1],
+                        max_z: bounds.max[2],
+                    },
+                    ground_delta,
+                });
+            }
+        }
+        Self::from_rigid_pieces(pieces)
+    }
+
     /// The constructor's `rigids.sort(PIECE_SORTER)`: pieces by box `minY`, stable (fastutil's sort), from the
     /// pieces the caller collected (BEARD_BOX/BEARD_THIN starts, close to the chunk, rigid pool elements).
     pub fn from_rigid_pieces(mut pieces: Vec<Piece>) -> Self {
@@ -255,6 +310,119 @@ pub fn distance_alpha(x: i32, z: i32, bounds: Bounds, radius_squared: f32) -> f3
 mod tests {
     use super::*;
     use std::{collections::BTreeSet, convert::Infallible};
+
+    #[test]
+    fn selection_matches_original_constructor() {
+        use super::super::super::structure::{
+            BoundingBox, Rotation,
+            jigsaw::{PoolElement, PoolPiece},
+            legacy::{LegacyPiece, PieceContext, Result as PieceResult},
+            start::{StructureDef, StructureKind},
+        };
+        use std::collections::BTreeMap;
+
+        #[derive(Debug)]
+        struct Legacy(BoundingBox);
+        impl LegacyPiece for Legacy {
+            fn bounding_box(&self) -> BoundingBox {
+                self.0
+            }
+            fn type_name(&self) -> &'static str {
+                "test"
+            }
+            fn post_process(&self, _: &mut PieceContext<'_>) -> PieceResult<()> {
+                Ok(())
+            }
+        }
+
+        let mut registry =
+            StructureRegistry::new(&BTreeMap::new(), &BTreeMap::new(), BTreeMap::new(), &|_| {
+                Ok(BTreeSet::new())
+            })
+            .unwrap();
+        let mut starts = Vec::new();
+        for adjustment in [
+            TerrainAdjustment::None,
+            TerrainAdjustment::Bury,
+            TerrainAdjustment::BeardBox,
+            TerrainAdjustment::BeardThin,
+            TerrainAdjustment::Encapsulate,
+        ] {
+            let structure = registry.structures.len();
+            registry.structures.push(StructureDef {
+                name: "test".into(),
+                kind: StructureKind::Unsupported("test".into()),
+                biomes: BTreeSet::new(),
+                step: 0,
+                terrain: adjustment,
+                enhanced_terrain: None,
+            });
+            let mut pieces = Vec::new();
+            for (x, z, y, projection, delta) in [
+                (-36, -16, 80, Projection::Rigid, 2),
+                (19, -16, 60, Projection::Rigid, 3),
+                (-37, -16, 40, Projection::Rigid, 4),
+                (20, -16, 40, Projection::Rigid, 5),
+                (-16, -36, 60, Projection::Rigid, 6),
+                (-16, 19, 90, Projection::Rigid, 7),
+                (-16, -37, 40, Projection::Rigid, 8),
+                (-16, 20, 40, Projection::Rigid, 9),
+                (-16, -16, 40, Projection::TerrainMatching, 10),
+            ] {
+                pieces.push(WorldPiece::Pool(PoolPiece {
+                    element: Arc::new(PoolElement::Feature {
+                        feature: "test".into(),
+                        projection,
+                    }),
+                    position: [x, y, z],
+                    ground_level_delta: delta,
+                    rotation: Rotation::None,
+                    bounding_box: BoundingBox::new([x, y, z], [x, y + 5, z]),
+                    junctions: Vec::new(),
+                    waterlogging: false,
+                }));
+            }
+            pieces.push(WorldPiece::Legacy(Box::new(Legacy(BoundingBox::new(
+                [-16, 60, -16],
+                [-16, 65, -16],
+            )))));
+            starts.push(Arc::new(StructureStart {
+                structure,
+                name: "test".into(),
+                chunk: ChunkPos::new(-1, -1),
+                pieces,
+                bounding_box: BoundingBox::new([-37, 40, -37], [20, 95, 20]),
+            }));
+        }
+        let selected = StructureTerrain::from_starts(&registry, &starts, ChunkPos::new(-1, -1));
+        let values: Vec<_> = selected
+            .pieces
+            .iter()
+            .map(|piece| {
+                (
+                    piece.bounds.min_x,
+                    piece.bounds.min_y,
+                    piece.bounds.min_z,
+                    piece.ground_delta,
+                )
+            })
+            .collect();
+        assert_eq!(
+            values,
+            vec![
+                (19, 60, -16, 3),
+                (-16, 60, -36, 6),
+                (-16, 60, -16, 0),
+                (19, 60, -16, 3),
+                (-16, 60, -36, 6),
+                (-16, 60, -16, 0),
+                (-36, 80, -16, 2),
+                (-36, 80, -16, 2),
+                (-16, 90, 19, 7),
+                (-16, 90, 19, 7),
+            ]
+        );
+    }
 
     struct Column {
         stone: BTreeSet<i32>,
