@@ -871,7 +871,7 @@ them) and `d`/`n` lines (defaults, overriding calls, no factory); debug and rele
 
 The cache-entry layer adds Engine's `ExpiringEntry` and `CacheEntry` (`concurrent.rs`), the entries the tile cache (a
 later layer) will hold. A `CacheEntry` is a `LazyCallable` over a task that runs on the first `get` or `call`, on the
-calling thread (Engine's asynchronous `computeAsync` and `then` are a later layer), plus the time of its last access:
+calling thread (the async-entry layer below adds `computeAsync` and `then`), plus the time of its last access:
 `System.currentTimeMillis()` (river.rs's `current_time_millis`, an `i64` like Java's `long`) at construction and at the
 start of every `get`, before the task runs; `call` and `is_done` leave it, as in Engine, which overrides only `get`.
 `is_done` is Engine's `task.isDone()`: it answers at once (it does not wait for another thread's task) and is `true` once
@@ -898,6 +898,26 @@ keeps its own sweep (Engine's uses an unbounded `StampedLongMap`). Its test repl
 `.local/terraforged/oracles/cache/` (Engine's real `Cache` with the clock injected through its `timeout` field: the
 sweep for lifetimes and clocks up to the `long` extremes, eviction order, `map`, `remove`, a swept entry whose task never
 ran, the factory holding the lock, capacity 0 and bad intervals); debug and release builds agree.
+
+The async-entry layer adds Engine's `CacheEntry.computeAsync` and `then` and the part of Engine's `ThreadPool` they use
+(`concurrent.rs`). `ThreadPool::create(size)` is `BatchingThreadPool.of(size)`'s task executor: `max(1, size / 2)`
+threads named `TF-Task-Worker-<n>`, started one per submitted task until all exist, taking tasks in submission order;
+`size()` adds Engine's `max(2, size)` batch threads (those are the tile generator's own scoped threads). Unlike
+`ThreadPools.create`, each call makes its own pool; when the last clone is dropped the threads finish the queued tasks and
+exit. On such a pool `compute_async` starts the task at once on a task thread: `is_done` is `false` until it ends
+(returning or panicking), `get` and `call` wait for it, and a failure is final, as for a failed Engine `Future`: every
+later `get`/`call` panics without running the task again. On `ThreadPool::NONE` (Engine's `EmptyThreadPool`, the tile
+generator's default) the entry is done at once, the task runs on the thread of the first `get` or `call`, and a task
+that panicked runs again on the next one (Engine's `adaptComplete` turns the exception into a null value that is never
+stored). Either way the timestamp is the clock's at creation and at each `get` (river.rs's `current_time_millis` or an
+injected clock, as for synchronous entries). `then(pool, f)` is Engine's `computeAsync(() -> f.apply(this.get()), pool)`:
+the new entry's task gets the parent on the pool's thread, stamping the parent's access time, and fails for good if the
+parent failed or `f` panicked. Engine 0.3.0's `CacheEntry` has no `map` or `supplyAsync`; neither is added. Expiring
+`Cache`s hold async entries like the others: a sweep may drop an entry whose task still runs, and its holder still gets
+the value. Its test replays the async lines of `CacheEntryOracle.java` (`.local/terraforged/oracles/cache_entry/`:
+`isDone` while the task runs, `get` blocking, the task's thread, two tasks at once on `ThreadPools.create(4)`,
+timestamps, failures, `then` chains and failing parents, `ThreadPools.NONE`, pool sizes) with an injected clock in place
+of the oracle's sleeps.
 
 ## Status: development only
 
