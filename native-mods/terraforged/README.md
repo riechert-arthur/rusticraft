@@ -282,6 +282,9 @@ while preserving default convenience constructors and TerraForged's seed order.
 Generator settings and context now aggregate world, climate, terrain, river, and filter configuration,
 with TerraForged's root-seed copy, split, offset, and level initialization semantics.
 
+The concrete heightmap now assembles TerraForged's continent, terrain-region, mountain, ocean, river,
+and climate graph and implements the tile generator's heightmap source contract.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:

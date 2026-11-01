@@ -31,7 +31,7 @@ use super::{
     terraforged_region::RegionConfig,
 };
 
-pub trait Populator {
+pub trait Populator: Send + Sync {
     fn apply(&self, cell: &mut Cell, x: f32, z: f32);
 
     fn terrain_weight(&self) -> Option<f32> {
