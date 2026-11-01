@@ -27,6 +27,9 @@ preserving its original step spacing, clamping and boundary behavior.
 The legacy terrace layer adds TerraForged's asymmetric Curve3 transitions with independent lower
 and upper curve controls.
 
+The advanced terrace layer adds masked, sloped, modulated and multi-octave stepping with the
+original blend thresholds and normalization range.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:

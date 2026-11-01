@@ -594,6 +594,18 @@ enum ModuleKind {
         steps: Vec<TerraceStep>,
         max_index: usize,
     },
+    AdvancedTerrace {
+        source: Module,
+        modulation: Module,
+        mask: Module,
+        slope: Module,
+        blend_min: f32,
+        blend_max: f32,
+        blend_range: f32,
+        mod_range: f32,
+        steps: usize,
+        octaves: usize,
+    },
     Select {
         control: Module,
         lower: Module,
@@ -827,6 +839,45 @@ impl Module {
                 }
                 step.value
             }
+            ModuleKind::AdvancedTerrace {
+                source,
+                modulation,
+                mask,
+                slope,
+                blend_min,
+                blend_max,
+                blend_range,
+                mod_range,
+                steps,
+                octaves,
+            } => {
+                let value = source.value(x, y);
+                if value <= *blend_min {
+                    return value;
+                }
+                let mask = mask.value(x, y);
+                if mask == 0.0 {
+                    return value;
+                }
+                let slope = slope.value(x, y);
+                let modulation = modulation.value(x, y);
+                let mut result = value;
+                for octave in 1..=*octaves {
+                    let step_count = *steps * octave;
+                    result = round(result * step_count as f32) as f32 / step_count as f32;
+                    result += (value - result) * slope;
+                }
+                result = (result + modulation) / *mod_range;
+                let mut alpha = if value > *blend_max {
+                    1.0
+                } else {
+                    (value - *blend_min) / *blend_range
+                };
+                if mask != 1.0 {
+                    alpha *= mask;
+                }
+                lerp(value, result, alpha)
+            }
             ModuleKind::Select {
                 control,
                 lower,
@@ -871,9 +922,9 @@ impl Module {
                 .fold(nodes[0].source.min_value(), |value, node| {
                     java_min(value, node.source.min_value())
                 }),
-            ModuleKind::Terrace { source, .. } | ModuleKind::LegacyTerrace { source, .. } => {
-                source.min_value()
-            }
+            ModuleKind::Terrace { source, .. }
+            | ModuleKind::LegacyTerrace { source, .. }
+            | ModuleKind::AdvancedTerrace { source, .. } => source.min_value(),
             ModuleKind::Add(sources) => combine_bounds(sources, true, |a, b| a + b),
             ModuleKind::Multiply(sources) => combine_bounds(sources, true, |a, b| a * b),
             ModuleKind::Max(sources) => {
@@ -912,9 +963,9 @@ impl Module {
                 .fold(nodes[0].source.max_value(), |value, node| {
                     java_max(value, node.source.max_value())
                 }),
-            ModuleKind::Terrace { source, .. } | ModuleKind::LegacyTerrace { source, .. } => {
-                source.max_value()
-            }
+            ModuleKind::Terrace { source, .. }
+            | ModuleKind::LegacyTerrace { source, .. }
+            | ModuleKind::AdvancedTerrace { source, .. } => source.max_value(),
             ModuleKind::Add(sources) => combine_bounds(sources, false, |a, b| a + b),
             ModuleKind::Multiply(sources) => combine_bounds(sources, false, |a, b| a * b),
             ModuleKind::Max(sources) => combine_bounds(sources, false, java_max),
@@ -1161,6 +1212,31 @@ impl Module {
             upper_curve,
             steps,
             max_index,
+        }))
+    }
+
+    pub fn advanced_terrace(
+        self,
+        modulation: Self,
+        mask: Self,
+        slope: Self,
+        blend_min: f32,
+        blend_max: f32,
+        steps: usize,
+        octaves: usize,
+    ) -> Self {
+        let mod_range = self.max_value() + modulation.max_value();
+        Self(Box::new(ModuleKind::AdvancedTerrace {
+            source: self,
+            modulation,
+            mask,
+            slope,
+            blend_min,
+            blend_max,
+            blend_range: blend_max - blend_min,
+            mod_range,
+            steps,
+            octaves,
         }))
     }
 
@@ -2095,6 +2171,99 @@ mod tests {
                 0, 0, 0, 0x2612f052, 0x3e1b8d8f, 0x3e2aaaab, 0x3e2aaaab, 0x3e2aaaab, 0x3e2aaaab,
                 0x3e2aaaab, 0x3e2aaaab, 0x3e8aaaab, 0x3f800000, 0x3f800000, 0x3f800000,
             ]
+        );
+    }
+
+    #[test]
+    fn advanced_terrace_matches_engine_0_3_0() {
+        let source = |kind, seed, scale: f32, octaves, gain| {
+            Module::source(Source::new(
+                kind,
+                SourceConfig {
+                    seed,
+                    octaves,
+                    gain,
+                    frequency: 1.0 / scale,
+                    lacunarity: 2.0,
+                    interpolation: Interpolation::Curve3,
+                },
+            ))
+        };
+        let module = source(SourceKind::Perlin, 801, 96.0, 4, 0.5).advanced_terrace(
+            source(SourceKind::Simplex, 802, 80.0, 3, 0.5),
+            source(SourceKind::Ridge, 803, 128.0, 2, 0.975),
+            source(SourceKind::Perlin, 804, 64.0, 2, 0.5),
+            0.2,
+            0.8,
+            8,
+            3,
+        );
+        let points = [
+            (0.0, 0.0),
+            (12.25, -98.75),
+            (-4096.5, 8192.25),
+            (123456.75, -0.125),
+            (64.0, 64.0),
+            (-128.0, 32.0),
+            (777.0, -333.0),
+            (-1024.0, -2048.0),
+        ];
+        assert_eq!(
+            bits(points.map(|(x, y)| module.value(x, y))),
+            [
+                0x3f000000, 0x3ec5e4a8, 0x3f110a8b, 0x3eec7491, 0x3ecdb230, 0x3f1fed43, 0x3f210ae1,
+                0x3f2f009a,
+            ]
+        );
+        let bounded =
+            |value| Module::constant(value).clamp(Module::constant(0.0), Module::constant(1.0));
+        let values = [0.1, 0.2, 0.20000002, 0.5, 0.8, 0.8000001, 1.0];
+        assert_eq!(
+            values.map(|value| bounded(value)
+                .advanced_terrace(
+                    Module::constant(0.1),
+                    Module::constant(0.5),
+                    Module::constant(0.25),
+                    0.2,
+                    0.8,
+                    8,
+                    3,
+                )
+                .value(0.0, 0.0)
+                .to_bits()),
+            [
+                0x3dcccccd, 0x3e4ccccd, 0x3e4cccce, 0x3f02e8ba, 0x3f4ac37e, 0x3f4ac37e, 0x3f800000,
+            ]
+        );
+        assert_eq!(
+            bounded(0.7)
+                .advanced_terrace(
+                    Module::constant(0.1),
+                    Module::constant(0.0),
+                    Module::constant(0.25),
+                    0.2,
+                    0.8,
+                    8,
+                    3
+                )
+                .value(0.0, 0.0)
+                .to_bits(),
+            0x3f333333
+        );
+        assert_eq!(
+            bounded(0.7)
+                .advanced_terrace(
+                    Module::constant(0.1),
+                    Module::constant(1.0),
+                    Module::constant(0.25),
+                    0.2,
+                    0.8,
+                    8,
+                    3
+                )
+                .value(0.0, 0.0)
+                .to_bits(),
+            0x3f404a79
         );
     }
 }
