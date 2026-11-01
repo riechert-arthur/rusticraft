@@ -105,6 +105,9 @@ zero-weight fallback, Engine rounding and the upper region's terrain identity du
 The volcano layer adds cell-driven cone height, inversion throats, lowland blending and river/water
 pipe demotion with exact Engine seed consumption and terrain identity behavior.
 
+The standard-provider layer registers every LandForm and volcano variant, builds all weighted terrain
+composites, preserves variant fallback and performs Java-compatible deterministic shuffling.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:

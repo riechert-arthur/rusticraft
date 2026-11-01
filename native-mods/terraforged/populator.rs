@@ -38,6 +38,14 @@ pub trait Populator {
         None
     }
 
+    fn terrain_variance(&self) -> Option<&Module> {
+        None
+    }
+
+    fn terrain_type(&self) -> Option<&Terrain> {
+        None
+    }
+
     fn value(&self, x: f32, z: f32) -> f32 {
         let mut cell = Cell::default();
         self.apply(&mut cell, x, z);
@@ -148,6 +156,14 @@ impl Populator for TerrainPopulator {
     fn terrain_weight(&self) -> Option<f32> {
         Some(self.weight)
     }
+
+    fn terrain_variance(&self) -> Option<&Module> {
+        Some(&self.variance)
+    }
+
+    fn terrain_type(&self) -> Option<&Terrain> {
+        Some(&self.terrain_type)
+    }
 }
 
 impl TerrainPopulatorLike for TerrainPopulator {
@@ -206,6 +222,14 @@ impl Populator for ScaledPopulator {
     fn terrain_weight(&self) -> Option<f32> {
         Some(self.populator.weight)
     }
+
+    fn terrain_variance(&self) -> Option<&Module> {
+        Some(&self.populator.variance)
+    }
+
+    fn terrain_type(&self) -> Option<&Terrain> {
+        Some(&self.populator.terrain_type)
+    }
 }
 
 impl TerrainPopulatorLike for ScaledPopulator {
@@ -218,7 +242,7 @@ impl TerrainPopulatorLike for ScaledPopulator {
     }
 
     fn terrain_type(&self) -> &Terrain {
-        self.populator.terrain_type()
+        TerrainPopulatorLike::terrain_type(&self.populator)
     }
 
     fn as_config(&self) -> TerrainConfig {
@@ -353,6 +377,14 @@ impl Populator for VolcanoPopulator {
     fn terrain_weight(&self) -> Option<f32> {
         Some(self.populator.weight)
     }
+
+    fn terrain_variance(&self) -> Option<&Module> {
+        Some(&self.populator.variance)
+    }
+
+    fn terrain_type(&self) -> Option<&Terrain> {
+        Some(&self.populator.terrain_type)
+    }
 }
 
 impl TerrainPopulatorLike for VolcanoPopulator {
@@ -365,7 +397,7 @@ impl TerrainPopulatorLike for VolcanoPopulator {
     }
 
     fn terrain_type(&self) -> &Terrain {
-        self.populator.terrain_type()
+        TerrainPopulatorLike::terrain_type(&self.populator)
     }
 
     fn as_config(&self) -> TerrainConfig {
@@ -493,7 +525,7 @@ mod tests {
 
         let configured = scaled.as_config().create_populator(Module::constant(0.125));
         assert_eq!(configured.weight().to_bits(), 0x3f19999a);
-        assert_eq!(configured.terrain_type().id(), 9);
+        assert_eq!(TerrainPopulatorLike::terrain_type(&configured).id(), 9);
         assert_eq!(configured.value(0.0, 0.0).to_bits(), 0x3f200000);
 
         let clamped = TerrainPopulator::new(
