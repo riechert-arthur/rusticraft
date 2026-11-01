@@ -24,10 +24,13 @@
 
 use super::{
     terraforged::{hash, java_max},
+    terraforged_biome_map::BiomePools,
     terraforged_engine::{BiomeType, TerrainProperties, TerrainRegistry},
     terraforged_terrain_blend_util::random,
     terraforged_terrain_data::NoiseSample,
+    terraforged_terrain_levels::TerrainLevels,
 };
+use std::sync::Arc;
 
 /// `ContinentPoints.DEEP_OCEAN`: continent noise of the deep-ocean control point. `DEEP_OCEAN`, `COAST` and
 /// `INLAND` are unused here until the continent control points (#113) re-export all five.
@@ -51,6 +54,8 @@ pub const MAX_FLAT_GRADIENT: f32 = 0.42;
 pub const WETLAND_SALT: i32 = 4153;
 /// The salt of `getInitialBiome`'s mountain-usage roll.
 pub const MOUNTAIN_SALT: i32 = 7309;
+/// The biome `getInitialBiome` falls back to when the lowland pool has nothing for the column (`Biomes.PLAINS`).
+pub const PLAINS: &str = "minecraft:plains";
 
 /// TerraForged's `ClimateSample`: a `NoiseSample` plus the climate fields `ClimateNoise` fills.
 #[derive(Clone)]
@@ -176,8 +181,9 @@ pub fn biome_override(sample: &ClimateSample) -> BiomeOverride {
 
 // The surface-biome decisions below are adapted from TerraForged Reimagined
 // (https://github.com/Romoslayer/TerraForged-Reimagined, a24d450): `BiomeSampler`'s `lowlandPool`, `cellRoll`,
-// `isSteep`, `freezes`, `keepsSnowCover` and `getInitialBiome`'s mountain-usage gate. TerraForged 6dd607eb and the
-// 1.18.2-0.3.1 jar pick from one pool with no wetland, slope or snow checks. MIT License, Copyright (c) 2020
+// `isSteep`, `freezes`, `keepsSnowCover`, `fromPool` and `getInitialBiome` (its mountain-usage gate and the assembly in
+// `InitialBiomeSelector`). TerraForged 6dd607eb and the 1.18.2-0.3.1 jar pick from one pool with no wetland, slope
+// or snow checks. MIT License, Copyright (c) 2020
 // TerraForged, Copyright (c) 2026 Romoslayer; see `LICENSE-TERRAFORGED-REIMAGINED`.
 
 /// Reimagined's `TerraSettings.Rivers.Wetlands`, as `BiomeSampler.lowlandPool` reads it: wetland biomes are
@@ -282,6 +288,79 @@ pub fn keeps_snow_cover(
         == freezes(highland_temperature, height, sea_level)
 }
 
+/// What Reimagined's `BiomeSampler.getInitialBiome` reads besides the sample: the wet (`getBiomeMap`), dry
+/// (`getDryBiomeMap`) and highland (`getHighlandBiomeMap`) pools, the registry's [`PLAINS`] biome, the wetland and
+/// mountain-usage settings and the generator's `TerrainLevels` (`maxY` for the slope gate, the column height and
+/// `seaLevel` for the snow check). Biomes are compared by identity (`Arc::ptr_eq`, Java's `==` on registry holders),
+/// so the pools must share one `Arc` per biome.
+pub struct InitialBiomeSelector<'a, T> {
+    pub wet: &'a BiomePools<T>,
+    pub dry: &'a BiomePools<T>,
+    pub highland: &'a BiomePools<T>,
+    pub plains: &'a Arc<T>,
+    pub wetlands: WetlandSettings,
+    pub mountain_usage: f32,
+    pub levels: TerrainLevels,
+}
+
+impl<T> InitialBiomeSelector<'_, T> {
+    /// `BiomeSampler.getInitialBiome(seed, x, z, sample)`, in Java's order: the normal biome from the
+    /// [`lowland_pool`] (missing or empty climate pool, or a noise past its last band or NaN: [`PLAINS`], returned
+    /// at once); the [`uses_mountain_pool`] gate; the centre height noise, then [`is_steep_at`]; the highland pool's
+    /// biome (none, or the normal biome itself: normal); then [`keeps_snow_cover`] at the column's height
+    /// (`levels.getHeight(levels.getScaledHeight(centre))`). Pools pick with `WeightMap.getValue(biomeNoise)`.
+    /// `height_noise` is `getHeightNoise(seed, x, z)` for the world's seed (UN-eroded, see [`is_steep_at`]); `x`/`z`
+    /// are block coordinates; the first error is returned. `getBiomeOverride` ([`biome_override`]) runs after this
+    /// and wins.
+    pub fn initial_biome<E>(
+        &self,
+        sample: &ClimateSample,
+        x: i32,
+        z: i32,
+        mut height_noise: impl FnMut(i32, i32) -> Result<f32, E>,
+        base_temperature: impl Fn(&T) -> f32,
+    ) -> Result<Arc<T>, E> {
+        let lowland = match lowland_pool(sample, self.wetlands) {
+            LowlandPool::Wet => self.wet,
+            LowlandPool::Dry => self.dry,
+        };
+        let Some(normal) = from_pool(lowland, sample) else {
+            return Ok(Arc::clone(self.plains));
+        };
+        if !uses_mountain_pool(sample.biome_noise, self.mountain_usage) {
+            return Ok(normal);
+        }
+        let centre = height_noise(x, z)?;
+        if !is_steep_at(self.levels.max_y, x, z, &mut height_noise)? {
+            return Ok(normal);
+        }
+        let Some(highland) = from_pool(self.highland, sample) else {
+            return Ok(normal);
+        };
+        if Arc::ptr_eq(&highland, &normal) {
+            return Ok(normal);
+        }
+        let height = self.levels.height(self.levels.scaled_height(centre));
+        let keeps = keeps_snow_cover(
+            base_temperature(&normal),
+            base_temperature(&highland),
+            height,
+            self.levels.sea_level,
+        );
+        Ok(if keeps { highland } else { normal })
+    }
+}
+
+/// `BiomeSampler.fromPool`: `None` where Java returns null (no pool for the climate type, an empty pool, or
+/// `getValue` past the last band or NaN).
+fn from_pool<T>(pools: &BiomePools<T>, sample: &ClimateSample) -> Option<Arc<T>> {
+    let pool = pools.get(sample.climate_type)?;
+    if pool.is_empty() {
+        return None;
+    }
+    pool.get_value(sample.biome_noise).cloned()
+}
+
 /// `BiomeSampler.cellRoll`: `MathUtil.rand(Float.floatToIntBits(biomeNoise), salt)`, a 0..1 value constant
 /// over one biome cell. `floatToIntBits` folds every NaN to `0x7fc00000`.
 pub fn cell_roll(biome_noise: f32, salt: i32) -> f32 {
@@ -295,7 +374,7 @@ pub fn cell_roll(biome_noise: f32, salt: i32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::super::terraforged_engine::Terrain;
+    use super::super::{terraforged_engine::Terrain, terraforged_terrain_blend_util::WeightMap};
     use super::*;
 
     /// `BiomeOverrideOracle.java` (`.local/terraforged/oracles/biome_override/`): TerraForged 1.18.2-0.3.1's own
@@ -523,6 +602,7 @@ Q 2147483635,-2147483648 -2147483637,-2147483648 2147483647,2147483636 214748364
 STEEP 17640 862f3f69854a40d4
 SNOW 7920 3118b3e53a0fa005
 MOUNTAIN 6591 897ed70fc41e4b14
+INITIAL 25600 61b4ea2aa079a049
 ";
 
     struct Lcg(u64);
@@ -805,12 +885,270 @@ MOUNTAIN 6591 897ed70fc41e4b14
             }
         }
         fold.section("MOUNTAIN");
+        initial_output(&mut rng, &mut fold, &special, &mut sample);
         fold.out
+    }
+
+    struct TestBiome {
+        temperature: f32,
+    }
+
+    /// The oracle's `initial` section: 64 worlds of pools from shared templates, 200 `getInitialBiome` samples each;
+    /// folds the biome (index, -1 plains, -2 failed) and the number of height-noise reads.
+    fn initial_output(
+        rng: &mut Lcg,
+        fold: &mut Fold,
+        special: &[f32; 26],
+        sample: &mut ClimateSample,
+    ) {
+        let temps = [
+            0.8,
+            0.6,
+            0.2,
+            0.1,
+            0.15,
+            0.15_f32.next_down(),
+            0.95,
+            f32::NAN,
+        ];
+        let biomes: Vec<_> = temps
+            .iter()
+            .map(|&temperature| Arc::new(TestBiome { temperature }))
+            .collect();
+        let plains = Arc::new(TestBiome { temperature: 0.8 });
+        let members: [&[usize]; 11] = [
+            &[],
+            &[],
+            &[0],
+            &[1, 2],
+            &[2, 3, 4],
+            &[5, 6, 7],
+            &[2],
+            &[0, 1],
+            &[3],
+            &[1, 6],
+            &[6, 2, 0],
+        ];
+        let weights: [&[f32]; 11] = [
+            &[],
+            &[1.0],
+            &[1.0],
+            &[1.0, 1.0],
+            &[0.5, 2.0, 1.0],
+            &[1.0, 0.0, 3.0],
+            &[1.0],
+            &[1.0],
+            &[f32::NAN],
+            &[2.0, 1.0],
+            &[1.0, 1.0, 1.0],
+        ];
+        let mut templates = vec![None];
+        for (values, weights) in members.iter().zip(weights) {
+            let values = values.iter().map(|&i| Arc::clone(&biomes[i])).collect();
+            templates.push(Some(Arc::new(WeightMap::new(values, weights))));
+        }
+        let chances = [1.0, 0.5, 0.0, f32::NAN];
+        let usages = [1.0, 0.0, 0.5, f32::NAN, 0.25, 1.5];
+        let max_ys = [480, 384, 1024, 256];
+        let sea_levels = [62, 63, -64, 200];
+        let coords = [0, -7, i32::MAX, i32::MIN];
+        let pick = |rng: &mut Lcg, len: usize| ((rng.int() as u32) >> 1) as usize % len;
+        for world in 0..64 {
+            let mut pools: [BiomePools<TestBiome>; 3] = Default::default();
+            for pool in &mut pools {
+                for kind in BiomeType::VALUES {
+                    let t = if world < 2 {
+                        world
+                    } else {
+                        pick(rng, templates.len())
+                    };
+                    if let Some(template) = &templates[t] {
+                        pool.insert(kind, Arc::clone(template));
+                    }
+                }
+            }
+            for _ in 0..200 {
+                sample.climate_type = BiomeType::VALUES[pick(rng, 11)];
+                sample.biome_noise = if rng.int() & 3 == 0 {
+                    special[pick(rng, special.len())]
+                } else {
+                    rng.unit()
+                };
+                sample.noise.river_noise = rng.unit();
+                sample.noise.continent_noise = rng.unit();
+                let chance = chances[(rng.int() & 3) as usize];
+                let mountain_usage = usages[pick(rng, usages.len())];
+                let mut levels = TerrainLevels::unconfigured();
+                levels.max_y = max_ys[(rng.int() & 3) as usize];
+                levels.sea_level = sea_levels[(rng.int() & 3) as usize];
+                let kind = rng.int() & 7;
+                let x = if kind < 4 {
+                    coords[kind as usize]
+                } else {
+                    rng.int()
+                };
+                let z = if kind < 4 {
+                    coords[(rng.int() & 3) as usize]
+                } else {
+                    rng.int()
+                };
+                let west = rng.unit();
+                let (mut east, mut north, mut south) = (west, west, west);
+                match rng.int() & 3 {
+                    0 => {}
+                    1 => east = west + 0.5,
+                    2 => {
+                        east = west + 0.42_f32 * 24.0 / levels.max_y as f32;
+                        let mut k = (rng.int() & 7) - 3;
+                        while k != 0 {
+                            east = if k > 0 {
+                                east.next_up()
+                            } else {
+                                east.next_down()
+                            };
+                            k += if k > 0 { -1 } else { 1 };
+                        }
+                    }
+                    _ => (east, north, south) = (rng.unit(), rng.unit(), rng.unit()),
+                }
+                let centre = if rng.int() & 1 == 0 {
+                    rng.unit() * 0.5
+                } else {
+                    special[pick(rng, special.len())]
+                };
+                let throw_at = (rng.int() & 7) - 1;
+                let _seed = rng.int();
+                let selector = InitialBiomeSelector {
+                    wet: &pools[0],
+                    dry: &pools[1],
+                    highland: &pools[2],
+                    plains: &plains,
+                    wetlands: WetlandSettings {
+                        river_size: 0.75,
+                        coast_size: 0.7,
+                        chance,
+                    },
+                    mountain_usage,
+                    levels,
+                };
+                let mut calls = 0;
+                let half = SLOPE_STEP / 2;
+                let got = selector.initial_biome(
+                    sample,
+                    x,
+                    z,
+                    |px, pz| {
+                        calls += 1;
+                        if calls - 1 == throw_at {
+                            return Err(());
+                        }
+                        Ok(match (px, pz) {
+                            _ if (px, pz) == (x.wrapping_sub(half), z) => west,
+                            _ if (px, pz) == (x.wrapping_add(half), z) => east,
+                            _ if (px, pz) == (x, z.wrapping_sub(half)) => north,
+                            _ if (px, pz) == (x, z.wrapping_add(half)) => south,
+                            _ if (px, pz) == (x, z) => centre,
+                            _ => panic!("unexpected sample point {px},{pz}"),
+                        })
+                    },
+                    |biome| biome.temperature,
+                );
+                let result = match got {
+                    Err(()) => -2,
+                    Ok(biome) if Arc::ptr_eq(&biome, &plains) => -1,
+                    Ok(biome) => biomes
+                        .iter()
+                        .position(|b| Arc::ptr_eq(b, &biome))
+                        .expect("a pooled biome") as i32,
+                };
+                fold.add(result as u32);
+                fold.add(calls as u32);
+            }
+        }
+        fold.section("INITIAL");
     }
 
     #[test]
     fn decisions_match_reimagined_java() {
         assert_eq!(decisions_output(), DECISIONS);
+    }
+
+    #[test]
+    fn initial_biome_keeps_reimagined_order() {
+        let biome = |temperature| Arc::new(TestBiome { temperature });
+        let (plains, wet_biome, dry_biome, high_biome) =
+            (biome(0.8), biome(0.6), biome(0.6), biome(0.2));
+        let one =
+            |biome: &Arc<TestBiome>| Arc::new(WeightMap::new(vec![Arc::clone(biome)], &[1.0]));
+        let (mut wet, mut dry, mut highland) = Default::default();
+        BiomePools::insert(&mut wet, BiomeType::Grassland, one(&wet_biome));
+        BiomePools::insert(&mut dry, BiomeType::Grassland, one(&dry_biome));
+        BiomePools::insert(&mut highland, BiomeType::Grassland, one(&high_biome));
+        let mut selector = InitialBiomeSelector {
+            wet: &wet,
+            dry: &dry,
+            highland: &highland,
+            plains: &plains,
+            wetlands: WetlandSettings {
+                river_size: 0.75,
+                coast_size: 0.7,
+                chance: 1.0,
+            },
+            mountain_usage: 1.0,
+            levels: TerrainLevels::unconfigured(),
+        };
+        let terrains = TerrainRegistry::new();
+        let mut sample = ClimateSample::new(&terrains);
+        sample.biome_noise = 0.5;
+        sample.noise.river_noise = 0.5;
+        sample.noise.continent_noise = 0.8;
+        // Steep east-west at every point; the centre reads `centre`; returns the biome and the read count.
+        let run = |selector: &InitialBiomeSelector<'_, TestBiome>,
+                   sample: &ClimateSample,
+                   centre: f32| {
+            let mut reads = 0;
+            let got = selector
+                .initial_biome(
+                    sample,
+                    0,
+                    0,
+                    |x, _| {
+                        reads += 1;
+                        Ok::<_, ()>(if x == 0 {
+                            centre
+                        } else if x > 0 {
+                            1.0
+                        } else {
+                            0.0
+                        })
+                    },
+                    |biome| biome.temperature,
+                )
+                .unwrap();
+            (got, reads)
+        };
+        let is = |(got, reads): (Arc<TestBiome>, i32), want: &Arc<TestBiome>, n: i32| {
+            Arc::ptr_eq(&got, want) && reads == n
+        };
+        // y 79 (centre 79.5 / 480): neither freezes, the highland biome is taken.
+        assert!(is(run(&selector, &sample, 79.5 / 480.0), &high_biome, 5));
+        // y 122: only the highland biome would freeze, so the swap is refused.
+        assert!(is(run(&selector, &sample, 122.5 / 480.0), &wet_biome, 5));
+        // A zero usage never reads the height noise.
+        selector.mountain_usage = 0.0;
+        assert!(is(run(&selector, &sample, 0.0), &wet_biome, 0));
+        selector.mountain_usage = 1.0;
+        // Away from water: the dry pool; the highland pool's own biome is a no-op (identity).
+        sample.noise.river_noise = 0.9;
+        selector.highland = &dry;
+        assert!(is(run(&selector, &sample, 0.0), &dry_biome, 5));
+        // No pool for the climate (or a noise past the last band): plains at once, before any height read.
+        sample.climate_type = BiomeType::Alpine;
+        assert!(is(run(&selector, &sample, 0.0), &plains, 0));
+        sample.climate_type = BiomeType::Grassland;
+        sample.biome_noise = 1.5;
+        assert!(is(run(&selector, &sample, 0.0), &plains, 0));
+        assert_eq!(PLAINS, "minecraft:plains");
     }
 
     #[test]
