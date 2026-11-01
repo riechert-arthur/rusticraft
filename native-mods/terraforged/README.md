@@ -168,6 +168,9 @@ center keys; both retain their generator settings and share maps across repeated
 The heightmap-river stage applies a continent's cached rivermap and then performs TerraForged's
 volcano-pipe demotion for submerged or river-cut terrain.
 
+The heightmap cache memoizes packed block coordinates, copies stable cell snapshots, and performs the
+same coast-to-beach correction used by TerraForged's direct world lookup.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
