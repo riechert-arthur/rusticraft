@@ -449,6 +449,9 @@ The current erosion pipeline's noise-tile geometry now preserves Java overflow a
 relative indexing, default dimensions and diagnostic formatting. Its standalone Java fixture is
 `tools/terraforged/TerraForgedNoiseTileSizeOracle.java`.
 
+Current heightmap smoothing now performs the in-place, distance-weighted post-erosion passes with
+the current settings defaults, early exits, radius rounding and Java float operation order.
+
 The scalar graph fixtures cover 15 graphs, four seeds and four coordinates (240 Java samples),
 including wrapped seed addition and mixed Perlin/seed-sensitive sources. Regenerate their hashes
 with `tools/terraforged/TerraForgedSeededGraphOracle.java` on a classpath containing compiled

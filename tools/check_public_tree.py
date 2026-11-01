@@ -24,6 +24,7 @@ ORIGINAL_TERRAFORGED_ORACLES = {
     "tools/terraforged/TerraForgedSeededLineOracle.java",
     "tools/terraforged/TerraForgedNoiseHeightOracle.java",
     "tools/terraforged/TerraForgedNoiseTileSizeOracle.java",
+    "tools/terraforged/TerraForgedHeightmapSmoothingOracle.java",
 }
 
 
