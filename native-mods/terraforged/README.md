@@ -2127,7 +2127,7 @@ that a plain fill after a structure stage gives the plain blocks and heights aga
 oracle and `ChunkAdapterOracle`, below); the composition is Java's three calls in order, so it has no oracle of its
 own. Heights the structure edits write come from the clipped chunk (its OCEAN_FLOOR_WG), while unedited columns
 keep TerraForged's unclipped heights; with terrain above the build range the two differ, which the world-height
-decision (below) has to settle. Not yet ported: Deep Caves, Strata, the surface step (apart from its erosion pass, below), the carver step, and the
+decision (below) has to settle. Not yet ported: Deep Caves, Strata, the surface step (apart from its erosion and water smoothing passes, below), the carver step, and the
 registration that would let Horizon call the stage.
 
 The surface erosion pass (`surface.rs`, `apply`) is TerraForged 6dd607eb's `worldgen.biome.surface.Surface.apply`
@@ -2139,12 +2139,26 @@ Writes go through `set_block_worldgen`, so only the chunk stage's heightmaps fol
 The caller supplies which states are erodible (Java's `isErodible`: `#minecraft:dirt` or `#minecraft:snow`). With
 26.3's tags that leaves grass, podzol, mycelium, moss and mud uneroded (`#minecraft:dirt` held them before 26.x);
 TerraForged Reimagined switches to `#minecraft:substrate_overworld` to keep them, which this port doesn't follow (the
-binding layer decides). The cached terrain data is only read. Snow and water postprocessing (`applyPost`,
-`smoothWater`) and the call from the surface decorator are later layers. The test runs `SurfaceErosionOracle`
+binding layer decides). The cached terrain data is only read. Snow postprocessing (`applyPost`) and the call from the
+surface decorator are later layers. The test runs `SurfaceErosionOracle`
 (6dd607eb's three methods, copied verbatim, over real 26.3 ProtoChunks, heightmaps and block tags): 160 generated
 chunks over three build ranges, four persisted statuses, primed and unprimed heightmaps, three gen depths and NaN
 gradients, comparing gradients, every block and all six heightmaps. Some of them put steep, all-erodible soil at the
 bottom of a 16..80 chunk, where the search runs into void air and copies it up the column, as Java does.
+
+The water edge smoothing pass (`surface.rs`, `smooth_water`) is TerraForged 6dd607eb's `Surface.smoothWater` with
+`shouldSmooth`, `isSmoothable` and `sameChunk` (MIT, as above; the 1.18.2-0.3.1 jar and TerraForged Reimagined 26.3 have
+the same logic), which `BiomeGenerator.decorate` runs after features and cave decoration. A river or lake column whose
+river value is exactly 0 (`-0.0` counts, NaN doesn't) and whose MOTION_BLOCKING_NO_LEAVES top is source water becomes
+level-2 water when any block at that height in the radius-6 disc around it is air (rows from -6, centre skipped, first
+hit wins). Blocks of the chunk itself are read from it; the others come from a caller-supplied region lookup in world
+coordinates (Java's `WorldGenLevel`), whose errors stop the pass. Writes go through `set_block_worldgen`, and a missing
+MOTION_BLOCKING_NO_LEAVES is primed only when the first eligible column reads it (`ChunkAccess.getHeight`). The caller
+supplies the water and level-2 water state ids; the region wiring is a later layer. The test runs `WaterSmoothingOracle`
+(the four methods, copied verbatim, over real 26.3 ProtoChunks and heightmaps, with Engine 0.3.0's terrain types and a
+region proxy over the eight neighbouring ProtoChunks): 128 generated 3x3 chunk grids over three build ranges, four
+persisted statuses and three priming states, with flowing water, leaves over water, kelp, cave air and signed-zero, NaN
+and non-zero river values, comparing every block, all six heightmaps (absent ones too) and every region read in order.
 
 The structure terrain columns (`structure_terrain.rs`, `StructureTerrain`) are TerraForged 6dd607eb's
 `worldgen.terrain.StructureTerrain.modify` and its helpers (MIT, as above), the per-column part of `fillFromNoise`'s
@@ -2618,7 +2632,7 @@ heights either way. The noise, weight and bounds match, so the test pins the two
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives, the biome climate types, the climate settings, the climate module, the climate stage, the continent factory, the generator context, the heightmap, the world generator factory, TerraForged's terrain levels, its terrain data, its terrain generator, its terrain-blend utilities, its terrain blender with its nearest-terrain search (and the newer source's seed-first blender), noise-graph reseeding, the cave noise primitives, the biome viability rules, the biome overrides (and TerraForged Reimagined's wider beach band), the continent control points, the continent cell primitives, the continent configuration, the continent shape blending, the continent cell generator with its spawn-offset search, the continent river nodes, the continent river carver's arithmetic, the continent river networks with their nearest-node sampling and their warped, carved river sampling, the newer source's seed-first noise sources, scalar noise graphs, domain warps, selectors, graph caches, terraces, legacy terraces, advanced terraces, curves, transforms (steps, frequency, gradient and modulation), special sources (boost, cell, cell edge and sine) and lines, and its bounded concurrent lossy cache with the continent's cell and
 river-piece caches on it, the continent noise module that joins the continent layers, the newer source's terrain height sampler with its bordered chunk generation and its nearest-terrain search, its biome chunk fill, cave biome sampler and chunk biome hook, the erosion tile geometry, and TerraForged Reimagined's heightmap smoothing, erosion brushes, hydraulic erosion filter, eroded-region cache, eroded region build, eroded chunk generation, terrain cache, generator queries, chunk fill, the terrain stage hand-off to it, the biome pool fallback, the surface-biome decisions, the initial biome selection, the current climate noise, the biome sampler bridge, the surface biome sampler, the biome registry pools, their live biome bindings, the biome settings, the terrain overrides, the terrain asset decoder, the terrain-type and terrain-noise registries, the bundled terrain types and all 14 bundled terrain noises, and 6dd607eb's structure terrain columns with their
-chunk adapter, piece selection and structure-aware terrain stage, and 6dd607eb's surface erosion pass. They change nothing in the game, so there is
+chunk adapter, piece selection and structure-aware terrain stage, and 6dd607eb's surface erosion and water edge smoothing passes. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development

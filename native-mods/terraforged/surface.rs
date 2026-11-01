@@ -24,9 +24,13 @@
 
 use super::{
     super::terrain::{TerrainBlockStates, TerrainChunk, TerrainError},
+    terraforged_engine::TerrainProperties,
     terraforged_terrain_data::TerrainData,
 };
-use crate::{heightmap::HeightmapType, registry::BlockStateId};
+use crate::{
+    heightmap::{HeightmapState, HeightmapType},
+    registry::BlockStateId,
+};
 
 /// TerraForged 6dd607eb's `Surface.apply` (the 1.18.2-0.3.1 jar's bytecode is the same), which
 /// `SurfaceDecorator.decoratePost` runs. Each column whose OCEAN_FLOOR_WG height is at or above `sea_level` and whose
@@ -73,6 +77,99 @@ pub fn apply<B: TerrainBlockStates>(
         }
     }
     Ok(())
+}
+
+/// TerraForged 6dd607eb's `Surface.smoothWater` with `shouldSmooth`, `isSmoothable` and `sameChunk` (the
+/// 1.18.2-0.3.1 jar's bytecode and TerraForged Reimagined 26.3 are the same), which `BiomeGenerator.decorate` runs
+/// after the features and cave decoration. Each river or lake column (`Terrain.isRiver() || isLake()`) whose river
+/// value is `== 0` (so `-0.0` passes and NaN doesn't) and whose MOTION_BLOCKING_NO_LEAVES top block is source water
+/// becomes level-2 water when any block at that height within the radius-6 disc around it (offset rows `dz` from -6,
+/// then `dx`, skipping the centre) is air (`BlockState.isAir`); the search stops at the first air block. Blocks of
+/// this chunk are read from `chunk`, others through `region_block(x, y, z)` (world block coordinates, Java's
+/// `WorldGenLevel.getBlockState`); an error there is returned at once, before that column is written.
+///
+/// `source_water` is `minecraft:water`'s default state (level 0, water's only property, so it is the one state
+/// `is(Blocks.WATER) && LEVEL == 0` accepts), `level_two_water` the same block with `level=2`. Writes go through
+/// `set_block_worldgen` (26.3's `ProtoChunk.setBlockState`); nothing updates heightmaps by hand. A missing
+/// MOTION_BLOCKING_NO_LEAVES is primed when the first smoothable column reads it, as `ChunkAccess.getHeight` does,
+/// so a chunk without one stays without it. `terrain` is the chunk's cached data, only read (see [`apply`]).
+pub fn smooth_water<B: TerrainBlockStates>(
+    terrain: &TerrainData,
+    chunk: &mut TerrainChunk<'_, B>,
+    source_water: BlockStateId,
+    level_two_water: BlockStateId,
+    mut region_block: impl FnMut(i32, i32, i32) -> Result<BlockStateId, TerrainError>,
+) -> Result<(), TerrainError> {
+    const RADIUS: i32 = 6;
+    let kind = HeightmapType::MotionBlockingNoLeaves;
+    let position = chunk.position();
+    let min_x = position.x.wrapping_shl(4);
+    let min_z = position.z.wrapping_shl(4);
+    for dz in 0..16 {
+        for dx in 0..16 {
+            if !is_smoothable(terrain, dx, dz) {
+                continue;
+            }
+            let x = min_x.wrapping_add(dx);
+            let z = min_z.wrapping_add(dz);
+            if chunk.heightmap(kind).is_none() {
+                chunk.prime_heightmaps(&[kind])?;
+            }
+            let y = chunk
+                .heightmap(kind)
+                .expect("MOTION_BLOCKING_NO_LEAVES primed above")
+                .highest_taken(dx, dz)?;
+            if chunk.block(dx, y, dz) != source_water {
+                continue;
+            }
+            if should_smooth(chunk, x, y, z, RADIUS, &mut region_block)? {
+                chunk.set_block_worldgen(dx, y, dz, level_two_water)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `isSmoothable`: river or lake terrain with a river value `== 0`.
+fn is_smoothable(terrain: &TerrainData, x: i32, z: i32) -> bool {
+    let river = terrain.river().get(x, z);
+    let land = terrain
+        .terrain()
+        .get(x, z)
+        .expect("TerrainData holds a terrain for every column");
+    (land.is_river() || land.is_lake()) && river == 0.0
+}
+
+/// `shouldSmooth`: whether any block in the disc of `radius` around `(x, y, z)` (centre excluded) is air, in Java's
+/// order; `sameChunk` (`x >> 4`, `z >> 4`) picks the chunk or the region.
+fn should_smooth<B: TerrainBlockStates>(
+    chunk: &TerrainChunk<'_, B>,
+    x: i32,
+    y: i32,
+    z: i32,
+    radius: i32,
+    region_block: &mut impl FnMut(i32, i32, i32) -> Result<BlockStateId, TerrainError>,
+) -> Result<bool, TerrainError> {
+    let position = chunk.position();
+    let radius2 = radius * radius;
+    for dz in -radius..=radius {
+        for dx in -radius..=radius {
+            let d2 = dx * dx + dz * dz;
+            if d2 == 0 || d2 > radius2 {
+                continue;
+            }
+            let (sample_x, sample_z) = (x.wrapping_add(dx), z.wrapping_add(dz));
+            let state = if sample_x >> 4 == position.x && sample_z >> 4 == position.z {
+                chunk.block(sample_x & 15, y, sample_z & 15)
+            } else {
+                region_block(sample_x, y, sample_z)?
+            };
+            if chunk.block_properties(state).is_air() {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 /// `findSolid`: the first non-erodible state below an erodible `y`, strictly above `max(0, y - 20)`, with its height.
@@ -539,5 +636,500 @@ p 9 minecraft:sand false true true true
             total += changed;
         }
         assert_eq!((scenarios, eroding, total), (160, 91, 34659));
+    }
+
+    /// The water oracle's palette: air, void air, stone, water (level 0, 1, 2), oak leaves, kelp plant, sand, cave air.
+    const WATER_NAMES: [(&str, Option<&str>); 10] = [
+        ("minecraft:air", None),
+        ("minecraft:void_air", None),
+        ("minecraft:stone", None),
+        ("minecraft:water", Some("0")),
+        ("minecraft:water", Some("1")),
+        ("minecraft:water", Some("2")),
+        ("minecraft:oak_leaves", None),
+        ("minecraft:kelp_plant", None),
+        ("minecraft:sand", None),
+        ("minecraft:cave_air", None),
+    ];
+
+    /// Heightmap facts of `WATER_NAMES` (checked against the oracle's palette lines).
+    #[derive(Clone, Copy)]
+    struct WaterState(u32);
+
+    impl HeightmapState for WaterState {
+        fn is_air(self) -> bool {
+            matches!(self.0, 0 | 1 | 9)
+        }
+
+        fn is_air_block(self) -> bool {
+            self.0 == 0
+        }
+
+        fn has_fluid(self) -> bool {
+            matches!(self.0, 3..=5 | 7)
+        }
+
+        fn blocks_motion_in_heightmap(self) -> bool {
+            matches!(self.0, 2 | 6 | 8)
+        }
+
+        fn blocks_motion_in_heightmap_no_leaves(self) -> bool {
+            matches!(self.0, 2 | 8)
+        }
+    }
+
+    struct WaterProperties;
+
+    impl TerrainBlockStates for WaterProperties {
+        type State = WaterState;
+
+        fn heightmap_state(&self, id: BlockStateId) -> Self::State {
+            WaterState(id.0)
+        }
+    }
+
+    fn water_registry() -> BlockRegistry {
+        let state = |(name, level): &(&str, Option<&str>)| match level {
+            None => Tag::compound([("id", Tag::String((*name).into()))]),
+            Some(level) => Tag::compound([
+                ("id", Tag::String((*name).into())),
+                (
+                    "properties",
+                    Tag::compound([("level", Tag::String((*level).into()))]),
+                ),
+            ]),
+        };
+        let mut defaults = Vec::new();
+        for (i, (name, level)) in WATER_NAMES.iter().enumerate() {
+            if matches!(level, None | Some("0")) {
+                defaults.push((*name, Tag::Int(i as i32)));
+            }
+        }
+        BlockRegistry::from_nbt(&Tag::compound([
+            ("DataVersion", Tag::Int(DATA_VERSION)),
+            ("states", Tag::List(WATER_NAMES.iter().map(state).collect())),
+            ("defaults", Tag::compound(defaults)),
+        ]))
+        .unwrap()
+    }
+
+    /// `WaterSmoothingOracle` (`.local/terraforged/oracles/surface_erosion/run.sh`, `water.txt`): 6dd607eb's
+    /// `Surface.smoothWater`, `shouldSmooth`, `isSmoothable` and `sameChunk` over real 26.3 ProtoChunks and heightmaps,
+    /// Engine 0.3.0's TerrainTypes, and a region proxy over the 8 neighbouring ProtoChunks that records every read.
+    const JAVA_WATER: &str = r"p 0 minecraft:air - true false false false false
+p 1 minecraft:void_air - true false false false false
+p 2 minecraft:stone - false true true true true
+p 3 minecraft:water 0 false false true true true
+p 4 minecraft:water 1 false false true true true
+p 5 minecraft:water 2 false false true true true
+p 6 minecraft:oak_leaves - false true true false true
+p 7 minecraft:kelp_plant - false false true true true
+p 8 minecraft:sand - false true true true true
+p 9 minecraft:cave_air - true false false false false
+t none false false
+t deep_ocean false false
+t ocean false false
+t coast false false
+t beach false false
+t river true false
+t lake false true
+t wetland false false
+t flats false false
+t badlands false false
+t plateau false false
+t hills false false
+t mountains false false
+t mountain_chain false false
+t volcano false false
+t volcano_pipe false false
+0 0xefeb65e1ad885998 0x9fd6da0aea8f3af4 218 0x2727fe491c22f39c 57
+1 0x75f92444c1ea319c 0xdeb1289c94183700 2414 0x15fab0bb6153c8a6 0
+2 0x331690e374ab0e53 0x2018bfd2a552bc3f 278 0x73c670685bafa0a8 48
+3 0xfcd560da2a356391 0x015ea56499a84f11 329 0x80776b423a30f9ce 55
+4 0x47fd78a383719b1b 0x5f9392b90c1cbc6c 155 0x9feaa503b72f247d 36
+5 0xd130a25c18fce7f2 0xd570caba89c37606 2503 0x8c1b8ba8b7ada54a 4
+6 0xaaedb02516a89dcb 0x73d827c023f8ccd4 172 0x171ae5e060803ac3 41
+7 0x0cace2030f0e2696 0x39d30fb9fe8af610 734 0xd9d0de4f1177341d 153
+8 0x3cd1e039535d6a91 0x79dd25c6a9300bda 319 0x0b6d2e39a43c9336 57
+9 0xcb961a1b0e3db1eb 0x1462a5bc376f55aa 0 0xcbf29ce484222325 0
+10 0xf2fce340589e6020 0xbf96438d15b4435d 179 0xecc47de99f394649 52
+11 0xbd27703df4d5709f 0x3119b26467ce5460 273 0x21cf176489b90225 52
+12 0xccc95857559cafe4 0x71b202eb0ed362c2 223 0xf770ad47e9441e92 45
+13 0xb0ff751a010d6a93 0x2f7067c3ec9701e2 2250 0x14a8a8a469e1b5e4 19
+14 0x566734e81ccd2d79 0x2aa30184d8bbb73f 260 0x894d2e4bd582b453 48
+15 0x64d80da4011da7c8 0xd3d22ecfc88d2f66 725 0x8e32913064f81012 151
+16 0xa3d86ef0ba4472a9 0x9b96e09751e9cea0 213 0x5e3a51cccc8bda23 36
+17 0x8fe0adf109185087 0x15cb766c0fc43e44 2264 0xd3d627e6daa7441a 7
+18 0x8c5b6a4ad960cf03 0x57631e9ec68aeb59 316 0xba01d3fbb00d90c0 50
+19 0x74891be713770bd9 0x896267f7e84bb564 238 0xa3126691f2ffdfe7 52
+20 0xd20787227a9eb051 0x044de70844e55b81 208 0x6950b59e023c2d35 39
+21 0x4d34274f2c5281a9 0x202e2cab90baea4b 3070 0x671003b312b13ba1 0
+22 0xf0930b00c8cd3a55 0x11cb12da77aae0be 200 0xc0f8e01723da0a1d 50
+23 0x902d9dcdbcfec7d7 0x4f474d96c16aa2b8 738 0x8a757f2304de500e 156
+24 0x39504ecd53babd21 0x1af3a06c055d72e8 264 0xcf54b118e31a24b8 46
+25 0x4d6df55b3089c657 0x5b9f49acf943a6ed 0 0xcbf29ce484222325 0
+26 0xc6f938f99d014748 0x6f63b69e79690df1 272 0x3433280cd185c87e 55
+27 0x2aa27bf262778ee8 0xce33acabba6c2d31 421 0x85f59c81ffde4f49 52
+28 0x3546203fe5232009 0x2ea5490718f17758 214 0x71a362e41deedb38 46
+29 0x73a3beb3fae45134 0x7d05b56fec0860b3 2166 0x65c6f34279dacade 34
+30 0x35ab8b773a585961 0x65cb18e15af1542b 168 0x701aa68337a2dc06 51
+31 0x8490fb3b617f015d 0xfa7dab3515e900a8 810 0xc8ca566ec042d557 152
+32 0xbda44d290160c6f7 0xa767e07635dc2101 367 0xc225b7932aeb921b 52
+33 0x5b69c867c4abb173 0x4c9a1c925a4be2c2 2441 0x7d6ed59d5b69ae5b 25
+34 0x324bd63eb1fb94ca 0xaecd2235d539f353 274 0xbd6d49419227590c 58
+35 0x6168930e555b8153 0x31234df92c5f053a 162 0x986f5bf2d1b443a1 53
+36 0x8db1b775ef47be04 0x09807175e279c3d4 590 0xb39029781959a1e6 65
+37 0xb2a421178fee0232 0x499577905041ca87 1883 0x5f8eeb1d01c1e337 30
+38 0xba8d8781a5d11c89 0x81cd1763487ae0c3 259 0xf54a808847a7c0a5 52
+39 0x117b49ccc2241f7a 0xc6f9ec526ab65022 467 0xe97355123b4bd756 147
+40 0x87ed5872faefccd4 0xee94df3a7d9508db 199 0xfe585c0f00bbc5e7 58
+41 0xe4b0660f2f6fb837 0x1686a4f7b7d6cc70 0 0xcbf29ce484222325 0
+42 0x7ccdbf53b8e27852 0xe53ed79cfb7b1ce5 343 0xf87a1b806eede3d1 44
+43 0xf8a0a7be3f0826fd 0x6d2dceae244d00c9 262 0x1eebdc7189f6f3e4 49
+44 0x04b9f8ca28f7f8cc 0x626b267ce8ce0421 210 0x0dbbd68684fde3f9 44
+45 0xfb6b398b547c6163 0x1944be2d20736baa 2478 0x28bcd34430176ea0 0
+46 0xe4f2e79fc307bb07 0x49c7bcdd1cd3944f 180 0xd2167d4341e5cdd3 50
+47 0xa1255f5bd83549ec 0x25d4919ca92b5420 852 0x43b0246a0c806f1a 160
+48 0x8099deedbb84f640 0x02cbebcb446d3d50 412 0xa95b368772c5685e 53
+49 0x49ca7a73c8cf3c02 0x90b11ed579c87aba 2674 0x3ada46dab7f9543c 14
+50 0x1ec1d4d11eb6066a 0x71a608e93e610d07 564 0x9e432fdf542e3de0 62
+51 0x1fd49ba10973e9d1 0x21f32c98b1096ecd 142 0x42321a5d331c1a74 43
+52 0x2a63f7215c94b5d6 0x66203b93c0e7dd83 422 0xd8ecc212448066eb 40
+53 0x033d7430dd97ffd0 0xadde5a6bb45388c5 2238 0x6dc310b1fa677652 5
+54 0xb43dcb2c6e5b0919 0x35e37765073f6439 315 0x02a89e7bf1fb7cfa 41
+55 0x01f8402973cfaea7 0xadb8b5f2195cb11d 638 0x1b2cda5fc3e138c2 160
+56 0xbe988caa46ff919c 0x94c6b80dfa64f8b7 362 0x41bd79c14b2c8f89 54
+57 0x26b2e983ca18d19c 0x2e8c9722f39cd648 0 0xcbf29ce484222325 0
+58 0xc4faa02a8a796034 0xc5ebb6a24886a41b 142 0x1eaf2bada2b30ea2 44
+59 0x96688729881db630 0xc4dacb45f24f6715 155 0x585ff82c60e54883 43
+60 0x2b0bcdfc1a9ea38c 0x225139e8be257ffc 339 0xb23ae9bf4327ff75 57
+61 0x479656f0d166585e 0x95d7065590b25545 2493 0xaed25952ed8e07e3 47
+62 0xc77217699e94dea4 0xee55e8fde763bb83 313 0x75f5e50ef9293404 46
+63 0xf70962b2c848e1f0 0x93ce31b6b16712bb 593 0x9ec940481c4d9004 143
+64 0x46c42c46b268ec36 0x3bf66fba8693b21e 269 0xf3dfad0813f8f7e8 40
+65 0xb5f0667788319523 0xc67cb4157134d28a 2082 0xbc0f2a0cbbdfd0ad 18
+66 0xeeef5570dc3511df 0x112708f08fcb3c84 324 0x34cf4426030bf566 55
+67 0xa9efd08c2af98b7a 0x2e43229e24920fbd 318 0x4cf47efad04d2f0b 51
+68 0x3ccad4350d2dc04e 0xe89ce79a3241ea6b 210 0x90d7bbda67d8fb3a 52
+69 0x23bb257d7624562f 0x57f8fa4992301136 2377 0xfe5e5e62c9e2cf43 33
+70 0x6e40f9709f1ea35c 0xef5cb69920b4b56f 163 0x5e9eb06fc1df35af 49
+71 0xfdd4a74867910397 0xf6e014f74f2f092e 447 0xee722012391d72ff 160
+72 0x1ae0beb7acc14609 0x0fc6f51086a184c7 273 0x88b0bfcc4c7af094 52
+73 0xc95864a6c74582ff 0x4a6c0816eb906c6f 0 0xcbf29ce484222325 0
+74 0x583cf58daba75803 0x41f2bfab373ab9b1 263 0xb1239d1efe0455ff 56
+75 0x020170cc4bda2245 0xcf1c73f4950b8b8f 283 0x8c0e36337872e51b 57
+76 0x6b4168648578551b 0x9a6fbf976ef6a84e 219 0xfd65e296f931ec2f 46
+77 0x7d0dee6d460377c7 0x3a34ea083d234d3d 2625 0x2cc664e96df1e887 8
+78 0xbe32104dbcfb5be0 0xa42d1add74db5dfc 196 0xf47f1ec98c578f48 50
+79 0xea6c98a65575e557 0x7479ef3c66c99730 547 0x1a1658aba249fc5f 165
+80 0x3d2cdbf4ae39d88b 0x3c1a30d68287123b 493 0xa2e3eef48e4ec6a7 59
+81 0x940bb19f6d378fb5 0x6d46f47daa0d5dd9 2205 0x55d67abdb089835a 7
+82 0x78a42addcb986e0f 0xe86f832d6669d431 220 0xe19ec7903b66fd70 46
+83 0x35712510c71976fe 0x9d569a6a9b1c2649 142 0x702788beffc0840d 47
+84 0xb1e7a671d9d7fc45 0x572fa6d305fbba35 260 0xb6e3d1a213cf9cbc 52
+85 0x6ce9225a0d75d527 0xceb2804f95c412a0 2665 0x236461fbce77aed1 1
+86 0x9ab40c53fb3bafa0 0xe0cf8b6eb0f99c4f 206 0xda9fc7d5602a4750 51
+87 0xede3f0289ec9fe81 0x56405364f0431ba4 743 0x7b89fbd82cfc5a42 143
+88 0xf6028812844300fb 0xe54d01f0da656352 204 0x1dab1cb53a113662 48
+89 0x9085c95cc0156759 0x4a6c0816eb906c6f 0 0xcbf29ce484222325 0
+90 0x8f7477e1058f3895 0xe8e54c7645d7283f 358 0xc4eca368a15d8be1 55
+91 0x1149d383d092e3d5 0x9b37cbbfd1b02b8d 218 0xdea36a56770810f8 48
+92 0x4b6b6b68f9e2f8cb 0x321a95a5b3be266f 393 0x8948e9009a52956d 55
+93 0xbee3961cc79fb8b7 0x44497669638a3796 2527 0xcaea35486330ee53 0
+94 0xa784dce82686a8d1 0x9427f7cccb00b1e4 334 0x735e3f370d9aed3f 48
+95 0x1a6afcb233ee8f13 0x27d10f821087adac 810 0x23fd18797144cd14 145
+96 0xef1612342a972cf2 0xd202bc89eaf6f19e 306 0xa693a042c720da39 52
+97 0xa924b3478e1513c8 0xa5cbb7cd2c6bd49d 2540 0xa2d3697647356de7 44
+98 0x6aa038aa913da1f7 0x9e3596ffc758bae3 126 0xa9cb3832cd1d3288 37
+99 0xe00865fd045360d0 0xe700117cfde03af7 427 0x56cfe29d2e7f78e4 59
+100 0xc8bebd0d6f29e5e9 0xbb0b7eab4e79de89 169 0xfe5150292aca3b82 48
+101 0x707b89d41e336990 0xc4a5f7e6f12c10f4 1534 0xfa568c5338c08cdc 26
+102 0xe7dcb25b3de3b74e 0x1467de311955fd50 276 0xe1757f4abeb732a7 61
+103 0x4bcc5fc44d9d83f6 0x8ab7baacb540d9bd 838 0x0e09a291f8f16fd5 150
+104 0x47cb5b5e566e6936 0x9577680b62a11050 185 0x324466e377c630d7 53
+105 0xfcb21458afbddf7d 0xef808aa8e1e542aa 0 0xcbf29ce484222325 0
+106 0x1ff0674d2ea5e47a 0xab26b3921cc4736a 235 0x90d4e95d0b09dd57 46
+107 0xf58b4563f42ad2e1 0x7ccc14e8b1468d98 279 0xcfc2b31df06d81d4 58
+108 0x7546a0977ad2f136 0x81866d933809a983 239 0xba278b2a14a17816 53
+109 0x341121a591c0d16f 0xefd8ebcff639e646 2199 0x692c1ad17f87a185 7
+110 0xf170a32686f395b8 0x080613539ec87cda 226 0x08cd02cfd77530b1 45
+111 0x862383b3ad33316d 0x893f6effc03cdb21 803 0x60f91c6e31967b0e 158
+112 0xd349eb65f36cd84c 0x7b0f9b57e28105d7 72 0x51b2549037e6ea3f 36
+113 0x3d2c527f6d82fa71 0xfcb37a83d1763d31 1967 0xd64ddbf289cb00b5 15
+114 0xe8f18d9fb6037e43 0x30d96c27fa4c3b2e 130 0x6747f0fffa2f7937 48
+115 0x29b7ee10afb54536 0xf4f1bee79382b08c 315 0x2ba96f94d147131f 61
+116 0x202e978f35b21887 0x20c2574ac1750d31 259 0x3ea34dbe0eac8b36 63
+117 0x803cc35aeca7fe92 0x030c0573d988ccff 2309 0x254dfdb4582f8415 32
+118 0x35e9779c6973e1c9 0x9325a4a69d30a4c7 183 0x272d1f632c255f36 47
+119 0xd9dec4ded000da68 0xca24d512e63f5794 595 0x29f5ed9a8bc56551 156
+120 0xa9b9761962ac827f 0xf655d8c3c8f71de6 238 0x2a631d69447d145c 40
+121 0x6ebb9498ad09d86b 0xe49be268cce6fbaa 0 0xcbf29ce484222325 0
+122 0x59dd0583779fc59e 0xd3020afbed2e7c8c 396 0x50f3c0dd1cf8059c 44
+123 0xa4226e32e1127531 0x68c3da9e32d2b69e 210 0x37bd9698b19b220d 41
+124 0x61de8d7c5301f54b 0xcf3e20b66828c28a 208 0x9d4f4ff717e752e4 55
+125 0xd08af0e0399269a3 0x3096dbbb68ec9daa 2145 0x18e1226b1ecd93e6 15
+126 0x703d392956eed49b 0x29718410aae97142 194 0x1df8c3578d40610b 39
+127 0x622f137b53a7772c 0x3140b4cdaeea1357 825 0x1d9a3473472a5c37 161";
+
+    /// Java's terrain names in `TerrainType` order (the oracle's `TerrainType.get(name)`).
+    const TERRAIN_NAMES: [&str; 16] = [
+        "none",
+        "deep_ocean",
+        "ocean",
+        "coast",
+        "beach",
+        "river",
+        "lake",
+        "wetland",
+        "flats",
+        "badlands",
+        "plateau",
+        "hills",
+        "mountains",
+        "mountain_chain",
+        "volcano",
+        "volcano_pipe",
+    ];
+
+    /// 128 generated 3x3 chunk grids (build ranges -64..320, 0..256 and 16..80, the persisted statuses TERRAIN,
+    /// FEATURES, EMPTY and BIOMES, no / MOTION_BLOCKING_NO_LEAVES / WG heightmaps primed, chunk positions -5..3) with
+    /// source and flowing water, shores topped with air or cave air, leaves over water and kelp tops, and per-column
+    /// terrains and river values (0, -0.0, 0.001, NaN, 1) give Java's blocks, all six heightmaps (absent ones too: a
+    /// chunk with no smoothable column is never primed) and the region reads (count and ordered positions). Every 8th
+    /// grid is all river with river 0; in every 4th from 1 shores are rare, so most searches cover the whole disc;
+    /// every 16th from 9 has no river or lake, so nothing is read or primed. 116 grids smooth 6830 columns over
+    /// 88165 region reads.
+    #[test]
+    fn water_smoothing_matches_6dd607eb_java_on_26_3_chunks() {
+        let mut lines = JAVA_WATER.lines();
+        for (i, line) in lines.by_ref().take(WATER_NAMES.len()).enumerate() {
+            let fields: Vec<_> = line.split(' ').collect();
+            let (name, level) = WATER_NAMES[i];
+            let i_text = i.to_string();
+            assert_eq!(
+                fields[..4],
+                ["p", i_text.as_str(), name, level.unwrap_or("-")]
+            );
+            let flag = |k: usize| fields[k] == "true";
+            let state = WaterState(i as u32);
+            assert_eq!(flag(4), state.is_air(), "{line}");
+            for (k, kind) in [
+                HeightmapType::OceanFloorWg,
+                HeightmapType::MotionBlocking,
+                HeightmapType::MotionBlockingNoLeaves,
+                HeightmapType::WorldSurface,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                assert_eq!(flag(5 + k), kind.is_opaque(state), "{line} {kind:?}");
+            }
+        }
+        let terrains = TerrainRegistry::new();
+        for (name, line) in TERRAIN_NAMES.iter().zip(lines.by_ref()) {
+            let terrain = terrains.get_by_name(name).unwrap();
+            let rust = format!("t {name} {} {}", terrain.is_river(), terrain.is_lake());
+            assert_eq!(rust, line);
+        }
+
+        let blocks = water_registry();
+        let ranges = [(-64, 384), (0, 256), (16, 64)];
+        let stages = [
+            PreLightChunkStage::Terrain,
+            PreLightChunkStage::Features,
+            PreLightChunkStage::Empty,
+            PreLightChunkStage::Biomes,
+        ];
+        let rivers = [0.0f32, 0.0, 0.0, -0.0, 0.001, f32::NAN, 1.0];
+        let (mut scenarios, mut smoothing, mut total, mut all_reads) = (0, 0, 0, 0);
+        for (s, line) in lines.enumerate() {
+            let mut rng = Lcg((s as u64)
+                .wrapping_mul(0x9E3779B97F4A7C15)
+                .wrapping_add(177));
+            let (min_y, height) = ranges[rng.next(3) as usize];
+            let max_y = min_y + height;
+            let stage = stages[rng.next(4) as usize];
+            let prime = rng.next(3);
+            let (cx, cz) = (rng.next(9) - 5, rng.next(9) - 5);
+            let sea = min_y + 4 + rng.next(height - 8);
+            let mut grid = Vec::new();
+            for gz in -1..=1 {
+                for gx in -1..=1 {
+                    let pos = ChunkPos::new(cx + gx, cz + gz);
+                    let mut chunk =
+                        TerrainChunk::new(pos, min_y, height, &blocks, WaterProperties).unwrap();
+                    for z in 0..16 {
+                        for x in 0..16 {
+                            let kind = rng.next(if s % 4 == 1 { 400 } else { 10 });
+                            let floor = sea - 1 - rng.next(6);
+                            let top = sea + rng.next(3) - 1;
+                            for y in min_y..max_y {
+                                let id = if kind == 6 || kind == 7 {
+                                    if y < top {
+                                        2
+                                    } else if y == top {
+                                        if kind == 7 { 8 } else { 2 }
+                                    } else if y == top + 1 && kind == 7 {
+                                        9
+                                    } else {
+                                        0
+                                    }
+                                } else if y <= floor {
+                                    2
+                                } else if y < sea {
+                                    3
+                                } else if y == sea {
+                                    match kind {
+                                        5 => 4,
+                                        9 => 7,
+                                        _ => 3,
+                                    }
+                                } else if y == sea + 1 && kind == 8 {
+                                    6
+                                } else {
+                                    0
+                                };
+                                if id != 0 {
+                                    chunk.set_block_raw(x, y, z, BlockStateId(id)).unwrap();
+                                }
+                            }
+                        }
+                    }
+                    grid.push(chunk);
+                }
+            }
+            let mut center = grid.remove(4);
+            center.set_generation_stage(stage);
+            match prime {
+                1 => center
+                    .prime_heightmaps(&[HeightmapType::MotionBlockingNoLeaves])
+                    .unwrap(),
+                2 => center
+                    .prime_heightmaps(&[HeightmapType::WorldSurfaceWg, HeightmapType::OceanFloorWg])
+                    .unwrap(),
+                _ => {}
+            }
+            let mut noise = NoiseData::new(&terrains);
+            for z in 0..16 {
+                for x in 0..16 {
+                    let pick = rng.next(4);
+                    let mut name = if pick < 2 {
+                        TERRAIN_NAMES[5 + pick as usize]
+                    } else {
+                        TERRAIN_NAMES[rng.next(16) as usize]
+                    };
+                    if s % 16 == 9 {
+                        name = "hills";
+                    }
+                    let mut river = rivers[rng.next(7) as usize];
+                    if s % 8 == 7 {
+                        (name, river) = ("river", 0.0);
+                    }
+                    let mut sample = NoiseSample::new(&terrains);
+                    sample.river_noise = river;
+                    sample.terrain_type = terrains.get_by_name(name).unwrap();
+                    noise.set_noise(x, z, &sample);
+                }
+            }
+            let mut terrain = TerrainData::new(TerrainLevels::default());
+            terrain.accept(&noise);
+            let mut before = Vec::new();
+            for z in 0..16 {
+                for x in 0..16 {
+                    before.extend((min_y..max_y).map(|y| center.block(x, y, z)));
+                }
+            }
+            let (mut reads, mut read_hash) = (0, 0xcbf29ce484222325u64);
+            smooth_water(
+                &terrain,
+                &mut center,
+                BlockStateId(3),
+                BlockStateId(5),
+                |x, y, z| {
+                    reads += 1;
+                    for v in [x, y, z] {
+                        read_hash = fold(read_hash, v as u32);
+                    }
+                    let (gx, gz) = ((x >> 4) - cx, (z >> 4) - cz);
+                    assert!((-1..=1).contains(&gx) && (-1..=1).contains(&gz) && (gx, gz) != (0, 0));
+                    let index = ((gz + 1) * 3 + gx + 1) as usize;
+                    let chunk = &grid[if index > 4 { index - 1 } else { index }];
+                    Ok(chunk.block(x & 15, y, z & 15))
+                },
+            )
+            .unwrap();
+
+            let mut block_hash = 0xcbf29ce484222325u64;
+            let mut changed = 0;
+            let mut index = 0;
+            for z in 0..16 {
+                for x in 0..16 {
+                    for y in min_y..max_y {
+                        let state = center.block(x, y, z);
+                        changed += i32::from(state != before[index]);
+                        index += 1;
+                        block_hash = fold(block_hash, state.0);
+                    }
+                }
+            }
+            let mut maps = 0xcbf29ce484222325u64;
+            for kind in HeightmapType::ALL {
+                let Some(map) = center.heightmap(kind) else {
+                    maps = fold(maps, u32::MAX);
+                    continue;
+                };
+                for z in 0..16 {
+                    for x in 0..16 {
+                        maps = fold(maps, map.first_available(x, z).unwrap() as u32);
+                    }
+                }
+            }
+            let rust = format!(
+                "{s} 0x{block_hash:016x} 0x{maps:016x} {reads} 0x{read_hash:016x} {changed}"
+            );
+            assert_eq!(rust, line, "scenario {s} ({stage:?}, {min_y}..{max_y})");
+            assert_eq!(center.generation_stage(), stage);
+            scenarios += 1;
+            smoothing += i32::from(changed > 0);
+            total += changed;
+            all_reads += reads;
+        }
+        assert_eq!(
+            (scenarios, smoothing, total, all_reads),
+            (128, 116, 6830, 88165)
+        );
+    }
+
+    /// A failing region read stops the pass at once: that column keeps its source water (Java's exception leaves
+    /// the chunk as it is at the throw).
+    #[test]
+    fn water_smoothing_returns_region_errors_before_writing() {
+        let blocks = water_registry();
+        let terrains = TerrainRegistry::new();
+        let mut chunk =
+            TerrainChunk::new(ChunkPos::new(-1, 2), 0, 64, &blocks, WaterProperties).unwrap();
+        chunk.set_block_raw(0, 10, 0, BlockStateId(3)).unwrap();
+        let mut noise = NoiseData::new(&terrains);
+        let mut sample = NoiseSample::new(&terrains);
+        sample.river_noise = 0.0;
+        sample.terrain_type = terrains.get_by_name("lake").unwrap();
+        noise.set_noise(0, 0, &sample);
+        let mut terrain = TerrainData::new(TerrainLevels::default());
+        terrain.accept(&noise);
+        let mut reads = Vec::new();
+        let result = smooth_water(
+            &terrain,
+            &mut chunk,
+            BlockStateId(3),
+            BlockStateId(5),
+            |x, y, z| {
+                reads.push((x, y, z));
+                Err(TerrainError::InvalidVolume)
+            },
+        );
+        assert!(matches!(result, Err(TerrainError::InvalidVolume)));
+        // The first disc offset (dx 0, dz -6) from block (-16, 32) is in chunk (-1, 1): a region read.
+        assert_eq!(reads, [(-16, 10, 26)]);
+        assert_eq!(chunk.block(0, 10, 0), BlockStateId(3));
     }
 }
