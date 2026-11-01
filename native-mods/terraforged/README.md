@@ -290,6 +290,9 @@ lightweight generator views with TerraForged's original factory lifecycle.
 
 The mod terrain-level layer now preserves TerraForged's configurable build, sea-floor, sea-level, and
 base-height bounds plus exact automatic horizontal-frequency and normalized-height transforms.
+Constructor bounds use the original requested maximum height for the sea-level limit, including
+Java's lower-bound-first clamp behavior when limits are inverted; seven Java boundary fixtures
+cover below-minimum and above-maximum build heights as well as valid endpoints.
 
 Bordered noise maps and chunk terrain data now preserve TerraForged's coordinate indexing, sampled
 height, base, river, terrain, gradient, and extrema conversion from the current source implementation.

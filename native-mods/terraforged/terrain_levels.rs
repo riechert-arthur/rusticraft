@@ -129,11 +129,20 @@ impl TerrainLevels {
         sea_level: i32,
         sea_floor: i32,
     ) -> Self {
-        let min_y = min_y.clamp(Self::MIN_MIN_Y, Self::MAX_MIN_Y);
-        let max_y = max_y.clamp(Self::MIN_MAX_Y, Self::MAX_MAX_Y);
-        let sea_level = sea_level.clamp(Self::MIN_SEA_LEVEL, max_y >> 1);
-        let sea_floor = sea_floor.clamp(min_y, sea_level - 1);
-        let base_height = base_height.clamp(sea_level, max_y);
+        fn clamp(value: i32, min: i32, max: i32) -> i32 {
+            if value < min {
+                min
+            } else if value > max {
+                max
+            } else {
+                value
+            }
+        }
+        let min_y = clamp(min_y, Self::MIN_MIN_Y, Self::MAX_MIN_Y);
+        let sea_level = clamp(sea_level, Self::MIN_SEA_LEVEL, max_y >> 1);
+        let max_y = clamp(max_y, Self::MIN_MAX_Y, Self::MAX_MAX_Y);
+        let sea_floor = clamp(sea_floor, min_y, sea_level - 1);
+        let base_height = clamp(base_height, sea_level, max_y);
         Self {
             min_y,
             max_y,
@@ -213,9 +222,9 @@ mod tests {
             ),
             (
                 TerrainLevels::new(false, 0.0, -9_999, 64, 1, 9_999, -9_999),
-                (-2_032, 128, 64, 64, -2_032),
+                (-2_032, 128, 32, 32, -2_032),
                 [
-                    0x3c000000, 0xc17e0000, 0x3f000000, 0x3f000000, 0x00000000, 0x41830000,
+                    0x3c000000, 0xc17e0000, 0x3e800000, 0x3e800000, 0x3f000000, 0x41810000,
                     0x3f800000,
                 ],
             ),
@@ -254,6 +263,84 @@ mod tests {
             );
         }
         assert_eq!(TerrainLevels::unconfigured().min_y, 64);
+    }
+
+    #[test]
+    fn constructor_bounds_match_current_java_oracle() {
+        let cases = [
+            (
+                [0, 0, 128, 62, 0],
+                [0, 128, 128, 0, -1],
+                [
+                    0x3c000000, 0xbc000000, 0, 0x3f800000, 0, 0x3c000000, 0x3f800000,
+                ],
+            ),
+            (
+                [0, 0, 128, 0, 0],
+                [0, 128, 128, 32, 0],
+                [
+                    0x3c000000, 0, 0x3e800000, 0x3f800000, 0xbe800000, 0x3e800000, 0x3f800000,
+                ],
+            ),
+            (
+                [-64, 10_000, 6_000, 5_000, 22],
+                [-64, 4_064, 4_064, 5_000, 22],
+                [
+                    0x39810204, 0x3bb162c6, 0x3f9d7af6, 0x3f800000, 0xbf9d7af6, 0x3f9cc993,
+                    0x3f800000,
+                ],
+            ),
+            (
+                [-9_999, i32::MIN, 128, 62, 0],
+                [-2_032, 128, 128, -1_073_741_824, -1_073_741_825],
+                [
+                    0x3c000000, 0xcb000000, 0xcb000000, 0x3f800000, 0x4b000000, 0, 0x3f800000,
+                ],
+            ),
+            (
+                [-64, 128, 128, 62, 22],
+                [-64, 128, 128, 62, 22],
+                [
+                    0x3c000000, 0x3e300000, 0x3ef80000, 0x3f800000, 0xbef80000, 0x3ea00000,
+                    0x3f800000,
+                ],
+            ),
+            (
+                [-64, 4_064, 128, 62, 22],
+                [-64, 4_064, 128, 62, 22],
+                [
+                    0x39810204, 0x3bb162c6, 0x3c79f3e8, 0x3d010204, 0x3f740810, 0x3c214285,
+                    0x3f800000,
+                ],
+            ),
+        ];
+        for ([min, max, base, sea, floor], expected, bits) in cases {
+            let levels = TerrainLevels::new(false, 0.0, min, max, base, sea, floor);
+            assert_eq!(
+                [
+                    levels.min_y,
+                    levels.max_y,
+                    levels.base_height,
+                    levels.sea_level,
+                    levels.sea_floor
+                ],
+                expected
+            );
+            let noise = levels.noise_levels;
+            assert_eq!(
+                [
+                    noise.unit,
+                    noise.depth_min,
+                    noise.height_min,
+                    noise.base_range,
+                    noise.height_range,
+                    noise.depth_range,
+                    noise.frequency
+                ]
+                .map(f32::to_bits),
+                bits
+            );
+        }
     }
 
     #[test]
