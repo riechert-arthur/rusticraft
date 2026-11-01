@@ -689,6 +689,9 @@ Engine's `Tile.getCellRaw`, as for steepness. Invalid control points fall back t
 8x8 to 33x33 maps (absent cells, NaN, infinite and signed-zero heights, NaN continent edges, valid and invalid beach
 control points) and prints every cell's terrain id folded together with the cells it turned into beach.
 
+Hydraulic-erosion primitives reproduce TerraForged's filter settings, paired-seed fast random stream,
+and radius-four normalized brush cache, including its reused interior brush layout.
+
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter and the beach detection filter. They change nothing in the game, so there is
