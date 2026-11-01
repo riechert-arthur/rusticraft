@@ -498,6 +498,9 @@ including plains-style fallback, identity no-ops, and snow-incompatible substitu
 Current climate sampling now preserves biome-scale and optional edge warps, nearest and second-nearest
 cell selection, macro-cell grouping, moisture and temperature graphs, edge distance, and the temporary
 steppe-to-grassland remap across runtime seeds. Raw fixture bits come from the current Java sources.
+`tools/terraforged/TerraForgedCurrentClimateOracle.java` regenerates the 24 samples when compiled with
+the current TerraForged `noise` and `engine` source trees, their `terraforged/biome_types.bin` resource,
+and the Cereal dependency from the original 0.3.1 artifact.
 
 The scalar graph fixtures cover 15 graphs, four seeds and four coordinates (240 Java samples),
 including wrapped seed addition and mixed Perlin/seed-sensitive sources. Regenerate their hashes
