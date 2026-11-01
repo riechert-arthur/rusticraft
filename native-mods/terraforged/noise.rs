@@ -2446,6 +2446,46 @@ impl Module {
                     interpolation.apply(alpha),
                 )
             }
+            ModuleKind::Terrace {
+                source,
+                ramp,
+                cliff,
+                ramp_height,
+                steps,
+                max_index,
+                ..
+            } => {
+                let noise_value = clamp(sample(source)?, 0.0, 0.999999);
+                let index = floor(noise_value * steps.len() as f32);
+                // Only a NaN sample (index -1) or a terrace without steps leaves the array, where Java throws.
+                let step = usize::try_from(index)
+                    .ok()
+                    .and_then(|index| steps.get(index))
+                    .expect("Terrace samples a step outside its steps, where Java throws");
+                let index = index as usize;
+                if index as i32 == *max_index || noise_value < step.lower_bound {
+                    step.value
+                } else if noise_value > step.upper_bound {
+                    steps[index + 1].value
+                } else {
+                    let ramp = 1.0 - sample(ramp)? * 0.5;
+                    let cliff = 1.0 - sample(cliff)? * 0.5;
+                    let alpha =
+                        (noise_value - step.lower_bound) / (step.upper_bound - step.lower_bound);
+                    let mut value = step.value;
+                    if alpha > ramp {
+                        let next = &steps[index + 1];
+                        let ramp_alpha = (alpha - ramp) / (1.0 - ramp);
+                        value += (next.value - value) * ramp_alpha * sample(ramp_height)?;
+                    }
+                    if alpha > cliff {
+                        let next = &steps[index + 1];
+                        let cliff_alpha = (alpha - cliff) / (1.0 - cliff);
+                        value = lerp(value, next.value, cliff_alpha);
+                    }
+                    value
+                }
+            }
             // Noise2D 2cb4843's `Cache` keeps one entry per thread keyed by `x == this.x && y == this.y` alone, so a
             // repeated point at another runtime seed returns the first seed's sample. The port keys the shared entry
             // by the seed too (and by the coordinates' bits, as the seedless path does): a hit is always the sample
@@ -3765,10 +3805,9 @@ mod tests {
     }
 
     fn unsupported_seeded_node(value: f32) -> Module {
-        Module::constant(value).terrace(
+        Module::constant(value).legacy_terrace(
             Module::constant(0.0),
             Module::constant(1.0),
-            Module::constant(0.5),
             4,
             0.25,
         )
@@ -7420,6 +7459,73 @@ mod tests {
         let cache = unsupported.cache();
         assert!(cache.try_value_seed_first(17, 1.0, 2.0).is_err());
         assert!(cache.try_value_seed_first(-91, 1.0, 2.0).is_err());
+    }
+
+    #[test]
+    fn runtime_seeded_terrace_matches_current_noise2d() {
+        let source = Module::source(Source::new(
+            SourceKind::Simplex,
+            SourceConfig {
+                seed: i32::MAX,
+                octaves: 3,
+                gain: 0.65,
+                frequency: 0.125,
+                lacunarity: 2.0,
+                interpolation: Interpolation::Curve3,
+            },
+        ));
+        let ramp = Module::source(Source::new(
+            SourceKind::Perlin2,
+            SourceConfig {
+                seed: -91,
+                octaves: 2,
+                gain: 0.5,
+                frequency: 0.25,
+                lacunarity: 2.0,
+                interpolation: Interpolation::Curve3,
+            },
+        ));
+        let cliff = Module::source(Source::new(
+            SourceKind::Simplex2,
+            SourceConfig {
+                seed: 17,
+                octaves: 2,
+                gain: 0.5,
+                frequency: 0.0625,
+                lacunarity: 2.0,
+                interpolation: Interpolation::Curve3,
+            },
+        ));
+        let height = Module::source(Source::new(
+            SourceKind::Perlin,
+            SourceConfig {
+                seed: 1234,
+                octaves: 1,
+                gain: 0.5,
+                frequency: 0.5,
+                lacunarity: 2.0,
+                interpolation: Interpolation::Curve3,
+            },
+        ));
+        let terrace = source.terrace(ramp, cliff, height, 7, 0.35);
+        for (seed, expected) in [0, 17, -91, i32::MAX].into_iter().zip([
+            0xa9cf707ca11f7949,
+            0x89d50db38b44a5ba,
+            0xe3348fd1ddadf84f,
+            0x2cf2f48543c12e94,
+        ]) {
+            let mut hash = 0xcbf29ce484222325u64;
+            for (x, y) in [
+                (0.0, 0.0),
+                (0.125, -0.75),
+                (12.34, 56.78),
+                (-1234.5, 987.25),
+            ] {
+                hash ^= u64::from(terrace.try_value_seed_first(seed, x, y).unwrap().to_bits());
+                hash = hash.wrapping_mul(0x100000001b3);
+            }
+            assert_eq!(hash, expected, "seed {seed}");
+        }
     }
 
     #[test]
