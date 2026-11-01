@@ -524,6 +524,9 @@ overlapping lakes and wetlands, branches nested three deep, NaN and infinite riv
 `Levels` (TerraForged's swapped `Levels(63, 255)` among them), plus every builder and network overlap test and the
 bounds, against a Java oracle running Engine's classes, `NetworkOracle.java` in `.local/terraforged/oracles/river/`.
 
+The rivermap layer applies paired generation warps and dispatches terrain samples to bounded river
+networks while retaining continent coordinates and cache timestamps.
+
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands and its river networks. They change nothing in the game, so there is
