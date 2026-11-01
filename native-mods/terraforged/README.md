@@ -170,6 +170,9 @@ jitter of 0.7, skipping and size variance of 0.25, and 5 distortion octaves with
 ported. These are Engine's defaults, not the values TerraForged generates with: its `NoiseGenerator` sets the seed,
 sea level and world height from its own levels and replaces the continent scale and control points.
 
+The terrain-settings layer adds exact global and per-landform weights plus vertical, horizontal and
+base scaling controls consumed by TerraForged's terrain distribution and LandForms graph.
+
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types and its world levels. They change nothing in the game, so there is
