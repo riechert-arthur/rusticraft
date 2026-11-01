@@ -30,9 +30,12 @@ use super::{
     terraforged_continent_config::ContinentConfig,
     terraforged_continent_shape::{ContinentCells, ShapeGenerator},
     terraforged_engine::TerrainRegistry,
+    terraforged_lossy_cache::ConcurrentLossyCache,
     terraforged_river_nodes::{CarverSample, NodeSample, RiverNode, RiverPieces, map},
     terraforged_terrain_data::NoiseSample,
+    terraforged_util::pack,
 };
+use std::sync::Arc;
 
 pub const DIRECTIONS: [(i32, i32); 4] = [(1, 0), (0, 1), (-1, 0), (0, -1)];
 
@@ -42,13 +45,29 @@ pub struct RiverNetwork<'a, Cells> {
     lake_density: f32,
     warp_x: Source,
     warp_y: Source,
+    cache: ConcurrentLossyCache<RiverPieces>,
 }
 
 impl<'a, Cells: ContinentCells> RiverNetwork<'a, Cells> {
     pub fn new(continent: &'a Cells, shape: &'a ShapeGenerator, config: ContinentConfig) -> Self {
+        Self::with_concurrency(
+            continent,
+            shape,
+            config,
+            std::thread::available_parallelism().map_or(1, usize::from),
+        )
+    }
+
+    pub fn with_concurrency(
+        continent: &'a Cells,
+        shape: &'a ShapeGenerator,
+        config: ContinentConfig,
+        concurrency: usize,
+    ) -> Self {
         Self {
             continent,
             shape,
+            cache: ConcurrentLossyCache::new(1024, concurrency),
             lake_density: config.rivers.lake_density,
             warp_x: Source::new(
                 SourceKind::Simplex,
@@ -124,6 +143,13 @@ impl<'a, Cells: ContinentCells> RiverNetwork<'a, Cells> {
         pieces
     }
 
+    pub fn nodes(&self, seed: i32, cell_x: i32, cell_y: i32) -> Arc<RiverPieces> {
+        self.cache
+            .get_or_compute(seed, pack(cell_x, cell_y), |seed, _| {
+                self.compute_nodes(seed, cell_x, cell_y)
+            })
+    }
+
     pub fn sample(
         &self,
         seed: i32,
@@ -149,15 +175,15 @@ impl<'a, Cells: ContinentCells> RiverNetwork<'a, Cells> {
         let mut lake = None;
         for delta_y in -1..=1 {
             for delta_x in -1..=1 {
-                let pieces = self.compute_nodes(
+                let pieces = self.nodes(
                     seed,
                     center_x.wrapping_add(delta_x),
                     center_y.wrapping_add(delta_y),
                 );
-                for node in pieces.rivers {
+                for &node in &pieces.rivers {
                     sample_node(x, y, node, &mut river, &mut sample.river);
                 }
-                for node in pieces.lakes {
+                for &node in &pieces.lakes {
                     sample_node(x, y, node, &mut lake, &mut sample.lake);
                 }
             }
@@ -336,6 +362,24 @@ mod tests {
             hash = add(hash, value.to_bits() as u64);
         }
         hash
+    }
+
+    #[test]
+    fn cached_network_hits_preserve_piece_identity() {
+        let config = ContinentConfig::default();
+        let cells = CellGenerator::with_concurrency(config, 4);
+        let shape = ShapeGenerator::new(config, ControlPoints::new(WorldControlPoints::default()));
+        let network = RiverNetwork::with_concurrency(&cells, &shape, config, 4);
+        for cell_y in -3..=3 {
+            for cell_x in -3..=3 {
+                let first = network.nodes(42, cell_x, cell_y);
+                let repeated = network.nodes(43, cell_x, cell_y);
+                assert!(Arc::ptr_eq(&first, &repeated));
+                let direct = network.compute_nodes(42, cell_x, cell_y);
+                assert_eq!(first.rivers, direct.rivers);
+                assert_eq!(first.lakes, direct.lakes);
+            }
+        }
     }
 
     #[test]

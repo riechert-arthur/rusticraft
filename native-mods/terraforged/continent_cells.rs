@@ -27,6 +27,8 @@ use super::{
     terraforged_continent_cell::{CellPoint, CellShape, CellSource},
     terraforged_continent_config::ContinentConfig,
     terraforged_continent_shape::ContinentCells,
+    terraforged_lossy_cache::ConcurrentLossyCache,
+    terraforged_util::pack,
 };
 use std::sync::Mutex;
 
@@ -38,10 +40,18 @@ pub struct CellGenerator {
     source: CellSource,
     threshold: f32,
     offset: Mutex<Option<(f32, f32)>>,
+    cache: ConcurrentLossyCache<CellPoint>,
 }
 
 impl CellGenerator {
     pub fn new(config: ContinentConfig) -> Self {
+        Self::with_concurrency(
+            config,
+            std::thread::available_parallelism().map_or(1, usize::from),
+        )
+    }
+
+    pub fn with_concurrency(config: ContinentConfig, concurrency: usize) -> Self {
         Self {
             seed: config.shape.seed0,
             sample_seed: config.shape.seed1.wrapping_add(6569),
@@ -50,6 +60,7 @@ impl CellGenerator {
             source: config.shape.cell_source,
             threshold: config.shape.threshold,
             offset: Mutex::new(None),
+            cache: ConcurrentLossyCache::new(2048, concurrency),
         }
     }
 
@@ -132,7 +143,9 @@ impl CellGenerator {
 
 impl ContinentCells for CellGenerator {
     fn cell(&self, seed: i32, x: i32, y: i32) -> CellPoint {
-        self.compute_cell(seed, x, y)
+        *self
+            .cache
+            .get_or_compute(seed, pack(x, y), |seed, _| self.compute_cell(seed, x, y))
     }
 
     fn cell_shape(&self) -> CellShape {
@@ -270,11 +283,19 @@ mod tests {
     }
 
     #[test]
-    fn samples_are_independent_of_call_order() {
+    fn uncached_samples_are_independent_of_call_order() {
         let generator = CellGenerator::new(ContinentConfig::default());
-        let original = generator.cell(42, 3, -7);
-        assert_ne!(original, generator.cell(43, 3, -7));
-        generator.cell(42, 100, 200);
-        assert_eq!(original, generator.cell(42, 3, -7));
+        let original = generator.compute_cell(42, 3, -7);
+        assert_ne!(original, generator.compute_cell(43, 3, -7));
+        generator.compute_cell(42, 100, 200);
+        assert_eq!(original, generator.compute_cell(42, 3, -7));
+    }
+
+    #[test]
+    fn cached_cells_preserve_first_seed_for_existing_key() {
+        let generator = CellGenerator::with_concurrency(ContinentConfig::default(), 4);
+        let first = generator.cell(42, 3, -7);
+        assert_eq!(generator.cell(43, 3, -7), first);
+        assert_ne!(generator.compute_cell(43, 3, -7), first);
     }
 }

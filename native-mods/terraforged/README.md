@@ -344,7 +344,10 @@ The current-source lossy cache now preserves bucket rounding, FastUtil mixing, k
 (the supplied seed is not part of the cache key), eviction order, and post-unlock removal callbacks.
 An original-Java eviction trace and concurrent-hit tests cover the Rust implementation. Rust uses
 mutexes and shared ownership instead of optimistic stamped locks; speculative listener races and
-invalid Java allocation sizes are not emulated. Wiring it into cells and river pieces is separate.
+invalid Java allocation sizes are not emulated. Cells now use the original 2,048-entry capacity and
+river pieces use 1,024 entries, with explicit concurrency constructors for deterministic checks.
+Spawn search still bypasses the cell cache as in Java. Native shared ownership replaces Java object
+reuse; pipeline fixtures also pass against the original Java caches and pools.
 
 The current-source Noise2D seed-first API now has a separate `value_seed_first` entry point:
 it preserves Perlin/Perlin2's ignored seed argument and adds the configured seed for other sources
@@ -358,7 +361,8 @@ node's raw float bits across both layouts and all noise sources. Nearest-node sa
 3×3 traversal, coordinate adjustment, distance ties and absent-node sentinels, checked on six 7×7
 Java-source grids. Warped sampling and ridge erosion now connect the shape/network/carver stages;
 six more grids verify combined outputs against the actual current Noise2D sources, without noise
-substitutes. Network caching and playable game integration remain unfinished.
+substitutes. The pipeline now uses bounded cell/network caches; playable game integration remains
+unfinished.
 
 The current-source river carver now applies valley/bank/bed shaping, erosion modifiers, coastline
 clipping, and river-then-lake precedence. Seven focused Java-source fixtures use an explicitly
@@ -372,8 +376,8 @@ against the original Java RiverNode, including projection clamping and radial fa
 The current-source cell generator now supplies seeded jittered cells and nearest-cell lookup to the
 shape blender. Tests compare cell fields and combined shape outputs for both cell layouts and all
 three noise sources against the local Java source, including overflowing seed additions. This
-increment computes cells directly; cell-cache/pool behavior, rivers, and game integration remain
-separate work. Spawn offsets now follow the original spiral search, origin skip, asymmetric
+cell cache preserves Java's key-only hits while direct computation remains available for references.
+Game integration remains separate work. Spawn offsets follow the original spiral search, origin skip, asymmetric
 neighborhood check, and retained first-seed result. Synchronized reads and writes preserve Java's
 separate volatile check-and-set, including the possibility of duplicate concurrent searches. Six
 Java-source fixtures verify the offsets across both cell layouts and all three noise sources.
