@@ -2454,6 +2454,20 @@ impl Module {
                     interpolation.apply(alpha),
                 )
             }
+            ModuleKind::Cache { source, value } => {
+                let mut cached = value.lock().expect("TerraForged cache lock poisoned");
+                if !cached.empty && x == cached.x && y == cached.y {
+                    return Ok(cached.value);
+                }
+                let result = sample(source)?;
+                *cached = CacheValue {
+                    x,
+                    y,
+                    value: result,
+                    empty: false,
+                };
+                result
+            }
             _ => return Err("runtime-seeded sampling is not implemented for this graph node"),
         })
     }
@@ -3740,6 +3754,16 @@ mod tests {
             }
         }
         assert_eq!((count, acc), (9216, 0x79cb_944a));
+    }
+
+    fn unsupported_seeded_node(value: f32) -> Module {
+        Module::constant(value).terrace(
+            Module::constant(0.0),
+            Module::constant(1.0),
+            Module::constant(0.5),
+            4,
+            0.25,
+        )
     }
 
     #[test]
@@ -5827,7 +5851,7 @@ mod tests {
 
     #[test]
     fn seeded_scalar_graph_rejects_unsupported_children() {
-        let unsupported = Module::constant(0.5).cache();
+        let unsupported = unsupported_seeded_node(0.5);
         assert!(unsupported.try_value_seed_first(1, 0.0, 0.0).is_err());
         assert!(
             Module::constant(0.25)
@@ -6303,7 +6327,7 @@ mod tests {
 
     #[test]
     fn seeded_domains_propagate_unsupported_children() {
-        let unsupported = Module::constant(0.5).cache();
+        let unsupported = unsupported_seeded_node(0.5);
         let axes = Domain::domain_warp(
             unsupported.clone(),
             unsupported.clone(),
@@ -6482,7 +6506,7 @@ mod tests {
 
     #[test]
     fn seeded_blends_only_evaluate_selected_children() {
-        let unsupported = Module::constant(0.25).cache();
+        let unsupported = unsupported_seeded_node(0.25);
         let valid = Module::constant(0.75);
         let fixed = |control, lower: Module, upper: Module| {
             let kind = ModuleKind::Blend {
@@ -6937,7 +6961,7 @@ mod tests {
             );
             assert_eq!(graph.try_value_seed_first(17, 0.0, 0.0), Ok(expected));
         }
-        let invalid = Module::constant(0.5).cache();
+        let invalid = unsupported_seeded_node(0.5);
         for (control, lower, upper, expected) in [
             (0.0, Module::constant(0.25), invalid.clone(), 0.25),
             (0.5, invalid.clone(), Module::constant(0.75), 0.75),
@@ -7192,6 +7216,49 @@ mod tests {
             }
             assert_eq!(hash, expected, "family {index}");
         }
+    }
+
+    #[test]
+    fn seeded_cache_matches_noise2d_seed_and_coordinate_keys() {
+        let source = Module::source(Source::new(
+            SourceKind::Perlin2,
+            SourceConfig {
+                seed: i32::MAX,
+                octaves: 3,
+                gain: 0.65,
+                frequency: 0.125,
+                lacunarity: 2.0,
+                interpolation: Interpolation::Curve3,
+            },
+        ));
+        let cache = source.clone().cache();
+        for ((seed, x, y), expected) in [
+            ((17, 1.25, -3.5), 0x3f0a_9872),
+            ((-91, 1.25, -3.5), 0x3f0a_9872),
+            ((-91, 12.34, 56.78), 0x3f0f_a18e),
+            ((17, 12.34, 56.78), 0x3f0f_a18e),
+            ((i32::MAX, f32::NAN, 0.0), 0x7fc0_0000),
+            ((0, f32::NAN, 0.0), 0x7fc0_0000),
+        ] {
+            assert_eq!(
+                cache.try_value_seed_first(seed, x, y).unwrap().to_bits(),
+                expected
+            );
+        }
+
+        let zero_cache = source.cache();
+        let negative_zero = zero_cache.try_value_seed_first(17, -0.0, 0.0).unwrap();
+        let positive_zero = zero_cache.try_value_seed_first(-91, 0.0, 0.0).unwrap();
+        assert_eq!(negative_zero.to_bits(), 0x3f00_0000);
+        assert_eq!(positive_zero.to_bits(), negative_zero.to_bits());
+    }
+
+    #[test]
+    fn seeded_cache_does_not_store_failed_children() {
+        let unsupported = unsupported_seeded_node(0.5);
+        let cache = unsupported.cache();
+        assert!(cache.try_value_seed_first(17, 1.0, 2.0).is_err());
+        assert!(cache.try_value_seed_first(-91, 1.0, 2.0).is_err());
     }
 
     #[test]
