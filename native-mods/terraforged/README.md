@@ -174,6 +174,9 @@ same coast-to-beach correction used by TerraForged's direct world lookup.
 Contextual heightmap sampling now reuses a current rivermap while the continent center is unchanged
 and resolves a replacement only when sampling crosses into another continent.
 
+Contextual cache misses execute base terrain, rivermap carving and climate in Java order, while cache
+hits copy the completed cell without rerunning any generation stage.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:

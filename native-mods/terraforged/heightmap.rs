@@ -28,7 +28,10 @@ use super::{
     terraforged_river::Rivermap,
     terraforged_util::pack,
 };
-use std::{collections::HashMap, sync::Mutex};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 
 pub struct HeightmapRivers {
     levels: Levels,
@@ -89,6 +92,37 @@ impl HeightmapCache {
         cells.insert(id, cell.clone());
         cell
     }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn generate(
+        &self,
+        cell: &mut Cell,
+        x: i32,
+        z: i32,
+        current: Option<Arc<Rivermap>>,
+        apply_base: impl FnOnce(&mut Cell, f32, f32),
+        lookup: impl FnOnce(i32, i32) -> Arc<Rivermap>,
+        apply_rivers: impl FnOnce(&mut Cell, f32, f32, &Rivermap),
+        apply_climate: impl FnOnce(&mut Cell, f32, f32),
+    ) -> Option<Arc<Rivermap>> {
+        let id = pack(x, z);
+        let mut cells = self.cells.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(cached) = cells.get(&id) {
+            cell.copy_from(cached);
+            return current;
+        }
+        if cells.len() >= self.capacity {
+            cells.clear();
+        }
+        let sample_x = x as f32;
+        let sample_z = z as f32;
+        apply_base(cell, sample_x, sample_z);
+        let rivermap = Rivermap::get_for_cell(cell, current, lookup);
+        apply_rivers(cell, sample_x, sample_z, &rivermap);
+        apply_climate(cell, sample_x, sample_z);
+        cells.insert(id, cell.clone());
+        Some(rivermap)
+    }
 }
 
 #[cfg(test)]
@@ -139,5 +173,52 @@ mod tests {
             cell.value = levels.water(6);
         });
         assert_eq!(coast.terrain.id(), 3);
+    }
+
+    #[test]
+    fn contextual_heightmap_cache_matches_engine_0_3_0() {
+        let terrains = TerrainRegistry::new();
+        let cache = HeightmapCache::with_capacity(Levels::new(256, 63), &terrains, 16);
+        let map = Arc::new(Rivermap::new(17, -9, Vec::new(), GenWarp::direct()));
+        let order = Mutex::new(Vec::new());
+        let mut cell = Cell::default();
+        let selected = cache.generate(
+            &mut cell,
+            12,
+            -34,
+            Some(Arc::clone(&map)),
+            |cell, _, _| {
+                order.lock().unwrap().push("base");
+                cell.continent_x = 17;
+                cell.continent_z = -9;
+                cell.value = 0.6;
+            },
+            |_, _| unreachable!(),
+            |cell, _, _, _| {
+                order.lock().unwrap().push("rivers");
+                cell.river_mask = 0.25;
+            },
+            |cell, _, _| {
+                order.lock().unwrap().push("climate");
+                cell.temperature = 0.75;
+            },
+        );
+        assert!(Arc::ptr_eq(&map, selected.as_ref().unwrap()));
+        assert_eq!(*order.lock().unwrap(), ["base", "rivers", "climate"]);
+
+        let mut cached = Cell::default();
+        let reused = cache.generate(
+            &mut cached,
+            12,
+            -34,
+            selected,
+            |_, _, _| unreachable!(),
+            |_, _| unreachable!(),
+            |_, _, _, _| unreachable!(),
+            |_, _, _| unreachable!(),
+        );
+        assert!(Arc::ptr_eq(&map, reused.as_ref().unwrap()));
+        assert_eq!(cached.river_mask.to_bits(), 0x3e800000);
+        assert_eq!(cached.temperature.to_bits(), 0x3f400000);
     }
 }
