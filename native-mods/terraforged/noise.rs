@@ -1425,6 +1425,16 @@ impl Line {
         self.value_with_width(x, y, self.width_modifier(x, y))
     }
 
+    pub fn try_value_seed_first(&self, seed: i32, x: f32, y: f32) -> Result<f32, &'static str> {
+        self.try_value_with_min_width_seed_first(
+            seed,
+            x,
+            y,
+            0.0,
+            self.try_width_modifier_seed_first(seed, x, y)?,
+        )
+    }
+
     pub fn value_with_width(&self, x: f32, y: f32, width_modifier: f32) -> f32 {
         self.value_with_min_width(x, y, 0.0, width_modifier)
     }
@@ -1447,6 +1457,27 @@ impl Line {
         }
         let feather = self.feather_bias + width_modifier * self.feather_scale;
         (1.0 - value) * feather
+    }
+
+    fn try_value_with_min_width_seed_first(
+        &self,
+        seed: i32,
+        x: f32,
+        y: f32,
+        min_width2: f32,
+        width_modifier: f32,
+    ) -> Result<f32, &'static str> {
+        let distance2 = self.distance2(x, y);
+        let radius2 = min_width2 + self.radius.try_value_seed_first(seed, x, y)? * width_modifier;
+        if distance2 > radius2 {
+            return Ok(0.0);
+        }
+        let value = distance2 / radius2;
+        if self.feather_scale == 0.0 {
+            return Ok(1.0 - value);
+        }
+        let feather = self.feather_bias + width_modifier * self.feather_scale;
+        Ok((1.0 - value) * feather)
     }
 
     pub fn clip_start(&self, x: f32, y: f32) -> bool {
@@ -1482,6 +1513,38 @@ impl Line {
             }
         }
         fade
+    }
+
+    fn try_width_modifier_seed_first(
+        &self,
+        seed: i32,
+        x: f32,
+        y: f32,
+    ) -> Result<f32, &'static str> {
+        let distance1 = Self::dist2(x, y, self.x1, self.y1);
+        if distance1 == 0.0 {
+            return Ok(0.0);
+        }
+        let distance2 = Self::dist2(x, y, self.x2, self.y2);
+        if distance2 == 0.0 {
+            return Ok(0.0);
+        }
+        let mut fade = 1.0;
+        let fade_in = self.fade_in.try_value_seed_first(seed, x, y)?;
+        let fade_out = self.fade_out.try_value_seed_first(seed, x, y)?;
+        if fade_in > 0.0 {
+            let distance = fade_in * self.length2;
+            if distance1 < distance {
+                fade *= distance1 / distance;
+            }
+        }
+        if fade_out > 0.0 {
+            let distance = fade_out * self.length2;
+            if distance2 < distance {
+                fade *= distance2 / distance;
+            }
+        }
+        Ok(fade)
     }
 
     fn distance2(&self, x: f32, y: f32) -> f32 {
@@ -2355,6 +2418,7 @@ impl Module {
                 };
                 noise_map(noise, -1.0, 1.0, 2.0)
             }
+            ModuleKind::Line(line) => line.try_value_seed_first(seed, x, y)?,
             ModuleKind::Warp(source, domain) => source.try_value_seed_first(
                 seed,
                 domain.try_x_seed_first(seed, x, y)?,
@@ -5464,6 +5528,43 @@ mod tests {
                 }
                 assert_eq!(hash, expected, "seed {seed}");
             }
+        }
+    }
+
+    #[test]
+    fn runtime_seeded_line_matches_current_noise2d() {
+        let source = |kind, seed, frequency, octaves, gain| {
+            Module::source(Source::new(
+                kind,
+                SourceConfig {
+                    seed,
+                    octaves,
+                    gain,
+                    frequency,
+                    lacunarity: 2.0,
+                    interpolation: Interpolation::Curve3,
+                },
+            ))
+        };
+        let radius =
+            source(SourceKind::Simplex, 1401, 1.0 / 64.0, 3, 0.5).scale(Module::constant(100.0));
+        let fade_in = source(SourceKind::Simplex2, 1402, 1.0 / 80.0, 2, 0.5);
+        let fade_out = source(SourceKind::Ridge, 1403, 1.0 / 96.0, 2, 0.5);
+        let line = Module::line(Line::new(
+            -10.0, 5.0, 30.0, 25.0, radius, fade_in, fade_out, 0.4,
+        ));
+        for (seed, expected) in [0, 17, -91, i32::MAX].into_iter().zip([
+            0x4d25767f9dce13f5,
+            0x4d25767f9dce13f5,
+            0x4d25767f9dce13f5,
+            0xcf90532f011f8368,
+        ]) {
+            let mut hash = 0xcbf29ce484222325u64;
+            for (x, y) in [(0.0, 0.0), (10.0, 10.0), (20.0, 15.0), (40.0, 25.0)] {
+                hash ^= u64::from(line.try_value_seed_first(seed, x, y).unwrap().to_bits());
+                hash = hash.wrapping_mul(0x100000001b3);
+            }
+            assert_eq!(hash, expected, "seed {seed}");
         }
     }
 
