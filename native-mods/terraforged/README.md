@@ -491,6 +491,8 @@ The cave-biome sampler now reproduces the coarse coverage mask, independent biom
 equal-weight selection, non-surface fallback, and Java-width seed offsets used by that deep layer.
 Empty surface and highland climate pools now borrow the nearest original non-empty pool using
 TerraForged's temperature-biased climate distance without order-dependent multi-hop borrowing.
+Surface-biome decisions now preserve per-cell wetland and mountain rolls, centered four-sample
+slope gating, and vanilla-compatible altitude snow checks before accepting a highland substitute.
 
 The scalar graph fixtures cover 15 graphs, four seeds and four coordinates (240 Java samples),
 including wrapped seed addition and mixed Perlin/seed-sensitive sources. Regenerate their hashes
