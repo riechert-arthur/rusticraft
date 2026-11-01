@@ -31,8 +31,7 @@ use super::{
 };
 use std::{
     collections::HashMap,
-    ops::Deref,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -43,14 +42,17 @@ struct CacheKey {
 }
 
 struct PooledTerrain<N: NoiseGenerator> {
-    data: Option<TerrainData>,
+    data: Option<RwLock<TerrainData>>,
     generator: Arc<TerrainGenerator<N>>,
 }
 
 impl<N: NoiseGenerator> Drop for PooledTerrain<N> {
     fn drop(&mut self) {
         if let Some(data) = self.data.take() {
-            self.generator.restore(data);
+            self.generator.restore(
+                data.into_inner()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            );
         }
     }
 }
@@ -67,16 +69,23 @@ impl<N: NoiseGenerator> TerrainDataHandle<N> {
     pub fn ptr_eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
     }
-}
 
-impl<N: NoiseGenerator> Deref for TerrainDataHandle<N> {
-    type Target = TerrainData;
-
-    fn deref(&self) -> &Self::Target {
+    pub fn read(&self) -> RwLockReadGuard<'_, TerrainData> {
         self.0
             .data
             .as_ref()
             .expect("pooled terrain data is present")
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub fn write(&self) -> RwLockWriteGuard<'_, TerrainData> {
+        self.0
+            .data
+            .as_ref()
+            .expect("pooled terrain data is present")
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
@@ -181,7 +190,7 @@ impl<N: NoiseGenerator + 'static> TerrainCache<N> {
                 TerrainTask::new(move || {
                     let data = generator.generate(seed, x, z);
                     Arc::new(PooledTerrain {
-                        data: Some(data),
+                        data: Some(RwLock::new(data)),
                         generator,
                     })
                 })
@@ -314,7 +323,9 @@ mod tests {
         let second_data = second.join();
         assert!(first_data.ptr_eq(&second_data));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert_eq!(first_data.height_at(0, 0), 43);
+        assert_eq!(first_data.read().height_at(0, 0), 43);
+        first_data.write().set_height_at(0, 0, 70);
+        assert_eq!(second_data.read().height_at(0, 0), 70);
         assert!(
             cache
                 .get_if_ready(7, 2, -1)
@@ -323,8 +334,41 @@ mod tests {
 
         cache.remove(7, 2, -1);
         assert!(cache.is_empty());
-        assert_eq!(cache.get_now(7, 2, -1).height_at(0, 0), 43);
+        assert_eq!(cache.get_now(7, 2, -1).read().height_at(0, 0), 43);
+        assert_eq!(first_data.read().height_at(0, 0), 70);
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn shared_handles_serialize_updates_and_restore_pooled_data() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let levels = TerrainLevels::default();
+        let cache = TerrainCache::with_pool_capacity(
+            levels,
+            TestNoise {
+                levels,
+                calls,
+                gate: Arc::new((Mutex::new(true), Condvar::new())),
+            },
+            1,
+        );
+        let handle = cache.get_now(7, 2, -1);
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                let handle = handle.clone();
+                scope.spawn(move || {
+                    for _ in 0..20 {
+                        let mut data = handle.write();
+                        let height = data.height_at(0, 0);
+                        data.set_height_at(0, 0, height + 1);
+                    }
+                });
+            }
+        });
+        assert_eq!(handle.read().height_at(0, 0), 123);
+        cache.remove(7, 2, -1);
+        drop(handle);
+        assert_eq!(cache.get_now(7, 2, -1).read().height_at(0, 0), 43);
     }
 
     #[test]
@@ -343,8 +387,8 @@ mod tests {
         );
         cache.hint(1, 0, 0);
         cache.hint(2, 0, 0);
-        assert_eq!(cache.get_now(1, 0, 0).height_at(0, 0), 1);
-        assert_eq!(cache.get_now(2, 0, 0).height_at(0, 0), 3);
+        assert_eq!(cache.get_now(1, 0, 0).read().height_at(0, 0), 1);
+        assert_eq!(cache.get_now(2, 0, 0).read().height_at(0, 0), 3);
         assert_eq!(cache.height(5, 10, -3), 22);
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }

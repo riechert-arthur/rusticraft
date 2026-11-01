@@ -494,6 +494,10 @@ then updates terrain heights without changing generation extrema. Selection from
 structure starts now filters BEARD_BOX/BEARD_THIN, includes pieces within the inclusive 20-block
 chunk margin, excludes non-rigid pool elements, and preserves stable minimum-Y ordering and ground
 offsets. The original constructor oracle covers adaptation, margin boundaries and equal-Y ties.
+The generator facade now offers a structure-aware terrain stage: it fills blocks and generation
+heightmaps before applying structure edits under one cached-terrain write lock. All retained handles
+observe the updated heights; explicit read/write guards replace unrestricted shared references.
+Concurrent writes serialize, and eviction still delays pool restoration until the final handle drops.
 Invocation from the complete game-generation pipeline is still pending.
 The original Java method oracle checks ordered block edits and resulting heights across six columns.
 
