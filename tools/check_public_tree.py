@@ -28,6 +28,7 @@ ORIGINAL_TERRAFORGED_ORACLES = {
     "tools/terraforged/TerraForgedErosionBrushOracle.java",
     "tools/terraforged/TerraForgedErosionFilterOracle.java",
     "tools/terraforged/TerraForgedErosionRegionOracle.java",
+    "tools/terraforged/TerraForgedGeneratorQueryOracle.java",
 }
 
 

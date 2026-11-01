@@ -475,6 +475,10 @@ The current terrain cache now starts one shared asynchronous generation task per
 supports readiness probes and eager hints, and removes completed entries after decoration. Shared
 terrain handles defer pool restoration until their final concurrent reader releases the data.
 
+The generator query facade captures Java's narrowed and raw world seeds, exposes level and cached
+chunk data, and reproduces structure heightmap and raw base-column queries, including their deliberate
+eroded-versus-un-eroded height split. A standalone current-source oracle records the query fixtures.
+
 The scalar graph fixtures cover 15 graphs, four seeds and four coordinates (240 Java samples),
 including wrapped seed addition and mixed Perlin/seed-sensitive sources. Regenerate their hashes
 with `tools/terraforged/TerraForgedSeededGraphOracle.java` on a classpath containing compiled

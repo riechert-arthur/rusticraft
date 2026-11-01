@@ -236,6 +236,14 @@ mod tests {
                     0x40015555,
                 ],
             ),
+            (
+                TerrainLevels::new(false, 1.0, -64, 9_999, 9_999, 9_999, 22),
+                (-64, 4_064, 4_064, 4_999, 22),
+                [
+                    0x39810204, 0x3bb162c6, 0x3f9d72e6, 0x3f800000, 0xbf9d72e6, 0x3f9cc183,
+                    0x3f800000,
+                ],
+            ),
         ];
         for (levels, expected, bits) in cases {
             assert_eq!(
