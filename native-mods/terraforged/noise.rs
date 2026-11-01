@@ -587,6 +587,13 @@ enum ModuleKind {
         steps: Vec<TerraceStep>,
         max_index: usize,
     },
+    LegacyTerrace {
+        source: Module,
+        lower_curve: Module,
+        upper_curve: Module,
+        steps: Vec<TerraceStep>,
+        max_index: usize,
+    },
     Select {
         control: Module,
         lower: Module,
@@ -792,6 +799,34 @@ impl Module {
                 }
                 value
             }
+            ModuleKind::LegacyTerrace {
+                source,
+                lower_curve,
+                upper_curve,
+                steps,
+                max_index,
+            } => {
+                let noise_value = clamp(source.value(x, y), 0.0, 1.0);
+                let index = round(noise_value * *max_index as f32) as usize;
+                let step = &steps[index];
+                if noise_value < step.lower_bound && index > 0 {
+                    let lower = &steps[index - 1];
+                    let alpha =
+                        (noise_value - lower.upper_bound) / (step.lower_bound - lower.upper_bound);
+                    let alpha = 1.0 - Interpolation::Curve3.apply(alpha);
+                    let range = step.value - lower.value;
+                    return step.value - alpha * range * upper_curve.value(x, y);
+                }
+                if noise_value > step.upper_bound && index < *max_index {
+                    let upper = &steps[index + 1];
+                    let alpha =
+                        (noise_value - step.upper_bound) / (upper.lower_bound - step.upper_bound);
+                    let alpha = Interpolation::Curve3.apply(alpha);
+                    let range = upper.value - step.value;
+                    return step.value + alpha * range * lower_curve.value(x, y);
+                }
+                step.value
+            }
             ModuleKind::Select {
                 control,
                 lower,
@@ -836,7 +871,9 @@ impl Module {
                 .fold(nodes[0].source.min_value(), |value, node| {
                     java_min(value, node.source.min_value())
                 }),
-            ModuleKind::Terrace { source, .. } => source.min_value(),
+            ModuleKind::Terrace { source, .. } | ModuleKind::LegacyTerrace { source, .. } => {
+                source.min_value()
+            }
             ModuleKind::Add(sources) => combine_bounds(sources, true, |a, b| a + b),
             ModuleKind::Multiply(sources) => combine_bounds(sources, true, |a, b| a * b),
             ModuleKind::Max(sources) => {
@@ -875,7 +912,9 @@ impl Module {
                 .fold(nodes[0].source.max_value(), |value, node| {
                     java_max(value, node.source.max_value())
                 }),
-            ModuleKind::Terrace { source, .. } => source.max_value(),
+            ModuleKind::Terrace { source, .. } | ModuleKind::LegacyTerrace { source, .. } => {
+                source.max_value()
+            }
             ModuleKind::Add(sources) => combine_bounds(sources, false, |a, b| a + b),
             ModuleKind::Multiply(sources) => combine_bounds(sources, false, |a, b| a * b),
             ModuleKind::Max(sources) => combine_bounds(sources, false, java_max),
@@ -1090,6 +1129,36 @@ impl Module {
             ramp,
             cliff,
             ramp_height,
+            steps,
+            max_index,
+        }))
+    }
+
+    pub fn legacy_terrace(
+        self,
+        lower_curve: Self,
+        upper_curve: Self,
+        step_count: usize,
+        blend_range: f32,
+    ) -> Self {
+        let max_index = step_count - 1;
+        let spacing = (self.max_value() - self.min_value()) / max_index as f32;
+        let steps = (0..step_count)
+            .map(|index| {
+                let value = index as f32 * spacing;
+                let blend = spacing * blend_range;
+                let bound = (spacing - blend) / 2.0;
+                TerraceStep {
+                    value,
+                    lower_bound: value - bound,
+                    upper_bound: value + bound,
+                }
+            })
+            .collect();
+        Self(Box::new(ModuleKind::LegacyTerrace {
+            source: self,
+            lower_curve,
+            upper_curve,
             steps,
             max_index,
         }))
@@ -1969,6 +2038,62 @@ mod tests {
                 0x00000000, 0x00000000, 0x3e2aaaaa, 0x3e2aaaab, 0x3e2aaaab, 0x3e2aaaab, 0x3e2aaaab,
                 0x3e2aaaab, 0x3e2aaaad, 0x3e93f1de, 0x3eaaaaab, 0x3eaaaaab, 0x3f800000, 0x3f800000,
                 0x3f800000,
+            ]
+        );
+    }
+
+    #[test]
+    fn legacy_terrace_matches_engine_0_3_0() {
+        let source = |kind, seed, scale: f32, octaves, gain| {
+            Module::source(Source::new(
+                kind,
+                SourceConfig {
+                    seed,
+                    octaves,
+                    gain,
+                    frequency: 1.0 / scale,
+                    lacunarity: 2.0,
+                    interpolation: Interpolation::Curve3,
+                },
+            ))
+        };
+        let module = source(SourceKind::Perlin, 701, 96.0, 4, 0.5).legacy_terrace(
+            source(SourceKind::Simplex, 702, 72.0, 3, 0.5),
+            source(SourceKind::Ridge, 703, 128.0, 3, 0.975),
+            7,
+            0.35,
+        );
+        let points = [
+            (0.0, 0.0),
+            (12.25, -98.75),
+            (-4096.5, 8192.25),
+            (123456.75, -0.125),
+            (64.0, 64.0),
+            (-128.0, 32.0),
+            (777.0, -333.0),
+            (-1024.0, -2048.0),
+        ];
+        assert_eq!(
+            bits(points.map(|(x, y)| module.value(x, y))),
+            [
+                0x3f000000, 0x3ebe6cf3, 0x3f296077, 0x3f000000, 0x3e91b23e, 0x3f03e9a3, 0x3f2aaaab,
+                0x3f000000,
+            ]
+        );
+        let bounded =
+            |value| Module::constant(value).clamp(Module::constant(0.0), Module::constant(1.0));
+        let values = [
+            -1.0, 0.0, 0.05416666, 0.05416667, 0.1, 0.1125, 0.15, 0.16666667, 0.2, 0.22083333,
+            0.22083335, 0.25, 0.999999, 1.0, 2.0,
+        ];
+        assert_eq!(
+            values.map(|value| bounded(value)
+                .legacy_terrace(Module::constant(0.25), Module::constant(0.75), 7, 0.35)
+                .value(0.0, 0.0)
+                .to_bits()),
+            [
+                0, 0, 0, 0x2612f052, 0x3e1b8d8f, 0x3e2aaaab, 0x3e2aaaab, 0x3e2aaaab, 0x3e2aaaab,
+                0x3e2aaaab, 0x3e2aaaab, 0x3e8aaaab, 0x3f800000, 0x3f800000, 0x3f800000,
             ]
         );
     }

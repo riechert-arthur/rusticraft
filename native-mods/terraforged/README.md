@@ -24,6 +24,9 @@ slot boundaries, Java rounding behavior and interpolation across neighboring sou
 The terrace layer adds TerraForged's ramp, cliff and ramp-height controlled step modifier,
 preserving its original step spacing, clamping and boundary behavior.
 
+The legacy terrace layer adds TerraForged's asymmetric Curve3 transitions with independent lower
+and upper curve controls.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
