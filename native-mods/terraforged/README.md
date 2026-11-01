@@ -485,6 +485,9 @@ four rivers (zero-length and NaN among them), for degenerate configs (wrapping w
 fades), plus fork configs and random draws, against a Java oracle running Engine's class, `RiverCarverOracle.java`
 in `.local/terraforged/oracles/river/`.
 
+The lake layer adds circular beds, depth blending, shoreline valleys, bank-height interpolation,
+river-mask shaping, overlap checks and the float bounds accumulator used by river networks.
+
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry and its river carver. They change nothing in the game, so there is
