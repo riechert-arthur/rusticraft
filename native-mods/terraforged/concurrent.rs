@@ -107,8 +107,8 @@ impl<T> CacheEntry<T> {
         let (sender, receiver) = mpsc::sync_channel(1);
         std::thread::spawn(move || {
             let value = create();
-            let _ = sender.send(value);
             complete.store(true, Ordering::Release);
+            let _ = sender.send(value);
         });
         Self {
             timestamp: AtomicU64::new(current_time_millis()),
