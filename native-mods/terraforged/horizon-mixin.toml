@@ -432,3 +432,10 @@ file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_surface"
 source = "surface.rs"
 visibility = "pub"
+
+[[module]]
+id = "surface_bindings"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_surface_bindings"
+source = "surface_bindings.rs"
+visibility = "pub"

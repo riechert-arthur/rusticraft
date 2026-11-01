@@ -516,6 +516,11 @@ floor behavior, and erodes steep snow with the original air fallback and strict 
 scan bounds. Thirteen Java fixtures cover fractional and negative heights, snow blocks versus layers,
 non-snow surfaces, early stopping and low terrain. Production block-class/tag/property bindings and
 full surface-pipeline invocation remain pending.
+The registry adapter now resolves air, stone and water levels from the live block registry, uses
+already-resolved dirt/snow tags, and preserves unrelated properties when setting snow layers.
+Snow-layer class membership is supplied separately from tags so custom snow-layer states can be
+classified without confusing tag membership with Java class identity. Missing states fail explicitly;
+the complete game pipeline still needs to supply its registry, tags, class sets and region access.
 The original Java method oracle checks ordered block edits and resulting heights across six columns.
 
 Biome chunk filling samples one 4-by-4 biome buffer at quart y=-1 in Java call order and repeats
