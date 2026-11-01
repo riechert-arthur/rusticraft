@@ -103,11 +103,11 @@ mod tests {
         }
 
         fn has_fluid(self) -> bool {
-            self.0 == 3
+            matches!(self.0, 3 | 7 | 8)
         }
 
         fn blocks_motion_in_heightmap(self) -> bool {
-            self.0 >= 2 && self.0 != 3
+            self.0 >= 2 && !self.has_fluid()
         }
 
         fn blocks_motion_in_heightmap_no_leaves(self) -> bool {
@@ -138,6 +138,20 @@ mod tests {
                     Tag::compound([("id", Tag::String("minecraft:dirt".into()))]),
                     Tag::compound([("id", Tag::String("minecraft:snow_block".into()))]),
                     Tag::compound([("id", Tag::String("minecraft:gravel".into()))]),
+                    Tag::compound([
+                        ("id", Tag::String("minecraft:water".into())),
+                        (
+                            "properties",
+                            Tag::compound([("level", Tag::String("2".into()))]),
+                        ),
+                    ]),
+                    Tag::compound([
+                        ("id", Tag::String("minecraft:water".into())),
+                        (
+                            "properties",
+                            Tag::compound([("level", Tag::String("1".into()))]),
+                        ),
+                    ]),
                 ]),
             ),
             (
@@ -161,9 +175,13 @@ mod tests {
     }
 
     fn terrain_with_slope(slope: f32) -> TerrainData {
+        terrain_with_river(slope, "river", 0.0)
+    }
+
+    fn terrain_with_river(slope: f32, kind: &str, river_noise: f32) -> TerrainData {
         let registry = TerrainRegistry::new();
         let hills = registry.get_by_name("hills").unwrap();
-        let river = registry.get_by_name("river").unwrap();
+        let river = registry.get_by_name(kind).unwrap();
         let mut noise = NoiseData::new();
         for z in NoiseData::MIN..NoiseData::MAX {
             for x in NoiseData::MIN..NoiseData::MAX {
@@ -173,7 +191,7 @@ mod tests {
                     &NoiseSample {
                         height_noise: 0.2 + x as f32 * slope,
                         base_noise: if (x, z) == (0, 0) { 0.5 } else { 0.25 },
-                        river_noise: if (x, z) == (0, 0) { 0.0 } else { 1.0 },
+                        river_noise: if (x, z) == (0, 0) { river_noise } else { 1.0 },
                         terrain_type: if (x, z) == (0, 0) {
                             river.clone()
                         } else {
@@ -187,6 +205,95 @@ mod tests {
         let mut terrain = TerrainData::new(TerrainLevels::default());
         terrain.accept(&noise);
         terrain
+    }
+
+    #[test]
+    fn water_smoothing_matches_original_java_region_reads() {
+        use super::super::terraforged_surface;
+
+        let cases = [
+            ("river", 0.0, 0, -6, 3, 7, 1, 0x202cf52a763010c9),
+            ("river", 0.0, 6, 0, 3, 7, 56, 0x6b81b6b91ed91ac5),
+            ("river", 0.0, 6, 1, 3, 3, 78, 0x6c4929d8df816aa1),
+            ("river", 0.0, 99, 99, 3, 3, 78, 0x6c4929d8df816aa1),
+            ("lake", 0.0, 0, -6, 3, 7, 1, 0x202cf52a763010c9),
+            ("hills", 0.0, 0, -6, 3, 3, 0, 0xcbf29ce484222325),
+            ("river", 0.001, 0, -6, 3, 3, 0, 0xcbf29ce484222325),
+            ("river", -0.0, 0, -6, 3, 7, 1, 0x202cf52a763010c9),
+            ("river", f32::NAN, 0, -6, 3, 3, 0, 0xcbf29ce484222325),
+            ("river", 0.0, 0, -6, 8, 8, 0, 0xcbf29ce484222325),
+        ];
+        for (kind, river, air_x, air_z, initial, expected, reads, expected_hash) in cases {
+            let registry = registry();
+            let terrain = terrain_with_river(0.0, kind, river);
+            let mut chunk =
+                TerrainChunk::new(ChunkPos::new(-1, 2), -64, 192, &registry, Properties).unwrap();
+            for z in 0..16 {
+                for x in 0..16 {
+                    let state = if (x, z) == (0, 0) {
+                        initial
+                    } else if (x, z) == (air_x, air_z) {
+                        0
+                    } else {
+                        2
+                    };
+                    chunk.set_block_raw(x, 60, z, BlockStateId(state)).unwrap();
+                }
+            }
+            let mut calls = 0;
+            let mut hash = 0xcbf29ce484222325u64;
+            terraforged_surface::smooth_water(
+                &terrain,
+                &mut chunk,
+                BlockStateId(3),
+                BlockStateId(7),
+                |state| State(state.0).is_air(),
+                |x, y, z| {
+                    calls += 1;
+                    for value in [x, y, z] {
+                        hash = (hash ^ u64::from(value as u32)).wrapping_mul(0x100000001b3);
+                    }
+                    Ok(BlockStateId(if (x, z) == (-16 + air_x, 32 + air_z) {
+                        0
+                    } else {
+                        2
+                    }))
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                (chunk.block(0, 60, 0).0, calls, hash),
+                (expected, reads, expected_hash)
+            );
+            assert_eq!(
+                chunk
+                    .heightmap(HeightmapType::MotionBlockingNoLeaves)
+                    .unwrap()
+                    .highest_taken(0, 0)
+                    .unwrap(),
+                60
+            );
+        }
+    }
+
+    #[test]
+    fn water_smoothing_propagates_neighbor_failure_without_replacing_source() {
+        use super::super::terraforged_surface;
+
+        let registry = registry();
+        let mut chunk =
+            TerrainChunk::new(ChunkPos::new(-1, 2), -64, 192, &registry, Properties).unwrap();
+        chunk.set_block_raw(0, 60, 0, BlockStateId(3)).unwrap();
+        let result = terraforged_surface::smooth_water(
+            &terrain(),
+            &mut chunk,
+            BlockStateId(3),
+            BlockStateId(7),
+            |state| State(state.0).is_air(),
+            |_, _, _| Err(TerrainError::InvalidVolume),
+        );
+        assert!(matches!(result, Err(TerrainError::InvalidVolume)));
+        assert_eq!(chunk.block(0, 60, 0), BlockStateId(3));
     }
 
     #[test]
