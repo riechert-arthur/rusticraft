@@ -401,6 +401,9 @@ field and every lookup over the simple-continent grid for six configs (skipping 
 scale 0, 1, 2 and `Integer.MAX_VALUE`, jitter 0 and NaN, zero octaves with a negative gain, custom control
 points), against a second Java oracle in `.local/terraforged/oracles/continent/`.
 
+The fancy-island layer adds scaled line segments, translated island bounds, overlap and containment,
+deep/shallow/coast edge shaping and curved land-distance values.
+
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities and its simple and advanced continent generators. They change nothing in the game, so there is

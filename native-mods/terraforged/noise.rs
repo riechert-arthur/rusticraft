@@ -1107,7 +1107,7 @@ fn clamp(value: f32, min: f32, max: f32) -> f32 {
 }
 
 /// `NoiseUtil.curve(t, mid, steepness)`.
-fn noise_curve(value: f32, midpoint: f32, steepness: f32) -> f32 {
+pub fn noise_curve(value: f32, midpoint: f32, steepness: f32) -> f32 {
     1.0 / (1.0 + noise_exp(-steepness * (value - midpoint)))
 }
 
