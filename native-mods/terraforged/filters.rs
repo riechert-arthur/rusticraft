@@ -187,6 +187,59 @@ impl Smoothing {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct Steepness {
+    radius: isize,
+    scaler: f32,
+    water_level: f32,
+    _max_beach_level: f32,
+}
+
+impl Steepness {
+    pub fn new(radius: i32, scaler: f32, levels: Levels) -> Self {
+        Self {
+            radius: radius as isize,
+            scaler,
+            water_level: levels.water,
+            _max_beach_level: levels.water(6),
+        }
+    }
+
+    pub fn apply(&self, map: &mut impl Filterable, _seed_x: i32, _seed_z: i32, _iterations: i32) {
+        let total = map.total_size();
+        for z in 0..total {
+            for x in 0..total {
+                let cell_value = map
+                    .cell_raw(x, z)
+                    .expect("filter coordinates are in bounds")
+                    .value;
+                let mut total_height_difference = 0.0_f32;
+                for dz in -1_isize..=2 {
+                    for dx in -1_isize..=2 {
+                        if dx == 0 && dz == 0 {
+                            continue;
+                        }
+                        let Some(neighbour) = map.cell_raw(
+                            x.wrapping_add_signed(dx * self.radius),
+                            z.wrapping_add_signed(dz * self.radius),
+                        ) else {
+                            continue;
+                        };
+                        if neighbour.is_absent() {
+                            continue;
+                        }
+                        let height = java_max(neighbour.value, self.water_level);
+                        total_height_difference += (cell_value - height).abs() / self.radius as f32;
+                    }
+                }
+                map.cell_raw_mut(x, z)
+                    .expect("filter coordinates are in bounds")
+                    .gradient = java_min(1.0, total_height_difference * self.scaler);
+            }
+        }
+    }
+}
+
 fn java_round(value: f32) -> i32 {
     (value + 0.5).floor() as i32
 }
@@ -202,6 +255,26 @@ fn map(value: f32, min: f32, max: f32, range: f32) -> f32 {
 
 fn lerp(first: f32, second: f32, alpha: f32) -> f32 {
     first + alpha * (second - first)
+}
+
+fn java_min(first: f32, second: f32) -> f32 {
+    if first.is_nan() || second.is_nan() {
+        f32::NAN
+    } else if first <= second {
+        first
+    } else {
+        second
+    }
+}
+
+fn java_max(first: f32, second: f32) -> f32 {
+    if first.is_nan() || second.is_nan() {
+        f32::NAN
+    } else if first >= second {
+        first
+    } else {
+        second
+    }
 }
 
 pub struct WorldErosion<T, F, V> {
@@ -314,6 +387,34 @@ mod tests {
         ];
         for (index, bits) in expected {
             assert_eq!(map.cells[index].value.to_bits(), bits, "cell {index}");
+        }
+    }
+
+    #[test]
+    fn steepness_matches_engine_0_3_0() {
+        let total = 6;
+        let cells = (0..total * total)
+            .map(|index| {
+                let mut cell = Cell::default();
+                cell.value = 0.25 + ((index * 29 + 7) % 97) as f32 / 32_768.0;
+                cell
+            })
+            .collect();
+        let mut map = TestMap { total, cells };
+
+        Steepness::new(1, 10.0, Levels::new(256, 63)).apply(&mut map, 123, -456, 99);
+
+        let expected = [
+            (0, 0x3e0c0000),
+            (1, 0x3dd7a000),
+            (7, 0x3e3a9000),
+            (14, 0x3e165000),
+            (21, 0x3e0a2000),
+            (28, 0x3da96000),
+            (35, 0x3d1c4000),
+        ];
+        for (index, bits) in expected {
+            assert_eq!(map.cells[index].gradient.to_bits(), bits, "cell {index}");
         }
     }
 

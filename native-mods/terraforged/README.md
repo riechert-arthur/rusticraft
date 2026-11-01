@@ -183,6 +183,9 @@ its map size matches and atomically rebuilding it when generation dimensions cha
 The smoothing filter preserves TerraForged's in-place circular weighted pass, including erosion-mask,
 terrain-edge, river-mask, and elevation-range strength modifiers.
 
+The steepness filter measures each cell against TerraForged's asymmetric sixteen-sample neighborhood,
+clamps submerged neighbors to water level, and records the scaled result as terrain gradient.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
