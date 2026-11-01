@@ -26,11 +26,11 @@ use std::sync::Arc;
 
 use super::{
     terraforged::{
-        CellFunction, DistanceFunction, Domain, EdgeFunction, Module, Source, SourceConfig,
+        CellFunction, DistanceFunction, Domain, EdgeFunction, Module, Rand, Source, SourceConfig,
         SourceKind, cell_vector, floor, noise_map, sin_lookup, value_coord_2d,
     },
     terraforged_engine::{
-        BiomeType, Cell, ControlPoints, Seed, Terrain, TerrainProperties, TerrainRegistry,
+        BiomeType, Cell, ControlPoints, Levels, Seed, Terrain, TerrainProperties, TerrainRegistry,
         WorldControlPoints,
     },
 };
@@ -366,6 +366,91 @@ impl ClimateModule {
     fn edge_value(&self, distance: f32, distance2: f32) -> f32 {
         let value = EdgeFunction::Distance2Div.apply(distance, distance2);
         1.0 - noise_map(value, -1.0, 0.0, 1.0) * self.edge_scale / self.edge_clamp
+    }
+}
+
+pub struct Climate {
+    lower_height: f32,
+    rand: Rand,
+    offset_x: Module,
+    offset_z: Module,
+    offset_distance: i32,
+    levels: Levels,
+    biome_noise: ClimateModule,
+    shallow_ocean: Terrain,
+}
+
+impl Climate {
+    pub fn new(
+        continent: Arc<dyn LandValue>,
+        seed: &mut Seed,
+        settings: ClimateSettings,
+        control_points: WorldControlPoints,
+        levels: Levels,
+    ) -> Self {
+        let biome_noise = ClimateModule::new(continent, seed, settings, control_points);
+        let rand = Rand::new(seed.next(), 1.0);
+        let offset_x = settings.biome_edge_shape.build(seed.next());
+        let offset_z = settings.biome_edge_shape.build(seed.next());
+        Self {
+            lower_height: levels.ground,
+            rand,
+            offset_x,
+            offset_z,
+            offset_distance: settings.biome_edge_shape.strength,
+            levels,
+            biome_noise,
+            shallow_ocean: TerrainRegistry::new().get_by_id(2),
+        }
+    }
+
+    pub const fn rand(&self) -> Rand {
+        self.rand
+    }
+
+    pub fn offset_x(&self, x: f32, z: f32, distance: f32) -> f32 {
+        self.offset_x.value(x, z) * distance
+    }
+
+    pub fn offset_z(&self, x: f32, z: f32, distance: f32) -> f32 {
+        self.offset_z.value(x, z) * distance
+    }
+
+    pub fn apply(&self, cell: &mut Cell, mut x: f32, mut z: f32) {
+        self.biome_noise.apply(cell, x, z);
+        let edge_blend = 0.4;
+        if cell.value <= self.levels.water {
+            if cell.terrain.name() == "coast" {
+                cell.terrain = self.shallow_ocean.clone();
+            }
+        } else if cell.biome_region_edge < edge_blend || cell.terrain.name() == "mountain_chain" {
+            let modifier = 1.0 - noise_map(cell.biome_region_edge, 0.0, edge_blend, edge_blend);
+            let distance = self.offset_distance as f32 * modifier;
+            let offset_x = self.offset_x(x, z, distance);
+            let offset_z = self.offset_z(x, z, distance);
+            x += offset_x;
+            z += offset_z;
+            self.biome_noise.apply_masked(cell, x, z, false);
+        }
+        self.modify_temperature(cell);
+    }
+
+    fn modify_temperature(&self, cell: &mut Cell) {
+        let mut height = cell.value;
+        if height > 0.75 {
+            cell.temperature = (cell.temperature - 0.05).max(0.0);
+            return;
+        }
+        if height > 0.45 {
+            let delta = (height - 0.45) / 0.3;
+            cell.temperature = (cell.temperature - delta * 0.05).max(0.0);
+            return;
+        }
+        height = height.max(self.lower_height);
+        if height >= self.lower_height {
+            let delta = 1.0 - (height - self.lower_height) / (0.45 - self.lower_height);
+            cell.temperature = (cell.temperature + delta * 0.05).min(1.0);
+        }
     }
 }
 
@@ -726,5 +811,49 @@ mod tests {
         );
         assert_eq!(cell.biome.id(), 4);
         assert_eq!(cell.terrain.name(), "flats");
+    }
+
+    #[test]
+    fn climate_matches_engine_0_3_0() {
+        let mut seed = Seed::new(1234);
+        let climate = Climate::new(
+            Arc::new(|_, _| 0.3),
+            &mut seed,
+            ClimateSettings::default(),
+            WorldControlPoints::default(),
+            Levels::new(256, 63),
+        );
+        assert_eq!(
+            bits(
+                [(0.0, 0.0), (12.25, -98.75), (-4096.5, 8192.25)]
+                    .map(|(x, z)| climate.rand().value(x, z))
+            ),
+            [0x3f349b7f, 0x3ea1c93d, 0x3f766d12]
+        );
+        assert_eq!(
+            bits([
+                climate.offset_x(12.25, -98.75, 7.0),
+                climate.offset_z(12.25, -98.75, 7.0),
+            ]),
+            [0xbfa00d6f, 0xbf517366]
+        );
+
+        let registry = TerrainRegistry::new();
+        let cases = [
+            (0.0, 0.0, 0.1, 8, 0x3f136176, "ocean"),
+            (12.25, -98.75, 0.2, 8, 0x3f136176, "ocean"),
+            (12.25, -98.75, 0.4, 8, 0x3f09b82b, "coast"),
+            (12.25, -98.75, 0.6, 8, 0x3f002e42, "coast"),
+            (12.25, -98.75, 0.8, 8, 0x3ef38fb8, "coast"),
+            (100_000.0, -100_000.0, 0.5, 13, 0x3f67bdd2, "coast"),
+        ];
+        for (x, z, height, terrain, temperature, expected_terrain) in cases {
+            let mut cell = Cell::default();
+            cell.value = height;
+            cell.terrain = registry.get_by_id(terrain);
+            climate.apply(&mut cell, x, z);
+            assert_eq!(cell.temperature.to_bits(), temperature);
+            assert_eq!(cell.terrain.name(), expected_terrain);
+        }
     }
 }
