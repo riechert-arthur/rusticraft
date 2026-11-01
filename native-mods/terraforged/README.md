@@ -165,6 +165,9 @@ then feeds their lakes, forks and wetlands through the shared Java-compatible ne
 Simple continents now expose legacy-keyed cached rivermaps, while advanced continents use packed
 center keys; both retain their generator settings and share maps across repeated terrain samples.
 
+The heightmap-river stage applies a continent's cached rivermap and then performs TerraForged's
+volcano-pipe demotion for submerged or river-cut terrain.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
