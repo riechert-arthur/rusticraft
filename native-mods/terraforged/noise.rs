@@ -995,6 +995,26 @@ struct Node {
     max: f32,
 }
 
+#[derive(Clone)]
+pub struct Line {
+    x1: f32,
+    y1: f32,
+    x2: f32,
+    y2: f32,
+    dx: f32,
+    dy: f32,
+    orth_x1: f32,
+    orth_y1: f32,
+    orth_x2: f32,
+    orth_y2: f32,
+    length2: f32,
+    feather_bias: f32,
+    feather_scale: f32,
+    fade_in: Module,
+    fade_out: Module,
+    radius: Module,
+}
+
 /// A `MultiBlend` slot: its source and the `[min, max]` of the selector range where it is used alone.
 struct BlendNode {
     source: Module,
@@ -1037,6 +1057,7 @@ enum ModuleKind {
         frequency: f32,
         alpha: Module,
     },
+    Line(Line),
     Abs(Module),
     Alpha(Module, Module),
     Bias(Module, Module),
@@ -1187,6 +1208,215 @@ enum ModuleKind {
     Subtract(Vec<Module>),
 }
 
+impl Line {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        x1: f32,
+        y1: f32,
+        x2: f32,
+        y2: f32,
+        radius: Module,
+        fade_in: Module,
+        fade_out: Module,
+        feather: f32,
+    ) -> Self {
+        let dx = x2 - x1;
+        let dy = y2 - y1;
+        Self {
+            x1,
+            y1,
+            x2,
+            y2,
+            dx,
+            dy,
+            orth_x1: x1 + (y2 - y1),
+            orth_y1: y1 + (x1 - x2),
+            orth_x2: x2 + (y2 - y1),
+            orth_y2: y2 + (x1 - x2),
+            length2: dx * dx + dy * dy,
+            feather_bias: 1.0 - feather,
+            feather_scale: feather,
+            fade_in,
+            fade_out,
+            radius,
+        }
+    }
+
+    pub fn value(&self, x: f32, y: f32) -> f32 {
+        self.value_with_width(x, y, self.width_modifier(x, y))
+    }
+
+    pub fn value_with_width(&self, x: f32, y: f32, width_modifier: f32) -> f32 {
+        self.value_with_min_width(x, y, 0.0, width_modifier)
+    }
+
+    pub fn value_with_min_width(
+        &self,
+        x: f32,
+        y: f32,
+        min_width2: f32,
+        width_modifier: f32,
+    ) -> f32 {
+        let distance2 = self.distance2(x, y);
+        let radius2 = min_width2 + self.radius.value(x, y) * width_modifier;
+        if distance2 > radius2 {
+            return 0.0;
+        }
+        let value = distance2 / radius2;
+        if self.feather_scale == 0.0 {
+            return 1.0 - value;
+        }
+        let feather = self.feather_bias + width_modifier * self.feather_scale;
+        (1.0 - value) * feather
+    }
+
+    pub fn clip_start(&self, x: f32, y: f32) -> bool {
+        Self::sign(x, y, self.x1, self.y1, self.orth_x1, self.orth_y1) > 0
+    }
+
+    pub fn clip_end(&self, x: f32, y: f32) -> bool {
+        Self::sign(x, y, self.x2, self.y2, self.orth_x2, self.orth_y2) < 0
+    }
+
+    pub fn width_modifier(&self, x: f32, y: f32) -> f32 {
+        let distance1 = Self::dist2(x, y, self.x1, self.y1);
+        if distance1 == 0.0 {
+            return 0.0;
+        }
+        let distance2 = Self::dist2(x, y, self.x2, self.y2);
+        if distance2 == 0.0 {
+            return 0.0;
+        }
+        let mut fade = 1.0;
+        let fade_in = self.fade_in.value(x, y);
+        let fade_out = self.fade_out.value(x, y);
+        if fade_in > 0.0 {
+            let distance = fade_in * self.length2;
+            if distance1 < distance {
+                fade *= distance1 / distance;
+            }
+        }
+        if fade_out > 0.0 {
+            let distance = fade_out * self.length2;
+            if distance2 < distance {
+                fade *= distance2 / distance;
+            }
+        }
+        fade
+    }
+
+    fn distance2(&self, x: f32, y: f32) -> f32 {
+        let projection = (x - self.x1) * self.dx + (y - self.y1) * self.dy;
+        let scale = clamp(projection / self.length2, 0.0, 1.0);
+        let intersection_x = self.x1 + scale * self.dx;
+        let intersection_y = self.y1 + scale * self.dy;
+        Self::dist2(x, y, intersection_x, intersection_y)
+    }
+
+    pub fn dist2(x1: f32, y1: f32, x2: f32, y2: f32) -> f32 {
+        let dx = x2 - x1;
+        let dy = y2 - y1;
+        dx * dx + dy * dy
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn sign(x: f32, y: f32, x1: f32, y1: f32, x2: f32, y2: f32) -> i32 {
+        let value = (x - x1) * (y2 - y1) - (y - y1) * (x2 - x1);
+        if value == 0.0 {
+            0
+        } else if value < 0.0 {
+            -1
+        } else {
+            1
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn intersect(
+        ax1: f32,
+        ay1: f32,
+        ax2: f32,
+        ay2: f32,
+        bx1: f32,
+        by1: f32,
+        bx2: f32,
+        by2: f32,
+    ) -> bool {
+        Self::relative_ccw(ax1, ay1, ax2, ay2, bx1, by1)
+            * Self::relative_ccw(ax1, ay1, ax2, ay2, bx2, by2)
+            <= 0
+            && Self::relative_ccw(bx1, by1, bx2, by2, ax1, ay1)
+                * Self::relative_ccw(bx1, by1, bx2, by2, ax2, ay2)
+                <= 0
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn distance_on_line(x: f32, y: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
+        let dx = bx - ax;
+        let dy = by - ay;
+        ((x - ax) * dx + (y - ay) * dy) / (dx * dx + dy * dy)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn distance2_line(x: f32, y: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
+        let dx = bx - ax;
+        let dy = by - ay;
+        let projection = ((x - ax) * dx + (y - ay) * dy) / (dx * dx + dy * dy);
+        if projection < 0.0 || projection > 1.0 {
+            return -1.0;
+        }
+        Self::dist2(x, y, ax + dx * projection, ay + dy * projection)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn distance2_line_including_ends(
+        x: f32,
+        y: f32,
+        ax: f32,
+        ay: f32,
+        bx: f32,
+        by: f32,
+    ) -> f32 {
+        let dx = bx - ax;
+        let dy = by - ay;
+        let projection = ((x - ax) * dx + (y - ay) * dy) / (dx * dx + dy * dy);
+        if projection < 0.0 {
+            Self::dist2(x, y, ax, ay)
+        } else if projection > 1.0 {
+            Self::dist2(x, y, bx, by)
+        } else {
+            Self::dist2(x, y, ax + dx * projection, ay + dy * projection)
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn relative_ccw(x1: f32, y1: f32, mut x2: f32, mut y2: f32, mut px: f32, mut py: f32) -> i32 {
+        x2 -= x1;
+        y2 -= y1;
+        px -= x1;
+        py -= y1;
+        let mut ccw = f64::from(px * y2 - py * x2);
+        if ccw == 0.0 {
+            ccw = f64::from(px * x2 + py * y2);
+            if ccw > 0.0 {
+                px -= x2;
+                py -= y2;
+                ccw = f64::from(px * x2 + py * y2);
+                if ccw < 0.0 {
+                    ccw = 0.0;
+                }
+            }
+        }
+        if ccw < 0.0 {
+            -1
+        } else if ccw > 0.0 {
+            1
+        } else {
+            0
+        }
+    }
+}
+
 impl Module {
     fn node(kind: ModuleKind, min: f32, max: f32) -> Self {
         Self(Arc::new(Node { kind, min, max }))
@@ -1270,6 +1500,11 @@ impl Module {
         Self::node(ModuleKind::SineSource { frequency, alpha }, 0.0, 1.0)
     }
 
+    /// `Line` as a module: reports the `Noise` defaults 0..1.
+    pub fn line(line: Line) -> Self {
+        Self::node(ModuleKind::Line(line), 0.0, 1.0)
+    }
+
     pub fn value(&self, x: f32, y: f32) -> f32 {
         match &self.0.kind {
             ModuleKind::Constant(value) => *value,
@@ -1333,6 +1568,7 @@ impl Module {
                 };
                 map(noise, -1.0, 1.0, 2.0)
             }
+            ModuleKind::Line(line) => line.value(x, y),
             ModuleKind::Abs(source) => source.value(x, y).abs(),
             ModuleKind::Alpha(source, alpha) => {
                 let value = source.value(x, y);
@@ -3534,6 +3770,83 @@ mod tests {
                 0x3effcdc3, 0x3f000000, 0x3e16cb9c, 0x3effcdc3, 0x3f6baa7e, 0x3f000000, 0x3f000000,
                 0x3edb688c
             ]
+        );
+    }
+
+    #[test]
+    fn line_source_matches_engine_0_3_0() {
+        let radius = Module::source(Source::new(
+            SourceKind::Simplex,
+            SourceConfig {
+                seed: 1501,
+                octaves: 2,
+                gain: 0.5,
+                frequency: 1.0 / 64.0,
+                lacunarity: 2.0,
+                interpolation: Interpolation::Curve3,
+            },
+        ))
+        .map(Module::constant(16.0), Module::constant(100.0));
+        let line = Line::new(
+            -10.0,
+            5.0,
+            30.0,
+            25.0,
+            radius,
+            Module::constant(0.2),
+            Module::constant(0.3),
+            0.4,
+        );
+        let module = Module::line(line.clone());
+        assert_eq!(
+            [module.min_value().to_bits(), module.max_value().to_bits()],
+            [0, 0x3f800000]
+        );
+        let points = [
+            (-10.0, 5.0),
+            (30.0, 25.0),
+            (10.0, 15.0),
+            (10.0, 20.0),
+            (-15.0, 2.0),
+            (35.0, 28.0),
+            (0.0, 0.0),
+            (22.0, 14.0),
+        ];
+        let expected = [
+            [0xffc00000, 0, 0x3f570a3e, 0x3f570a3e, 0, 0],
+            [0xffc00000, 0, 0x3f570a3e, 0x3f570a3e, 0, 0],
+            [0x3f6eeef0, 0x3f555555, 0x3f570a3e, 0x3f570a3e, 0, 0],
+            [0x3f096fb8, 0x3f355555, 0x3ee6ee27, 0x3ef7cf76, 0, 0],
+            [0, 0x3dae147b, 0, 0x3c34235f, 1, 0],
+            [0, 0x3d681b4f, 0, 0, 0, 1],
+            [0, 0x3ea00000, 0, 0, 0, 0],
+            [0, 0x3e9dddde, 0x3d01b31a, 0x3dd4df5f, 0, 0],
+        ];
+        assert_eq!(
+            points.map(|(x, y)| [
+                line.value(x, y).to_bits(),
+                line.width_modifier(x, y).to_bits(),
+                line.value_with_width(x, y, 0.6).to_bits(),
+                line.value_with_min_width(x, y, 4.0, 0.6).to_bits(),
+                line.clip_start(x, y) as u32,
+                line.clip_end(x, y) as u32,
+            ]),
+            expected
+        );
+        assert_eq!(Line::dist2(1.0, 2.0, 4.0, 6.0).to_bits(), 0x41c80000);
+        assert_eq!(Line::sign(2.0, 3.0, 0.0, 0.0, 4.0, 4.0), -1);
+        assert!(Line::intersect(0.0, 0.0, 4.0, 4.0, 0.0, 4.0, 4.0, 0.0));
+        assert_eq!(
+            Line::distance_on_line(2.0, 3.0, 0.0, 0.0, 4.0, 4.0).to_bits(),
+            0x3f200000
+        );
+        assert_eq!(
+            Line::distance2_line(2.0, 3.0, 0.0, 0.0, 4.0, 4.0).to_bits(),
+            0x3f000000
+        );
+        assert_eq!(
+            Line::distance2_line_including_ends(8.0, 9.0, 0.0, 0.0, 4.0, 4.0).to_bits(),
+            0x42240000
         );
     }
 

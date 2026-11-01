@@ -111,6 +111,9 @@ itself never returns one: as in Engine, a NaN coordinate reads entry 0 and an in
 to an index. Its tests check raw bits against a Java oracle for all three branches, including NaN, infinite and
 extrapolating alphas and NaN, infinite and huge coordinates.
 
+The line source layer adds dynamic radius, endpoint fading, feathering, clipping, intersection and
+distance helpers for TerraForged's finite line masks.
+
 ## Status: development only
 
 This layer only adds the noise functions. It changes nothing in the game, so there is nothing for players to install
