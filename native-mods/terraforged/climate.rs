@@ -24,6 +24,135 @@
 
 use super::terraforged::{Module, Source, SourceConfig, SourceKind, sin_lookup};
 
+#[derive(Clone, Copy)]
+pub struct ClimateRange {
+    pub seed_offset: i32,
+    pub scale: i32,
+    pub falloff: i32,
+    pub min: f32,
+    pub max: f32,
+    pub bias: f32,
+}
+
+impl ClimateRange {
+    pub const fn new(scale: i32, falloff: i32, min: f32, max: f32, bias: f32) -> Self {
+        Self {
+            seed_offset: 0,
+            scale,
+            falloff,
+            min,
+            max,
+            bias,
+        }
+    }
+
+    pub fn min(self) -> f32 {
+        self.min.min(self.max).clamp(0.0, 1.0)
+    }
+
+    pub fn max(self) -> f32 {
+        self.min.max(self.max).clamp(self.min(), 1.0)
+    }
+
+    pub fn bias(self) -> f32 {
+        self.bias.clamp(-1.0, 1.0)
+    }
+
+    pub fn apply(self, module: Module) -> Module {
+        module
+            .bias(Module::constant(self.bias() / 2.0))
+            .clamp(Module::constant(self.min()), Module::constant(self.max()))
+    }
+}
+
+impl Default for ClimateRange {
+    fn default() -> Self {
+        Self::new(7, 1, 0.0, 1.0, 0.0)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BiomeShape {
+    pub biome_size: i32,
+    pub macro_noise_size: i32,
+    pub biome_warp_scale: i32,
+    pub biome_warp_strength: i32,
+}
+
+impl BiomeShape {
+    pub const DEFAULT_BIOME_SIZE: i32 = 225;
+}
+
+impl Default for BiomeShape {
+    fn default() -> Self {
+        Self {
+            biome_size: Self::DEFAULT_BIOME_SIZE,
+            macro_noise_size: 8,
+            biome_warp_scale: 150,
+            biome_warp_strength: 80,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct BiomeNoise {
+    pub kind: SourceKind,
+    pub scale: i32,
+    pub octaves: i32,
+    pub gain: f32,
+    pub lacunarity: f32,
+    pub strength: i32,
+}
+
+impl BiomeNoise {
+    pub fn build(self, seed: i32) -> Module {
+        Module::source(Source::new(
+            self.kind,
+            SourceConfig {
+                seed,
+                octaves: self.octaves as usize,
+                gain: self.gain,
+                frequency: 1.0 / self.scale as f32,
+                lacunarity: self.lacunarity,
+                ..SourceConfig::default()
+            },
+        ))
+        .bias(Module::constant(-0.5))
+    }
+}
+
+impl Default for BiomeNoise {
+    fn default() -> Self {
+        Self {
+            kind: SourceKind::Simplex,
+            scale: 24,
+            octaves: 2,
+            gain: 0.5,
+            lacunarity: 2.65,
+            strength: 14,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct ClimateSettings {
+    pub temperature: ClimateRange,
+    pub moisture: ClimateRange,
+    pub biome_shape: BiomeShape,
+    pub biome_edge_shape: BiomeNoise,
+}
+
+impl Default for ClimateSettings {
+    fn default() -> Self {
+        Self {
+            temperature: ClimateRange::new(6, 2, 0.0, 0.98, 0.05),
+            moisture: ClimateRange::new(6, 1, 0.0, 1.0, 0.0),
+            biome_shape: BiomeShape::default(),
+            biome_edge_shape: BiomeNoise::default(),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Compressor {
     lower_start: f32,
@@ -205,6 +334,70 @@ mod tests {
             [
                 0x00000000, 0x3e940000, 0x3ee00000, 0x3f000000, 0x3f100000, 0x3f800000,
             ]
+        );
+    }
+
+    #[test]
+    fn climate_settings_match_engine_0_3_0() {
+        let settings = ClimateSettings::default();
+        assert_eq!(
+            (
+                settings.temperature.seed_offset,
+                settings.temperature.scale,
+                settings.temperature.falloff,
+                settings.temperature.min.to_bits(),
+                settings.temperature.max.to_bits(),
+                settings.temperature.bias.to_bits(),
+            ),
+            (0, 6, 2, 0x00000000, 0x3f7ae148, 0x3d4ccccd)
+        );
+        assert_eq!(
+            (
+                settings.moisture.seed_offset,
+                settings.moisture.scale,
+                settings.moisture.falloff,
+                settings.moisture.min.to_bits(),
+                settings.moisture.max.to_bits(),
+                settings.moisture.bias.to_bits(),
+            ),
+            (0, 6, 1, 0x00000000, 0x3f800000, 0x00000000)
+        );
+        assert_eq!(settings.biome_shape, BiomeShape::default());
+    }
+
+    #[test]
+    fn climate_range_and_edge_noise_match_engine_0_3_0() {
+        let range = ClimateRange {
+            min: 0.8,
+            max: 0.2,
+            bias: 2.0,
+            ..ClimateRange::default()
+        };
+        assert_eq!(
+            bits([range.min(), range.max(), range.bias()]),
+            [0x3e4ccccd, 0x3f4ccccd, 0x3f800000]
+        );
+        assert_eq!(
+            range
+                .apply(Module::constant(0.25))
+                .value(0.0, 0.0)
+                .to_bits(),
+            0x3f400000
+        );
+
+        let edge = BiomeNoise::default().build(42);
+        assert_eq!(
+            bits(
+                [
+                    (0.0, 0.0),
+                    (1.0, 2.0),
+                    (24.0, 48.0),
+                    (-10.0, 7.0),
+                    (1000.0, -300.0)
+                ]
+                .map(|(x, y)| edge.value(x, y))
+            ),
+            [0x00000000, 0xbdd59d54, 0x3e314904, 0xbea34c20, 0xbe89fdf4]
         );
     }
 }

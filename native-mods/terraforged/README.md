@@ -264,6 +264,9 @@ frequency-scaled moisture shaping as composable noise modules with Java-oracle r
 Biome climate classification now reproduces TerraForged's complete 256-square lookup map, climate
 ranges, display colors, curved and linear sampling, and direct cell application without a PNG decoder.
 
+Climate settings now preserve TerraForged's temperature and moisture ranges, biome shape defaults,
+range clamping and biasing, and configurable edge-noise module construction.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
