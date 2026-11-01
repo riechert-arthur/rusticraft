@@ -149,6 +149,9 @@ static list per Java process, so there the ids of composites and custom terrains
 registered; here each world owns a registry, and its built-in terrains are its own objects. Its tests check every
 registered terrain's id, name, category, hue, erosion and flags against a Java oracle.
 
+The world-level layer adds spawn and height properties, validated ocean-to-inland control points and
+the exact normalized block-level conversions used by TerraForged's heightmap pipeline.
+
 ## Status: development only
 
 These layers only add the noise functions and Engine's terrain types. They change nothing in the game, so there is

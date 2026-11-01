@@ -722,6 +722,168 @@ fn single_case_mapping(mut mapped: impl Iterator<Item = char>, c: char) -> char 
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SpawnType {
+    ContinentCenter,
+    WorldOrigin,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WorldProperties {
+    pub spawn_type: SpawnType,
+    pub world_height: i32,
+    pub sea_level: i32,
+}
+
+impl Default for WorldProperties {
+    fn default() -> Self {
+        Self {
+            spawn_type: SpawnType::ContinentCenter,
+            world_height: 256,
+            sea_level: 63,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WorldControlPoints {
+    pub deep_ocean: f32,
+    pub shallow_ocean: f32,
+    pub beach: f32,
+    pub coast: f32,
+    pub inland: f32,
+}
+
+impl Default for WorldControlPoints {
+    fn default() -> Self {
+        Self {
+            deep_ocean: 0.1,
+            shallow_ocean: 0.25,
+            beach: 0.327,
+            coast: 0.448,
+            inland: 0.502,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ControlPoints {
+    pub deep_ocean: f32,
+    pub shallow_ocean: f32,
+    pub beach: f32,
+    pub coast: f32,
+    pub coast_marker: f32,
+    pub inland: f32,
+}
+
+impl ControlPoints {
+    pub fn new(mut points: WorldControlPoints) -> Self {
+        if !Self::validate(&points) {
+            points = WorldControlPoints::default();
+        }
+        Self {
+            inland: points.inland,
+            coast: points.coast,
+            beach: points.beach,
+            shallow_ocean: points.shallow_ocean,
+            deep_ocean: points.deep_ocean,
+            coast_marker: points.coast + (points.inland - points.coast) / 2.0,
+        }
+    }
+
+    pub fn validate(points: &WorldControlPoints) -> bool {
+        points.inland <= 1.0
+            && points.inland > points.coast
+            && points.coast > points.beach
+            && points.beach > points.shallow_ocean
+            && points.shallow_ocean > points.deep_ocean
+            && points.deep_ocean >= 0.0
+    }
+}
+
+impl Default for ControlPoints {
+    fn default() -> Self {
+        Self::new(WorldControlPoints::default())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Levels {
+    pub world_height: i32,
+    pub unit: f32,
+    pub water_y: i32,
+    ground_y: i32,
+    pub ground_level: i32,
+    pub water_level: i32,
+    pub ground: f32,
+    pub water: f32,
+    elevation_range: f32,
+}
+
+impl Levels {
+    pub fn from_properties(properties: WorldProperties) -> Self {
+        Self::new(properties.world_height, properties.sea_level)
+    }
+
+    pub fn new(height: i32, sea_level: i32) -> Self {
+        let world_height = height.max(1);
+        let unit = 1.0 / world_height as f32;
+        let water_level = sea_level;
+        let ground_level = water_level.wrapping_add(1);
+        let water_y = water_level.wrapping_sub(1).min(world_height);
+        let ground_y = ground_level.wrapping_sub(1).min(world_height);
+        let ground = ground_y as f32 / world_height as f32;
+        let water = water_y as f32 / world_height as f32;
+        Self {
+            world_height,
+            unit,
+            water_y,
+            ground_y,
+            ground_level,
+            water_level,
+            ground,
+            water,
+            elevation_range: 1.0 - water,
+        }
+    }
+
+    pub fn scale_value(self, value: f32) -> i32 {
+        if value >= 1.0 {
+            self.world_height - 1
+        } else {
+            (value * self.world_height as f32) as i32
+        }
+    }
+
+    pub fn elevation_value(self, value: f32) -> f32 {
+        if value <= self.water {
+            0.0
+        } else {
+            (value - self.water) / self.elevation_range
+        }
+    }
+
+    pub fn elevation_y(self, y: i32) -> f32 {
+        if y <= self.water_y {
+            0.0
+        } else {
+            self.scale_level(y - self.water_y) / self.elevation_range
+        }
+    }
+
+    pub fn scale_level(self, level: i32) -> f32 {
+        level as f32 / self.world_height as f32
+    }
+
+    pub fn water(self, amount: i32) -> f32 {
+        self.water_y.wrapping_add(amount) as f32 / self.world_height as f32
+    }
+
+    pub fn ground(self, amount: i32) -> f32 {
+        self.ground_y.wrapping_add(amount) as f32 / self.world_height as f32
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1425,5 +1587,110 @@ mod tests {
                 "{second} {first}"
             );
         }
+    }
+
+    #[test]
+    fn control_points_match_engine_0_3_0() {
+        let defaults = ControlPoints::default();
+        assert_eq!(
+            bits_of_control_points(defaults),
+            [
+                0x3dcccccd, 0x3e800000, 0x3ea76c8b, 0x3ee56042, 0x3ef33333, 0x3f008312,
+            ]
+        );
+        let valid = WorldControlPoints {
+            deep_ocean: 0.0,
+            shallow_ocean: 0.2,
+            beach: 0.3,
+            coast: 0.6,
+            inland: 1.0,
+        };
+        assert!(ControlPoints::validate(&valid));
+        assert_eq!(
+            bits_of_control_points(ControlPoints::new(valid)),
+            [
+                0x00000000, 0x3e4ccccd, 0x3e99999a, 0x3f19999a, 0x3f4ccccd, 0x3f800000,
+            ]
+        );
+        let mut invalid = WorldControlPoints::default();
+        invalid.coast = invalid.inland;
+        assert!(!ControlPoints::validate(&invalid));
+        assert_eq!(ControlPoints::new(invalid), defaults);
+        invalid = WorldControlPoints::default();
+        invalid.beach = f32::NAN;
+        assert!(!ControlPoints::validate(&invalid));
+        assert_eq!(ControlPoints::new(invalid), defaults);
+    }
+
+    fn bits_of_control_points(points: ControlPoints) -> [u32; 6] {
+        [
+            points.deep_ocean.to_bits(),
+            points.shallow_ocean.to_bits(),
+            points.beach.to_bits(),
+            points.coast.to_bits(),
+            points.coast_marker.to_bits(),
+            points.inland.to_bits(),
+        ]
+    }
+
+    #[test]
+    fn levels_match_engine_0_3_0() {
+        let levels = Levels::new(256, 63);
+        assert_eq!(levels.world_height, 256);
+        assert_eq!(levels.unit.to_bits(), 0x3b800000);
+        assert_eq!(levels.water_y, 62);
+        assert_eq!(levels.ground_level, 64);
+        assert_eq!(levels.ground.to_bits(), 0x3e7c0000);
+        assert_eq!(levels.water.to_bits(), 0x3e780000);
+        let values = [
+            -1.0,
+            0.0,
+            0.25,
+            levels.water,
+            0.75,
+            1.0,
+            f32::NAN,
+            f32::INFINITY,
+        ];
+        assert_eq!(
+            values.map(|value| levels.scale_value(value)),
+            [-256, 0, 64, 62, 192, 255, 0, 255]
+        );
+        assert_eq!(
+            values.map(|value| levels.elevation_value(value).to_bits()),
+            [
+                0x00000000, 0x00000000, 0x3c28e83f, 0x00000000, 0x3f2b8be0, 0x3f800000, 0x7fc00000,
+                0x7f800000,
+            ]
+        );
+        assert_eq!(
+            [-10, 62, 63, 256, 300].map(|y| levels.elevation_y(y).to_bits()),
+            [0x00000000, 0x00000000, 0x3ba8e83f, 0x3f800000, 0x3f9d07eb]
+        );
+        assert_eq!(levels.scale_level(-5).to_bits(), 0xbca00000);
+        assert_eq!(levels.water(5).to_bits(), 0x3e860000);
+        assert_eq!(levels.ground(5).to_bits(), 0x3e880000);
+    }
+
+    #[test]
+    fn level_edge_cases_match_engine_0_3_0() {
+        let zero = Levels::new(0, 63);
+        assert_eq!(zero.world_height, 1);
+        assert_eq!(zero.water_y, 1);
+        assert_eq!(zero.water.to_bits(), 0x3f800000);
+        assert_eq!(zero.scale_value(1.0), 0);
+        assert_eq!(zero.elevation_y(2).to_bits(), 0x7f800000);
+
+        let negative = Levels::new(-10, -5);
+        assert_eq!(negative.world_height, 1);
+        assert_eq!(negative.water_y, -6);
+        assert_eq!(negative.ground.to_bits(), 0xc0a00000);
+        assert_eq!(negative.water.to_bits(), 0xc0c00000);
+        assert_eq!(negative.elevation_value(-1.0).to_bits(), 0x3f36db6e);
+
+        let high_sea = Levels::new(100, 200);
+        assert_eq!(high_sea.water_y, 100);
+        assert_eq!(high_sea.water.to_bits(), 0x3f800000);
+        assert_eq!(high_sea.elevation_y(101).to_bits(), 0x7f800000);
     }
 }
