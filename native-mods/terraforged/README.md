@@ -5,6 +5,9 @@ An exact Rust translation of
 native-mod changes. This foundation ports the deterministic Noise2D primitives used by later terrain
 modules. It intentionally does not alter world generation yet.
 
+The next layer adds TerraForged's octave configuration and Perlin, Perlin2, legacy simplex,
+improved simplex and cubic sources, including the original explicit-seed behavior.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
