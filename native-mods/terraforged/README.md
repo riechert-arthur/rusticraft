@@ -309,6 +309,9 @@ name, jitter matching region cells, and return world-scaled nearest positions.
 Noise graphs now support TerraForged's Cereal-style recursive reseeding by adding the context seed to
 every nested source, domain, erosion node, and cached branch, completing terrain-blender `withSeed`.
 
+Cave-noise assets now preserve global and unique cave modes, recursively reseeded elevation, shape,
+and floor modules, integer cave scaling, and TerraForged's jittered cellular cave distribution.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
