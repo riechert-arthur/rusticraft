@@ -30,6 +30,10 @@ use super::{
 pub trait Populator {
     fn apply(&self, cell: &mut Cell, x: f32, z: f32);
 
+    fn terrain_weight(&self) -> Option<f32> {
+        None
+    }
+
     fn value(&self, x: f32, z: f32) -> f32 {
         let mut cell = Cell::default();
         self.apply(&mut cell, x, z);
@@ -136,6 +140,10 @@ impl Populator for TerrainPopulator {
     fn apply(&self, cell: &mut Cell, x: f32, z: f32) {
         self.apply_value(cell, self.base.value(x, z), self.variance.value(x, z));
     }
+
+    fn terrain_weight(&self) -> Option<f32> {
+        Some(self.weight)
+    }
 }
 
 impl TerrainPopulatorLike for TerrainPopulator {
@@ -189,6 +197,10 @@ impl Populator for ScaledPopulator {
         let base = self.populator.base.value(x, z) * self.base_scale;
         let variance = self.populator.variance.value(x, z) * self.variance_scale;
         self.populator.apply_value(cell, base, variance);
+    }
+
+    fn terrain_weight(&self) -> Option<f32> {
+        Some(self.populator.weight)
     }
 }
 

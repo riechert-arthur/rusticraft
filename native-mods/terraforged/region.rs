@@ -30,6 +30,7 @@ use super::{
     terraforged_engine::Cell,
     terraforged_populator::Populator,
 };
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct RegionConfig {
@@ -140,15 +141,119 @@ impl Populator for RegionModule {
     }
 }
 
+pub struct RegionSelector {
+    max_index: i32,
+    nodes: Vec<Arc<dyn Populator>>,
+}
+
+impl RegionSelector {
+    pub fn new(populators: Vec<Arc<dyn Populator>>) -> Self {
+        let nodes = Self::weighted_array(&populators);
+        Self {
+            max_index: nodes.len() as i32 - 1,
+            nodes,
+        }
+    }
+
+    pub fn get(&self, identity: f32) -> &dyn Populator {
+        let index = noise_round(identity * self.max_index as f32);
+        self.nodes[index as usize].as_ref()
+    }
+
+    fn weighted_array(populators: &[Arc<dyn Populator>]) -> Vec<Arc<dyn Populator>> {
+        let mut smallest = f32::MAX;
+        for populator in populators {
+            if let Some(weight) = populator.terrain_weight() {
+                if weight == 0.0 {
+                    continue;
+                }
+                smallest = smallest.min(weight);
+            } else {
+                smallest = smallest.min(1.0);
+            }
+        }
+        if smallest == f32::MAX {
+            return populators.to_vec();
+        }
+        let mut result = Vec::new();
+        for populator in populators {
+            let count = match populator.terrain_weight() {
+                Some(0.0) => continue,
+                Some(weight) => java_round(weight / smallest),
+                None => java_round(1.0 / smallest),
+            };
+            for _ in 0..count.max(0) {
+                result.push(Arc::clone(populator));
+            }
+        }
+        if result.is_empty() {
+            populators.to_vec()
+        } else {
+            result
+        }
+    }
+}
+
+impl Populator for RegionSelector {
+    fn apply(&self, cell: &mut Cell, x: f32, y: f32) {
+        self.get(cell.terrain_region_id).apply(cell, x, y);
+    }
+}
+
+pub struct RegionLerper {
+    lower: Arc<dyn Populator>,
+    upper: Arc<dyn Populator>,
+}
+
+impl RegionLerper {
+    pub fn new(lower: Arc<dyn Populator>, upper: Arc<dyn Populator>) -> Self {
+        Self { lower, upper }
+    }
+}
+
+impl Populator for RegionLerper {
+    fn apply(&self, cell: &mut Cell, x: f32, y: f32) {
+        let alpha = cell.terrain_region_edge;
+        if alpha == 0.0 {
+            self.lower.apply(cell, x, y);
+            return;
+        }
+        if alpha == 1.0 {
+            self.upper.apply(cell, x, y);
+            return;
+        }
+        self.lower.apply(cell, x, y);
+        let lower_value = cell.value;
+        self.upper.apply(cell, x, y);
+        let upper_value = cell.value;
+        cell.value = lower_value + alpha * (upper_value - lower_value);
+    }
+}
+
 fn pack(left: f32, right: f32) -> i64 {
     let left = left as i32;
     let right = right as i32;
     (i64::from(left) << 32) | (i64::from(right) & 0xffff_ffff)
 }
 
+fn java_round(value: f32) -> i32 {
+    (value + 0.5).floor() as i32
+}
+
+fn noise_round(value: f32) -> i32 {
+    if value >= 0.0 {
+        (value + 0.5) as i32
+    } else {
+        (value - 0.5) as i32
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::terraforged::{Interpolation, Source, SourceConfig, SourceKind};
+    use super::super::{
+        terraforged_engine::TerrainRegistry, terraforged_populator::TerrainPopulator,
+    };
     use super::*;
 
     fn perlin(seed: i32, scale: f32, octaves: usize) -> Module {
@@ -218,5 +323,61 @@ mod tests {
                 (0x3e2dd120, 0x3d843f55, 0x0001e23afffffff3),
             ]
         );
+    }
+
+    fn populator(terrain: i32, value: f32, weight: f32) -> Arc<dyn Populator> {
+        Arc::new(TerrainPopulator::new(
+            TerrainRegistry::new().get_by_id(terrain),
+            Module::constant(0.0),
+            Module::constant(value),
+            weight,
+        ))
+    }
+
+    #[test]
+    fn region_selection_matches_engine_0_3_0() {
+        let selector = RegionSelector::new(vec![
+            populator(8, 0.1, 0.5),
+            populator(11, 0.2, 1.0),
+            populator(12, 0.3, 2.0),
+        ]);
+        let cases = [
+            (0.0, 0x3dcccccd, 8),
+            (0.1, 0x3e4ccccd, 11),
+            (0.2, 0x3e4ccccd, 11),
+            (0.4, 0x3e4ccccd, 11),
+            (0.6, 0x3e99999a, 12),
+            (0.8, 0x3e99999a, 12),
+            (1.0, 0x3e99999a, 12),
+        ];
+        for (identity, value, terrain) in cases {
+            let mut cell = Cell::default();
+            cell.terrain_region_id = identity;
+            selector.apply(&mut cell, 0.0, 0.0);
+            assert_eq!(cell.value.to_bits(), value);
+            assert_eq!(cell.terrain.id(), terrain);
+        }
+
+        let lerper = RegionLerper::new(populator(11, 0.2, 1.0), populator(12, 0.8, 1.0));
+        for (edge, value, terrain) in [
+            (0.0, 0x3e4ccccd, 11),
+            (0.25, 0x3eb33334, 12),
+            (1.0, 0x3f4ccccd, 12),
+        ] {
+            let mut cell = Cell::default();
+            cell.terrain_region_edge = edge;
+            lerper.apply(&mut cell, 0.0, 0.0);
+            assert_eq!(cell.value.to_bits(), value);
+            assert_eq!(cell.terrain.id(), terrain);
+        }
+
+        let zeros = RegionSelector::new(vec![populator(8, 0.4, 0.0), populator(11, 0.6, 0.0)]);
+        for (identity, value, terrain) in [(0.0, 0x3ecccccd, 8), (1.0, 0x3f19999a, 11)] {
+            let mut cell = Cell::default();
+            cell.terrain_region_id = identity;
+            zeros.apply(&mut cell, 0.0, 0.0);
+            assert_eq!(cell.value.to_bits(), value);
+            assert_eq!(cell.terrain.id(), terrain);
+        }
     }
 }

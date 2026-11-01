@@ -99,6 +99,9 @@ configuration round-tripping, output clamping and Java-compatible NaN behavior.
 The region-module layer adds warped natural-distance terrain cells, deterministic region identities,
 edge shaping and packed world-space centers, including Java integer-overflow behavior.
 
+The region-selection layer adds weighted populator slot expansion and edge interpolation, preserving
+zero-weight fallback, Engine rounding and the upper region's terrain identity during blends.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
