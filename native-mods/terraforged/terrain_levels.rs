@@ -189,6 +189,25 @@ impl TerrainLevels {
     pub fn height(self, scaled_height: f32) -> i32 {
         super::terraforged::floor(scaled_height)
     }
+
+    pub fn water_level(
+        sea_level: i32,
+        x: i32,
+        z: i32,
+        terrain: &super::terraforged_terrain_data::TerrainData,
+    ) -> i32 {
+        use super::terraforged_engine::TerrainProperties;
+
+        let terrain_type = terrain
+            .terrain()
+            .get(x, z)
+            .expect("generated terrain has a terrain type");
+        if (terrain_type.is_river() || terrain_type.is_lake()) && terrain.river().get(x, z) == 0.0 {
+            terrain.base_height_at(x, z)
+        } else {
+            sea_level
+        }
+    }
 }
 
 impl Default for TerrainLevels {

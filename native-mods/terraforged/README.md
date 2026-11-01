@@ -479,6 +479,10 @@ The generator query facade captures Java's narrowed and raw world seeds, exposes
 chunk data, and reproduces structure heightmap and raw base-column queries, including their deliberate
 eroded-versus-un-eroded height split. A standalone current-source oracle records the query fixtures.
 
+The first playable terrain stage now fills Rusticraft chunks from TerraForged height data with stone
+and water, including river/lake base-height water levels, build-range clipping, and the ocean-floor and
+world-surface generation heightmaps used by later surface, structure, and carving stages.
+
 The scalar graph fixtures cover 15 graphs, four seeds and four coordinates (240 Java samples),
 including wrapped seed addition and mixed Perlin/seed-sensitive sources. Regenerate their hashes
 with `tools/terraforged/TerraForgedSeededGraphOracle.java` on a classpath containing compiled
