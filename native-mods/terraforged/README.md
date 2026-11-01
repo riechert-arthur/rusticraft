@@ -207,6 +207,9 @@ the same raw linear-index filter region consumed by the complete world-filter pi
 Chunk views reproduce TerraForged's masked chunk lookup, world and region block coordinates, sixteen by
 sixteen cell iteration, and mutable generation visitor contract over the tile backing.
 
+Tile heightmap traversal now runs base terrain, contextual rivermap selection, river carving, and climate
+in TerraForged's chunk-major order while reusing the current continent's rivermap across cells.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:

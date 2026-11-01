@@ -25,8 +25,10 @@
 use super::{
     terraforged_engine::Cell,
     terraforged_filters::Filterable,
+    terraforged_river::Rivermap,
     terraforged_util::{pack, unpack_left, unpack_right},
 };
+use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Size {
@@ -192,6 +194,43 @@ impl Tile {
 
     pub fn chunk_writer(&mut self, region_chunk_x: i32, region_chunk_z: i32) -> GenChunk<'_> {
         GenChunk::new(self, region_chunk_x, region_chunk_z)
+    }
+
+    pub fn generate_heightmap(
+        &mut self,
+        mut apply_base: impl FnMut(&mut Cell, f32, f32),
+        mut lookup_rivermap: impl FnMut(i32, i32) -> Arc<Rivermap>,
+        mut apply_rivers: impl FnMut(&mut Cell, f32, f32, &Rivermap),
+        mut apply_climate: impl FnMut(&mut Cell, f32, f32),
+    ) {
+        let mut current = None;
+        for chunk_z in 0..self.chunk_size.total {
+            let world_chunk_z = self.chunk_z.wrapping_add(chunk_z).wrapping_sub(self.border);
+            let region_block_z = chunk_z.wrapping_shl(4);
+            for chunk_x in 0..self.chunk_size.total {
+                let world_chunk_x = self.chunk_x.wrapping_add(chunk_x).wrapping_sub(self.border);
+                let region_block_x = chunk_x.wrapping_shl(4);
+                for delta_z in 0..16 {
+                    let region_z = region_block_z.wrapping_add(delta_z);
+                    let world_z = world_chunk_z.wrapping_shl(4).wrapping_add(delta_z);
+                    for delta_x in 0..16 {
+                        let region_x = region_block_x.wrapping_add(delta_x);
+                        let world_x = world_chunk_x.wrapping_shl(4).wrapping_add(delta_x);
+                        let index = self.block_size.index_of(region_x, region_z) as usize;
+                        let cell = &mut self.blocks[index];
+                        let sample_x = world_x as f32;
+                        let sample_z = world_z as f32;
+                        apply_base(cell, sample_x, sample_z);
+                        let rivermap = Rivermap::get_for_cell(cell, current.take(), |x, z| {
+                            lookup_rivermap(x, z)
+                        });
+                        apply_rivers(cell, sample_x, sample_z, &rivermap);
+                        apply_climate(cell, sample_x, sample_z);
+                        current = Some(rivermap);
+                    }
+                }
+            }
+        }
     }
 
     pub fn cell(&self, block_x: i32, block_z: i32) -> &Cell {
@@ -386,7 +425,9 @@ impl<'tile> GenChunk<'tile> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::terraforged_river::GenWarp;
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn size_matches_engine_0_3_0() {
@@ -486,5 +527,39 @@ mod tests {
         let mut count = 0;
         chunk.iterate(|_, _, _| count += 1);
         assert_eq!(count, 256);
+    }
+
+    #[test]
+    fn tile_heightmap_generation_matches_engine_0_3_0() {
+        let mut tile = Tile::new(0, 0, 1, 1);
+        let lookups = AtomicUsize::new(0);
+        tile.generate_heightmap(
+            |cell, x, z| {
+                cell.value = x * 1_000.0 + z;
+                cell.continent_x = 7;
+                cell.continent_z = -9;
+            },
+            |x, z| {
+                lookups.fetch_add(1, Ordering::Relaxed);
+                Arc::new(Rivermap::new(x, z, Vec::new(), GenWarp::direct()))
+            },
+            |cell, _, _, map| {
+                assert_eq!((map.x(), map.z()), (7, -9));
+                cell.river_mask = 0.25;
+            },
+            |cell, x, z| {
+                cell.temperature = (x - z).abs();
+            },
+        );
+
+        assert_eq!(lookups.load(Ordering::Relaxed), 1);
+        let first = tile.raw_cell(0, 0).unwrap();
+        let last = tile.raw_cell(63, 63).unwrap();
+        assert_eq!(first.value, -16_016.0);
+        assert_eq!(last.value, 47_047.0);
+        assert_eq!(first.river_mask.to_bits(), 0x3e800000);
+        assert_eq!(last.river_mask.to_bits(), 0x3e800000);
+        assert_eq!(first.temperature, 0.0);
+        assert_eq!(last.temperature, 0.0);
     }
 }
