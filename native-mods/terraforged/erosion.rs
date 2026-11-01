@@ -170,6 +170,146 @@ fn java_round(value: f32) -> i32 {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ErosionFilterSettings {
+    pub droplets_per_chunk: i32,
+    pub droplet_lifetime: i32,
+    pub droplet_volume: f32,
+    pub droplet_velocity: f32,
+    pub erosion_rate: f32,
+    pub deposit_rate: f32,
+}
+
+impl Default for ErosionFilterSettings {
+    fn default() -> Self {
+        Self {
+            droplets_per_chunk: 350,
+            droplet_lifetime: 25,
+            droplet_volume: 0.7,
+            droplet_velocity: 0.7,
+            erosion_rate: 0.5,
+            deposit_rate: 0.5,
+        }
+    }
+}
+
+struct ErosionDisc {
+    x: Vec<i32>,
+    y: Vec<i32>,
+    weights: Vec<f32>,
+    weight_sum: f32,
+    reach: i32,
+}
+
+impl ErosionDisc {
+    fn new(radius: i32) -> Self {
+        let mut x = Vec::new();
+        let mut y = Vec::new();
+        let mut weights = Vec::new();
+        let mut weight_sum = 0.0_f32;
+        let mut reach = 0;
+        for delta_y in -radius..=radius {
+            for delta_x in -radius..=radius {
+                let squared_distance = delta_x
+                    .wrapping_mul(delta_x)
+                    .wrapping_add(delta_y.wrapping_mul(delta_y))
+                    as f32;
+                if squared_distance < radius.wrapping_mul(radius) as f32 {
+                    let weight = 1.0 - f64::from(squared_distance).sqrt() as f32 / radius as f32;
+                    weight_sum += weight;
+                    x.push(delta_x);
+                    y.push(delta_y);
+                    weights.push(weight);
+                    reach = reach.max(delta_x.abs().max(delta_y.abs()));
+                }
+            }
+        }
+        Self {
+            x,
+            y,
+            weights,
+            weight_sum,
+            reach,
+        }
+    }
+}
+
+pub struct ErosionBrushes {
+    offsets: Vec<i32>,
+    weights: Vec<f32>,
+    edge_offsets: Vec<Option<Vec<i32>>>,
+    edge_weights: Vec<Option<Vec<f32>>>,
+}
+
+impl ErosionBrushes {
+    pub const RADIUS: i32 = 7;
+
+    pub fn new(map_size: i32) -> Self {
+        let disc = ErosionDisc::new(Self::RADIUS);
+        let offsets = disc
+            .x
+            .iter()
+            .zip(&disc.y)
+            .map(|(&x, &y)| y.wrapping_mul(map_size).wrapping_add(x))
+            .collect();
+        let weights = disc
+            .weights
+            .iter()
+            .map(|weight| weight / disc.weight_sum)
+            .collect();
+        let length = map_size.wrapping_mul(map_size) as usize;
+        let mut brushes = Self {
+            offsets,
+            weights,
+            edge_offsets: std::iter::repeat_with(|| None).take(length).collect(),
+            edge_weights: std::iter::repeat_with(|| None).take(length).collect(),
+        };
+        brushes.init_edges(map_size, &disc);
+        brushes
+    }
+
+    pub fn brush(&self, index: usize) -> (&[i32], &[f32]) {
+        match (&self.edge_offsets[index], &self.edge_weights[index]) {
+            (Some(offsets), Some(weights)) => (offsets, weights),
+            _ => (&self.offsets, &self.weights),
+        }
+    }
+
+    fn init_edges(&mut self, size: i32, disc: &ErosionDisc) {
+        for index in 0..self.edge_offsets.len() {
+            let center_x = index as i32 % size;
+            let center_y = index as i32 / size;
+            let clipped = center_x < disc.reach
+                || center_x >= size - disc.reach
+                || center_y < disc.reach
+                || center_y >= size - disc.reach;
+            if !clipped {
+                continue;
+            }
+            let mut weight_sum = 0.0_f32;
+            for point in 0..disc.weights.len() {
+                let x = center_x.wrapping_add(disc.x[point]);
+                let y = center_y.wrapping_add(disc.y[point]);
+                if x >= 0 && x < size && y >= 0 && y < size {
+                    weight_sum += disc.weights[point];
+                }
+            }
+            let mut offsets = Vec::new();
+            let mut weights = Vec::new();
+            for point in 0..disc.weights.len() {
+                let x = center_x.wrapping_add(disc.x[point]);
+                let y = center_y.wrapping_add(disc.y[point]);
+                if x >= 0 && x < size && y >= 0 && y < size {
+                    offsets.push(disc.y[point].wrapping_mul(size).wrapping_add(disc.x[point]));
+                    weights.push(disc.weights[point] / weight_sum);
+                }
+            }
+            self.edge_offsets[index] = Some(offsets);
+            self.edge_weights[index] = Some(weights);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -261,6 +401,48 @@ mod tests {
             let mut map = fixture_map(9);
             HeightmapSmoothing::apply(&mut map, 9, settings);
             assert_eq!(hash(&map), expected);
+        }
+    }
+
+    fn brush_hash(offsets: &[i32], weights: &[f32]) -> u64 {
+        offsets
+            .iter()
+            .zip(weights)
+            .fold(0xcbf29ce484222325, |hash, (&offset, &weight)| {
+                let hash = (hash ^ offset as u32 as u64).wrapping_mul(1099511628211);
+                (hash ^ u64::from(weight.to_bits())).wrapping_mul(1099511628211)
+            })
+    }
+
+    #[test]
+    fn erosion_brushes_match_current_java_source() {
+        let settings = ErosionFilterSettings::default();
+        assert_eq!(
+            [
+                settings.droplets_per_chunk,
+                settings.droplet_lifetime,
+                settings.droplet_volume.to_bits() as i32,
+                settings.droplet_velocity.to_bits() as i32,
+                settings.erosion_rate.to_bits() as i32,
+                settings.deposit_rate.to_bits() as i32,
+            ],
+            [350, 25, 0x3f333333, 0x3f333333, 0x3f000000, 0x3f000000]
+        );
+        let fixtures = [
+            (16, 0, 43, 0xc61aeca980831d14_u64),
+            (16, 8, 79, 0xbe4f8331a112f8cb_u64),
+            (16, 136, 145, 0x0cc571d93d0350d4_u64),
+            (16, 255, 43, 0xe8cbdfeee1655677_u64),
+            (32, 0, 43, 0xc997b62ae4fd4804_u64),
+            (32, 16, 79, 0x6a689175594529db_u64),
+            (32, 528, 145, 0xb11badbb28d047b4_u64),
+            (32, 1023, 43, 0xd033aa0de6cf8087_u64),
+        ];
+        for (size, index, expected_count, expected_hash) in fixtures {
+            let brushes = ErosionBrushes::new(size);
+            let (offsets, weights) = brushes.brush(index);
+            assert_eq!(offsets.len(), expected_count);
+            assert_eq!(brush_hash(offsets, weights), expected_hash);
         }
     }
 }

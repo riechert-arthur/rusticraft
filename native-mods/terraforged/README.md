@@ -452,6 +452,9 @@ relative indexing, default dimensions and diagnostic formatting. Its standalone 
 Current heightmap smoothing now performs the in-place, distance-weighted post-erosion passes with
 the current settings defaults, early exits, radius rounding and Java float operation order.
 
+The current hydraulic filter now has its radius-seven erosion brush: one normalized interior disc
+is shared across the map while clipped edge cells retain Java's ordered, reweighted subsets.
+
 The scalar graph fixtures cover 15 graphs, four seeds and four coordinates (240 Java samples),
 including wrapped seed addition and mixed Perlin/seed-sensitive sources. Regenerate their hashes
 with `tools/terraforged/TerraForgedSeededGraphOracle.java` on a classpath containing compiled
