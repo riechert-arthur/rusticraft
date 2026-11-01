@@ -2130,6 +2130,11 @@ keep TerraForged's unclipped heights; with terrain above the build range the two
 decision (below) has to settle. Not yet ported: Deep Caves, Strata, the surface and carver steps, and the
 registration that would let Horizon call the stage.
 
+The surface erosion pass (`surface.rs`, `apply`) is TerraForged 6dd607eb's `worldgen.biome.surface.Surface.apply`
+with `findSolid` (MIT, as above). On columns at or above sea level whose gradient (normalised by `55 * genDepth /
+255`) is at least 0.6, it replaces the erodible top blocks with the first non-erodible state found strictly above
+`max(0, y - 20)`. The caller supplies which states are erodible; snow and water postprocessing are not part of it.
+
 The structure terrain columns (`structure_terrain.rs`, `StructureTerrain`) are TerraForged 6dd607eb's
 `worldgen.terrain.StructureTerrain.modify` and its helpers (MIT, as above), the per-column part of `fillFromNoise`'s
 `buildStructureTerrain`. Given the chunk's rigid structure pieces, sorted by their boxes' `minY` (stable, as
