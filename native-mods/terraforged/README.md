@@ -499,6 +499,12 @@ heightmaps before applying structure edits under one cached-terrain write lock. 
 observe the updated heights; explicit read/write guards replace unrestricted shared references.
 Concurrent writes serialize, and eviction still delays pool restoration until the final handle drops.
 Invocation from the complete game-generation pipeline is still pending.
+The surface erosion pass now applies the original depth-scaled gradient threshold and sea-level
+cutoff to real chunk storage. It searches strictly above max(0, surface-20), preserves the first
+non-erodible material (including air or fluid), and leaves cached terrain heights unchanged.
+The caller supplies dirt/snow tag membership; vanilla surface rules, snow/water postprocessing and
+game-pipeline invocation remain pending. Eleven original-Java column fixtures cover the search
+boundaries, low terrain, material replacement and threshold decisions.
 The original Java method oracle checks ordered block edits and resulting heights across six columns.
 
 Biome chunk filling samples one 4-by-4 biome buffer at quart y=-1 in Java call order and repeats
