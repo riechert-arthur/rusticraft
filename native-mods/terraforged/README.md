@@ -490,8 +490,11 @@ storage, and returns the same pooled handle so the remaining terrain stages can 
 Structure-terrain column operations now preserve stable piece ordering, ground-level offsets,
 distance-based raising, highest-piece carving and elliptical roof clearance. The caller supplies
 eligible nearby rigid pieces. The chunk adapter edits real block storage and generation heightmaps,
-then updates terrain heights without changing generation extrema. Structure discovery and invocation
-from the complete game-generation pipeline are still pending.
+then updates terrain heights without changing generation extrema. Selection from Horizon's referenced
+structure starts now filters BEARD_BOX/BEARD_THIN, includes pieces within the inclusive 20-block
+chunk margin, excludes non-rigid pool elements, and preserves stable minimum-Y ordering and ground
+offsets. The original constructor oracle covers adaptation, margin boundaries and equal-Y ties.
+Invocation from the complete game-generation pipeline is still pending.
 The original Java method oracle checks ordered block edits and resulting heights across six columns.
 
 Biome chunk filling samples one 4-by-4 biome buffer at quart y=-1 in Java call order and repeats
