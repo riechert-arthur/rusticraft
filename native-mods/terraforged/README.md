@@ -284,6 +284,10 @@ cells come from per-thread pools; here `empty` returns a new cell and callers ow
 lookup map Engine loads from TerraForged's biome-type image come later. Its test checks every field's bits after
 construction, `copy_from` and `reset` against a Java oracle.
 
+The terrain-populator layer adds regular and scaled cell population, weight and variance metadata,
+configuration round-tripping, output clamping and Java-compatible NaN behavior.
+
+
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms and its cell model. They change nothing in the game, so there is
