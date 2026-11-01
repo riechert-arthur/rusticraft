@@ -340,6 +340,12 @@ generator, and keep the mod enabled for that world's unexplored chunks.
 
 ## Development
 
+The current-source cell generator now supplies seeded jittered cells and nearest-cell lookup to the
+shape blender. Tests compare cell fields and combined shape outputs for both cell layouts and all
+three noise sources against the local Java source, including overflowing seed additions. This
+increment computes cells directly; cache/pool behavior, spawn offsets, rivers, and game integration
+remain separate work.
+
 The current-source continent shape layer now blends the nearest 25 cells, preserving threshold,
 falloff, and separate primary/base noise semantics. Mixed-cell outputs are checked against the
 Java ShapeGenerator bytecode (with a plain NoiseSample holder replacing Minecraft registry setup).
