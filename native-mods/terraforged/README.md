@@ -139,6 +139,9 @@ terrain's category and flags: Engine's `getDominant` compares the first terrain'
 ids, names, categories, hue and erosion bits and every flag against a Java oracle. The `TerrainType` registry, which
 assigns the ids, is not part of this layer.
 
+The terrain registry layer adds the 16 built-in terrain descriptors, case-insensitive registration,
+composite caching, ID fallback and parent-based custom terrain creation.
+
 ## Status: development only
 
 These layers only add the noise functions and Engine's terrain types. They change nothing in the game, so there is
