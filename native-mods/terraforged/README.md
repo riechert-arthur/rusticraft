@@ -204,6 +204,9 @@ conversion model with Java-width wrapping arithmetic.
 Tiles now own TerraForged's region, chunk, and block coordinates plus bordered cell backing, and expose
 the same raw linear-index filter region consumed by the complete world-filter pipeline.
 
+Chunk views reproduce TerraForged's masked chunk lookup, world and region block coordinates, sixteen by
+sixteen cell iteration, and mutable generation visitor contract over the tile backing.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
