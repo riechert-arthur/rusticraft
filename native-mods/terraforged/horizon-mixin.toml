@@ -33,3 +33,10 @@ file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_populator"
 source = "populator.rs"
 visibility = "pub"
+
+[[module]]
+id = "region"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_region"
+source = "region.rs"
+visibility = "pub"

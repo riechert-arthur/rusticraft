@@ -294,6 +294,8 @@ another base (its data spec is not ported). Engine's `Populator` is also a noise
 new and on a fully set cell, against a Java oracle running Engine's populators on Engine cells, including the hills
 and mountains landforms; the oracle lives outside Git, in `.local/terraforged/oracles/populator/`.
 
+The region-module layer adds warped natural-distance terrain cells, deterministic region identities,
+edge shaping and packed world-space centers, including Java integer-overflow behavior.
 
 ## Status: development only
 
