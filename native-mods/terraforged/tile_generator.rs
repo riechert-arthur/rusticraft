@@ -23,8 +23,8 @@
  */
 
 use super::{
-    terraforged_engine::Cell, terraforged_filters::WorldFilters, terraforged_river::Rivermap,
-    terraforged_tile::Tile,
+    terraforged_concurrent::LazyCallable, terraforged_engine::Cell,
+    terraforged_filters::WorldFilters, terraforged_river::Rivermap, terraforged_tile::Tile,
 };
 use std::sync::Arc;
 
@@ -103,6 +103,24 @@ where
 
     pub const fn chunk_to_region(&self, chunk: i32) -> i32 {
         chunk >> self.factor
+    }
+
+    pub fn get_tile(
+        &self,
+        region_x: i32,
+        region_z: i32,
+    ) -> LazyCallable<Tile, impl Fn() -> Tile + '_> {
+        LazyCallable::new(move || self.generate_region(region_x, region_z))
+    }
+
+    pub fn get_zoomed_tile(
+        &self,
+        center_x: f32,
+        center_z: f32,
+        zoom: f32,
+        filter: bool,
+    ) -> LazyCallable<Tile, impl Fn() -> Tile + '_> {
+        LazyCallable::new(move || self.generate_zoomed_region(center_x, center_z, zoom, filter))
     }
 
     pub fn generate_region(&self, region_x: i32, region_z: i32) -> Tile {
@@ -234,5 +252,16 @@ mod tests {
         assert_eq!((zoomed.region_x(), zoomed.region_z()), (0, 0));
         assert_eq!(zoomed.cell(0, 0).value, 95_946.0);
         assert_eq!(*filters.lock().unwrap(), [true, false]);
+
+        let lazy = generator.get_tile(4, -5);
+        assert!(!lazy.is_done());
+        assert_eq!((lazy.get().region_x(), lazy.get().region_z()), (4, -5));
+        assert!(lazy.is_done());
+        assert_eq!(*filters.lock().unwrap(), [true, false, true]);
+
+        let zoomed = generator.get_zoomed_tile(25.0, 75.0, 2.0, false);
+        assert!(!zoomed.is_done());
+        assert_eq!((zoomed.get().region_x(), zoomed.get().region_z()), (0, 0));
+        assert_eq!(*filters.lock().unwrap(), [true, false, true, false]);
     }
 }

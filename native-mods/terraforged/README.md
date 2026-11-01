@@ -228,6 +228,9 @@ generation visitor exposes mutable cells and tile batch sizing preserves TerraFo
 The synchronous tile generator now owns TerraForged's heightmap and filter stages, maps chunks to
 regions, creates empty tiles, generates regular or centered zoomed terrain, and post-processes filters.
 
+TerraForged's lazy callable now computes exactly once under concurrent access, reports completion and
+non-cancellation like the Java source, and backs lazy regular and zoomed tile generation handles.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
