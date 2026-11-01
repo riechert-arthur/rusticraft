@@ -63,6 +63,9 @@ composite caching, ID fallback and parent-based custom terrain creation.
 The world-level layer adds spawn and height properties, validated ocean-to-inland control points and
 the exact normalized block-level conversions used by TerraForged's heightmap pipeline.
 
+The world-settings layer completes TerraForged's root settings object with continent generator mode,
+shape, scale, jitter, skipping, size variance and octave-distortion defaults.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
