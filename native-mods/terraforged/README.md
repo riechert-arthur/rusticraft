@@ -495,6 +495,9 @@ Surface-biome decisions now preserve per-cell wetland and mountain rolls, center
 slope gating, and vanilla-compatible altitude snow checks before accepting a highland substitute.
 Initial biome selection now connects those decisions to wet, dry, and highland climate pools,
 including plains-style fallback, identity no-ops, and snow-incompatible substitution rejection.
+Current climate sampling now preserves biome-scale and optional edge warps, nearest and second-nearest
+cell selection, macro-cell grouping, moisture and temperature graphs, edge distance, and the temporary
+steppe-to-grassland remap across runtime seeds. Raw fixture bits come from the current Java sources.
 
 The scalar graph fixtures cover 15 graphs, four seeds and four coordinates (240 Java samples),
 including wrapped seed addition and mixed Perlin/seed-sensitive sources. Regenerate their hashes
