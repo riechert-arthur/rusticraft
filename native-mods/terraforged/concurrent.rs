@@ -25,7 +25,8 @@
 use super::terraforged_river::current_time_millis;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, RwLock};
 
 /// Engine 0.3.0's `LazyCallable` (`com.terraforged.engine.concurrent.task`), the deferred value
 /// behind `TileGenerator.getTile` (`CallableTile`, `CallableZoomTile`): `create` runs on the first
@@ -216,6 +217,189 @@ impl<T> ExpiringEntry for CacheEntry<'_, T> {
     /// Engine closes a `SafeCloseable` or `AutoCloseable` value here (a `Tile` hands its cells back to
     /// Engine's resource pools, which are not ported). Here the value is dropped with the entry.
     fn close(&self) {}
+}
+
+struct LongMapState<T> {
+    values: HashMap<i64, Arc<T>>,
+    order: VecDeque<i64>,
+}
+
+pub struct BoundedLongMap<T> {
+    capacity: usize,
+    state: RwLock<LongMapState<T>>,
+}
+
+impl<T> BoundedLongMap<T> {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            state: RwLock::new(LongMapState {
+                values: HashMap::with_capacity(capacity),
+                order: VecDeque::with_capacity(capacity),
+            }),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.state
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .values
+            .len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn clear(&self) {
+        let mut state = self
+            .state
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        state.values.clear();
+        state.order.clear();
+    }
+
+    pub fn remove(&self, key: i64) -> Option<Arc<T>> {
+        let mut state = self
+            .state
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        let value = state.values.remove(&key);
+        if value.is_some() {
+            state.order.retain(|entry| *entry != key);
+        }
+        value
+    }
+
+    pub fn remove_if(&self, predicate: impl Fn(&T) -> bool) -> usize {
+        let mut state = self
+            .state
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        let keys = state
+            .values
+            .iter()
+            .filter_map(|(key, value)| predicate(value).then_some(*key))
+            .collect::<Vec<_>>();
+        for key in &keys {
+            state.values.remove(key);
+        }
+        state.order.retain(|key| !keys.contains(key));
+        keys.len()
+    }
+
+    pub fn put(&self, key: i64, value: T) -> Option<Arc<T>> {
+        let mut state = self
+            .state
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        let previous = state.values.insert(key, Arc::new(value));
+        if previous.is_none() {
+            state.order.push_back(key);
+        }
+        previous
+    }
+
+    pub fn get(&self, key: i64) -> Option<Arc<T>> {
+        self.state
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .values
+            .get(&key)
+            .cloned()
+    }
+
+    pub fn compute_if_absent(&self, key: i64, factory: impl FnOnce(i64) -> T) -> Arc<T> {
+        if let Some(value) = self.get(key) {
+            return value;
+        }
+        let mut state = self
+            .state
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        if state.values.len() >= self.capacity {
+            if let Some(first) = state.order.pop_front() {
+                state.values.remove(&first);
+            }
+        }
+        if let Some(value) = state.values.get(&key) {
+            return Arc::clone(value);
+        }
+        let value = Arc::new(factory(key));
+        state.values.insert(key, Arc::clone(&value));
+        state.order.push_back(key);
+        value
+    }
+
+    pub fn map<V>(
+        &self,
+        key: i64,
+        factory: impl FnOnce(i64) -> T,
+        mapper: impl FnOnce(&T) -> V,
+    ) -> V {
+        mapper(&self.compute_if_absent(key, factory))
+    }
+}
+
+pub struct Cache<T> {
+    name: String,
+    entries: BoundedLongMap<T>,
+    lifetime_millis: i64,
+    timeout: AtomicI64,
+}
+
+impl<T: ExpiringEntry> Cache<T> {
+    pub fn new(name: impl Into<String>, capacity: usize, lifetime_millis: i64) -> Self {
+        Self {
+            name: name.into(),
+            entries: BoundedLongMap::new(capacity),
+            lifetime_millis,
+            timeout: AtomicI64::new(0),
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn remove(&self, key: i64) {
+        if let Some(entry) = self.entries.remove(key) {
+            entry.close();
+        }
+    }
+
+    pub fn get(&self, key: i64) -> Option<Arc<T>> {
+        self.entries.get(key)
+    }
+
+    pub fn compute_if_absent(&self, key: i64, factory: impl FnOnce(i64) -> T) -> Arc<T> {
+        self.entries.compute_if_absent(key, factory)
+    }
+
+    pub fn map<V>(
+        &self,
+        key: i64,
+        factory: impl FnOnce(i64) -> T,
+        mapper: impl FnOnce(&T) -> V,
+    ) -> V {
+        self.entries.map(key, factory, mapper)
+    }
+
+    pub fn run(&self) -> usize {
+        self.run_at(current_time_millis())
+    }
+
+    pub fn run_at(&self, now: i64) -> usize {
+        let timeout = now.saturating_sub(self.lifetime_millis);
+        self.timeout.store(timeout, Ordering::Release);
+        self.entries.remove_if(|entry| entry.timestamp() < timeout)
+    }
+
+    pub fn timeout(&self) -> i64 {
+        self.timeout.load(Ordering::Acquire)
+    }
 }
 
 #[cfg(test)]
@@ -532,4 +716,67 @@ c 16 1 1
 d 0 false true true
 d 1 false true true
 ";
+    struct TestEntry {
+        id: i32,
+        timestamp: i64,
+        closed: AtomicBool,
+    }
+
+    impl TestEntry {
+        fn new(id: i32, timestamp: i64) -> Self {
+            Self {
+                id,
+                timestamp,
+                closed: AtomicBool::new(false),
+            }
+        }
+    }
+
+    impl ExpiringEntry for TestEntry {
+        fn timestamp(&self) -> i64 {
+            self.timestamp
+        }
+
+        fn close(&self) {
+            self.closed.store(true, Ordering::Release);
+        }
+    }
+
+    #[test]
+    fn bounded_long_map_matches_engine_0_3_0() {
+        let map = BoundedLongMap::new(3);
+        map.put(1, 10);
+        map.put(2, 20);
+        map.put(3, 30);
+        assert_eq!(map.compute_if_absent(4, |_| 40).as_ref(), &40);
+        assert!(map.get(1).is_none());
+        assert_eq!(map.map(2, |_| unreachable!(), |value| *value), 20);
+        assert_eq!(map.remove_if(|value| *value >= 30), 2);
+        assert_eq!(map.len(), 1);
+
+        map.put(5, 50);
+        map.put(6, 60);
+        map.put(7, 70);
+        assert_eq!(map.len(), 4);
+        map.clear();
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn expiring_cache_matches_engine_0_3_0() {
+        let cache = Cache::new("TileCache", 3, 60);
+        assert_eq!(cache.name(), "TileCache");
+        let removed = cache.compute_if_absent(1, |_| TestEntry::new(1, 900));
+        cache.remove(1);
+        assert!(removed.closed.load(Ordering::Acquire));
+
+        cache.compute_if_absent(2, |_| TestEntry::new(2, 939));
+        cache.compute_if_absent(3, |_| TestEntry::new(3, 940));
+        cache.compute_if_absent(4, |_| TestEntry::new(4, 1_000));
+        assert_eq!(cache.run_at(1_000), 1);
+        assert_eq!(cache.timeout(), 940);
+        assert!(cache.get(2).is_none());
+        assert_eq!(cache.get(3).unwrap().id, 3);
+        assert_eq!(cache.map(4, |_| unreachable!(), |entry| entry.id), 4);
+    }
 }
