@@ -219,6 +219,9 @@ coordinates for optional and required passes exactly like the Java `WorldFilters
 Zoomed tile traversal applies TerraForged's centered translation and zoom to world block coordinates
 before the same base, rivermap, river, and climate stages.
 
+Cached zoomed traversal floors transformed samples with TerraForged's Engine 0.3.0 semantics and reuses
+completed cache cells when multiple zoomed blocks resolve to the same integer coordinate.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
