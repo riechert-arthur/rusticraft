@@ -542,6 +542,9 @@ Standard terraces now propagate runtime seeds through source, ramp, cliff, and r
 while retaining branch-lazy child evaluation and exact step boundaries. The direct Java oracle is
 `tools/terraforged/TerraForgedSeededTerraceOracle.java`.
 
+Current terrain assets now decode their complete recursive Cereal graph schema into Rust noise
+modules, including source, modifier, selector, combiner, curve, and domain nodes.
+
 The noise layer is ordinary Rust and can be tested without Minecraft resources:
 
 ```sh

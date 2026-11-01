@@ -390,3 +390,10 @@ file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_terrain_overrides"
 source = "terrain_overrides.rs"
 visibility = "pub"
+
+[[module]]
+id = "terrain_asset"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_terrain_asset"
+source = "terrain_asset.rs"
+visibility = "pub"
