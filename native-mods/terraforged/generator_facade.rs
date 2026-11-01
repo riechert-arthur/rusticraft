@@ -23,13 +23,21 @@
  */
 
 use super::{
+    super::biome_chunk::{BiomeChunk, BiomeFillError},
     super::terrain::{TerrainBlockStates, TerrainChunk, TerrainError},
+    terraforged_biome_chunk_fill::fill_noise_biomes,
+    terraforged_biome_map::BiomePools,
+    terraforged_biome_sampler::{BiomeOverride, InitialBiomeSettings},
     terraforged_chunk_fill::fill_chunk,
+    terraforged_current_surface_biomes::CurrentSurfaceBiomeSampler,
     terraforged_eroded_noise_generator::ErodedNoiseGenerator,
+    terraforged_noise_generator::NoiseGenerator,
     terraforged_terrain_cache::{TerrainCache, TerrainDataHandle, TerrainTask},
     terraforged_terrain_levels::TerrainLevels,
 };
 use crate::registry::BlockStateId;
+use horizon_core::position::ChunkPos;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicI64, Ordering};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -136,6 +144,54 @@ impl TerraForgedGenerator {
         Ok(terrain)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn fill_biomes<T: Clone, E>(
+        &self,
+        chunk: &mut BiomeChunk<T>,
+        position: ChunkPos,
+        wet: &BiomePools<T>,
+        dry: &BiomePools<T>,
+        highland: &BiomePools<T>,
+        fallback: Arc<T>,
+        settings: InitialBiomeSettings,
+        base_temperature: &impl Fn(&T) -> f32,
+        override_biome: &impl Fn(BiomeOverride) -> Arc<T>,
+        cave_biome: impl FnMut(i32, i32) -> Result<Option<T>, E>,
+    ) -> Result<(), BiomeFillError<E>> {
+        let surface = CurrentSurfaceBiomeSampler::new(
+            self.noise_generator(),
+            wet,
+            dry,
+            highland,
+            fallback,
+            settings,
+        );
+        let seed = self.seed();
+        fill_noise_biomes(
+            chunk,
+            position,
+            |x, z| {
+                Ok::<_, E>(
+                    surface
+                        .sample(
+                            seed,
+                            x.wrapping_shl(2),
+                            z.wrapping_shl(2),
+                            base_temperature,
+                            override_biome,
+                        )
+                        .as_ref()
+                        .clone(),
+                )
+            },
+            cave_biome,
+        )
+    }
+
+    pub fn noise_generator(&self) -> &NoiseGenerator {
+        self.terrain.noise_generator().generator()
+    }
+
     pub fn drop_chunk(&self, x: i32, z: i32) {
         self.terrain.remove(self.seed(), x, z);
     }
@@ -188,15 +244,16 @@ mod tests {
         terraforged::Module,
         terraforged_context::{GeneratorContext, GeneratorSettings},
         terraforged_continent_noise::ContinentNoise,
-        terraforged_engine::TerrainRegistry,
+        terraforged_engine::{BiomeType, TerrainRegistry},
         terraforged_erosion::{ErosionFilterSettings, HeightmapSmoothingSettings},
         terraforged_noise_generator::NoiseGenerator,
+        terraforged_terrain_blend_util::WeightMap,
         terraforged_terrain_blender::{TerrainBlender, TerrainNoise},
     };
     use super::*;
     use crate::{DATA_VERSION, heightmap::HeightmapState, nbt::Tag, registry::BlockRegistry};
     use horizon_core::position::ChunkPos;
-    use std::sync::Arc;
+    use std::{convert::Infallible, sync::Arc};
 
     #[derive(Clone, Copy)]
     struct State(u32);
@@ -380,5 +437,71 @@ mod tests {
             }
         );
         assert_eq!(chunk.block(0, top.wrapping_add(1), 0), BlockStateId(0));
+    }
+
+    #[test]
+    fn fill_biomes_connects_surface_and_cave_layers() {
+        let generator = generator();
+        generator.capture_seed(17);
+        let position = ChunkPos::new(-2, 3);
+        let mut chunk = BiomeChunk::new(position, -64, 96, -1).unwrap();
+        let pools = |value| {
+            let mut pools = BiomePools::default();
+            for climate in BiomeType::VALUES {
+                pools.insert(
+                    climate,
+                    Arc::new(WeightMap::new(vec![Arc::new(value)], &[1.0])),
+                );
+            }
+            pools
+        };
+        let wet = pools(10);
+        let dry = pools(20);
+        let highland = pools(30);
+        let settings = InitialBiomeSettings {
+            wetlands: super::super::terraforged_biome_sampler::WetlandSettings {
+                river_size: 0.75,
+                coast_size: 0.7,
+                chance: 1.0,
+            },
+            mountain_usage: 0.0,
+            sea_level: generator.sea_level(),
+        };
+        let temperature = |_: &i32| 0.8;
+        let replacement = |_: BiomeOverride| Arc::new(99);
+        generator
+            .fill_biomes(
+                &mut chunk,
+                position,
+                &wet,
+                &dry,
+                &highland,
+                Arc::new(1),
+                settings,
+                &temperature,
+                &replacement,
+                |_, _| Ok::<_, Infallible>(Some(77)),
+            )
+            .unwrap();
+
+        let surface = CurrentSurfaceBiomeSampler::new(
+            generator.noise_generator(),
+            &wet,
+            &dry,
+            &highland,
+            Arc::new(1),
+            settings,
+        );
+        let quart_x = position.x.wrapping_shl(2);
+        let quart_z = position.z.wrapping_shl(2);
+        let expected = surface.sample(
+            generator.seed(),
+            quart_x.wrapping_shl(2),
+            quart_z.wrapping_shl(2),
+            &temperature,
+            &replacement,
+        );
+        assert_eq!(*chunk.noise_biome([quart_x, 0, quart_z]), *expected);
+        assert_eq!(*chunk.noise_biome([quart_x, -1, quart_z]), 77);
     }
 }

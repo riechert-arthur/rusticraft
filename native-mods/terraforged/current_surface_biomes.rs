@@ -69,8 +69,8 @@ impl<'a, T> CurrentSurfaceBiomeSampler<'a, T> {
         seed: i32,
         x: i32,
         z: i32,
-        base_temperature: impl Fn(&T) -> f32,
-        override_biome: impl Fn(BiomeOverride) -> Arc<T>,
+        base_temperature: &impl Fn(&T) -> f32,
+        override_biome: &impl Fn(BiomeOverride) -> Arc<T>,
     ) -> Arc<T> {
         let sample = self.climate.get_sample(seed, x, z);
         let mountain = uses_mountain_pool(sample.biome_noise, self.settings.mountain_usage);
@@ -117,8 +117,8 @@ pub fn resolve_surface_biome<T>(
     fallback: &Arc<T>,
     steep: bool,
     height: i32,
-    base_temperature: impl Fn(&T) -> f32,
-    override_biome: impl Fn(BiomeOverride) -> Arc<T>,
+    base_temperature: &impl Fn(&T) -> f32,
+    override_biome: &impl Fn(BiomeOverride) -> Arc<T>,
 ) -> Arc<T> {
     let initial = select_initial_biome(
         sample,
@@ -187,8 +187,8 @@ mod tests {
             &fallback,
             true,
             70,
-            |_| 0.8,
-            |replacement| {
+            &|_| 0.8,
+            &|replacement| {
                 Arc::new(match replacement {
                     BiomeOverride::DeepOcean => "deep_ocean",
                     _ => "unexpected",
@@ -218,8 +218,8 @@ mod tests {
             &fallback,
             true,
             70,
-            |_| 0.8,
-            |_| Arc::new("unexpected"),
+            &|_| 0.8,
+            &|_| Arc::new("unexpected"),
         );
         assert_eq!(*selected, "highland");
     }

@@ -508,6 +508,8 @@ The surface override now uses the current source's full `COAST - BEACH` shorelin
 the obsolete 0.005 fringe, so coastal columns remain beach candidates through the coast marker.
 Surface sampling now composes climate pools, the per-cell mountain roll, four-point slope gate,
 height-adjusted snow compatibility, and final ocean, shore, and river overrides in source order.
+The generator facade now feeds that composed surface sampler into quart-resolution chunk biome
+filling, converts quart coordinates back to blocks, and retains the separate deep cave layer.
 
 The scalar graph fixtures cover 15 graphs, four seeds and four coordinates (240 Java samples),
 including wrapped seed addition and mixed Perlin/seed-sensitive sources. Regenerate their hashes

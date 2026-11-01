@@ -202,6 +202,10 @@ impl<N: NoiseGenerator + 'static> TerrainCache<N> {
 }
 
 impl TerrainCache<ErodedNoiseGenerator> {
+    pub fn noise_generator(&self) -> &ErodedNoiseGenerator {
+        self.generator.noise_generator()
+    }
+
     pub fn eroded_height_noise(&self, seed: i32, x: i32, z: i32) -> f32 {
         self.generator
             .noise_generator()
