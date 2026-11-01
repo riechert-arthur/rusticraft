@@ -39,17 +39,17 @@ use std::sync::Arc;
 
 pub const DIRECTIONS: [(i32, i32); 4] = [(1, 0), (0, 1), (-1, 0), (0, -1)];
 
-pub struct RiverNetwork<'a, Cells> {
-    continent: &'a Cells,
-    shape: &'a ShapeGenerator,
+pub struct RiverNetwork<Cells> {
+    continent: Cells,
+    shape: ShapeGenerator,
     lake_density: f32,
     warp_x: Source,
     warp_y: Source,
     cache: ConcurrentLossyCache<RiverPieces>,
 }
 
-impl<'a, Cells: ContinentCells> RiverNetwork<'a, Cells> {
-    pub fn new(continent: &'a Cells, shape: &'a ShapeGenerator, config: ContinentConfig) -> Self {
+impl<Cells: ContinentCells> RiverNetwork<Cells> {
+    pub fn new(continent: Cells, shape: &ShapeGenerator, config: ContinentConfig) -> Self {
         Self::with_concurrency(
             continent,
             shape,
@@ -59,14 +59,14 @@ impl<'a, Cells: ContinentCells> RiverNetwork<'a, Cells> {
     }
 
     pub fn with_concurrency(
-        continent: &'a Cells,
-        shape: &'a ShapeGenerator,
+        continent: Cells,
+        shape: &ShapeGenerator,
         config: ContinentConfig,
         concurrency: usize,
     ) -> Self {
         Self {
             continent,
-            shape,
+            shape: *shape,
             cache: ConcurrentLossyCache::new(1024, concurrency),
             lake_density: config.rivers.lake_density,
             warp_x: Source::new(

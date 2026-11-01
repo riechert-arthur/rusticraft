@@ -36,6 +36,31 @@ pub trait ContinentCells {
     fn cell_shape(&self) -> CellShape;
 }
 
+impl<Cells: ContinentCells + ?Sized> ContinentCells for &Cells {
+    fn nearest_cell(&self, seed: i32, x: f32, y: f32) -> (i32, i32) {
+        (**self).nearest_cell(seed, x, y)
+    }
+    fn cell(&self, seed: i32, x: i32, y: i32) -> CellPoint {
+        (**self).cell(seed, x, y)
+    }
+    fn cell_shape(&self) -> CellShape {
+        (**self).cell_shape()
+    }
+}
+
+impl<Cells: ContinentCells + ?Sized> ContinentCells for std::sync::Arc<Cells> {
+    fn nearest_cell(&self, seed: i32, x: f32, y: f32) -> (i32, i32) {
+        (**self).nearest_cell(seed, x, y)
+    }
+    fn cell(&self, seed: i32, x: i32, y: i32) -> CellPoint {
+        (**self).cell(seed, x, y)
+    }
+    fn cell_shape(&self) -> CellShape {
+        (**self).cell_shape()
+    }
+}
+
+#[derive(Clone, Copy)]
 pub struct ShapeGenerator {
     base_falloff: f32,
     continent_falloff: f32,

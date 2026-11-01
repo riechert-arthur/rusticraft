@@ -340,6 +340,12 @@ generator, and keep the mod enabled for that world's unexplored chunks.
 
 ## Development
 
+The current-source `ContinentNoise` wrapper now owns the cached cell/shape/river stages, consumes
+context seeds in Java order, applies continent-scale coordinates and domain warp, and offsets both
+sampling paths by the selected spawn location. Four original-Java fixtures cover two scales and
+two world seeds; worker-thread tests check shared ownership. Full terrain-height blending and
+playable generator integration remain separate steps.
+
 The current-source lossy cache now preserves bucket rounding, FastUtil mixing, key-only hits
 (the supplied seed is not part of the cache key), eviction order, and post-unlock removal callbacks.
 An original-Java eviction trace and concurrent-hit tests cover the Rust implementation. Rust uses
