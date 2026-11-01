@@ -201,6 +201,9 @@ runs required steepness then beach detection in TerraForged's original order.
 The tile foundation reproduces TerraForged's block/chunk size, border, masking, indexing, and coordinate
 conversion model with Java-width wrapping arithmetic.
 
+Tiles now own TerraForged's region, chunk, and block coordinates plus bordered cell backing, and expose
+the same raw linear-index filter region consumed by the complete world-filter pipeline.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
