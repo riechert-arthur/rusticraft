@@ -222,3 +222,10 @@ file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_continent_cell"
 source = "continent_cell.rs"
 visibility = "pub"
+
+[[module]]
+id = "continent_config"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_continent_config"
+source = "continent_config.rs"
+visibility = "pub"

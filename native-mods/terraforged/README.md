@@ -324,6 +324,9 @@ custom world settings through TerraForged's clamped five-segment falloff curve w
 Current-source continent cells now preserve mutable point samples, square and staggered-hexagon
 jitter placement, coordinate adjustment, and Perlin, Simplex, and Cubic source normalization.
 
+Current-source continent configuration now preserves shape and noise defaults, mutable float ranges,
+river and lake width/depth presets, copy behavior, and width-only frequency scaling.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
