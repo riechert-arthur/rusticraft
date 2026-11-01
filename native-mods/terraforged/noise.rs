@@ -529,6 +529,7 @@ enum ModuleKind {
     Power(Module, Module),
     Scale(Module, Module, f32, f32),
     Threshold(Module, Module),
+    Warp(Module, Domain),
     Add(Vec<Module>),
     Multiply(Vec<Module>),
     Max(Vec<Module>),
@@ -589,6 +590,7 @@ impl Module {
                     1.0
                 }
             }
+            ModuleKind::Warp(source, domain) => source.value(domain.x(x, y), domain.y(x, y)),
             ModuleKind::Add(sources) => combine(sources, x, y, |a, b| a + b),
             ModuleKind::Multiply(sources) => combine(sources, x, y, |a, b| a * b),
             ModuleKind::Max(sources) => combine(sources, x, y, java_max),
@@ -617,7 +619,8 @@ impl Module {
             | ModuleKind::Alpha(source, _)
             | ModuleKind::Invert(source)
             | ModuleKind::Power(source, _)
-            | ModuleKind::Threshold(source, _) => source.min_value(),
+            | ModuleKind::Threshold(source, _)
+            | ModuleKind::Warp(source, _) => source.min_value(),
         }
     }
 
@@ -636,7 +639,8 @@ impl Module {
             | ModuleKind::Alpha(source, _)
             | ModuleKind::Invert(source)
             | ModuleKind::Power(source, _)
-            | ModuleKind::Threshold(source, _) => source.max_value(),
+            | ModuleKind::Threshold(source, _)
+            | ModuleKind::Warp(source, _) => source.max_value(),
         }
     }
 
@@ -714,6 +718,10 @@ impl Module {
         Self(Box::new(ModuleKind::Threshold(self, threshold)))
     }
 
+    pub fn warp(self, domain: Domain) -> Self {
+        Self(Box::new(ModuleKind::Warp(self, domain)))
+    }
+
     pub fn add(sources: Vec<Self>) -> Self {
         Self(Box::new(ModuleKind::Add(sources)))
     }
@@ -724,6 +732,114 @@ impl Module {
 
     pub fn max(sources: Vec<Self>) -> Self {
         Self(Box::new(ModuleKind::Max(sources)))
+    }
+}
+
+#[derive(Clone)]
+pub struct Domain(Box<DomainKind>);
+
+#[derive(Clone)]
+enum DomainKind {
+    Direct,
+    DomainWarp {
+        x: Module,
+        y: Module,
+        distance: Module,
+    },
+    Direction {
+        direction: Module,
+        strength: Module,
+    },
+    Add(Domain, Domain),
+    Compound(Domain, Domain),
+    Cumulative(Domain, Domain),
+}
+
+impl Domain {
+    pub fn direct() -> Self {
+        Self(Box::new(DomainKind::Direct))
+    }
+
+    pub fn domain_warp(x: Module, y: Module, distance: Module) -> Self {
+        let map_axis = |axis: Module| {
+            if axis.min_value() == -0.5 && axis.max_value() == 0.5 {
+                axis
+            } else {
+                axis.map(Module::constant(-0.5), Module::constant(0.5))
+            }
+        };
+        Self(Box::new(DomainKind::DomainWarp {
+            x: map_axis(x),
+            y: map_axis(y),
+            distance,
+        }))
+    }
+
+    pub fn direction(direction: Module, strength: Module) -> Self {
+        Self(Box::new(DomainKind::Direction {
+            direction,
+            strength,
+        }))
+    }
+
+    #[allow(clippy::should_implement_trait)]
+    pub fn add(self, next: Self) -> Self {
+        Self(Box::new(DomainKind::Add(self, next)))
+    }
+
+    pub fn compound(self, next: Self) -> Self {
+        Self(Box::new(DomainKind::Compound(self, next)))
+    }
+
+    pub fn then(self, next: Self) -> Self {
+        Self(Box::new(DomainKind::Cumulative(self, next)))
+    }
+
+    pub fn offset_x(&self, x: f32, y: f32) -> f32 {
+        match self.0.as_ref() {
+            DomainKind::Direct => 0.0,
+            DomainKind::DomainWarp {
+                x: axis, distance, ..
+            } => axis.value(x, y) * distance.value(x, y),
+            DomainKind::Direction {
+                direction,
+                strength,
+            } => {
+                let angle = direction.value(x, y) * java_pi2();
+                sin_lookup(angle) * strength.value(x, y)
+            }
+            DomainKind::Add(first, second) => first.offset_x(x, y) + second.offset_x(x, y),
+            DomainKind::Compound(first, second) => second.offset_x(first.x(x, y), first.y(x, y)),
+            DomainKind::Cumulative(first, second) => second.x(first.x(x, y), first.y(x, y)),
+        }
+    }
+
+    pub fn offset_y(&self, x: f32, y: f32) -> f32 {
+        match self.0.as_ref() {
+            DomainKind::Direct => 0.0,
+            DomainKind::DomainWarp {
+                y: axis, distance, ..
+            } => axis.value(x, y) * distance.value(x, y),
+            DomainKind::Direction {
+                direction,
+                strength,
+            } => {
+                const COS_OFFSET: f32 = f32::from_bits(0x3fc9_0ff9);
+                let angle = direction.value(x, y) * java_pi2();
+                sin_lookup(angle + COS_OFFSET) * strength.value(x, y)
+            }
+            DomainKind::Add(first, second) => first.offset_y(x, y) + second.offset_y(x, y),
+            DomainKind::Compound(first, second) => second.offset_y(first.x(x, y), first.y(x, y)),
+            DomainKind::Cumulative(first, second) => second.y(first.x(x, y), first.y(x, y)),
+        }
+    }
+
+    pub fn x(&self, x: f32, y: f32) -> f32 {
+        x + self.offset_x(x, y)
+    }
+
+    pub fn y(&self, x: f32, y: f32) -> f32 {
+        y + self.offset_y(x, y)
     }
 }
 
@@ -776,6 +892,24 @@ fn java_max(first: f32, second: f32) -> f32 {
         first
     } else {
         second
+    }
+}
+
+fn java_pi2() -> f32 {
+    (std::f64::consts::PI * 2.0) as f32
+}
+
+fn sin_lookup(radians: f32) -> f32 {
+    const SIN_COUNT: f32 = 4096.0;
+    const SIN_MASK: i32 = 4095;
+    let radians_full = java_pi2();
+    let index = ((radians * (SIN_COUNT / radians_full)) as i32 & SIN_MASK) as usize;
+    if index & 1023 == 0 {
+        let degrees = (index / 1024 * 90) as f64;
+        (degrees.to_radians().sin()) as f32
+    } else {
+        let angle = (index as f32 + 0.5) / SIN_COUNT * radians_full;
+        f64::from(angle).sin() as f32
     }
 }
 
@@ -1023,6 +1157,110 @@ mod tests {
                 max_bounds.max_value().to_bits()
             ],
             [0x3f000000, 0x3f800000]
+        );
+    }
+
+    #[test]
+    fn domain_warps_match_engine_0_3_0() {
+        let source = |kind, seed, scale: f32, octaves, gain| {
+            Module::source(Source::new(
+                kind,
+                SourceConfig {
+                    seed,
+                    octaves,
+                    gain,
+                    frequency: 1.0 / scale,
+                    lacunarity: 2.0,
+                    interpolation: Interpolation::Curve3,
+                },
+            ))
+        };
+        let warp = Domain::domain_warp(
+            source(SourceKind::Perlin, 110, 64.0, 3, 0.5),
+            source(SourceKind::Simplex, 220, 96.0, 2, 0.5),
+            Module::constant(37.5),
+        );
+        let direction = Domain::direction(
+            source(SourceKind::Simplex, 330, 72.0, 3, 0.5),
+            Module::constant(11.25),
+        );
+        let points = [
+            (0.0, 0.0),
+            (12.25, -98.75),
+            (-4096.5, 8192.25),
+            (123456.75, -0.125),
+        ];
+        let cases = [
+            (
+                Domain::direct(),
+                [
+                    [0, 0, 0, 0],
+                    [0, 0, 0x41440000, 0xc2c58000],
+                    [0, 0, 0xc5800400, 0x46000100],
+                    [0, 0, 0x47f12060, 0xbe000000],
+                ],
+            ),
+            (
+                warp.clone(),
+                [
+                    [0, 0, 0, 0],
+                    [0xc0bec34d, 0x4156e18b, 0x40c93cb3, 0xc2aaa3cf],
+                    [0x3df4d364, 0xbf334ce1, 0xc580030b, 0x45fffc66],
+                    [0xbd01b190, 0x41257e96, 0x47f1205c, 0x41237e96],
+                ],
+            ),
+            (
+                direction.clone(),
+                [
+                    [0x26c68d2e, 0xc1340000, 0x26c68d2e, 0xc1340000],
+                    [0xc12463b5, 0xc092a4cb, 0x3ffce258, 0xc2ceaa4d],
+                    [0xc04b2f4b, 0xc12caf18, 0xc5801d66, 0x45ffaba8],
+                    [0xc132b251, 0xbfacfb79, 0x47f11aca, 0xbfbcfb79],
+                ],
+            ),
+            (
+                warp.clone().add(direction.clone()),
+                [
+                    [0x26c68d2e, 0xc1340000, 0x26c68d2e, 0xc1340000],
+                    [0xc181e2ae, 0x410d8f26, 0xc07f1570, 0xc2b3ce1b],
+                    [0xc04388b0, 0xc137e3e6, 0xc5801c71, 0x45ffa60e],
+                    [0xc1333403, 0x410fdf27, 0x47f11ac6, 0x410ddf27],
+                ],
+            ),
+            (
+                warp.clone().compound(direction.clone()),
+                [
+                    [0x26c68d2e, 0xc1340000, 0x26c68d2e, 0xc1340000],
+                    [0x3f212ad7, 0xc133b7ca, 0x414e12ad, 0xc2dbf6f9],
+                    [0xc07f83a3, 0xc12848b9, 0xc58023f0, 0x45ffaddc],
+                    [0xc10cf689, 0xc0dfdeb2, 0x47f11bf8, 0xc0e3deb2],
+                ],
+            ),
+            (
+                warp.clone().then(direction.clone()),
+                [
+                    [0x26c68d2e, 0xc1340000, 0x26c68d2e, 0xc1340000],
+                    [0x40dd620e, 0xc2c11ac8, 0x41995884, 0xc3434d64],
+                    [0xc58022fb, 0x45ffa842, 0xc600137e, 0x467fd521],
+                    [0x47f11bf4, 0x404e3cf4, 0x48711e2a, 0x40463cf4],
+                ],
+            ),
+        ];
+        for (domain, expected) in cases {
+            assert_eq!(
+                points.map(|(x, y)| [
+                    domain.offset_x(x, y).to_bits(),
+                    domain.offset_y(x, y).to_bits(),
+                    domain.x(x, y).to_bits(),
+                    domain.y(x, y).to_bits(),
+                ]),
+                expected
+            );
+        }
+        let warped = source(SourceKind::Ridge, 440, 128.0, 4, 0.975).warp(warp.add(direction));
+        assert_eq!(
+            bits(points.map(|(x, y)| warped.value(x, y))),
+            [0x3f4fea9c, 0x3f2d9330, 0x3f4b5329, 0x3f53bd2e]
         );
     }
 }

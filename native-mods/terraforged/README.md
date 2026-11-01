@@ -12,6 +12,9 @@ The graph layer translates TerraForged's constants, source nodes, core modifiers
 combiners. Its tests preserve Engine 0.3.0's reported bounds as well as raw sample bits, including
 the original combiner bound behavior.
 
+The domain layer adds direct, axis-noise, directional, additive, compound and cumulative warps,
+plus warped module sampling. Directional warps reproduce Engine 0.3.0's 4096-entry sine lookup.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
