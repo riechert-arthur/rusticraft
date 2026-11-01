@@ -117,6 +117,9 @@ visitation and TerraForged's exact 2D/3D iterator state transitions, including i
 The simple-continent layer adds warped tectonic cells, shape modulation, nearest-center and boundary
 searches, ocean-distance solving and the single-continent center filter.
 
+The advanced-continent layer adds variable-size warped Voronoi continents, skipping, corrected
+centers, cliff and bay shaping, and exact iterative edge and ocean-distance searches.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
