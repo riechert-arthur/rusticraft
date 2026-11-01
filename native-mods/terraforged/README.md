@@ -350,12 +350,14 @@ Current-source river networks now generate downhill connections, displaced segme
 extensions, and source lakes. Six 13×13-cell Java-source grids check counts and a checksum of every
 node's raw float bits across both layouts and all noise sources. Nearest-node sampling now preserves
 3×3 traversal, coordinate adjustment, distance ties and absent-node sentinels, checked on six 7×7
-Java-source grids. Network caching and warped sampling remain separate integration steps.
+Java-source grids. Warped sampling and ridge erosion now connect the shape/network/carver stages;
+six more grids verify combined outputs against the actual current Noise2D sources, without noise
+substitutes. Network caching and playable game integration remain unfinished.
 
 The current-source river carver now applies valley/bank/bed shaping, erosion modifiers, coastline
-clipping, and river-then-lake precedence. Seven Java-source fixtures use an explicitly supplied
-erosion value; erosion-noise graph wiring is deliberately separate until the differing dependency
-seed APIs are verified. This is component parity, not an integrated river-generation claim.
+clipping, and river-then-lake precedence. Seven focused Java-source fixtures use an explicitly
+supplied erosion value, while the combined pipeline tests use the real seeded erosion source.
+This checks the river pipeline, not complete terrain generation or playable integration.
 
 The current-source river layer now includes displaced river-node geometry, node/carver sample
 sentinels, and reusable river/lake piece collections. Geometry fixtures compare raw float bits

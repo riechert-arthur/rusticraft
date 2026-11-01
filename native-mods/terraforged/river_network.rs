@@ -2,6 +2,7 @@
  * MIT License
  *
  * Copyright (c) 2021 TerraForged
+ * Copyright (c) 2020 TerraForged
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -23,11 +24,14 @@
  */
 
 use super::{
-    terraforged::hash_2d,
+    terraforged::{Source, SourceConfig, SourceKind, hash_2d},
+    terraforged_continent_carver::RiverCarver,
     terraforged_continent_cell::{CellPoint, hash_1d, random},
     terraforged_continent_config::ContinentConfig,
     terraforged_continent_shape::{ContinentCells, ShapeGenerator},
+    terraforged_engine::TerrainRegistry,
     terraforged_river_nodes::{CarverSample, NodeSample, RiverNode, RiverPieces, map},
+    terraforged_terrain_data::NoiseSample,
 };
 
 pub const DIRECTIONS: [(i32, i32); 4] = [(1, 0), (0, 1), (-1, 0), (0, -1)];
@@ -36,6 +40,8 @@ pub struct RiverNetwork<'a, Cells> {
     continent: &'a Cells,
     shape: &'a ShapeGenerator,
     lake_density: f32,
+    warp_x: Source,
+    warp_y: Source,
 }
 
 impl<'a, Cells: ContinentCells> RiverNetwork<'a, Cells> {
@@ -44,6 +50,22 @@ impl<'a, Cells: ContinentCells> RiverNetwork<'a, Cells> {
             continent,
             shape,
             lake_density: config.rivers.lake_density,
+            warp_x: Source::new(
+                SourceKind::Simplex,
+                SourceConfig {
+                    seed: 8657124,
+                    frequency: 30.0,
+                    ..SourceConfig::default()
+                },
+            ),
+            warp_y: Source::new(
+                SourceKind::Simplex,
+                SourceConfig {
+                    seed: 5123678,
+                    frequency: 30.0,
+                    ..SourceConfig::default()
+                },
+            ),
         }
     }
 
@@ -100,6 +122,22 @@ impl<'a, Cells: ContinentCells> RiverNetwork<'a, Cells> {
             });
         }
         pieces
+    }
+
+    pub fn sample(
+        &self,
+        seed: i32,
+        x: f32,
+        y: f32,
+        sample: &mut NoiseSample,
+        carver: &RiverCarver,
+        terrains: &TerrainRegistry,
+    ) {
+        let point_x = x + (-0.5 + self.warp_x.value_seed_first(seed, x, y)) * 0.004;
+        let point_y = y + (-0.5 + self.warp_y.value_seed_first(seed, x, y)) * 0.004;
+        let mut nodes = CarverSample::new(terrains);
+        self.sample_nodes(seed, point_x, point_y, &mut nodes);
+        carver.carve(seed, point_x, point_y, sample, &nodes);
     }
 
     pub fn sample_nodes(&self, seed: i32, x: f32, y: f32, sample: &mut CarverSample) {
@@ -275,6 +313,7 @@ mod tests {
         terraforged_continent_cell::{CellShape, CellSource},
         terraforged_continent_cells::CellGenerator,
         terraforged_engine::{ControlPoints, TerrainRegistry, WorldControlPoints},
+        terraforged_terrain_levels::NoiseLevels,
     };
     use super::*;
 
@@ -297,6 +336,65 @@ mod tests {
             hash = add(hash, value.to_bits() as u64);
         }
         hash
+    }
+
+    #[test]
+    fn warped_carving_pipeline_matches_current_java() {
+        let expected = [
+            (0xa09768f390824b4a, 5),
+            (0xb7898604981bbb00, 5),
+            (0x7d54a9341e2b731a, 8),
+            (0xf78c629e5c4541d4, 0),
+            (0x22ebd6c0ccfabeaa, 0),
+            (0x9cb05b15abf2c063, 2),
+        ];
+        for (shape_index, shape) in [CellShape::Square, CellShape::Hexagon]
+            .into_iter()
+            .enumerate()
+        {
+            for (source_index, source) in
+                [CellSource::Perlin, CellSource::Simplex, CellSource::Cubic]
+                    .into_iter()
+                    .enumerate()
+            {
+                let mut config = ContinentConfig::default();
+                config.shape.cell_shape = shape;
+                config.shape.cell_source = source;
+                config.rivers.seed = i32::MAX;
+                let cells = CellGenerator::new(config);
+                let levels = NoiseLevels::new(false, 1.0, 62, 22, 256, 128);
+                let shape =
+                    ShapeGenerator::new(config, ControlPoints::new(WorldControlPoints::default()));
+                let network = RiverNetwork::new(&cells, &shape, config);
+                let carver = RiverCarver::new(levels, config);
+                let terrains = TerrainRegistry::default();
+                let mut hash = 0xcbf29ce484222325;
+                let mut carved = 0;
+                for sample_y in -3..=3 {
+                    for sample_x in -3..=3 {
+                        let x = sample_x as f32 + 0.125;
+                        let y = sample_y as f32 - 0.375;
+                        let mut sample = NoiseSample::default();
+                        shape.sample(&cells, 42, x, y, &mut sample);
+                        sample.height_noise = levels.to_height_noise(sample.base_noise, 0.35);
+                        network.sample(42, x, y, &mut sample, &carver, &terrains);
+                        for value in [
+                            sample.continent_noise,
+                            sample.base_noise,
+                            sample.height_noise,
+                            sample.river_noise,
+                        ] {
+                            hash = add(hash, value.to_bits() as u64);
+                        }
+                        hash = add(hash, sample.terrain_type.id() as u64);
+                        if sample.terrain_type.id() != 0 {
+                            carved += 1;
+                        }
+                    }
+                }
+                assert_eq!((hash, carved), expected[shape_index * 3 + source_index]);
+            }
+        }
     }
 
     #[test]

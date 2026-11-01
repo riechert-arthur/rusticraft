@@ -23,7 +23,7 @@
  */
 
 use super::{
-    terraforged::java_min,
+    terraforged::{Source, SourceConfig, SourceKind, java_min},
     terraforged_continent_config::{ContinentConfig, RiverConfig},
     terraforged_continent_points::{BEACH, COAST},
     terraforged_river_nodes::{CarverSample, NodeSample, clamp, map},
@@ -33,6 +33,7 @@ use super::{
 
 pub struct RiverCarver {
     levels: NoiseLevels,
+    erosion: Source,
     river_config: RiverConfig,
     lake_config: RiverConfig,
     pub blend_radius: f32,
@@ -51,10 +52,31 @@ impl RiverCarver {
         );
         Self {
             levels,
+            erosion: Source::new(
+                SourceKind::Ridge,
+                SourceConfig {
+                    seed: config.rivers.seed.wrapping_add(21221),
+                    frequency: 128.0,
+                    octaves: 2,
+                    gain: 0.975,
+                    ..SourceConfig::default()
+                },
+            ),
             river_config,
             lake_config,
             blend_radius: java_min(1.0, valley_width + 0.2),
         }
+    }
+
+    pub fn carve(
+        &self,
+        seed: i32,
+        x: f32,
+        y: f32,
+        sample: &mut NoiseSample,
+        carver: &CarverSample,
+    ) {
+        self.carve_with_erosion(self.erosion.value_seed_first(seed, x, y), sample, carver);
     }
 
     pub fn carve_with_erosion(
