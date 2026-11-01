@@ -315,6 +315,9 @@ and floor modules, integer cave scaling, and TerraForged's jittered cellular cav
 Biome viability now composes edge, height, noise, saturation, and slope fitness through TerraForged's
 ordered multiply and weighted-sum rules, including the original scaling and falloff formulas.
 
+Climate samples and biome overrides now preserve TerraForged's deep and shallow ocean climates,
+beach variants, exact river masking, and base-only sample reset behavior.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
