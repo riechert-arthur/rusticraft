@@ -60,6 +60,9 @@ preserving Engine 0.3.0's object identity, Java string hues and original composi
 The terrain registry layer adds the 16 built-in terrain descriptors, case-insensitive registration,
 composite caching, ID fallback and parent-based custom terrain creation.
 
+The world-level layer adds spawn and height properties, validated ocean-to-inland control points and
+the exact normalized block-level conversions used by TerraForged's heightmap pipeline.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
