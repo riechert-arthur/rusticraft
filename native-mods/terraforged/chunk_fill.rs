@@ -180,6 +180,53 @@ mod tests {
     }
 
     #[test]
+    fn structure_adapter_updates_negative_chunk_columns_without_changing_extrema() {
+        use super::super::super::terrain::PreLightChunkStage;
+        use super::super::terraforged_structure_terrain::{Bounds, Piece, StructureTerrain};
+
+        for stage in [PreLightChunkStage::Empty, PreLightChunkStage::Terrain] {
+            let registry = registry();
+            let mut terrain = terrain();
+            let extrema = (terrain.min(), terrain.max(), terrain.max_base());
+            let mut chunk =
+                TerrainChunk::new(ChunkPos::new(-1, -1), -64, 544, &registry, Properties).unwrap();
+            chunk.set_generation_stage(stage);
+            for z in 0..16 {
+                for x in 0..16 {
+                    chunk
+                        .fill_solid_run(x, 60, z, 125, BlockStateId(2))
+                        .unwrap();
+                }
+            }
+            let operation = StructureTerrain::from_rigid_pieces(vec![Piece {
+                bounds: Bounds {
+                    min_x: -16,
+                    min_y: 70,
+                    min_z: -16,
+                    max_x: -10,
+                    max_y: 75,
+                    max_z: -10,
+                },
+                ground_delta: 0,
+            }]);
+            operation
+                .modify_chunk(&mut chunk, &mut terrain, BlockStateId(2), BlockStateId(0))
+                .unwrap();
+            assert_eq!(chunk.block(3, 69, 3), BlockStateId(2));
+            assert_eq!(chunk.block(3, 70, 3), BlockStateId(0));
+            assert_eq!(terrain.height_at(-13, -13), 69);
+            for kind in [HeightmapType::OceanFloorWg, HeightmapType::WorldSurfaceWg] {
+                assert_eq!(
+                    chunk.heightmap(kind).unwrap().highest_taken(3, 3).unwrap(),
+                    69
+                );
+            }
+            assert_eq!((terrain.min(), terrain.max(), terrain.max_base()), extrema);
+            assert_eq!(chunk.generation_stage(), stage);
+        }
+    }
+
+    #[test]
     fn fill_chunk_matches_terraforged_stone_water_and_heightmaps() {
         let registry = registry();
         let terrain = terrain();
