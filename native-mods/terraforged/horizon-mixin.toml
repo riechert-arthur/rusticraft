@@ -236,3 +236,10 @@ file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_continent_shape"
 source = "continent_shape.rs"
 visibility = "pub"
+
+[[module]]
+id = "continent_cells"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_continent_cells"
+source = "continent_cells.rs"
+visibility = "pub"
