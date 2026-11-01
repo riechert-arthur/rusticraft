@@ -54,7 +54,7 @@ pub enum DistanceFunction {
 }
 
 impl DistanceFunction {
-    fn apply(self, x: f32, y: f32) -> f32 {
+    pub fn apply(self, x: f32, y: f32) -> f32 {
         match self {
             Self::Euclidean => x * x + y * y,
             Self::Manhattan => x.abs() + y.abs(),
@@ -80,7 +80,7 @@ pub enum CellFunction {
 }
 
 impl EdgeFunction {
-    fn apply(self, distance: f32, distance2: f32) -> f32 {
+    pub fn apply(self, distance: f32, distance2: f32) -> f32 {
         match self {
             Self::Distance2 => distance2 - 1.0,
             Self::Distance2Add => distance2 + distance - 1.0,
@@ -466,7 +466,7 @@ struct CellResult {
     distance: f32,
 }
 
-fn cell_vector(seed: i32, x: i32, y: i32) -> [f32; 2] {
+pub fn cell_vector(seed: i32, x: i32, y: i32) -> [f32; 2] {
     CELL_2D[(hash_2d(seed, x, y) & 255) as usize]
 }
 
@@ -1076,7 +1076,7 @@ fn clamp(value: f32, min: f32, max: f32) -> f32 {
     }
 }
 
-fn noise_map(value: f32, min: f32, max: f32, range: f32) -> f32 {
+pub fn noise_map(value: f32, min: f32, max: f32, range: f32) -> f32 {
     let difference = clamp(value, min, max) - min;
     if difference > range {
         1.0

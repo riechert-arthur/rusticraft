@@ -96,6 +96,9 @@ absent-cell behavior, plus the ordered biome-type identities carried by each sam
 The terrain-populator layer adds regular and scaled cell population, weight and variance metadata,
 configuration round-tripping, output clamping and Java-compatible NaN behavior.
 
+The region-module layer adds warped natural-distance terrain cells, deterministic region identities,
+edge shaping and packed world-space centers, including Java integer-overflow behavior.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
