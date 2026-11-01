@@ -482,6 +482,8 @@ eroded-versus-un-eroded height split. A standalone current-source oracle records
 The first playable terrain stage now fills Rusticraft chunks from TerraForged height data with stone
 and water, including river/lake base-height water levels, build-range clipping, and the ocean-floor and
 world-surface generation heightmaps used by later surface, structure, and carving stages.
+The generator facade now joins the cached terrain for a chunk's own position, fills its real block
+storage, and returns the same pooled handle so the remaining terrain stages can consume it safely.
 
 The scalar graph fixtures cover 15 graphs, four seeds and four coordinates (240 Java samples),
 including wrapped seed addition and mixed Perlin/seed-sensitive sources. Regenerate their hashes
