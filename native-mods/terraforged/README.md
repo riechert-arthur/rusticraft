@@ -128,6 +128,9 @@ order, each one's flags, and `get_dominant`, which keeps the later category. Eng
 this `Seed` is `Copy`, so code that draws from it takes `&mut Seed`. Its tests check every category's flags, the
 ordinals and dominance, and the seed cursor's wrapping against a Java oracle.
 
+The terrain descriptor layer adds delegated, configured, volcanic and composite terrain types,
+preserving Engine 0.3.0's object identity, Java string hues and original composite-dominance quirk.
+
 ## Status: development only
 
 These layers only add the noise functions and Engine's terrain types. They change nothing in the game, so there is
