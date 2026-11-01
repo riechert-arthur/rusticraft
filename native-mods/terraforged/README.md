@@ -186,6 +186,9 @@ terrain-edge, river-mask, and elevation-range strength modifiers.
 The steepness filter measures each cell against TerraForged's asymmetric sixteen-sample neighborhood,
 clamps submerged neighbors to water level, and records the scaled result as terrain gradient.
 
+Beach detection samples coast gradients eight blocks in each cardinal direction and reclassifies only
+low-edge, low-gradient coast cells with the shared beach terrain identity.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:

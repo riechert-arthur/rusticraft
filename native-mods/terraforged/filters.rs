@@ -24,7 +24,9 @@
 
 use std::sync::{Arc, RwLock};
 
-use super::terraforged_engine::{Cell, Levels, TerrainProperties};
+use super::terraforged_engine::{
+    Cell, ControlPoints, Levels, Terrain, TerrainProperties, TerrainRegistry,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SmoothingSettings {
@@ -240,6 +242,73 @@ impl Steepness {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct BeachDetect {
+    transition: ControlPoints,
+    _gradient_squared: f32,
+    radius: usize,
+    diameter: i32,
+    beach: Terrain,
+}
+
+impl BeachDetect {
+    pub fn new(transition: ControlPoints, terrains: &TerrainRegistry) -> Self {
+        let gradient = 0.001_838_235_3_f32;
+        Self {
+            transition,
+            _gradient_squared: gradient * gradient,
+            radius: 8,
+            diameter: 17,
+            beach: terrains.get_by_id(4),
+        }
+    }
+
+    pub fn apply(&self, map: &mut impl Filterable, _seed_x: i32, _seed_z: i32, _iterations: i32) {
+        let total = map.total_size();
+        for z in 0..total {
+            for x in 0..total {
+                let cell = map
+                    .cell_raw(x, z)
+                    .expect("filter coordinates are in bounds");
+                if !cell.terrain.is_coast() || cell.continent_edge >= self.transition.beach {
+                    continue;
+                }
+                let north = map.cell_raw(x, z.wrapping_sub(self.radius));
+                let south = map.cell_raw(x, z.wrapping_add(self.radius));
+                let east = map.cell_raw(x.wrapping_add(self.radius), z);
+                let west = map.cell_raw(x.wrapping_sub(self.radius), z);
+                let gradient_x = self.gradient(east, west, cell);
+                let gradient_z = self.gradient(north, south, cell);
+                let distance_squared = gradient_x * gradient_x + gradient_z * gradient_z;
+                if distance_squared < 0.275 {
+                    map.cell_raw_mut(x, z)
+                        .expect("filter coordinates are in bounds")
+                        .terrain = self.beach.clone();
+                }
+            }
+        }
+    }
+
+    fn gradient(&self, first: Option<&Cell>, second: Option<&Cell>, default: &Cell) -> f32 {
+        let mut distance = self.diameter;
+        let first = match first.filter(|cell| !cell.is_absent()) {
+            Some(cell) => cell,
+            None => {
+                distance -= self.radius as i32;
+                default
+            }
+        };
+        let second = match second.filter(|cell| !cell.is_absent()) {
+            Some(cell) => cell,
+            None => {
+                distance -= self.radius as i32;
+                default
+            }
+        };
+        (first.value - second.value) / distance as f32
+    }
+}
+
 fn java_round(value: f32) -> i32 {
     (value + 0.5).floor() as i32
 }
@@ -416,6 +485,38 @@ mod tests {
         for (index, bits) in expected {
             assert_eq!(map.cells[index].gradient.to_bits(), bits, "cell {index}");
         }
+    }
+
+    #[test]
+    fn beach_detection_matches_engine_0_3_0() {
+        let total = 20;
+        let mut cells = (0..total * total)
+            .map(|index| {
+                let mut cell = Cell::default();
+                cell.value = 0.25 + ((index * 17 + 3) % 41) as f32 / 512.0;
+                cell
+            })
+            .collect::<Vec<_>>();
+        let terrains = TerrainRegistry::new();
+        let smooth = 10 + 10 * total;
+        let steep = 9 + 9 * total;
+        let inland = 11 + 10 * total;
+        let other = 12 + 10 * total;
+        for index in [smooth, steep, inland] {
+            cells[index].terrain = terrains.get_by_id(3);
+            cells[index].continent_edge = 0.2;
+        }
+        cells[inland].continent_edge = 0.4;
+        cells[17 + 9 * total].value = 10.0;
+        cells[1 + 9 * total].value = -10.0;
+        let mut map = TestMap { total, cells };
+
+        BeachDetect::new(ControlPoints::default(), &terrains).apply(&mut map, 123, -456, 99);
+
+        assert_eq!(
+            [smooth, steep, inland, other].map(|index| map.cells[index].terrain.id()),
+            [4, 3, 3, 0]
+        );
     }
 
     #[test]
