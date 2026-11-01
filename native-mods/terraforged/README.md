@@ -485,6 +485,9 @@ world-surface generation heightmaps used by later surface, structure, and carvin
 The generator facade now joins the cached terrain for a chunk's own position, fills its real block
 storage, and returns the same pooled handle so the remaining terrain stages can consume it safely.
 
+Biome chunk filling now precomputes TerraForged's surface and optional cave 4-by-4 layers in Java
+call order, repeats them through whole sections, and keeps the surface layer above the y=0 cave band.
+
 The scalar graph fixtures cover 15 graphs, four seeds and four coordinates (240 Java samples),
 including wrapped seed addition and mixed Perlin/seed-sensitive sources. Regenerate their hashes
 with `tools/terraforged/TerraForgedSeededGraphOracle.java` on a classpath containing compiled
