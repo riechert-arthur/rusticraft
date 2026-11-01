@@ -285,6 +285,9 @@ with TerraForged's root-seed copy, split, offset, and level initialization seman
 The concrete heightmap now assembles TerraForged's continent, terrain-region, mountain, ocean, river,
 and climate graph and implements the tile generator's heightmap source contract.
 
+The world-generator factory now owns and shares the concrete heightmap and filter graph, returning
+lightweight generator views with TerraForged's original factory lifecycle.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:

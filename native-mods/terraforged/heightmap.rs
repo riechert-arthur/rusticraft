@@ -550,4 +550,73 @@ mod tests {
             assert_eq!(cell.terrain.name(), terrain);
         }
     }
+
+    #[test]
+    fn heightmap_matches_engine_0_3_0() {
+        use super::super::terraforged_engine::BiomeType;
+
+        let mut settings = super::super::terraforged_context::GeneratorSettings::default();
+        settings.world.seed = 1_234;
+        let map = Heightmap::new(&mut GeneratorContext::new(settings));
+        let cases = [
+            (
+                0.0,
+                0.0,
+                [
+                    0x3ec8142c, 0x3f800000, 0x3f0a4c5a, 0x3f22637f, 0x3e93f3fc, 0x3ebca8f4,
+                    0x3f10082e,
+                ],
+                "coast",
+                BiomeType::TemperateForest,
+            ),
+            (
+                12.25,
+                -98.75,
+                [
+                    0x3efce5e4, 0x3f800000, 0x3f03b261, 0x3f164762, 0x3d50a340, 0x3f492d16,
+                    0x3f10082e,
+                ],
+                "flats-hills",
+                BiomeType::TemperateForest,
+            ),
+            (
+                -4096.5,
+                8192.25,
+                [
+                    0x3e12539a, 0x3f800000, 0x3f10f5a6, 0x3f15a698, 0x3e91b55b, 0x3e47df98,
+                    0x3f37652a,
+                ],
+                "deep_ocean",
+                BiomeType::TemperateForest,
+            ),
+            (
+                100_000.0,
+                -100_000.0,
+                [
+                    0x3eebd0e1, 0x3f800000, 0x3f6460a4, 0x3f7aa36f, 0x3f128ff0, 0x3f3714ab,
+                    0x3f056f69,
+                ],
+                "mountain_chain",
+                BiomeType::TropicalRainforest,
+            ),
+        ];
+        for (x, z, expected, terrain, biome) in cases {
+            let mut cell = Cell::default();
+            map.apply(&mut cell, x, z);
+            assert_eq!(
+                [
+                    cell.value.to_bits(),
+                    cell.river_mask.to_bits(),
+                    cell.temperature.to_bits(),
+                    cell.moisture.to_bits(),
+                    cell.biome_region_id.to_bits(),
+                    cell.biome_region_edge.to_bits(),
+                    cell.macro_biome_id.to_bits(),
+                ],
+                expected
+            );
+            assert_eq!(cell.terrain.name(), terrain);
+            assert_eq!(cell.biome, biome);
+        }
+    }
 }

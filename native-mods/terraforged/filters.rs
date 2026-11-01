@@ -24,6 +24,7 @@
 
 use std::sync::{Arc, RwLock};
 
+use super::terraforged_context::GeneratorContext;
 use super::terraforged_engine::{
     Cell, ControlPoints, Levels, Terrain, TerrainProperties, TerrainRegistry,
 };
@@ -756,6 +757,17 @@ pub struct WorldFilters {
 }
 
 impl WorldFilters {
+    pub fn from_context(context: &GeneratorContext) -> Self {
+        let terrains = TerrainRegistry::new();
+        Self::new(
+            context.seed.root(),
+            context.settings.filters,
+            context.levels,
+            ControlPoints::new(context.settings.world.control_points),
+            &terrains,
+        )
+    }
+
     pub fn new(
         root_seed: i32,
         settings: FilterSettings,

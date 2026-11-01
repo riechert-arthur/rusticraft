@@ -24,8 +24,10 @@
 
 use super::{
     terraforged_concurrent::{Cache, CacheEntry, LazyCallable},
+    terraforged_context::GeneratorContext,
     terraforged_engine::Cell,
     terraforged_filters::WorldFilters,
+    terraforged_heightmap::Heightmap,
     terraforged_river::Rivermap,
     terraforged_tile::{GenChunk, Tile},
 };
@@ -41,6 +43,24 @@ pub trait HeightmapSource {
     fn apply_climate(&self, cell: &mut Cell, x: f32, z: f32);
 }
 
+impl<H: HeightmapSource + ?Sized> HeightmapSource for Arc<H> {
+    fn apply_base(&self, cell: &mut Cell, x: f32, z: f32) {
+        (**self).apply_base(cell, x, z);
+    }
+
+    fn rivermap(&self, x: i32, z: i32) -> Arc<Rivermap> {
+        (**self).rivermap(x, z)
+    }
+
+    fn apply_rivers(&self, cell: &mut Cell, x: f32, z: f32, rivermap: &Rivermap) {
+        (**self).apply_rivers(cell, x, z, rivermap);
+    }
+
+    fn apply_climate(&self, cell: &mut Cell, x: f32, z: f32) {
+        (**self).apply_climate(cell, x, z);
+    }
+}
+
 pub trait TileFilters {
     fn apply(&self, tile: &mut Tile, optional: bool);
 }
@@ -48,6 +68,12 @@ pub trait TileFilters {
 impl TileFilters for WorldFilters {
     fn apply(&self, tile: &mut Tile, optional: bool) {
         self.apply_tile(tile, optional);
+    }
+}
+
+impl<F: TileFilters + ?Sized> TileFilters for Arc<F> {
+    fn apply(&self, tile: &mut Tile, optional: bool) {
+        (**self).apply(tile, optional);
     }
 }
 
@@ -67,6 +93,43 @@ impl<H, F> WorldGenerator<H, F> {
 
     pub const fn filters(&self) -> &F {
         &self.filters
+    }
+}
+
+pub type TerraForgedWorldGenerator = WorldGenerator<Arc<Heightmap>, Arc<WorldFilters>>;
+
+pub struct WorldGeneratorFactory {
+    heightmap: Arc<Heightmap>,
+    filters: Arc<WorldFilters>,
+}
+
+impl WorldGeneratorFactory {
+    pub fn new(context: &mut GeneratorContext) -> Self {
+        let heightmap = Heightmap::new(context);
+        Self::with_heightmap(context, heightmap)
+    }
+
+    pub fn with_heightmap(context: &GeneratorContext, heightmap: Heightmap) -> Self {
+        Self {
+            heightmap: Arc::new(heightmap),
+            filters: Arc::new(WorldFilters::from_context(context)),
+        }
+    }
+
+    pub fn heightmap(&self) -> &Heightmap {
+        &self.heightmap
+    }
+
+    pub fn climate(&self) -> &super::terraforged_climate::Climate {
+        self.heightmap.climate()
+    }
+
+    pub fn filters(&self) -> &WorldFilters {
+        &self.filters
+    }
+
+    pub fn get(&self) -> TerraForgedWorldGenerator {
+        WorldGenerator::new(Arc::clone(&self.heightmap), Arc::clone(&self.filters))
     }
 }
 
@@ -727,6 +790,26 @@ mod tests {
             self.0.lock().unwrap().push(optional);
             tile.cell_mut(0, 0).moisture = 0.5;
         }
+    }
+
+    #[test]
+    fn world_generator_factory_matches_engine_0_3_0() {
+        let mut settings = super::super::terraforged_context::GeneratorSettings::default();
+        settings.world.seed = 1_234;
+        settings.filters.erosion.droplets_per_chunk = 17;
+        let mut context = GeneratorContext::new(settings);
+        let factory = WorldGeneratorFactory::new(&mut context);
+        let first = factory.get();
+        let second = factory.get();
+
+        assert!(Arc::ptr_eq(first.heightmap(), second.heightmap()));
+        assert!(Arc::ptr_eq(first.filters(), second.filters()));
+        assert_eq!(factory.filters().settings().erosion.droplets_per_chunk, 17);
+        let mut cell = Cell::default();
+        factory.heightmap().apply(&mut cell, 0.0, 0.0);
+        assert_eq!(cell.value.to_bits(), 0x3ec8142c);
+        assert_eq!(cell.temperature.to_bits(), 0x3f0a4c5a);
+        assert_eq!(cell.terrain.name(), "coast");
     }
 
     #[test]
