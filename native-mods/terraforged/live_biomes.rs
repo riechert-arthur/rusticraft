@@ -24,8 +24,7 @@
 
 // Adapted from TerraForged Reimagined (https://github.com/Romoslayer/TerraForged-Reimagined, a24d450): the registry
 // lookups of `BiomeSampler.getInitialBiome` (`getBiomes().getOrThrow(Biomes.PLAINS)`) and `getBiomeOverride`
-// (`BiomeMapManager.get`), `Source`'s `new CaveBiomeSampler(800, manager)` with its registry pools, and
-// `getBaseTemperature` as the samplers read it. MIT License, Copyright (c) 2020 TerraForged, Copyright (c) 2026
+// (`BiomeMapManager.get`), and `getBaseTemperature` as the samplers read it. MIT License, Copyright (c) 2020 TerraForged, Copyright (c) 2026
 // Romoslayer; see `LICENSE-TERRAFORGED-REIMAGINED`.
 
 use super::{
@@ -35,11 +34,9 @@ use super::{
     },
     GeneratorData,
     terraforged_biome_registry::{
-        ClimateWeight, RegistryBiome, RegistryBiomeMap, identifier, identifier_order,
-        registry_entries,
+        ClimateWeight, RegistryBiome, RegistryBiomeMap, identifier, registry_entries,
     },
     terraforged_biome_sampler::{BiomeOverride, WetlandSettings},
-    terraforged_cave_biome_sampler::CaveBiomeSampler,
     terraforged_current_surface_biomes::CurrentSurfaceBiomeSampler,
     terraforged_generator_facade::TerraForgedGenerator,
 };
@@ -48,10 +45,6 @@ use std::{fmt, sync::Arc};
 
 /// `Biomes.PLAINS`: `getInitialBiome`'s fallback when the climate's pool is empty.
 const PLAINS: &str = "minecraft:plains";
-/// `ModBiomes.CAVE`: the cave sampler's GLOBAL pool, when the registry has it.
-const CAVE: &str = "terraforged:cave";
-/// `Source`'s `new CaveBiomeSampler(800, manager)`.
-const CAVE_SCALE: i32 = 800;
 /// Every biome `getBiomeOverride` can return, in `BiomeOverride` order; [`BiomeOverride::key`] names each.
 const OVERRIDES: [BiomeOverride; 13] = [
     BiomeOverride::DeepColdOcean,
@@ -81,7 +74,7 @@ impl fmt::Display for MissingBiome {
 
 impl std::error::Error for MissingBiome {}
 
-/// TerraForged's biome pools, its plains fallback, its 13 override biomes and its cave pools, bound to the numeric
+/// TerraForged's biome pools, its plains fallback and its 13 override biomes, bound to the numeric
 /// biome ids of one loaded registry ([`GeneratorData`]). Those ids are the ones Horizon's own generator writes into
 /// chunks; the client maps them by name to the world's biome table for saves and the network (`vanillagen`'s
 /// `biome_map`), so a mod biome in the data (a data pack's, or a native mod's) is bound like a vanilla one. The
@@ -94,7 +87,6 @@ pub struct LiveBiomeBindings {
     fallback: Arc<BiomeId>,
     overrides: Vec<Arc<BiomeId>>,
     temperatures: Vec<f32>,
-    cave: CaveBiomeSampler<BiomeId>,
 }
 
 // Chunk workers share one set of bindings (and the surface sampler built over it).
@@ -113,18 +105,13 @@ impl LiveBiomeBindings {
         Self::bind(&registry_entries(data), configured)
     }
 
-    /// `new BiomeMapManager(access)` over `entries` (see [`RegistryBiomeMap::build`]), the lookups by key and
-    /// `new CaveBiomeSampler(800, manager)`. Entry `i` must hold `BiomeId(i)` (as [`GeneratorData`]'s do; panics
+    /// `new BiomeMapManager(access)` over `entries` (see [`RegistryBiomeMap::build`]) and the lookups by key. Entry `i` must hold `BiomeId(i)` (as [`GeneratorData`]'s do; panics
     /// otherwise). Keys match by namespace and path exactly (`Identifier.equals`).
     ///
     /// `Err` with the first of plains and the 13 override biomes (in [`BiomeOverride`] order) the registry lacks. Java
     /// resolves each with `getOrThrow` when a column first needs it and throws there (failing that chunk); the port
     /// checks them all here, once, so a registry without them is refused before any chunk instead of partway
     /// through generation. No biome ever stands in for a missing one.
-    ///
-    /// The cave sampler's GLOBAL pool is `terraforged:cave` if registered; UNIQUE is every `isNonSurface` biome in
-    /// 26.3's registry order: `RegistryDataLoader` registers data-pack entries sorted by `Identifier` (path, then
-    /// namespace), not in [`GeneratorData`]'s name order, so the entries are re-sorted that way.
     pub fn bind(
         entries: &[RegistryBiome<BiomeId>],
         configured: &[ClimateWeight],
@@ -152,36 +139,17 @@ impl LiveBiomeBindings {
             .iter()
             .map(|replacement| required(replacement.key().unwrap()))
             .collect::<Result<_, _>>()?;
-        let global = find(CAVE)
-            .map(|entry| Arc::clone(&entry.value))
-            .into_iter()
-            .collect();
-        let mut special: Vec<_> = entries
-            .iter()
-            .filter(|entry| entry.is_non_surface())
-            .collect();
-        special.sort_by(|left, right| identifier_order(&left.name, &right.name));
-        let special = special
-            .into_iter()
-            .map(|entry| Arc::clone(&entry.value))
-            .collect();
         Ok(Self {
             map: RegistryBiomeMap::build(entries, configured),
             fallback,
             overrides,
             temperatures: entries.iter().map(|entry| entry.temperature).collect(),
-            cave: CaveBiomeSampler::reimagined(CAVE_SCALE, global, special),
         })
     }
 
     /// `minecraft:plains`, `getInitialBiome`'s fallback.
     pub fn fallback(&self) -> Arc<BiomeId> {
         Arc::clone(&self.fallback)
-    }
-
-    /// `new CaveBiomeSampler(800, manager)` over this registry.
-    pub const fn cave(&self) -> &CaveBiomeSampler<BiomeId> {
-        &self.cave
     }
 
     /// `biome.value().getBaseTemperature()`. Panics for an id outside this registry.
@@ -219,8 +187,7 @@ impl LiveBiomeBindings {
         )
     }
 
-    /// [`TerraForgedGenerator::create_biomes`] with this registry's cave sampler, base temperatures and override
-    /// biomes. `surface` must come from [`Self::surface_sampler`] on the same bindings and generator.
+    /// [`TerraForgedGenerator::create_biomes`] with this registry's base temperatures and override biomes. `surface` must come from [`Self::surface_sampler`] on the same bindings and generator.
     pub fn create_biomes(
         &self,
         generator: &TerraForgedGenerator,
@@ -232,7 +199,6 @@ impl LiveBiomeBindings {
             chunk,
             position,
             surface,
-            &self.cave,
             |biome| self.base_temperature(biome),
             |replacement| self.override_biome(replacement),
         )
@@ -242,7 +208,6 @@ impl LiveBiomeBindings {
 #[cfg(test)]
 mod tests {
     use super::super::{
-        terraforged_cave_noise::CaveType,
         terraforged_current_surface_biomes::tests::WETLANDS,
         terraforged_eroded_noise_generator::ErodedNoiseGenerator,
         terraforged_erosion::{ErosionFilterSettings, HeightmapSmoothingSettings},
@@ -251,14 +216,14 @@ mod tests {
     };
     use super::*;
 
-    // ---- LiveBiomesOracle (`.local/terraforged/oracles/live_biomes/`): Reimagined's real lookups and cave pools ----
+    // ---- LiveBiomesOracle (`.local/terraforged/oracles/live_biomes/`): Reimagined's real lookups (`no_cave/`) ----
 
     /// The oracle's `H` lines: (section, lines, FNV-1a 64 of the section's lines).
     const JAVA: [(&str, usize, u64); 4] = [
-        ("vanilla", 4, 0xc4a4_bfd2_e20b_5d0e),
-        ("modded", 4, 0x93e8_eae9_5ed9_2271),
+        ("vanilla", 2, 0xe397_f8bb_4a70_d6a9),
+        ("modded", 2, 0x931a_f297_76da_21bf),
         ("missing", 28, 0x7737_106f_92a1_f5db),
-        ("random", 5200, 0x5f86_a071_5f62_fea4),
+        ("random", 4000, 0x8f4c_612e_2d0a_d98f),
     ];
     const RANDOM_CASES: u64 = 2000;
     const OW: &str = "minecraft:is_overworld";
@@ -291,13 +256,6 @@ mod tests {
                 line += &format!(" {}={bits:x}", names[biome.0 as usize]);
             }
             self.emit(line);
-            for (tag, kind) in [("G", CaveType::Global), ("U", CaveType::Unique)] {
-                let mut line = String::from(tag);
-                for biome in bindings.cave().pool(kind).values() {
-                    line = line + " " + &names[biome.0 as usize];
-                }
-                self.emit(line);
-            }
         }
         fn check(&self, section: &str) {
             let java = JAVA.iter().find(|(name, ..)| *name == section).unwrap();
@@ -444,8 +402,8 @@ mod tests {
     }
 
     /// Every pool, list and lookup holds the registry entry's own `Arc`, and the chunk hook fills from them: the
-    /// surface layer is the surface sampler's biome with these overrides and temperatures, the cave layer a UNIQUE
-    /// cave biome.
+    /// whole column is the surface sampler's biome with these overrides and temperatures (no cave layer, so the cave
+    /// biome in the registry is never used).
     #[test]
     fn bindings_share_the_registry_arcs_and_fill_chunks() {
         let mut specs = vec![
@@ -475,10 +433,6 @@ mod tests {
                     .for_each(own);
             }
         }
-        let unique = bindings.cave().pool(CaveType::Unique).values();
-        assert_eq!(unique.len(), 1);
-        own(&unique[0]);
-        assert!(bindings.cave().pool(CaveType::Global).values().is_empty());
         assert!(
             std::panic::catch_unwind(|| bindings.override_biome(BiomeOverride::Input)).is_err()
         );
@@ -512,9 +466,9 @@ mod tests {
                     |r| bindings.override_biome(r),
                 )
                 .unwrap();
-            assert_eq!(*chunk.noise_biome([x, 0, z]), *expected);
-            let below = *chunk.noise_biome([x, -16, z]);
-            assert!(below == *expected || below == *unique[0]);
+            for y in [-16, -1, 0, 79] {
+                assert_eq!(*chunk.noise_biome([x, y, z]), *expected);
+            }
         }
     }
 
