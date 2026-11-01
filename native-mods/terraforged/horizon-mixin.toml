@@ -145,3 +145,10 @@ file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_continent_api"
 source = "continent_api.rs"
 visibility = "pub"
+
+[[module]]
+id = "context"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_context"
+source = "context.rs"
+visibility = "pub"
