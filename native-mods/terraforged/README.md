@@ -147,6 +147,9 @@ warped geometry and terrain-noise coordinates plus exact wetland tagging and ero
 The river-network layer recursively composes warped channel carvers, lakes, wetlands and child
 branches, including aggregate bounds and TerraForged's branch-overlap checks.
 
+The rivermap layer applies paired generation warps and dispatches terrain samples to bounded river
+networks while retaining continent coordinates and cache timestamps.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:

@@ -35,6 +35,7 @@ use super::{
     terraforged_util::{pack_floats, unpack_left_float, unpack_right_float},
 };
 use horizon_core::random::{LegacyRandom, RandomSource};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone)]
 pub struct GenWarp {
@@ -1192,6 +1193,56 @@ impl RiverNetworkBuilder {
     }
 }
 
+pub struct Rivermap {
+    x: i32,
+    z: i32,
+    lake_warp: Domain,
+    river_warp: Domain,
+    networks: Vec<RiverNetwork>,
+    timestamp: u128,
+}
+
+impl Rivermap {
+    pub fn new(x: i32, z: i32, networks: Vec<RiverNetwork>, warp: GenWarp) -> Self {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        Self {
+            x,
+            z,
+            lake_warp: warp.lake,
+            river_warp: warp.river,
+            networks,
+            timestamp,
+        }
+    }
+
+    pub fn apply(&self, cell: &mut Cell, x: f32, z: f32) {
+        let river_x = self.river_warp.x(x, z);
+        let river_z = self.river_warp.y(x, z);
+        let lake_x = self.lake_warp.offset_x(river_x, river_z);
+        let lake_z = self.lake_warp.offset_y(river_x, river_z);
+        for network in &self.networks {
+            if network.contains(river_x, river_z) {
+                network.carve(cell, river_x, river_z, lake_x, lake_z);
+            }
+        }
+    }
+
+    pub const fn timestamp(&self) -> u128 {
+        self.timestamp
+    }
+
+    pub const fn x(&self) -> i32 {
+        self.x
+    }
+
+    pub const fn z(&self) -> i32 {
+        self.z
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn line_distance2(x: f32, y: f32, ax: f32, ay: f32, bx: f32, by: f32, t: f32) -> f32 {
     if t <= 0.0 {
@@ -1760,6 +1811,63 @@ mod tests {
             ]
             .map(|river| network.overlaps(river, 50.0)),
             [true, false, true]
+        );
+    }
+
+    #[test]
+    fn rivermap_matches_engine_0_3_0() {
+        let levels = Levels::new(256, 63);
+        let config = RiverConfig::builder(levels)
+            .main(true)
+            .bed_width(8)
+            .bank_width(20)
+            .bed_depth(5)
+            .bank_height(2, 6)
+            .fade(0.75)
+            .build();
+        let carver = RiverCarver::new(
+            River::new(0.0, 0.0, 1000.0, 0.0),
+            RiverWarp::none(),
+            config,
+            RiverCarverSettings::default(),
+            levels,
+        );
+        let map = Rivermap::new(
+            17,
+            -9,
+            vec![RiverNetwork::builder(carver).build()],
+            GenWarp::new(12_345, 3_000),
+        );
+        assert_eq!((map.x(), map.z()), (17, -9));
+        assert!(map.timestamp() > 0);
+        assert_eq!(
+            [
+                (0.0, 0.0),
+                (500.0, 0.0),
+                (500.0, 50.0),
+                (1000.0, 0.0),
+                (2000.0, 2000.0)
+            ]
+            .map(|(x, z)| {
+                let mut cell = Cell::default();
+                cell.value = 0.6;
+                cell.river_mask = 1.0;
+                cell.continent_edge = 0.4;
+                map.apply(&mut cell, x, z);
+                (
+                    cell.value.to_bits(),
+                    cell.river_mask.to_bits(),
+                    cell.erosion_mask,
+                    cell.terrain.id(),
+                )
+            }),
+            [
+                (0x3e780000, 0, true, 5),
+                (0x3e69b24e, 0x38f84000, true, 5),
+                (0x3e8e76a0, 0x3d4ca9c0, false, 0),
+                (0x3e6688dc, 0x3a78b000, true, 5),
+                (0x3f19999a, 0x3f800000, false, 0),
+            ]
         );
     }
 }
