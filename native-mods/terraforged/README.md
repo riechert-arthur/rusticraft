@@ -216,6 +216,9 @@ completed cells on hits without rerunning base, river, lookup, or climate stages
 World filters now accept real TerraForged tiles, borrow their filter region, and use the tile's region
 coordinates for optional and required passes exactly like the Java `WorldFilters.apply` entry point.
 
+Zoomed tile traversal applies TerraForged's centered translation and zoom to world block coordinates
+before the same base, rivermap, river, and climate stages.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
