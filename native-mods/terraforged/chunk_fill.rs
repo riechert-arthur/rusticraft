@@ -95,7 +95,7 @@ mod tests {
 
     impl HeightmapState for State {
         fn is_air(self) -> bool {
-            self.0 < 2
+            self.0 < 2 || self.0 == 17
         }
 
         fn is_air_block(self) -> bool {
@@ -107,7 +107,7 @@ mod tests {
         }
 
         fn blocks_motion_in_heightmap(self) -> bool {
-            self.0 >= 2 && !self.has_fluid() && !(9..16).contains(&self.0)
+            !self.is_air() && !self.has_fluid() && !(9..16).contains(&self.0)
         }
 
         fn blocks_motion_in_heightmap_no_leaves(self) -> bool {
@@ -135,7 +135,13 @@ mod tests {
                         Tag::compound([("id", Tag::String("minecraft:air".into()))]),
                         Tag::compound([("id", Tag::String("minecraft:void_air".into()))]),
                         Tag::compound([("id", Tag::String("minecraft:stone".into()))]),
-                        Tag::compound([("id", Tag::String("minecraft:water".into()))]),
+                        Tag::compound([
+                            ("id", Tag::String("minecraft:water".into())),
+                            (
+                                "properties",
+                                Tag::compound([("level", Tag::String("0".into()))]),
+                            ),
+                        ]),
                         Tag::compound([("id", Tag::String("minecraft:dirt".into()))]),
                         Tag::compound([("id", Tag::String("minecraft:snow_block".into()))]),
                         Tag::compound([("id", Tag::String("minecraft:gravel".into()))]),
@@ -167,6 +173,10 @@ mod tests {
                             ),
                         ])
                     }))
+                    .chain([Tag::compound([(
+                        "id",
+                        Tag::String("minecraft:cave_air".into()),
+                    )])])
                     .collect(),
                 ),
             ),
@@ -181,6 +191,7 @@ mod tests {
                     ("minecraft:snow_block", Tag::Int(5)),
                     ("minecraft:gravel", Tag::Int(6)),
                     ("minecraft:snow", Tag::Int(9)),
+                    ("minecraft:cave_air", Tag::Int(17)),
                 ]),
             ),
         ]))
@@ -226,6 +237,37 @@ mod tests {
         let mut terrain = TerrainData::new(TerrainLevels::default());
         terrain.accept(&noise);
         terrain
+    }
+
+    #[test]
+    fn bound_surface_passes_use_registry_water_and_snow_states() {
+        use super::super::terraforged_surface_bindings::SurfaceBindings;
+        use std::{
+            collections::{BTreeMap, BTreeSet},
+            sync::Arc,
+        };
+
+        let registry = registry();
+        let layers: Arc<BTreeSet<_>> = Arc::new((9..=16).map(BlockStateId).collect());
+        let tags = BTreeMap::from([
+            (
+                "minecraft:dirt".into(),
+                Arc::new(BTreeSet::from([BlockStateId(4)])),
+            ),
+            ("minecraft:snow".into(), layers.clone()),
+        ]);
+        let bindings = SurfaceBindings::new(&registry, &tags, layers).unwrap();
+        let mut chunk =
+            TerrainChunk::new(ChunkPos::new(-1, 2), -64, 192, &registry, Properties).unwrap();
+        chunk.set_block_raw(0, 60, 0, BlockStateId(3)).unwrap();
+        bindings
+            .smooth_water(&terrain(), &mut chunk, |_, _, _| Ok(BlockStateId(17)))
+            .unwrap();
+        assert_eq!(chunk.block(0, 60, 0), BlockStateId(7));
+        chunk.set_block_worldgen(0, 61, 0, BlockStateId(9)).unwrap();
+        let data = terrain_fixture(0.0, "hills", 1.0, 96.5 / 480.0);
+        bindings.apply_post(&data, &mut chunk, 255).unwrap();
+        assert_eq!(chunk.block(0, 61, 0), BlockStateId(12));
     }
 
     #[test]
