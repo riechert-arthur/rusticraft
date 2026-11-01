@@ -81,6 +81,9 @@ terrace composition used by TerraForged's plateau terrain.
 The terraced LandForms layer adds badlands and torridonian graphs with masks, dual step detail,
 modulation, linear and Curve3 slopes, advanced terracing and final boost shaping.
 
+The ocean LandForms layer adds exact level and ground context, ocean/land base accessors and the
+deep-ocean hills/canyons blend with its mixed float/double sea-level scaling and six seed increments.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:

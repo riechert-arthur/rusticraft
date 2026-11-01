@@ -24,16 +24,56 @@
 
 use super::{
     terraforged::{CurveFunction, Domain, Interpolation, Module, Source, SourceConfig, SourceKind},
-    terraforged_engine::{Seed, TerrainSettings},
+    terraforged_engine::{Levels, Seed, TerrainSettings},
 };
 
 pub struct LandForms {
     settings: TerrainSettings,
+    terrain_vertical_scale: f32,
+    sea_level: f32,
+    ground: Module,
 }
 
 impl LandForms {
-    pub const fn new(settings: TerrainSettings) -> Self {
-        Self { settings }
+    pub fn new(settings: TerrainSettings, levels: Levels, ground: Module) -> Self {
+        Self {
+            terrain_vertical_scale: settings.general.global_vertical_scale,
+            sea_level: levels.water,
+            settings,
+            ground,
+        }
+    }
+
+    pub fn ocean_base(&self) -> Module {
+        Module::constant(0.0)
+    }
+
+    pub fn land_base(&self) -> Module {
+        self.ground.clone()
+    }
+
+    pub fn deep_ocean(&self, mut seed: i32) -> Module {
+        seed = seed.wrapping_add(1);
+        let hills_source = perlin(seed, 150, 3, 2.0)
+            .scale(Module::constant((f64::from(self.sea_level) * 0.7) as f32));
+        seed = seed.wrapping_add(1);
+        let hills_bias = perlin(seed, 200, 1, 2.0).scale(Module::constant(self.sea_level * 0.2));
+        let hills = hills_source.bias(hills_bias);
+
+        seed = seed.wrapping_add(1);
+        let canyon_source = perlin(seed, 150, 4, 2.0)
+            .power_curve(0.2)
+            .invert()
+            .scale(Module::constant((f64::from(self.sea_level) * 0.7) as f32));
+        seed = seed.wrapping_add(1);
+        let canyon_bias = perlin(seed, 170, 1, 2.0).scale(Module::constant(self.sea_level * 0.15));
+        let canyons = canyon_source.bias(canyon_bias);
+
+        seed = seed.wrapping_add(1);
+        let ocean =
+            perlin(seed, 500, 1, 2.0).blend(hills, canyons, 0.6, 0.65, Interpolation::Linear);
+        seed = seed.wrapping_add(1);
+        ocean.warp(noise_warp(seed, 50, 2, 50.0))
     }
 
     pub fn steppe(&self, seed: &mut Seed) -> Module {
@@ -66,9 +106,7 @@ impl LandForms {
                 Module::constant(scale_h as f32 / 4.0),
             ))
             .warp(noise_warp(seed.next(), 256, 1, 256.0))
-            .scale(Module::constant(
-                0.15 * self.settings.general.global_vertical_scale,
-            ))
+            .scale(Module::constant(0.15 * self.terrain_vertical_scale))
             .bias(Module::constant(-0.02))
     }
 
@@ -80,9 +118,7 @@ impl LandForms {
         hills
             .warp(noise_warp(seed.next(), 30, 3, 20.0))
             .warp(noise_warp(seed.next(), 400, 3, 200.0))
-            .scale(Module::constant(
-                0.6 * self.settings.general.global_vertical_scale,
-            ))
+            .scale(Module::constant(0.6 * self.terrain_vertical_scale))
     }
 
     pub fn hills2(&self, seed: &mut Seed) -> Module {
@@ -96,9 +132,7 @@ impl LandForms {
             hills,
             source(SourceKind::Ridge, seed.next(), 512, 2, 0.975, 2.0).alpha(Module::constant(0.8)),
         ])
-        .scale(Module::constant(
-            0.55 * self.settings.general.global_vertical_scale,
-        ))
+        .scale(Module::constant(0.55 * self.terrain_vertical_scale))
     }
 
     pub fn dales(&self, seed: &mut Seed) -> Module {
@@ -148,7 +182,7 @@ impl LandForms {
             0.4,
         );
         Module::add(vec![terraced, surface]).scale(Module::constant(
-            (0.475_f64 * f64::from(self.settings.general.global_vertical_scale)) as f32,
+            (0.475_f64 * f64::from(self.terrain_vertical_scale)) as f32,
         ))
     }
 
@@ -290,9 +324,13 @@ mod tests {
         ]
     }
 
+    fn make_forms(settings: TerrainSettings) -> LandForms {
+        LandForms::new(settings, Levels::new(256, 63), Module::constant(0.0))
+    }
+
     #[test]
     fn steppe_matches_engine_0_3_0() {
-        let forms = LandForms::new(TerrainSettings::default());
+        let forms = make_forms(TerrainSettings::default());
         let mut seed = Seed::new(12_345);
         let module = forms.steppe(&mut seed);
         assert_eq!(seed.get(), 12_350);
@@ -306,7 +344,7 @@ mod tests {
 
     #[test]
     fn plains_matches_engine_0_3_0() {
-        let forms = LandForms::new(TerrainSettings::default());
+        let forms = make_forms(TerrainSettings::default());
         let mut seed = Seed::new(-998_877);
         let module = forms.plains(&mut seed);
         assert_eq!(seed.get(), -998_872);
@@ -324,7 +362,7 @@ mod tests {
         settings.steppe.horizontal_scale = 0.25;
         settings.plains.horizontal_scale = 1.75;
         settings.general.global_vertical_scale = 0.43;
-        let forms = LandForms::new(settings);
+        let forms = make_forms(settings);
 
         let mut steppe_seed = Seed::new(i32::MAX - 2);
         let steppe = forms.steppe(&mut steppe_seed);
@@ -346,7 +384,7 @@ mod tests {
 
     #[test]
     fn hills_match_engine_0_3_0() {
-        let forms = LandForms::new(TerrainSettings::default());
+        let forms = make_forms(TerrainSettings::default());
         let mut hills1_seed = Seed::new(321);
         let hills1 = forms.hills1(&mut hills1_seed);
         assert_eq!(hills1_seed.get(), 325);
@@ -370,7 +408,7 @@ mod tests {
 
     #[test]
     fn dales_matches_engine_0_3_0() {
-        let forms = LandForms::new(TerrainSettings::default());
+        let forms = make_forms(TerrainSettings::default());
         let mut seed = Seed::new(987_654);
         let dales = forms.dales(&mut seed);
         assert_eq!(seed.get(), 987_658);
@@ -386,7 +424,7 @@ mod tests {
     fn scaled_hills_match_engine_0_3_0() {
         let mut settings = TerrainSettings::default();
         settings.general.global_vertical_scale = 0.37;
-        let forms = LandForms::new(settings);
+        let forms = make_forms(settings);
         let mut hills1_seed = Seed::new(i32::MAX - 3);
         let hills1 = forms.hills1(&mut hills1_seed);
         assert_eq!(hills1_seed.get(), i32::MIN);
@@ -408,7 +446,7 @@ mod tests {
 
     #[test]
     fn plateau_matches_engine_0_3_0() {
-        let forms = LandForms::new(TerrainSettings::default());
+        let forms = make_forms(TerrainSettings::default());
         let mut seed = Seed::new(123);
         let plateau = forms.plateau(&mut seed);
         assert_eq!(seed.get(), 132);
@@ -421,7 +459,7 @@ mod tests {
 
         let mut settings = TerrainSettings::default();
         settings.general.global_vertical_scale = 0.37;
-        let forms = LandForms::new(settings);
+        let forms = make_forms(settings);
         let mut seed = Seed::new(i32::MAX - 8);
         let plateau = forms.plateau(&mut seed);
         assert_eq!(seed.get(), i32::MIN);
@@ -434,7 +472,7 @@ mod tests {
 
     #[test]
     fn badlands_matches_engine_0_3_0() {
-        let forms = LandForms::new(TerrainSettings::default());
+        let forms = make_forms(TerrainSettings::default());
         let mut seed = Seed::new(777);
         let badlands = forms.badlands(&mut seed);
         assert_eq!(seed.get(), 783);
@@ -456,7 +494,7 @@ mod tests {
 
     #[test]
     fn torridonian_matches_engine_0_3_0() {
-        let forms = LandForms::new(TerrainSettings::default());
+        let forms = make_forms(TerrainSettings::default());
         let mut seed = Seed::new(-222);
         let torridonian = forms.torridonian(&mut seed);
         assert_eq!(seed.get(), -213);
@@ -473,6 +511,41 @@ mod tests {
         assert_eq!(
             bits(&torridonian),
             [0x3e738a24, 0x3e531467, 0x3d3dae7e, 0x3eb1a779]
+        );
+    }
+
+    #[test]
+    fn deep_ocean_matches_engine_0_3_0() {
+        let forms = LandForms::new(
+            TerrainSettings::default(),
+            Levels::new(256, 63),
+            Module::constant(0.375),
+        );
+        let ocean_base = forms.ocean_base();
+        assert_eq!(ocean_base.min_value().to_bits(), 0);
+        assert_eq!(ocean_base.max_value().to_bits(), 0);
+        assert_eq!(bits(&ocean_base), [0; 4]);
+        let land_base = forms.land_base();
+        assert_eq!(bits(&land_base), [0x3ec00000; 4]);
+
+        let deep_ocean = forms.deep_ocean(100);
+        assert_eq!(deep_ocean.min_value().to_bits(), 0x00000000);
+        assert_eq!(deep_ocean.max_value().to_bits(), 0x3e5f3334);
+        assert_eq!(
+            bits(&deep_ocean),
+            [0x3ddd62b6, 0x3e096a9f, 0x3d61020a, 0x3dc84380]
+        );
+
+        let custom = LandForms::new(
+            TerrainSettings::default(),
+            Levels::new(320, 71),
+            Module::constant(0.625),
+        )
+        .deep_ocean(i32::MAX - 3);
+        assert_eq!(custom.max_value().to_bits(), 0x3e49999a);
+        assert_eq!(
+            bits(&custom),
+            [0x3dc7f60f, 0x3e04cb64, 0x3d99ff3c, 0x3da6d606]
         );
     }
 }
