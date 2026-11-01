@@ -18,6 +18,9 @@ methods (`map`, `clamp`, `pow`, `bias`...). Its tests check the bounds each node
 including Engine's quirks: Threshold reports its source's bounds rather than 0..1, and Max's minimum is the larger of
 the first source's minimum and the other sources' maxima.
 
+The domain layer adds direct, axis-noise, directional, additive, compound and cumulative warps,
+plus warped module sampling. Directional warps reproduce Engine 0.3.0's 4096-entry sine lookup.
+
 ## Status: development only
 
 This layer only adds the noise functions. It changes nothing in the game, so there is nothing for players to install
