@@ -25,7 +25,11 @@
 use super::terraforged::{Domain, Module, Source, SourceConfig, SourceKind, clamp, floor, hash_2d};
 use super::terraforged_engine::Terrain;
 use super::terraforged_terrain_blend_util::{
-    Object2FloatCache, WeightMap, Weighted, X_PRIME, Y_PRIME, random,
+    Object2FloatCache, PositionFinder, SpiralIterator, WeightMap, Weighted, X_PRIME, Y_PRIME,
+    random,
+};
+use super::terraforged_util::{
+    pack_floats, unpack_left, unpack_left_float, unpack_right, unpack_right_float,
 };
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -86,7 +90,7 @@ impl Weighted for TerrainNoise {
 /// generator: the point is warped and scaled into a grid of jittered cells; each cell's hash picks a terrain from the
 /// weight map, and points near the border of their nearest cell blend in the neighbouring cells' terrain noises.
 /// As in the jar, the seed is bound when the blender is built. Not ported here: `withSeed` (reseeding the terrain
-/// noises) and the nearest-terrain search (`findNearest`, `iterator`).
+/// noises).
 pub struct TerrainBlender {
     region_seed: i32,
     frequency: f32,
@@ -170,6 +174,48 @@ impl TerrainBlender {
     /// `getTerrain(blender)`: the terrain of the blender's nearest cell (from the last `value_with`).
     pub fn terrain<'a>(&'a self, blender: &Blender) -> &'a Terrain {
         terrain_at(&self.terrains, blender.centre_noise_index()).terrain()
+    }
+
+    /// `findNearest(x, z, minRadius, maxRadius, terrain)`: `None` (Java's null) when no terrain noise has the
+    /// terrain's name (`String.equals`, the first match); otherwise a finder over [`TerrainBlender::iterator`] whose
+    /// `next` walks on to the next cell in that noise's weight band (`WeightMap.getBand`, by identity) and returns its
+    /// jittered point divided by the frequency (back to blocks), `PosUtil.packf`ed. When the spiral runs out during
+    /// a search, the point is Java's `0L` divided the same way (signed zeros, or NaN for a NaN frequency); once it is
+    /// out, `next` is `None` (Java's `0L`). Java's spiral quirks are kept: a `min_radius` above `max_radius` revisits
+    /// one cell forever, so a search there that misses never returns, as in Java.
+    pub fn find_nearest(
+        &self,
+        x: f32,
+        z: f32,
+        min_radius: i32,
+        max_radius: i32,
+        terrain: &Terrain,
+    ) -> Option<PositionFinder<impl FnMut(&mut SpiralIterator) -> i64 + use<>>> {
+        let noise = self
+            .terrains
+            .find(|candidate| candidate.terrain().name() == terrain.name())?;
+        let band = self.terrains.band(noise);
+        let lower = unpack_left_float(band);
+        let upper = unpack_right_float(band);
+        let (seed, jitter, frequency) = (self.region_seed, self.jitter, self.frequency);
+        Some(
+            self.iterator(x, z, min_radius, max_radius)
+                .finder(move |spiral| {
+                    let position = find(seed, jitter, lower, upper, spiral);
+                    pack_floats(
+                        unpack_left_float(position) / frequency,
+                        unpack_right_float(position) / frequency,
+                    )
+                }),
+        )
+    }
+
+    /// `iterator(x, z, minRadius, maxRadius)`: the [`SpiralIterator`] of cells around the point's warped,
+    /// scaled cell (`NoiseUtil.floor`, as `getValue` locates it).
+    pub fn iterator(&self, x: f32, z: f32, min_radius: i32, max_radius: i32) -> SpiralIterator {
+        let region_x = self.warp.x(x, z) * self.frequency;
+        let region_z = self.warp.y(x, z) * self.frequency;
+        SpiralIterator::new(floor(region_x), floor(region_z), min_radius, max_radius)
     }
 }
 
@@ -372,6 +418,25 @@ fn random2(seed: i32, offset: i32) -> f32 {
         .wrapping_mul(hash)
         .wrapping_mul(60_493);
     random((hash >> 13) ^ hash)
+}
+
+/// `TerrainBlender.find(seed, jitter, lower, upper, spiral)`: walks the spiral (while `hasNext`) to the first
+/// cell whose `MathUtil.rand(hash)` is in the band, strictly above `lower` and at most `upper` (so NaN never matches),
+/// and returns its jittered point `PosUtil.packf(cell + MathUtil.rand(hash, prime) * jitter)`; `0L` once the spiral
+/// runs out.
+fn find(seed: i32, jitter: f32, lower: f32, upper: f32, spiral: &mut SpiralIterator) -> i64 {
+    for position in spiral {
+        let cell_x = unpack_left(position);
+        let cell_z = unpack_right(position);
+        let hash = hash_2d(seed, cell_x, cell_z);
+        let noise = random(hash);
+        if noise > lower && noise <= upper {
+            let point_x = cell_x as f32 + random2(hash, X_PRIME) * jitter;
+            let point_z = cell_z as f32 + random2(hash, Y_PRIME) * jitter;
+            return pack_floats(point_x, point_z);
+        }
+    }
+    0
 }
 
 /// `TerrainBlender.Blender.getWeight(distance, origin, blendRange)`: 1 up to the origin, 0 from `blendRange` past
