@@ -80,6 +80,9 @@ sources' minima, and `Sub` subtracts the other sources' maxima from the first so
 its maximum). Their tests check raw bits against a Java oracle, including NaN results: `NoiseUtil.pow` returns the NaN
 `Math.pow` returns (its NaN operand, so `Grad` with `lower == upper` gives Java's -NaN from 0/0).
 
+The cache layer adds TerraForged's shared single-coordinate memoization while remaining safe for
+Rusticraft's parallel world-generation workers.
+
 ## Status: development only
 
 This layer only adds the noise functions. It changes nothing in the game, so there is nothing for players to install

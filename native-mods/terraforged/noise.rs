@@ -608,6 +608,25 @@ struct TerraceStep {
     upper_bound: f32,
 }
 
+#[derive(Clone, Copy)]
+struct CacheValue {
+    x: f32,
+    y: f32,
+    value: f32,
+    empty: bool,
+}
+
+impl Default for CacheValue {
+    fn default() -> Self {
+        Self {
+            x: 0.0,
+            y: 0.0,
+            value: 0.0,
+            empty: true,
+        }
+    }
+}
+
 enum ModuleKind {
     Constant(f32),
     Source(Source),
@@ -737,6 +756,10 @@ enum ModuleKind {
         source: Module,
         direction: Module,
         strength: Module,
+    },
+    Cache {
+        source: Module,
+        value: std::sync::Mutex<CacheValue>,
     },
     /// `Select`: `lower_curve`/`upper_curve` hold Engine's `(curveMin, curveMax, curveRange)` per bound, fixed in the
     /// constructor.
@@ -1141,6 +1164,20 @@ impl Module {
                 let dx = sin(angle) * strength;
                 let dy = cos(angle) * strength;
                 source.value(x + dx, y + dy)
+            }
+            ModuleKind::Cache { source, value } => {
+                let mut cached = value.lock().expect("TerraForged cache lock poisoned");
+                if !cached.empty && x == cached.x && y == cached.y {
+                    return cached.value;
+                }
+                let result = source.value(x, y);
+                *cached = CacheValue {
+                    x,
+                    y,
+                    value: result,
+                    empty: false,
+                };
+                result
             }
             ModuleKind::Select {
                 control,
@@ -1589,6 +1626,17 @@ impl Module {
             strength,
         };
         Self::modifier(kind, &source)
+    }
+
+    pub fn cache(self) -> Self {
+        let source = self.clone();
+        Self::modifier(
+            ModuleKind::Cache {
+                source: self,
+                value: std::sync::Mutex::new(CacheValue::default()),
+            },
+            &source,
+        )
     }
 
     /// `Module.select(Module, Module, lowerBound, upperBound, falloff, Interpolation)` (Engine's five-argument
@@ -4788,5 +4836,51 @@ steps c2 0x7fc00000 0x3f4ccccd 0x3e4ccccd 0xbf800000 0x40000000 | 0x7fc00000 0x7
             .map(|(x, y)| java_pow(f32::from_bits(x), f32::from_bits(y)).to_bits())
             .collect();
         assert_eq!(actual, EXPECTED);
+    }
+
+    #[test]
+    fn cache_matches_engine_0_3_0() {
+        let module = Module::source(Source::new(
+            SourceKind::Perlin,
+            SourceConfig {
+                seed: 1101,
+                octaves: 4,
+                gain: 0.5,
+                frequency: 1.0 / 96.0,
+                lacunarity: 2.0,
+                interpolation: Interpolation::Curve3,
+            },
+        ))
+        .cache();
+        let clone = module.clone();
+        let points = [
+            (0.0, 0.0),
+            (12.25, -98.75),
+            (12.25, -98.75),
+            (0.0, 0.0),
+            (-0.0, 0.0),
+            (777.0, -333.0),
+            (777.0, -333.0),
+        ];
+        assert_eq!(
+            [module.min_value().to_bits(), module.max_value().to_bits()],
+            [0x00000000, 0x3f800000]
+        );
+        assert_eq!(
+            bits(points.map(|(x, y)| module.value(x, y))),
+            [
+                0x3f000000, 0x3edc7fe7, 0x3edc7fe7, 0x3f000000, 0x3f000000, 0x3eea770a, 0x3eea770a,
+            ]
+        );
+        assert!(Arc::ptr_eq(&module.0, &clone.0));
+        let ModuleKind::Cache { value, .. } = &module.0.kind else {
+            unreachable!()
+        };
+        let cached = value.lock().unwrap();
+        assert_eq!(
+            [cached.x.to_bits(), cached.y.to_bits()],
+            [0x44424000, 0xc3a68000]
+        );
+        assert_eq!(cached.value.to_bits(), 0x3eea770a);
     }
 }
