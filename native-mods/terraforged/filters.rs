@@ -68,6 +68,12 @@ impl Default for ErosionSettings {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct FilterSettings {
+    pub erosion: ErosionSettings,
+    pub smoothing: SmoothingSettings,
+}
+
 pub trait Filterable {
     fn block_x(&self) -> i32;
 
@@ -735,6 +741,71 @@ pub struct WorldErosion<T, F, V> {
     validator: V,
 }
 
+type ErosionFactory = Box<dyn Fn(i32) -> Erosion + Send + Sync>;
+type ErosionValidator = fn(&Erosion, i32) -> bool;
+
+pub struct WorldFilters {
+    smoothing: Smoothing,
+    steepness: Steepness,
+    beach: BeachDetect,
+    settings: FilterSettings,
+    erosion: WorldErosion<Erosion, ErosionFactory, ErosionValidator>,
+    erosion_iterations: i32,
+    smoothing_iterations: i32,
+}
+
+impl WorldFilters {
+    pub fn new(
+        root_seed: i32,
+        settings: FilterSettings,
+        levels: Levels,
+        transition: ControlPoints,
+        terrains: &TerrainRegistry,
+    ) -> Self {
+        let erosion_settings = settings.erosion;
+        let factory: ErosionFactory = Box::new(move |size| {
+            Erosion::factory(root_seed, size as usize, erosion_settings, levels)
+        });
+        let validator: ErosionValidator = |erosion, size| erosion.size() == size as usize;
+        Self {
+            smoothing: Smoothing::new(settings.smoothing, levels),
+            steepness: Steepness::new(1, 10.0, levels),
+            beach: BeachDetect::new(transition, terrains),
+            settings,
+            erosion: WorldErosion::new(factory, validator),
+            erosion_iterations: settings.erosion.droplets_per_chunk,
+            smoothing_iterations: settings.smoothing.iterations,
+        }
+    }
+
+    pub fn settings(&self) -> &FilterSettings {
+        &self.settings
+    }
+
+    pub fn apply(&self, map: &mut impl Filterable, region_x: i32, region_z: i32, optional: bool) {
+        if optional {
+            self.apply_optional(map, region_x, region_z);
+        }
+        self.apply_required(map, region_x, region_z);
+    }
+
+    pub fn apply_required(&self, map: &mut impl Filterable, seed_x: i32, seed_z: i32) {
+        self.steepness.apply(map, seed_x, seed_z, 1);
+        self.beach.apply(map, seed_x, seed_z, 1);
+    }
+
+    pub fn apply_optional(&self, map: &mut impl Filterable, seed_x: i32, seed_z: i32) {
+        self.erosion.get(map.total_size() as i32).apply(
+            map,
+            seed_x,
+            seed_z,
+            self.erosion_iterations,
+        );
+        self.smoothing
+            .apply(map, seed_x, seed_z, self.smoothing_iterations);
+    }
+}
+
 impl<T, F, V> WorldErosion<T, F, V>
 where
     F: Fn(i32) -> T,
@@ -1024,6 +1095,105 @@ mod tests {
                     map.cells[index].sediment.to_bits(),
                 ),
                 (value, erosion, sediment),
+                "cell {index}"
+            );
+        }
+    }
+
+    #[test]
+    fn world_filters_match_engine_0_3_0() {
+        struct FilterMap {
+            cells: Vec<Cell>,
+        }
+
+        impl Filterable for FilterMap {
+            fn block_x(&self) -> i32 {
+                -32
+            }
+
+            fn block_z(&self) -> i32 {
+                48
+            }
+
+            fn total_size(&self) -> usize {
+                48
+            }
+
+            fn border_size(&self) -> usize {
+                16
+            }
+
+            fn backing(&self) -> &[Cell] {
+                &self.cells
+            }
+
+            fn backing_mut(&mut self) -> &mut [Cell] {
+                &mut self.cells
+            }
+        }
+
+        let total = 48;
+        let terrains = TerrainRegistry::new();
+        let cells = (0..total)
+            .flat_map(|z| {
+                let coast = terrains.get_by_id(3);
+                (0..total).map(move |x| {
+                    let index = z * total + x;
+                    let mut cell = Cell::default();
+                    cell.value = 0.28 + ((x * 13 + z * 7 + x * z) % 31) as f32 / 1_000.0;
+                    cell.continent_edge = 0.2;
+                    if index % 11 == 0 {
+                        cell.terrain = coast.clone();
+                    }
+                    cell.erosion_mask = index % 113 == 0;
+                    cell
+                })
+            })
+            .collect();
+        let mut map = FilterMap { cells };
+        let settings = FilterSettings {
+            erosion: ErosionSettings {
+                droplets_per_chunk: 2,
+                ..ErosionSettings::default()
+            },
+            smoothing: SmoothingSettings {
+                iterations: 1,
+                ..SmoothingSettings::default()
+            },
+        };
+        let filters = WorldFilters::new(
+            0,
+            settings,
+            Levels::new(256, 63),
+            ControlPoints::default(),
+            &terrains,
+        );
+
+        filters.apply_optional(&mut map, 2, -3);
+        filters.apply_required(&mut map, 2, -3);
+
+        let expected = [
+            (0, 0x3e8f5c29, 0, 0, 0x3f800000, 4),
+            (11, 0x3e991687, 0, 0, 0x3f50b209, 4),
+            (12, 0x3e8fdf3b, 0, 0, 0x3f800000, 0),
+            (113, 0x3e9a1cac, 0, 0, 0x3f4d2ce7, 0),
+            (210, 0x3e981df5, 0, 0, 0x3f05f840, 0),
+            (511, 0x3e94b44c, 0xb8f1d340, 0, 0x3f255b54, 0),
+            (1024, 0x3e950493, 0xb8bdffce, 0, 0x3f149f6c, 0),
+            (1536, 0x3e92d459, 0xb96a8c37, 0, 0x3f800000, 0),
+            (2299, 0x3e9cac08, 0, 0, 0x3f667981, 4),
+        ];
+        for (index, value, erosion, sediment, gradient, terrain) in expected {
+            let cell = &map.cells[index];
+            assert_eq!(
+                (
+                    cell.value.to_bits(),
+                    cell.erosion.to_bits(),
+                    cell.sediment.to_bits(),
+                    cell.gradient.to_bits(),
+                    cell.terrain.id(),
+                ),
+                (value, erosion, sediment, gradient, terrain),
                 "cell {index}"
             );
         }

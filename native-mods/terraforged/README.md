@@ -195,6 +195,9 @@ and radius-four normalized brush cache, including its reused interior brush layo
 Hydraulic erosion runs TerraForged's deterministic chunk-seeded droplet simulation, bilinear gradient
 sampling, weighted erosion, deposition, evaporation, and terrain-aware strength modifier.
 
+The world-filter pipeline caches erosion by map size, runs optional erosion then smoothing, and always
+runs required steepness then beach detection in TerraForged's original order.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
