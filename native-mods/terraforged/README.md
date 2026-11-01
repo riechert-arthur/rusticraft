@@ -375,6 +375,9 @@ all of it wraps like Java `int`s. Its tests fold every result over 0, -1, `MIN`/
 `range2D` is `range_3d` here), against a Java oracle running Engine's classes; the oracle lives outside Git, in
 `.local/terraforged/oracles/posutil/`.
 
+The simple-continent layer adds warped tectonic cells, shape modulation, nearest-center and boundary
+searches, ocean-distance solving and the single-continent center filter.
+
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders and its position utilities. They change nothing in the game, so there is
