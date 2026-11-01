@@ -252,6 +252,9 @@ completed entries, supports blocking and present-only lookup, and gates queueing
 Cached chunk readers now retain their tile entry, expose chunk and block coordinates, and reproduce
 TerraForged's cell lookup, full iteration, and original bounded-visit behavior safely across threads.
 
+Tile disposal now counts unbordered chunks with Java-width atomic increments and removes a completed
+region from its provider cache when the source threshold is reached.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:

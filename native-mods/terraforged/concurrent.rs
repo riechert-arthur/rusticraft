@@ -137,6 +137,10 @@ impl<T> CacheEntry<T> {
     pub fn is_done(&self) -> bool {
         self.done.load(Ordering::Acquire)
     }
+
+    pub fn value(&self) -> Option<&T> {
+        self.value.get()
+    }
 }
 
 impl<T> ExpiringEntry for CacheEntry<T> {

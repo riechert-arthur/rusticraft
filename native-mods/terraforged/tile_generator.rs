@@ -96,11 +96,12 @@ pub struct TileGeneratorBuilder<H, F> {
 pub struct TileCache<H, F> {
     can_queue: bool,
     generator: Arc<TileGenerator<H, F>>,
-    cache: Cache<CacheEntry<Tile>>,
+    cache: Arc<Cache<CacheEntry<Tile>>>,
 }
 
 pub struct CachedChunk {
     tile: Arc<CacheEntry<Tile>>,
+    cache: Arc<Cache<CacheEntry<Tile>>>,
     chunk_x: i32,
     chunk_z: i32,
     block_x: i32,
@@ -108,9 +109,15 @@ pub struct CachedChunk {
 }
 
 impl CachedChunk {
-    fn new(tile: Arc<CacheEntry<Tile>>, chunk_x: i32, chunk_z: i32) -> Self {
+    fn new(
+        tile: Arc<CacheEntry<Tile>>,
+        cache: Arc<Cache<CacheEntry<Tile>>>,
+        chunk_x: i32,
+        chunk_z: i32,
+    ) -> Self {
         Self {
             tile,
+            cache,
             chunk_x,
             chunk_z,
             block_x: chunk_x.wrapping_shl(4),
@@ -135,10 +142,17 @@ impl CachedChunk {
     }
 
     pub fn cell(&self, block_x: i32, block_z: i32) -> &Cell {
-        self.tile.get().cell(
+        self.tile().cell(
             self.block_x.wrapping_add(block_x & 15),
             self.block_z.wrapping_add(block_z & 15),
         )
+    }
+
+    pub fn dispose(&self) {
+        let tile = self.tile();
+        if tile.dispose() {
+            self.cache.remove(tile.region_id());
+        }
     }
 
     pub fn iterate(&self, mut visitor: impl FnMut(&Cell, i32, i32)) {
@@ -175,6 +189,12 @@ impl CachedChunk {
             }
         }
     }
+
+    fn tile(&self) -> &Tile {
+        self.tile
+            .value()
+            .expect("cached chunk tile must be generated before use")
+    }
 }
 
 impl<H, F> TileCache<H, F>
@@ -190,7 +210,11 @@ where
         Self {
             can_queue: worker_count > Self::QUEUING_MIN_POOL_SIZE,
             generator,
-            cache: Cache::new("TileCache", Self::CAPACITY, Self::LIFETIME_MILLIS),
+            cache: Arc::new(Cache::new(
+                "TileCache",
+                Self::CAPACITY,
+                Self::LIFETIME_MILLIS,
+            )),
         }
     }
 
@@ -245,7 +269,12 @@ where
     pub fn get_chunk(&self, chunk_x: i32, chunk_z: i32) -> CachedChunk {
         let region_x = self.chunk_to_region(chunk_x);
         let region_z = self.chunk_to_region(chunk_z);
-        CachedChunk::new(self.get_tile_at(region_x, region_z), chunk_x, chunk_z)
+        CachedChunk::new(
+            self.get_tile_at(region_x, region_z),
+            Arc::clone(&self.cache),
+            chunk_x,
+            chunk_z,
+        )
     }
 }
 
@@ -833,6 +862,35 @@ mod tests {
         let mut count = 0;
         chunk.iterate(|_, _, _| count += 1);
         assert_eq!(count, 256);
+    }
+
+    #[test]
+    fn cached_chunk_disposal_matches_engine_0_3_0() {
+        let heightmap = TestHeightmap {
+            map: Arc::new(Rivermap::new(7, -9, Vec::new(), GenWarp::direct())),
+            events: Arc::new(Mutex::new(Vec::new())),
+        };
+        let cache = Arc::new(TileGenerator::new(
+            1,
+            0,
+            0,
+            WorldGenerator::new(heightmap, TestFilters(Arc::new(Mutex::new(Vec::new())))),
+        ))
+        .cached(5);
+        let id = Tile::region_id_for(2, -6);
+        let chunks = [
+            cache.get_chunk(4, -12),
+            cache.get_chunk(5, -12),
+            cache.get_chunk(4, -11),
+            cache.get_chunk(5, -11),
+        ];
+        assert!(cache.get(id).is_some());
+        for chunk in &chunks[..3] {
+            chunk.dispose();
+            assert!(cache.get(id).is_some());
+        }
+        chunks[3].dispose();
+        assert!(cache.get(id).is_none());
     }
 
     fn rivermap_events(events: &Mutex<Vec<&'static str>>) -> usize {

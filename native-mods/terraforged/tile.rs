@@ -29,7 +29,10 @@ use super::{
     terraforged_river::Rivermap,
     terraforged_util::{pack, unpack_left, unpack_right},
 };
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicI32, Ordering},
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Size {
@@ -100,6 +103,8 @@ pub struct Tile {
     block_size: Size,
     chunk_size: Size,
     blocks: Vec<Cell>,
+    disposal_target: i32,
+    disposed: AtomicI32,
 }
 
 impl Tile {
@@ -122,6 +127,8 @@ impl Tile {
             blocks: (0..block_size.array_size)
                 .map(|_| Cell::default())
                 .collect(),
+            disposal_target: chunk_size.size.wrapping_mul(chunk_size.size),
+            disposed: AtomicI32::new(0),
         }
     }
 
@@ -175,6 +182,14 @@ impl Tile {
 
     pub const fn block_size(&self) -> Size {
         self.block_size
+    }
+
+    pub fn dispose(&self) -> bool {
+        self.disposed.fetch_add(1, Ordering::AcqRel).wrapping_add(1) >= self.disposal_target
+    }
+
+    pub fn disposed_count(&self) -> i32 {
+        self.disposed.load(Ordering::Acquire)
     }
 
     pub fn filterable(&mut self) -> FilterRegion<'_> {
@@ -726,6 +741,19 @@ mod tests {
         assert_eq!(Tile::batch_size(3, size), 4);
         assert_eq!(Tile::batch_size(5, size), 3);
         assert_eq!(Tile::batch_size(16, size), 1);
+    }
+
+    #[test]
+    fn tile_disposal_matches_engine_0_3_0() {
+        let tile = Tile::new(0, 0, 1, 2);
+        assert_eq!(tile.chunk_count(), 36);
+        for expected in 1..4 {
+            assert!(!tile.dispose());
+            assert_eq!(tile.disposed_count(), expected);
+        }
+        assert!(tile.dispose());
+        assert_eq!(tile.disposed_count(), 4);
+        assert!(tile.dispose());
     }
 
     #[test]
