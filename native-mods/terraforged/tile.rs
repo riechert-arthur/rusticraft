@@ -213,6 +213,22 @@ impl Tile {
         FilterRegion { tile: self }
     }
 
+    pub fn chunk(&mut self, chunk_x: i32, chunk_z: i32) -> GenChunk<'_> {
+        let relative_x = self
+            .chunk_size
+            .border
+            .wrapping_add(self.chunk_size.mask(chunk_x));
+        let relative_z = self
+            .chunk_size
+            .border
+            .wrapping_add(self.chunk_size.mask(chunk_z));
+        self.chunk_writer(relative_x, relative_z)
+    }
+
+    pub fn chunk_writer(&mut self, region_chunk_x: i32, region_chunk_z: i32) -> GenChunk<'_> {
+        GenChunk::new(self, region_chunk_x, region_chunk_z)
+    }
+
     /// `border + mask(block)` on both axes: the index `getCell` reads, always inside the backing.
     fn masked_index(&self, block_x: i32, block_z: i32) -> usize {
         let size = self.block_size;
@@ -289,6 +305,122 @@ impl Filterable for FilterRegion<'_> {
 
     fn backing_mut(&mut self) -> &mut [Cell] {
         &mut self.tile.blocks
+    }
+}
+
+pub struct GenChunk<'tile> {
+    tile: &'tile mut Tile,
+    chunk_x: i32,
+    chunk_z: i32,
+    block_x: i32,
+    block_z: i32,
+    region_block_x: i32,
+    region_block_z: i32,
+}
+
+impl<'tile> GenChunk<'tile> {
+    fn new(tile: &'tile mut Tile, region_chunk_x: i32, region_chunk_z: i32) -> Self {
+        let region_block_x = region_chunk_x.wrapping_shl(4);
+        let region_block_z = region_chunk_z.wrapping_shl(4);
+        let chunk_x = tile
+            .chunk_x
+            .wrapping_add(region_chunk_x)
+            .wrapping_sub(tile.offset_chunks());
+        let chunk_z = tile
+            .chunk_z
+            .wrapping_add(region_chunk_z)
+            .wrapping_sub(tile.offset_chunks());
+        Self {
+            tile,
+            chunk_x,
+            chunk_z,
+            block_x: chunk_x.wrapping_shl(4),
+            block_z: chunk_z.wrapping_shl(4),
+            region_block_x,
+            region_block_z,
+        }
+    }
+
+    pub const fn chunk_x(&self) -> i32 {
+        self.chunk_x
+    }
+
+    pub const fn chunk_z(&self) -> i32 {
+        self.chunk_z
+    }
+
+    pub const fn block_x(&self) -> i32 {
+        self.block_x
+    }
+
+    pub const fn block_z(&self) -> i32 {
+        self.block_z
+    }
+
+    pub fn cell(&self, block_x: i32, block_z: i32) -> &Cell {
+        let relative_x = self.region_block_x.wrapping_add(block_x & 15);
+        let relative_z = self.region_block_z.wrapping_add(block_z & 15);
+        &self.tile.blocks[self.tile.block_size.index_of(relative_x, relative_z) as usize]
+    }
+
+    pub fn cell_mut(&mut self, block_x: i32, block_z: i32) -> &mut Cell {
+        let relative_x = self.region_block_x.wrapping_add(block_x & 15);
+        let relative_z = self.region_block_z.wrapping_add(block_z & 15);
+        let index = self.tile.block_size.index_of(relative_x, relative_z) as usize;
+        &mut self.tile.blocks[index]
+    }
+
+    pub fn visit(
+        &self,
+        mut min_x: i32,
+        mut min_z: i32,
+        mut max_x: i32,
+        mut max_z: i32,
+        mut visitor: impl FnMut(&Cell, i32, i32),
+    ) {
+        let region_min_x = self.block_x;
+        let region_min_z = self.block_z;
+        if max_x < region_min_x || max_z < region_min_z {
+            return;
+        }
+        let region_max_x = self.block_x.wrapping_add(15);
+        let region_max_z = self.block_z.wrapping_add(15);
+        if min_x > region_max_x || max_z > region_max_z {
+            return;
+        }
+        min_x = min_x.max(region_min_x);
+        min_z = min_z.max(region_min_z);
+        max_x = max_x.min(region_max_x);
+        max_z = max_z.min(region_max_z);
+        for z in min_z..=max_x {
+            for x in min_x..=max_z {
+                visitor(self.cell(x, z), x, z);
+            }
+        }
+    }
+
+    pub fn iterate(&self, mut visitor: impl FnMut(&Cell, i32, i32)) {
+        for delta_z in 0..16 {
+            for delta_x in 0..16 {
+                visitor(self.cell(delta_x, delta_z), delta_x, delta_z);
+            }
+        }
+    }
+
+    pub fn generate(&mut self, mut visitor: impl FnMut(&mut Cell, i32, i32, i32, i32)) {
+        let block_x = self.block_x;
+        let block_z = self.block_z;
+        for delta_z in 0..16 {
+            for delta_x in 0..16 {
+                visitor(
+                    self.cell_mut(delta_x, delta_z),
+                    delta_x,
+                    delta_z,
+                    block_x.wrapping_add(delta_x),
+                    block_z.wrapping_add(delta_z),
+                );
+            }
+        }
     }
 }
 
@@ -747,6 +879,42 @@ mod tests {
              w 3 f1abc2a41207e9fe bcb74212e5be0011 bcb74212e5be0011 e3e693d1b08be63d 8d940be0f635f540\n\
              w 4 3bcfc87a7ec4212e 9a4db5329ff5152c d10543f7129cf897 90e87f4ad4a4bba 35389eeae71f8f8a\n"
         );
+    }
+
+    #[test]
+    fn tile_chunks_match_engine_0_3_0() {
+        let mut tile = Tile::new(-2, 3, 2, 1, &TerrainRegistry::new());
+        for (index, cell) in tile.blocks.iter_mut().enumerate() {
+            cell.value = index as f32;
+        }
+        let mut chunk = tile.chunk_writer(2, 3);
+        assert_eq!(
+            (
+                chunk.chunk_x(),
+                chunk.chunk_z(),
+                chunk.block_x(),
+                chunk.block_z(),
+            ),
+            (-7, 14, -112, 224)
+        );
+        assert_eq!(chunk.cell(0, 0).value, 4_640.0);
+        assert_eq!(chunk.cell(17, -1).value, 6_081.0);
+        chunk.cell_mut(17, -1).value = -1.0;
+        let mut generated = Vec::new();
+        chunk.generate(|cell, delta_x, delta_z, block_x, block_z| {
+            if delta_x == 0 && delta_z == 0 {
+                generated.push((cell.value, block_x, block_z));
+            }
+        });
+        assert_eq!(generated, [(4_640.0, -112, 224)]);
+        drop(chunk);
+
+        let chunk = tile.chunk(-7, 14);
+        assert_eq!((chunk.chunk_x(), chunk.chunk_z()), (-7, 14));
+        assert_eq!(chunk.cell(17, -1).value, -1.0);
+        let mut count = 0;
+        chunk.iterate(|_, _, _| count += 1);
+        assert_eq!(count, 256);
     }
 
     /// Engine's tile generators build a tile on one thread and hand it to others (cache, chunk

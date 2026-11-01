@@ -742,6 +742,9 @@ negative and wrapping region positions, shift factors Java masks to five bits, m
 negative, border and overflowing coordinates, and run Engine's `WorldFilters.apply` on its own tiles (hashed cells,
 borders and the optional filters on and off) against `apply_tile`.
 
+Chunk views reproduce TerraForged's masked chunk lookup, world and region block coordinates, sixteen by
+sixteen cell iteration, and mutable generation visitor contract over the tile backing.
+
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes and the tiles' cells with their filter region. They change nothing in the game, so there is
