@@ -32,6 +32,7 @@ use super::{
     terraforged_current_surface_biomes::CurrentSurfaceBiomeSampler,
     terraforged_eroded_noise_generator::ErodedNoiseGenerator,
     terraforged_noise_generator::NoiseGenerator,
+    terraforged_structure_terrain::StructureTerrain,
     terraforged_terrain_cache::{TerrainCache, TerrainDataHandle, TerrainTask},
     terraforged_terrain_levels::TerrainLevels,
 };
@@ -141,7 +142,25 @@ impl TerraForgedGenerator {
     ) -> Result<TerrainDataHandle<ErodedNoiseGenerator>, TerrainError> {
         let position = chunk.position();
         let terrain = self.chunk_data(position.x, position.z);
-        fill_chunk(self.sea_level(), chunk, &terrain, stone, water)?;
+        fill_chunk(self.sea_level(), chunk, &terrain.read(), stone, water)?;
+        Ok(terrain)
+    }
+
+    pub fn fill_from_noise_with_structures<B: TerrainBlockStates>(
+        &self,
+        chunk: &mut TerrainChunk<'_, B>,
+        stone: BlockStateId,
+        water: BlockStateId,
+        air: BlockStateId,
+        structures: &StructureTerrain,
+    ) -> Result<TerrainDataHandle<ErodedNoiseGenerator>, TerrainError> {
+        let position = chunk.position();
+        let terrain = self.chunk_data(position.x, position.z);
+        {
+            let mut data = terrain.write();
+            fill_chunk(self.sea_level(), chunk, &data, stone, water)?;
+            structures.modify_chunk(chunk, &mut data, stone, air)?;
+        }
         Ok(terrain)
     }
 
@@ -465,6 +484,64 @@ mod tests {
     }
 
     #[test]
+    fn structure_stage_updates_the_shared_cached_terrain() {
+        use super::super::terraforged_structure_terrain::{Bounds, Piece};
+        use crate::heightmap::HeightmapType;
+
+        let generator = generator();
+        generator.capture_seed(7);
+        let cached = generator.chunk_data(-1, 2);
+        let (min, max, max_base) = {
+            let data = cached.read();
+            (data.min(), data.max(), data.max_base())
+        };
+        let floor = max + 10;
+        let structures = StructureTerrain::from_rigid_pieces(vec![Piece {
+            bounds: Bounds {
+                min_x: -16,
+                min_y: floor,
+                min_z: 32,
+                max_x: -1,
+                max_y: floor + 5,
+                max_z: 47,
+            },
+            ground_delta: 0,
+        }]);
+        let registry = registry();
+        let mut chunk =
+            TerrainChunk::new(ChunkPos::new(-1, 2), -64, 544, &registry, Properties).unwrap();
+        let result = generator
+            .fill_from_noise_with_structures(
+                &mut chunk,
+                BlockStateId(2),
+                BlockStateId(3),
+                BlockStateId(0),
+                &structures,
+            )
+            .unwrap();
+        assert!(result.ptr_eq(&cached));
+        assert_eq!(cached.read().height_at(-13, 36), floor - 1);
+        assert_eq!(chunk.block(3, floor - 1, 4), BlockStateId(2));
+        assert_eq!(chunk.block(3, floor, 4), BlockStateId(0));
+        assert_eq!(
+            chunk
+                .heightmap(HeightmapType::OceanFloorWg)
+                .unwrap()
+                .highest_taken(3, 4)
+                .unwrap(),
+            floor - 1
+        );
+        let later = generator.chunk_data(-1, 2);
+        assert!(result.ptr_eq(&later));
+        let data = later.read();
+        assert_eq!(data.height_at(-13, 36), floor - 1);
+        assert_eq!(
+            (data.min(), data.max(), data.max_base()),
+            (min, max, max_base)
+        );
+    }
+
+    #[test]
     fn fill_from_noise_uses_chunk_position_and_keeps_terrain_for_later_stages() {
         let generator = generator();
         generator.capture_seed(7);
@@ -477,8 +554,9 @@ mod tests {
         let cached = generator.chunk_data(0, 0);
         assert!(terrain.ptr_eq(&cached));
 
-        let height = terrain.height_at(0, 0);
-        let water = TerrainLevels::water_level(generator.sea_level(), 0, 0, &terrain);
+        let data = terrain.read();
+        let height = data.height_at(0, 0);
+        let water = TerrainLevels::water_level(generator.sea_level(), 0, 0, &data);
         let top = height.max(water);
         assert_eq!(chunk.block(0, height, 0), BlockStateId(2));
         assert_eq!(
