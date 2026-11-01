@@ -550,6 +550,9 @@ wetlands, a 384/62 world) and four ids, plus the additional lakes, overlap tests
 oracle running Engine's class through a subclass with radial roots, `BaseRiverGeneratorOracle.java` in
 `.local/terraforged/oracles/river/`.
 
+The fancy-river layer projects roots from island segments and endpoints, extends them through matching
+island IDs, and immediately generates their branches and wetlands in the original Java random order.
+
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps and its base river generator. They change nothing in the game, so there is

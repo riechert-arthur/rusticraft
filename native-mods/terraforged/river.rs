@@ -3889,7 +3889,7 @@ mod tests {
             }
         }
 
-        fn mix_network(fold: &mut Fold, network: &RiverNetwork) -> i32 {
+        pub(super) fn mix_network(fold: &mut Fold, network: &RiverNetwork) -> i32 {
             let carver = &network.river_carver;
             let river = carver.river;
             for v in [river.x1, river.z1, river.x2, river.z2] {
@@ -4086,6 +4086,172 @@ mod tests {
                     (0x3eb4_0d05, 0x3e92_e3fa, false, 0), (0x3f19_999a, 0x3f80_0000, false, 0),
                     (0x3f19_999a, 0x3f80_0000, false, 0), (0x3f19_999a, 0x3f80_0000, false, 0),
                     (0x3f19_999a, 0x3f80_0000, false, 0), (0x3f19_999a, 0x3f80_0000, false, 0),
+                ]
+            );
+        }
+    }
+
+    mod fancy_river_generator_oracle {
+        use super::super::super::terraforged_engine::Seed;
+        use super::super::super::terraforged_fancy::{
+            FancyContinentGenerator, FancyRiverGenerator,
+        };
+        use super::base_river_generator_oracle::mix_network;
+        use super::lake_oracle::{Fold, fill_from};
+        use super::network_oracle::FILLS;
+        use super::*;
+        use std::sync::Arc;
+
+        fn settings(variant: i32) -> (WorldSettings, RiverSettings) {
+            let mut world = WorldSettings {
+                seed: 12_345,
+                ..WorldSettings::default()
+            };
+            let mut rivers = RiverSettings::default();
+            match variant {
+                1 => {
+                    world.seed = -987_654_321;
+                    rivers.seed_offset = i32::MAX;
+                    rivers.lakes.chance = 1.0;
+                    rivers.wetlands.chance = 1.0;
+                }
+                2 => {
+                    world.properties.world_height = 384;
+                    world.properties.sea_level = 62;
+                    world.control_points.inland = 0.75;
+                }
+                3 => world.continent.continent_scale = 1000,
+                4 => {
+                    world.continent.continent_scale = 777;
+                    rivers.lakes.chance = 0.5;
+                    world.seed = 7;
+                }
+                _ => {}
+            }
+            (world, rivers)
+        }
+
+        /// `new FancyContinentGenerator(new Seed(continent_seed), context)` and the `FancyRiverGenerator` its
+        /// `FancyContinent` builds from the same `GeneratorContext`.
+        fn generator(
+            variant: i32,
+            continent_seed: i32,
+            registry: &Arc<TerrainRegistry>,
+        ) -> (FancyRiverGenerator, i32) {
+            let (world, rivers) = settings(variant);
+            let continent = FancyContinentGenerator::new(&mut Seed::new(continent_seed), world);
+            let levels = Levels::new(world.properties.world_height, world.properties.sea_level);
+            let generator = FancyRiverGenerator::new(
+                continent,
+                world.seed as i32,
+                &world,
+                &rivers,
+                levels,
+                Arc::clone(registry),
+            );
+            (generator, world.continent.continent_scale)
+        }
+
+        #[test]
+        fn generates_networks_like_engine() {
+            let registry = Arc::new(TerrainRegistry::new());
+            let ids = [0x1234_5678, -1, 0x7fff_ffff_0000_0005];
+            let mut fold = Fold(17);
+            let (mut applies, mut networks, mut nodes) = (0, 0, 0);
+            for variant in 0..5 {
+                for continent_seed in [12_345, -98_765] {
+                    let (generator, scale) = generator(variant, continent_seed, &registry);
+                    for (i, id) in (0..).zip(ids) {
+                        let (x, z) = (200 * i - 300, 150 - 100 * i);
+                        let map = generator.generate_rivers(x, z, id);
+                        fold.mix(map.x());
+                        fold.mix(map.z());
+                        fold.mix(map.networks.len() as i32);
+                        networks += map.networks.len();
+                        for network in &map.networks {
+                            nodes += mix_network(&mut fold, network);
+                        }
+                        let step = 0.15 * scale as f32;
+                        for gx in 0..=40 {
+                            for gz in 0..=40 {
+                                let px = -3.0 * scale as f32 + step * gx as f32;
+                                let pz = -3.0 * scale as f32 + step * gz as f32;
+                                for fill in [None, Some(0), Some(1)] {
+                                    let mut cell = fill_from(&FILLS, fill, &registry);
+                                    map.apply(&mut cell, px, pz);
+                                    fold.cell(&cell, &registry);
+                                    applies += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            assert_eq!(
+                (applies, networks, nodes, fold.0),
+                (151_290, 1163, 1702, -1_536_805_052)
+            );
+        }
+
+        #[test]
+        fn samples_match_engine() {
+            let registry = Arc::new(TerrainRegistry::new());
+            let (generator, _) = generator(0, 12_345, &registry);
+            let map = generator.generate_rivers(17, -9, 0x1234_5678);
+            assert_eq!(map.networks.len(), 38);
+            let roots: Vec<_> = map
+                .networks
+                .iter()
+                .take(6)
+                .map(|network| {
+                    let river = network.river_carver.river;
+                    (
+                        [river.x1, river.z1, river.x2, river.z2].map(f32::to_bits),
+                        network.children.len(),
+                    )
+                })
+                .collect();
+            #[rustfmt::skip]
+            assert_eq!(
+                roots,
+                [
+                    ([0xc3e5_f4e5, 0x4191_a4cb, 0xc456_588e, 0x4506_637e], 1),
+                    ([0xc4c1_f108, 0xc312_7834, 0xc4b0_53fb, 0xc560_a93d], 1),
+                    ([0x28a9_e4fb, 0x431a_0540, 0x2a6f_9582, 0x44d9_32dc], 1),
+                    ([0xc503_2035, 0xc4f3_bfb9, 0xc585_3b03, 0xc4f3_bfb9], 1),
+                    ([0xc5b0_9a1a, 0xc49d_7a96, 0xc5b3_a681, 0xc3ad_2cd5], 1),
+                    ([0xc5b3_fdbd, 0xc4a0_15ba, 0xc5ad_d99f, 0xc50c_25fd], 1),
+                ]
+            );
+            let applied: Vec<_> = (0..12)
+                .map(|i| {
+                    let river = map.networks[i / 2].river_carver.river;
+                    let t = if i % 2 == 0 { 0.3 } else { 0.7 };
+                    let x = river.x1 + (river.x2 - river.x1) * t;
+                    let z = river.z1 + (river.z2 - river.z1) * t;
+                    let mut cell = Cell::new(&registry);
+                    cell.value = 0.6;
+                    cell.river_mask = 1.0;
+                    cell.continent_edge = 0.4;
+                    map.apply(&mut cell, x, z);
+                    (
+                        cell.value.to_bits(),
+                        cell.river_mask.to_bits(),
+                        cell.erosion_mask,
+                        cell.terrain.id(),
+                    )
+                })
+                .collect();
+            #[rustfmt::skip]
+            assert_eq!(
+                applied,
+                [
+                    (0x3e83_4515, 0x39fa_0000, false, 0), (0x3e87_874b, 0x39f2_4800, false, 0),
+                    (0x3e83_3949, 0x3634_0000, false, 0), (0x3e87_a7c1, 0x3a9c_ea00, false, 0),
+                    (0x3e83_5fae, 0x3a58_4c00, false, 0), (0x3e66_3602, 0x3a30_6400, true, 5),
+                    (0x3e83_43f4, 0x39b8_5000, false, 0), (0x3e88_01d2, 0x3b42_0500, false, 0),
+                    (0x3e83_8b92, 0x3b23_2000, false, 0), (0x3e87_a222, 0x3946_1000, false, 0),
+                    (0x3e83_3f35, 0x39d4_f800, false, 0), (0x3e87_8c95, 0x39a9_e000, false, 0),
                 ]
             );
         }
