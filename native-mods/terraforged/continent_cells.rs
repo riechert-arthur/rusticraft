@@ -28,6 +28,7 @@ use super::{
     terraforged_continent_config::ContinentConfig,
     terraforged_continent_shape::ContinentCells,
 };
+use std::sync::Mutex;
 
 pub struct CellGenerator {
     seed: i32,
@@ -35,6 +36,8 @@ pub struct CellGenerator {
     jitter: f32,
     shape: CellShape,
     source: CellSource,
+    threshold: f32,
+    offset: Mutex<Option<(f32, f32)>>,
 }
 
 impl CellGenerator {
@@ -45,6 +48,8 @@ impl CellGenerator {
             jitter: config.shape.jitter,
             shape: config.shape.cell_shape,
             source: config.shape.cell_source,
+            threshold: config.shape.threshold,
+            offset: Mutex::new(None),
         }
     }
 
@@ -63,6 +68,65 @@ impl CellGenerator {
             noise,
             noise0,
         }
+    }
+
+    pub fn world_offset(&self, seed: i32) -> (f32, f32) {
+        let offset = *self
+            .offset
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(offset) = offset {
+            return offset;
+        }
+        let offset = self.compute_world_offset(seed, 100_000);
+        *self
+            .offset
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(offset);
+        offset
+    }
+
+    fn compute_world_offset(&self, seed: i32, maximum_radius: i32) -> (f32, f32) {
+        for radius in 1..=maximum_radius {
+            for edge in 0..4 {
+                for step in 0..radius * 2 {
+                    let (cell_x, cell_y) = match edge {
+                        0 => (-radius + step, -radius),
+                        1 => (radius, -radius + step),
+                        2 => (radius - step, radius),
+                        _ => (-radius, radius - step),
+                    };
+                    let cell = self.compute_cell(seed, cell_x, cell_y);
+                    if cell.noise < self.threshold {
+                        continue;
+                    }
+                    if self.valid_spawn(seed, cell_x, cell_y) {
+                        return (cell.px, cell.py);
+                    }
+                }
+            }
+        }
+        (0.0, 0.0)
+    }
+
+    fn valid_spawn(&self, seed: i32, cell_x: i32, cell_y: i32) -> bool {
+        for delta_y in -3..=3 {
+            for delta_x in -3..=3 {
+                let distance_squared = delta_x * delta_x + delta_y * delta_y;
+                if delta_y < 1 || distance_squared >= 9 {
+                    continue;
+                }
+                let cell = self.compute_cell(
+                    seed,
+                    cell_x.wrapping_add(delta_x),
+                    cell_y.wrapping_add(delta_y),
+                );
+                if cell.noise < self.threshold {
+                    return false;
+                }
+            }
+        }
+        true
     }
 }
 
@@ -157,6 +221,52 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn spawn_offsets_match_current_java_source() {
+        let expected = [
+            (0xc015b35c, 0xc03c170b),
+            (0xbff61748, 0xc01546e6),
+            (0x3e757df8, 0xbfae835a),
+            (0xc00ad9ae, 0xc03c170b),
+            (0xbfbb0ba4, 0xc01546e6),
+            (0x3e757df8, 0xbfae835a),
+        ];
+        for (shape_index, shape) in [CellShape::Square, CellShape::Hexagon]
+            .into_iter()
+            .enumerate()
+        {
+            for (source_index, source) in
+                [CellSource::Perlin, CellSource::Simplex, CellSource::Cubic]
+                    .into_iter()
+                    .enumerate()
+            {
+                let mut config = ContinentConfig::default();
+                config.shape.cell_shape = shape;
+                config.shape.cell_source = source;
+                let generator = CellGenerator::new(config);
+                let offset = generator.world_offset(42);
+                assert_eq!(
+                    (offset.0.to_bits(), offset.1.to_bits()),
+                    expected[shape_index * 3 + source_index]
+                );
+                assert_eq!(generator.world_offset(43), offset);
+            }
+        }
+    }
+
+    #[test]
+    fn spawn_search_preserves_origin_skip_and_exhaustion() {
+        let mut config = ContinentConfig::default();
+        config.shape.threshold = f32::NAN;
+        let generator = CellGenerator::new(config);
+        let first = generator.compute_cell(42, -1, -1);
+        assert_eq!(generator.compute_world_offset(42, 1), (first.px, first.py));
+        assert_eq!(generator.compute_world_offset(42, 0), (0.0, 0.0));
+        config.shape.threshold = f32::INFINITY;
+        let generator = CellGenerator::new(config);
+        assert_eq!(generator.compute_world_offset(42, 3), (0.0, 0.0));
     }
 
     #[test]

@@ -343,8 +343,11 @@ generator, and keep the mod enabled for that world's unexplored chunks.
 The current-source cell generator now supplies seeded jittered cells and nearest-cell lookup to the
 shape blender. Tests compare cell fields and combined shape outputs for both cell layouts and all
 three noise sources against the local Java source, including overflowing seed additions. This
-increment computes cells directly; cache/pool behavior, spawn offsets, rivers, and game integration
-remain separate work.
+increment computes cells directly; cell-cache/pool behavior, rivers, and game integration remain
+separate work. Spawn offsets now follow the original spiral search, origin skip, asymmetric
+neighborhood check, and retained first-seed result. Synchronized reads and writes preserve Java's
+separate volatile check-and-set, including the possibility of duplicate concurrent searches. Six
+Java-source fixtures verify the offsets across both cell layouts and all three noise sources.
 
 The current-source continent shape layer now blends the nearest 25 cells, preserving threshold,
 falloff, and separate primary/base noise semantics. Mixed-cell outputs are checked against the
