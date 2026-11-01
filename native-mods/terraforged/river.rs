@@ -1392,6 +1392,29 @@ impl Rivermap {
     pub const fn z(&self) -> i32 {
         self.z
     }
+
+    /// Engine's `Rivermap.get(x, z, instance, heightmap)`: `current` when it is the map of continent cell (x, z),
+    /// otherwise `lookup(x, z)` (Engine calls `heightmap.getContinent().getRivermap(x, z)`).
+    pub fn get_or_lookup(
+        x: i32,
+        z: i32,
+        current: Option<Arc<Self>>,
+        lookup: impl FnOnce(i32, i32) -> Arc<Self>,
+    ) -> Arc<Self> {
+        match current {
+            Some(map) if map.x == x && map.z == z => map,
+            _ => lookup(x, z),
+        }
+    }
+
+    /// Engine's `Rivermap.get(cell, instance, heightmap)`: [`Self::get_or_lookup`] for the cell's continent cell.
+    pub fn get_for_cell(
+        cell: &Cell,
+        current: Option<Arc<Self>>,
+        lookup: impl FnOnce(i32, i32) -> Arc<Self>,
+    ) -> Arc<Self> {
+        Self::get_or_lookup(cell.continent_x, cell.continent_z, current, lookup)
+    }
 }
 
 /// Engine's `rivermap.RiverCache`: river maps by continent cell, made by a `RiverGenerator` on first use and kept
@@ -4010,6 +4033,41 @@ mod tests {
                     (0x3e73_cd30, 0x39a7_a000, false, 6), (0x3f19_999a, 0x3f80_0000, false, 0),
                 ]
             );
+        }
+
+        /// Engine's `Rivermap.get`: the current map is kept while the continent cell matches on both axes; otherwise
+        /// (no map yet, or another cell) the lookup runs once with the requested cell.
+        #[test]
+        fn get_reuses_the_current_map_like_engine() {
+            let empty = |x, z| Arc::new(Rivermap::new(x, z, Vec::new(), GenWarp::direct()));
+            let map = empty(17, -9);
+            let reused =
+                Rivermap::get_or_lookup(17, -9, Some(Arc::clone(&map)), |_, _| unreachable!());
+            assert!(Arc::ptr_eq(&map, &reused));
+            for (x, z, current) in [
+                (18, -9, Some(Arc::clone(&map))),
+                (17, -8, Some(Arc::clone(&map))),
+                (-9, 17, Some(Arc::clone(&map))),
+                (17, -9, None),
+            ] {
+                let mut calls = Vec::new();
+                let replaced = Rivermap::get_or_lookup(x, z, current, |x, z| {
+                    calls.push((x, z));
+                    empty(x, z)
+                });
+                assert!(!Arc::ptr_eq(&map, &replaced));
+                assert_eq!((calls, replaced.x(), replaced.z()), (vec![(x, z)], x, z));
+            }
+
+            let registry = TerrainRegistry::new();
+            let mut cell = Cell::new(&registry);
+            (cell.continent_x, cell.continent_z) = (17, -9);
+            let reused =
+                Rivermap::get_for_cell(&cell, Some(Arc::clone(&map)), |_, _| unreachable!());
+            assert!(Arc::ptr_eq(&map, &reused));
+            (cell.continent_x, cell.continent_z) = (i32::MIN, i32::MAX);
+            let replaced = Rivermap::get_for_cell(&cell, Some(map), empty);
+            assert_eq!((replaced.x(), replaced.z()), (i32::MIN, i32::MAX));
         }
     }
 

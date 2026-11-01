@@ -626,6 +626,9 @@ four terrains, three height / sea level variants, extreme blocks, caches of 4096
 `HeightmapCacheOracle.java` in `.local/terraforged/oracles/heightmap/`, which calls Engine's `HeightmapCache.get` on a
 `Heightmap` whose `apply` is that fill.
 
+Contextual heightmap sampling now reuses a current rivermap while the continent center is unchanged
+and resolves a replacement only when sampling crosses into another continent.
+
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage and the heightmap cache. They change nothing in the game, so there is
