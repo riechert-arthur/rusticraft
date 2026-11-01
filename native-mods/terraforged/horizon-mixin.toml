@@ -131,3 +131,10 @@ file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_climate"
 source = "climate.rs"
 visibility = "pub"
+
+[[module]]
+id = "biome_type"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_biome_type"
+source = "biome_type.rs"
+visibility = "pub"
