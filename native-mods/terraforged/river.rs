@@ -1145,6 +1145,170 @@ impl WetlandCarver {
     }
 }
 
+pub struct RiverNetwork {
+    bounds: Boundsf,
+    lakes: Vec<LakeCarver>,
+    wetlands: Vec<WetlandCarver>,
+    children: Vec<Self>,
+    river_carver: RiverCarver,
+}
+
+impl RiverNetwork {
+    pub fn new(
+        river_carver: RiverCarver,
+        lakes: Vec<LakeCarver>,
+        wetlands: Vec<WetlandCarver>,
+        children: Vec<Self>,
+        bounds: Boundsf,
+    ) -> Self {
+        Self {
+            bounds,
+            lakes,
+            wetlands,
+            children,
+            river_carver,
+        }
+    }
+
+    pub const fn contains(&self, x: f32, z: f32) -> bool {
+        self.bounds.contains(x, z)
+    }
+
+    pub fn carve(&self, cell: &mut Cell, mut x: f32, mut z: f32, lake_x: f32, lake_z: f32) {
+        let river = self.river_carver.river;
+        let warp = self.river_carver.warp;
+        let mut t = Line::distance_on_line(x, z, river.x1, river.z1, river.x2, river.z2);
+        let previous_x = x;
+        let previous_z = z;
+        let previous_t = t;
+        if warp.test(t) {
+            let offset = warp.offset(x, z, previous_t, river);
+            x += unpack_left_float(offset);
+            z += unpack_right_float(offset);
+            t = Line::distance_on_line(x, z, river.x1, river.z1, river.x2, river.z2);
+        }
+        self.river_carver
+            .carve(cell, previous_x, previous_z, previous_t, x, z, t);
+        for wetland in &self.wetlands {
+            wetland.apply_warped(cell, x + lake_x, z + lake_z, x, z);
+        }
+        for lake in &self.lakes {
+            lake.apply(cell, x + lake_x, z + lake_z);
+        }
+        for child in &self.children {
+            child.carve(cell, x, z, lake_x, lake_z);
+        }
+    }
+
+    pub fn overlaps(&self, river: River, extend: f32) -> bool {
+        self.river_carver.river.intersects_extended(river, extend)
+            || self
+                .children
+                .iter()
+                .any(|child| child.overlaps(river, extend))
+    }
+
+    pub fn builder(carver: RiverCarver) -> RiverNetworkBuilder {
+        RiverNetworkBuilder::new(carver)
+    }
+}
+
+pub struct RiverNetworkBuilder {
+    pub carver: RiverCarver,
+    pub lakes: Vec<LakeCarver>,
+    pub wetlands: Vec<WetlandCarver>,
+    pub children: Vec<Self>,
+    _min_x: f32,
+    _min_z: f32,
+    _max_x: f32,
+    _max_z: f32,
+}
+
+impl RiverNetworkBuilder {
+    pub fn new(carver: RiverCarver) -> Self {
+        let mut builder = Self {
+            carver,
+            lakes: Vec::new(),
+            wetlands: Vec::new(),
+            children: Vec::new(),
+            _min_x: 0.0,
+            _min_z: 0.0,
+            _max_x: 0.0,
+            _max_z: 0.0,
+        };
+        let river = builder.carver.river;
+        builder.add_bounds(river);
+        builder
+    }
+
+    pub fn add_bounds(&mut self, river: River) {
+        self._min_x = self._min_x.min(river.x1).min(river.x2);
+        self._min_z = self._min_z.min(river.z1).min(river.z2);
+        self._max_x = self._max_x.max(river.x1).max(river.x2);
+        self._max_z = self._max_z.max(river.z1).max(river.z2);
+    }
+
+    pub fn overlaps(
+        &self,
+        river: River,
+        parent: Option<&RiverNetworkBuilder>,
+        extend: f32,
+    ) -> bool {
+        let parent_is_self = parent.is_some_and(|parent| std::ptr::eq(parent, self));
+        if parent_is_self {
+            let x1 = river.x1 - river.ndx * extend;
+            let z1 = river.z1 - river.ndz * extend;
+            let x2 = river.x1 + river.dx * 0.5;
+            let z2 = river.z1 + river.dz * 0.5;
+            let other = self.carver.river;
+            if Line::intersect(x1, z1, x2, z2, other.x1, other.z1, other.x2, other.z2) {
+                return true;
+            }
+        } else if self.carver.river.intersects_extended(river, extend) {
+            return true;
+        }
+        if parent.is_some()
+            && !parent_is_self
+            && self.carver.river.intersects_extended(river, extend)
+        {
+            return true;
+        }
+        self.children
+            .iter()
+            .any(|branch| branch.overlaps(river, parent, extend))
+    }
+
+    pub fn build(self) -> RiverNetwork {
+        let mut builder = Boundsf::builder();
+        self.record_bounds(&mut builder);
+        self.build_with_bounds(builder.build())
+    }
+
+    fn build_with_bounds(self, bounds: Boundsf) -> RiverNetwork {
+        let children = self
+            .children
+            .into_iter()
+            .map(|child| child.build_with_bounds(Boundsf::NONE))
+            .collect();
+        RiverNetwork::new(self.carver, self.lakes, self.wetlands, children, bounds)
+    }
+
+    fn record_bounds(&self, builder: &mut BoundsfBuilder) {
+        let river = self.carver.river;
+        builder.record(river.min_x, river.min_z);
+        builder.record(river.max_x, river.max_z);
+        for child in &self.children {
+            child.record_bounds(builder);
+        }
+        for lake in &self.lakes {
+            lake.record_bounds(builder);
+        }
+        for wetland in &self.wetlands {
+            wetland.record_bounds(builder);
+        }
+    }
+}
+
 impl LakeConfig {
     pub fn new(settings: Lake, levels: Levels) -> Self {
         let size_min = settings.size_min as f32;
@@ -2796,5 +2960,98 @@ mod tests {
                 [0xc2c80000, 0xc2c80000, 0x44160000, 0x43960000]
             );
         }
+    }
+
+    #[test]
+    fn river_network_matches_engine_0_3_0() {
+        let registry = TerrainRegistry::new();
+        let levels = Levels::new(256, 63);
+        let make_carver = |x1, z1, x2, z2, main| {
+            let config = RiverConfig::builder(levels)
+                .main(main)
+                .bed_width(8)
+                .bank_width(20)
+                .bed_depth(5)
+                .bank_height(2, 6)
+                .fade(0.75)
+                .build();
+            RiverCarver::new(
+                River::new(x1, z1, x2, z2),
+                RiverWarp::none(),
+                config,
+                RiverCarverSettings::default(),
+                levels,
+                &registry,
+            )
+        };
+        let mut root = RiverNetwork::builder(make_carver(0.0, 0.0, 1000.0, 0.0, true));
+        root.lakes.push(LakeCarver::new(
+            Vec2f::new(200.0, 100.0),
+            75.0,
+            0.8,
+            LakeConfig::new(DefaultRiverSettings::default().lakes, levels),
+            &registry,
+        ));
+        root.wetlands.push(WetlandCarver::new(
+            12_345,
+            Vec2f::new(600.0, -100.0),
+            Vec2f::new(900.0, -100.0),
+            80.0,
+            levels,
+            &registry,
+        ));
+        root.children.push(RiverNetwork::builder(make_carver(
+            500.0, -500.0, 500.0, 500.0, false,
+        )));
+        let network = root.build();
+        assert_eq!(
+            [
+                (0.0, 0.0),
+                (500.0, 500.0),
+                (1000.0, 1000.0),
+                (200.0, 100.0),
+                (750.0, -100.0)
+            ]
+            .map(|(x, z)| network.contains(x, z)),
+            [true, true, true, true, true]
+        );
+        assert_eq!(
+            [
+                (500.0, 0.0, 0.0, 0.0),
+                (200.0, 100.0, 0.0, 0.0),
+                (750.0, -100.0, 0.0, 0.0),
+                (500.0, 100.0, 20.0, -10.0),
+                (1100.0, 0.0, 0.0, 0.0)
+            ]
+            .map(|(x, z, lake_x, lake_z)| {
+                let mut cell = Cell::new(&registry);
+                cell.value = 0.6;
+                cell.river_mask = 1.0;
+                cell.continent_edge = 0.4;
+                network.carve(&mut cell, x, z, lake_x, lake_z);
+                (
+                    cell.value.to_bits(),
+                    cell.river_mask.to_bits(),
+                    cell.erosion_mask,
+                    cell.terrain.id(),
+                )
+            }),
+            [
+                (0x3e69b6db, 0, true, 5),
+                (0x3e500000, 0, false, 6),
+                (0x3e7b5555, 0, true, 7),
+                (0x3e66db6e, 0, true, 5),
+                (0x3eaa199f, 0x3e4bf690, false, 0),
+            ]
+        );
+        assert_eq!(
+            [
+                River::new(500.0, -100.0, 500.0, 100.0),
+                River::new(2000.0, 2000.0, 2100.0, 2100.0),
+                River::new(-100.0, 0.0, 100.0, 0.0)
+            ]
+            .map(|river| network.overlaps(river, 50.0)),
+            [true, false, true]
+        );
     }
 }
