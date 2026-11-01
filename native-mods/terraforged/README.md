@@ -756,6 +756,9 @@ replay the `k` lines of `TileOracle.java` on the same tiles: readers before any 
 edge, aliasing and out-of-range positions, Engine's `generate(Consumer)` loop, readers over negative, border and
 overflowing chunk positions, and `visit` over rectangles around chunks.
 
+Tile heightmap traversal now runs base terrain, contextual rivermap selection, river carving, and climate
+in TerraForged's chunk-major order while reusing the current continent's rivermap across cells.
+
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region and the tiles' chunk views. They change nothing in the game, so there is
