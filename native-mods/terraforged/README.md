@@ -53,6 +53,9 @@ including Engine's quirks: a NaN sample rounds to the first step, and below the 
 step even when a blend range above 1 inverts the windows. Where Engine throws (sampling a legacy terrace with no steps),
 this port panics.
 
+The advanced terrace layer adds masked, sloped, modulated and multi-octave stepping with the
+original blend thresholds and normalization range.
+
 ## Status: development only
 
 This layer only adds the noise functions. It changes nothing in the game, so there is nothing for players to install
