@@ -485,8 +485,10 @@ world-surface generation heightmaps used by later surface, structure, and carvin
 The generator facade now joins the cached terrain for a chunk's own position, fills its real block
 storage, and returns the same pooled handle so the remaining terrain stages can consume it safely.
 
-Biome chunk filling now precomputes TerraForged's surface and optional cave 4-by-4 layers in Java
-call order, repeats them through whole sections, and keeps the surface layer above the y=0 cave band.
+Biome chunk filling samples one 4-by-4 biome buffer at quart y=-1 in Java call order and repeats
+it through every section. It does not inject a separate cave layer. Sampling completes before
+section writes, so a source failure cannot partially fill the chunk. The biome-fill oracle runner
+extracts and executes the pinned Java method with minimal chunk/section/buffer stand-ins.
 The cave-biome sampler reproduces independent GLOBAL and UNIQUE pools, equal-weight selection,
 and Java-width seed offsets. Empty pools remain empty, matching Java's null result; no coverage mask
 is applied. `tools/terraforged/run_cave_biome_oracle.py` compiles the original CaveBiomeSampler,
