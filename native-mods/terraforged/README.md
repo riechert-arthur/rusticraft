@@ -61,6 +61,9 @@ or below `blendMin` returns the source sample unchanged. It reports the source's
 against a Java oracle, including Engine's quirks: zero steps turn every terraced sample into NaN, `steps * i` wraps
 like Java's `int`, and a zero `modRange` divides by zero. Where Engine loops forever (`octaves` = `Integer.MAX_VALUE`), this port stops.
 
+The curve layer adds midpoint and S-curves, variable curves, symmetric power curves and configurable
+step smoothing with TerraForged's original approximate exponential and mapping behavior.
+
 ## Status: development only
 
 This layer only adds the noise functions. It changes nothing in the game, so there is nothing for players to install
