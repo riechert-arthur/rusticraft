@@ -24,8 +24,10 @@
 
 use super::{
     terraforged_concurrent::{Cache, CacheEntry, DisposeListener, LazyCallable, ThreadPool},
+    terraforged_context::GeneratorContext,
     terraforged_engine::{Cell, TerrainRegistry},
     terraforged_filters::WorldFilters,
+    terraforged_heightmap::Heightmap,
     terraforged_river::{Rivermap, current_time_millis},
     terraforged_tile::{BatchChunk, ChunkReader, GenChunk, Tile},
 };
@@ -52,6 +54,24 @@ pub trait HeightmapSource {
     fn apply_climate(&self, cell: &mut Cell, x: f32, z: f32);
 }
 
+impl<H: HeightmapSource + ?Sized> HeightmapSource for Arc<H> {
+    fn apply_base(&self, cell: &mut Cell, x: f32, z: f32) {
+        (**self).apply_base(cell, x, z);
+    }
+
+    fn rivermap(&self, x: i32, z: i32) -> Arc<Rivermap> {
+        (**self).rivermap(x, z)
+    }
+
+    fn apply_rivers(&self, cell: &mut Cell, x: f32, z: f32, rivermap: &Rivermap) {
+        (**self).apply_rivers(cell, x, z, rivermap);
+    }
+
+    fn apply_climate(&self, cell: &mut Cell, x: f32, z: f32) {
+        (**self).apply_climate(cell, x, z);
+    }
+}
+
 /// What `postProcess` runs on a filled tile: Engine's `WorldFilters.apply(tile, optionalFilters)`.
 pub trait TileFilters {
     fn apply(&self, tile: &mut Tile, optional: bool);
@@ -60,6 +80,12 @@ pub trait TileFilters {
 impl TileFilters for WorldFilters {
     fn apply(&self, tile: &mut Tile, optional: bool) {
         self.apply_tile(tile, optional);
+    }
+}
+
+impl<F: TileFilters + ?Sized> TileFilters for Arc<F> {
+    fn apply(&self, tile: &mut Tile, optional: bool) {
+        (**self).apply(tile, optional);
     }
 }
 
@@ -83,6 +109,43 @@ impl<H, F> WorldGenerator<H, F> {
     /// `getFilters()`.
     pub const fn filters(&self) -> &F {
         &self.filters
+    }
+}
+
+pub type TerraForgedWorldGenerator = WorldGenerator<Arc<Heightmap>, Arc<WorldFilters>>;
+
+pub struct WorldGeneratorFactory {
+    heightmap: Arc<Heightmap>,
+    filters: Arc<WorldFilters>,
+}
+
+impl WorldGeneratorFactory {
+    pub fn new(context: &mut GeneratorContext) -> Self {
+        let heightmap = Heightmap::new(context);
+        Self::with_heightmap(context, heightmap)
+    }
+
+    pub fn with_heightmap(context: &GeneratorContext, heightmap: Heightmap) -> Self {
+        Self {
+            heightmap: Arc::new(heightmap),
+            filters: Arc::new(WorldFilters::from_context(context)),
+        }
+    }
+
+    pub fn heightmap(&self) -> &Heightmap {
+        &self.heightmap
+    }
+
+    pub fn climate(&self) -> &super::terraforged_climate::Climate {
+        self.heightmap.climate()
+    }
+
+    pub fn filters(&self) -> &WorldFilters {
+        &self.filters
+    }
+
+    pub fn get(&self) -> TerraForgedWorldGenerator {
+        WorldGenerator::new(Arc::clone(&self.heightmap), Arc::clone(&self.filters))
     }
 }
 
