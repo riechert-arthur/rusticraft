@@ -179,6 +179,18 @@ class PublicationTests(unittest.TestCase):
         self.assertTrue(check_public_tree.prohibited("mods/horizon/src/main/java/net/minecraft/Client.java"))
         for path in ["tools/JfrSummary.java", "tests/java/JfrFixture.java"]:
             self.assertFalse(check_public_tree.prohibited(path), path)
+        for path in [
+            "tools/terraforged/TerraForgedSeededGraphOracle.java",
+            "tools/terraforged/TerraForgedSeededDomainOracle.java",
+        ]:
+            self.assertFalse(check_public_tree.prohibited(path), path)
+        for path in [
+            "tools/terraforged/Minecraft.java",
+            "tools/terraforged/TerraForgedSeededGraphOracle.class",
+            "tools/terraforged/TerraForgedSeededDomainOracle.jar",
+            ".local/tools/terraforged/TerraForgedSeededGraphOracle.java",
+        ]:
+            self.assertTrue(check_public_tree.prohibited(path), path)
         for path in ["tools/Minecraft.java", "tests/java/Client.java", ".local/tools/JfrSummary.java"]:
             self.assertTrue(check_public_tree.prohibited(path), path)
 

@@ -9,12 +9,18 @@ import sys
 PRIVATE_ROOTS = {".local", "decompiled", "minecraft", "assets", "run", "logs"}
 PRIVATE_EXTENSIONS = {".jar", ".class", ".jfr", ".hprof", ".java"}
 ORIGINAL_JDK_TOOLS = {"tools/JfrSummary.java", "tests/java/JfrFixture.java"}
+ORIGINAL_TERRAFORGED_ORACLES = {
+    "tools/terraforged/TerraForgedSeededGraphOracle.java",
+    "tools/terraforged/TerraForgedSeededDomainOracle.java",
+}
 
 
 def prohibited(path):
     parsed = PurePosixPath(path)
     # Original JDK-only tools are an exact allowlist; recovered game Java stays private.
     if path in ORIGINAL_JDK_TOOLS:
+        return False
+    if path in ORIGINAL_TERRAFORGED_ORACLES:
         return False
     # Original Horizon mod sources may also be tracked.
     if parsed.suffix == ".java" and path.startswith(("mods/horizon/src/", "mods/horizon-lab/src/")):

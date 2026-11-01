@@ -401,13 +401,20 @@ Runtime-seeded scalar graphs now propagate the seed through constants, octave so
 value, alpha, bias, clamp, inversion, mapping, powers, scaling, thresholds and all five arithmetic
 combiners. `Module::try_value_seed_first` returns an error for nodes not ported to runtime seeding;
 it never silently falls back to legacy sampling. Legacy sampling and serialized reseeding remain
-unchanged. Domain warps, selectors, terraces, caches and other graph nodes still need this path
+unchanged. Selectors, terraces, caches and other graph nodes still need this path
 before current-source terrain blending can use it.
 
 The scalar graph fixtures cover 15 graphs, four seeds and four coordinates (240 Java samples),
 including wrapped seed addition and mixed Perlin/seed-sensitive sources. Regenerate their hashes
 with `tools/terraforged/TerraForgedSeededGraphOracle.java` on a classpath containing compiled
 Noise2D commit `2cb48431148a321f74319d7ef0ea61b26bf8e59c` and its Cereal dependency.
+
+Runtime-seeded domain sampling now covers direct, axis-noise, directional, additive, compound and
+cumulative warps, including nested combinations and warped module evaluation. Both axes use the
+original coordinates independently, and cumulative offsets retain the Java implementation's
+coordinate addition. Seven domains across four seeds and four coordinates compare five outputs
+each against Java (560 float samples). The companion oracle is
+`tools/terraforged/TerraForgedSeededDomainOracle.java`; unsupported children return errors.
 
 The noise layer is ordinary Rust and can be tested without Minecraft resources:
 
