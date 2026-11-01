@@ -45,6 +45,8 @@ As in Engine, the steps are fixed when it is built and start at 0, not at the so
 range over `steps - 1`; it reports the source's bounds. Where Engine throws (sampling a NaN, or a terrace with no
 steps), this port panics.
 
+The legacy terrace layer adds `LegacyTerrace` (`Module.legacyTerrace(lowerCurve, upperCurve, steps, blendRange)`).
+
 ## Status: development only
 
 This layer only adds the noise functions. It changes nothing in the game, so there is nothing for players to install
