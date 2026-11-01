@@ -57,6 +57,9 @@ terrain-category property model, including dominance ordering and derived overri
 The terrain descriptor layer adds delegated, configured, volcanic and composite terrain types,
 preserving Engine 0.3.0's object identity, Java string hues and original composite-dominance quirk.
 
+The terrain registry layer adds the 16 built-in terrain descriptors, case-insensitive registration,
+composite caching, ID fallback and parent-based custom terrain creation.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:

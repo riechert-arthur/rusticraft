@@ -498,6 +498,117 @@ fn java_min(first: f32, second: f32) -> f32 {
     }
 }
 
+pub struct TerrainRegistry {
+    terrains: Vec<Terrain>,
+}
+
+impl TerrainRegistry {
+    pub fn new() -> Self {
+        let terrains = vec![
+            Terrain::new(0, "none", TerrainCategory::None),
+            Terrain::new(1, "deep_ocean", TerrainCategory::DeepOcean),
+            Terrain::new(2, "ocean", TerrainCategory::ShallowOcean),
+            Terrain::new(3, "coast", TerrainCategory::Coast),
+            Terrain::new(4, "beach", TerrainCategory::Beach),
+            Terrain::new(5, "river", TerrainCategory::River),
+            Terrain::new(6, "lake", TerrainCategory::Lake),
+            Terrain::configured_river_override(7, "wetland", TerrainCategory::Wetland, true),
+            Terrain::new(8, "flats", TerrainCategory::Flatland),
+            Terrain::configured_erosion(9, "badlands", TerrainCategory::Flatland, 0.3),
+            Terrain::new(10, "plateau", TerrainCategory::Lowland),
+            Terrain::new(11, "hills", TerrainCategory::Lowland),
+            Terrain::configured_mountain(12, "mountains", TerrainCategory::Highland, true, true),
+            Terrain::configured_mountain(
+                13,
+                "mountain_chain",
+                TerrainCategory::Highland,
+                true,
+                true,
+            ),
+            Terrain::volcano(14, "volcano", TerrainCategory::Highland),
+            Terrain::volcano(15, "volcano_pipe", TerrainCategory::Highland),
+        ];
+        Self { terrains }
+    }
+
+    pub fn terrains(&self) -> &[Terrain] {
+        &self.terrains
+    }
+
+    pub fn find(&self, filter: impl Fn(&Terrain) -> bool) -> Option<Terrain> {
+        self.terrains
+            .iter()
+            .find(|terrain| filter(terrain))
+            .cloned()
+    }
+
+    pub fn get_by_name(&self, name: &str) -> Option<Terrain> {
+        self.terrains
+            .iter()
+            .find(|terrain| terrain.name().eq_ignore_ascii_case(name))
+            .cloned()
+    }
+
+    pub fn get_by_id(&self, id: i32) -> Terrain {
+        usize::try_from(id)
+            .ok()
+            .and_then(|id| self.terrains.get(id))
+            .unwrap_or(&self.terrains[0])
+            .clone()
+    }
+
+    pub fn register(&mut self, instance: Terrain) -> Terrain {
+        if let Some(current) = self.get_by_name(instance.name()) {
+            return current;
+        }
+        let terrain = instance.with_id(self.terrains.len() as i32);
+        self.terrains.push(terrain.clone());
+        terrain
+    }
+
+    pub fn register_composite(&mut self, first: &Terrain, second: &Terrain) -> Terrain {
+        if first.is_same(second) {
+            return first.clone();
+        }
+        let min = if first.id() < second.id() {
+            first.clone()
+        } else {
+            second.clone()
+        };
+        let max = if first.id() > second.id() {
+            first.clone()
+        } else {
+            second.clone()
+        };
+        let name = format!("{}-{}", min.name(), max.name());
+        if let Some(current) = self.get_by_name(&name) {
+            return current;
+        }
+        let terrain = Terrain::composite(self.terrains.len() as i32, min, max);
+        self.terrains.push(terrain.clone());
+        terrain
+    }
+
+    pub fn get_or_create(&mut self, name: &str, parent: Option<Terrain>) -> Terrain {
+        let Some(parent) = parent else {
+            return self.get_by_id(0);
+        };
+        if parent.is_same(&self.terrains[0]) {
+            return self.get_by_id(0);
+        }
+        if let Some(current) = self.get_by_name(name) {
+            return current;
+        }
+        self.register(Terrain::with_parent(0, Arc::<str>::from(name), parent))
+    }
+}
+
+impl Default for TerrainRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -682,5 +793,99 @@ mod tests {
     fn volcano_overrides_match_engine_0_3_0() {
         let volcano = Terrain::volcano(14, "volcano", TerrainCategory::Highland);
         assert_eq!(property_bits(&volcano), 0x19c0);
+    }
+
+    #[test]
+    fn default_terrain_registry_matches_engine_0_3_0() {
+        let registry = TerrainRegistry::new();
+        let expected = [
+            ("none", TerrainCategory::None, 0x3f800000, 0x000),
+            ("deep_ocean", TerrainCategory::DeepOcean, 0x3f800000, 0x0a8),
+            ("ocean", TerrainCategory::ShallowOcean, 0x3f800000, 0x0a4),
+            ("coast", TerrainCategory::Coast, 0x3f800000, 0x0d0),
+            ("beach", TerrainCategory::Beach, 0x3f800000, 0x0d0),
+            ("river", TerrainCategory::River, 0x3f800000, 0x022),
+            ("lake", TerrainCategory::Lake, 0x3f800000, 0x220),
+            ("wetland", TerrainCategory::Wetland, 0x3f800000, 0x4c0),
+            ("flats", TerrainCategory::Flatland, 0x3f800000, 0x041),
+            ("badlands", TerrainCategory::Flatland, 0x3e99999a, 0x041),
+            ("plateau", TerrainCategory::Lowland, 0x3f800000, 0x040),
+            ("hills", TerrainCategory::Lowland, 0x3f800000, 0x040),
+            ("mountains", TerrainCategory::Highland, 0x3f800000, 0x8c0),
+            (
+                "mountain_chain",
+                TerrainCategory::Highland,
+                0x3f800000,
+                0x8c0,
+            ),
+            ("volcano", TerrainCategory::Highland, 0x3f800000, 0x19c0),
+            (
+                "volcano_pipe",
+                TerrainCategory::Highland,
+                0x3f800000,
+                0x19c0,
+            ),
+        ];
+        assert_eq!(registry.terrains().len(), expected.len());
+        for (id, (terrain, expected)) in registry.terrains().iter().zip(expected).enumerate() {
+            let (name, category, erosion, properties) = expected;
+            assert_eq!(terrain.id(), id as i32);
+            assert_eq!(terrain.name(), name);
+            assert_eq!(terrain.category(), category);
+            assert_eq!(terrain.erosion_modifier().to_bits(), erosion);
+            assert_eq!(property_bits(terrain), properties, "{terrain:?}");
+        }
+        assert!(registry.get_by_id(-1).is_same(&registry.get_by_id(0)));
+        assert!(registry.get_by_id(999).is_same(&registry.get_by_id(0)));
+        assert_eq!(registry.get_by_name("OcEaN").unwrap().id(), 2);
+        assert_eq!(
+            registry
+                .find(|terrain| terrain.name() == "hills")
+                .unwrap()
+                .id(),
+            11
+        );
+    }
+
+    #[test]
+    fn terrain_registration_matches_engine_0_3_0() {
+        let mut registry = TerrainRegistry::new();
+        let hills = registry.get_by_id(11);
+        let custom = registry.register(Terrain::with_parent(999, "Custom", hills));
+        assert_eq!(custom.id(), 16);
+        assert_eq!(custom.category(), TerrainCategory::Lowland);
+
+        let duplicate = registry.register(Terrain::new(999, "cUsToM", TerrainCategory::River));
+        assert!(custom.is_same(&duplicate));
+
+        let badlands = registry.get_by_id(9);
+        let composite = registry.register_composite(&custom, &badlands);
+        assert_eq!(composite.id(), 17);
+        assert_eq!(composite.name(), "badlands-Custom");
+        assert_eq!(composite.category(), TerrainCategory::Flatland);
+        assert_eq!(composite.erosion_modifier().to_bits(), 0x3e99999a);
+        assert_eq!(property_bits(&composite), 0x040);
+        assert!(composite.is_same(&registry.register_composite(&badlands, &custom)));
+        assert!(custom.is_same(&registry.register_composite(&custom, &custom)));
+
+        assert!(
+            registry
+                .get_or_create("null_child", None)
+                .is_same(&registry.get_by_id(0))
+        );
+        assert!(
+            registry
+                .get_or_create("none_child", Some(registry.get_by_id(0)))
+                .is_same(&registry.get_by_id(0))
+        );
+        assert!(
+            registry
+                .get_or_create("CUSTOM", Some(registry.get_by_id(5)))
+                .is_same(&custom)
+        );
+        let child = registry.get_or_create("child", Some(custom));
+        assert_eq!(child.id(), 18);
+        assert_eq!(child.category(), TerrainCategory::Lowland);
+        assert_eq!(registry.terrains().len(), 19);
     }
 }
