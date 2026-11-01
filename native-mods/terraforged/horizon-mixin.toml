@@ -208,3 +208,10 @@ file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_biome_sampler"
 source = "biome_sampler.rs"
 visibility = "pub"
+
+[[module]]
+id = "continent_points"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_continent_points"
+source = "continent_points.rs"
+visibility = "pub"

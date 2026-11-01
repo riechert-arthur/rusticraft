@@ -318,6 +318,9 @@ ordered multiply and weighted-sum rules, including the original scaling and fall
 Climate samples and biome overrides now preserve TerraForged's deep and shallow ocean climates,
 beach variants, exact river masking, and base-only sample reset behavior.
 
+Continent control points now classify deep ocean, shallow ocean, coast, and inland terrain and map
+custom world settings through TerraForged's clamped five-segment falloff curve with exact float order.
+
 ## Install
 
 Use `native-mods/terraforged` as a local native-mod bundle in the Rusticraft launcher:
