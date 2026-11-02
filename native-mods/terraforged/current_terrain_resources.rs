@@ -32,7 +32,7 @@ use super::terraforged_terrain_blender::TerrainNoise;
 use std::{collections::BTreeMap, sync::Arc};
 
 pub const TERRAIN_TYPE_COUNT: usize = 18;
-pub const TERRAIN_NOISE_COUNT: usize = 5;
+pub const TERRAIN_NOISE_COUNT: usize = 8;
 
 pub fn current_terrain_type_documents() -> [(&'static str, &'static str); TERRAIN_TYPE_COUNT] {
     [
@@ -169,6 +169,24 @@ pub fn current_terrain_noise_documents() -> [(&'static str, &'static str); TERRA
                 "worldgen/terrain_noise/dales.json"
             )),
         ),
+        (
+            "terraforged:mountains_1",
+            text(crate::terraforged_data!(
+                "worldgen/terrain_noise/mountains_1.json"
+            )),
+        ),
+        (
+            "terraforged:mountains_2",
+            text(crate::terraforged_data!(
+                "worldgen/terrain_noise/mountains_2.json"
+            )),
+        ),
+        (
+            "terraforged:mountains_ridge_1",
+            text(crate::terraforged_data!(
+                "worldgen/terrain_noise/mountains_ridge_1.json"
+            )),
+        ),
     ]
 }
 
@@ -266,6 +284,33 @@ mod tests {
             [
                 1017159841, 1026041084, 1043379902, 1035175271, 1017390598, 1023450675, 1025047324,
                 1034384982,
+            ],
+        ),
+        (
+            "terraforged:mountains_1",
+            "mountains",
+            1.25,
+            [
+                1048829516, 1046430769, 1046501494, 1052706038, 1055145861, 1048762234, 1057043923,
+                1048450569,
+            ],
+        ),
+        (
+            "terraforged:mountains_2",
+            "mountains",
+            1.25,
+            [
+                1035501795, 1046989317, 1046651682, 1047064590, 1038732424, 1033551910, 1041201818,
+                1051702338,
+            ],
+        ),
+        (
+            "terraforged:mountains_ridge_1",
+            "mountains",
+            1.25,
+            [
+                1042479441, 1046453625, 1032500516, 1048851351, 1049707534, 1042506253, 1036087417,
+                1027194770,
             ],
         ),
     ];
