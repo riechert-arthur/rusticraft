@@ -601,3 +601,27 @@ id = "decorator"
 file = "crates/horizon-world/src/worldgen/generator_decoration.rs"
 name = "terraforged_decorator"
 source = "decorator.rs"
+
+[[module]]
+id = "builtin_pack"
+file = "crates/horizon-client-render/src/datapack.rs"
+name = "terraforged_builtin_pack"
+source = "builtin_pack.rs"
+visibility = "pub"
+
+[[injection]]
+id = "builtin-pack"
+target = "horizon_client_render::datapack::discover"
+kind = "RETURN"
+helper = "hooks/builtin_pack.rs"
+bindings = [{ name = "value", ty = "Vec<DataPack>", value = "$value" }]
+
+[[injection]]
+id = "cloud-height"
+target = "horizon_client_render::clouds::Input<'_>::state"
+kind = "RETURN"
+helper = "hooks/cloud_height.rs"
+bindings = [
+  { name = "input", ty = "&Input<'_>", value = "self" },
+  { name = "value", ty = "(MeshKey, Uniform)", value = "$value" },
+]
