@@ -55,6 +55,7 @@ pub(in crate::game) fn register(game: &Game<'_>, commands: &mut Vec<NativeComman
         2,
     ));
     commands.push(NativeCommand::op("tf export structures", 2));
+    commands.push(NativeCommand::op("tf regen <radius:integer>", 2));
 }
 
 /// A TerraForged command: answers and returns true, or leaves the line to others.
@@ -69,6 +70,16 @@ pub(in crate::game) fn perform(
             // `export`: its structure export is commented out in TerraForged, so it writes nothing and only answers
             // (`sendSuccess(.., false)`).
             game.feedback_unbroadcast(Text::colored("Exported structure settings", text::GREEN));
+            true
+        }
+        ["tf", "regen", radius] => {
+            let Ok(radius) = radius.parse::<i32>() else {
+                return false;
+            };
+            if radius < 1 {
+                return false;
+            }
+            regen(game, player, radius);
             true
         }
         ["locateterrain", terrain, rest @ ..] if rest.len() <= 1 => {
@@ -254,4 +265,73 @@ fn syntax_failure(game: &mut Game<'_>, input: &str, cursor: usize, message: Text
         ..Style::default()
     };
     game.command_failure(context.with_color(text::GRAY).with_style(&suggest));
+}
+
+/// `Regenerator.regenerateChunks`: the chunks within `radius` of the player's chunk are
+/// saved away, deleted from memory and disk, and generated again; players get them anew.
+fn regen(game: &mut Game<'_>, player: &NativeServerPlayer, radius: i32) {
+    let italic = |text: &str| {
+        Text::styled(
+            text,
+            Style {
+                italic: Some(true),
+                ..Style::default()
+            },
+        )
+    };
+    let centre = (
+        (player.position[0] as i32) >> 4,
+        (player.position[2] as i32) >> 4,
+    );
+    let keys: Vec<(i32, i32)> = (-radius..=radius)
+        .flat_map(|dz| (-radius..=radius).map(move |dx| (centre.0 + dx, centre.1 + dz)))
+        .collect();
+    game.native_feedback(italic("Deleting chunks"));
+    // Flush out any chunks queued to be written, and the jobs still holding protos.
+    game.streaming.save(&mut game.world, true);
+    horizon_client::streaming::terraforged_regen::discard(&mut game.streaming, &keys);
+    let set: std::collections::HashSet<(i32, i32)> = keys.iter().copied().collect();
+    let _ = game.entity_chunks(&set, true);
+    for &(x, z) in &keys {
+        game.world.modified.remove(&(x, z));
+        game.streaming.forget(&mut game.world, x, z);
+    }
+    game.world
+        .block_entities
+        .retain(|p, _| !set.contains(&(p.0 >> 4, p.2 >> 4)));
+    game.world
+        .block_names
+        .retain(|p, _| !set.contains(&(p.0 >> 4, p.2 >> 4)));
+    if let Err(error) = horizon_client::save::terraforged_regen::delete_chunks(&game.save, &keys) {
+        game.native_feedback(Text::colored(format!("Regen failed: {error}"), text::RED));
+        return;
+    }
+    game.native_feedback(italic("Regenerating chunks"));
+    if let Some(host) = &mut game.lan {
+        let hub = &mut host.hub;
+        for index in 0..hub.guests.len() {
+            if !hub.here(&hub.guests[index]) {
+                continue;
+            }
+            let guest = &mut hub.guests[index];
+            for key in &keys {
+                if guest.sent_chunks.remove(key) {
+                    guest.send(
+                        &horizon_protocol::packets::play::Clientbound::ForgetLevelChunk(
+                            horizon_protocol::packets::play::ForgetLevelChunk {
+                                pos: [key.0, key.1],
+                            },
+                        ),
+                    );
+                }
+            }
+            guest.center = None;
+        }
+        if let Some(far) = hub.far.as_mut() {
+            for &(x, z) in &keys {
+                far.changed(x, z);
+            }
+        }
+    }
+    game.native_feedback(Text::colored("Regen complete!", text::GREEN));
 }
