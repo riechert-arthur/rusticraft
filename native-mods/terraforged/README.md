@@ -1,9 +1,45 @@
 # TerraForged for Rusticraft
 
-An exact Rust translation of
-[TerraForged](https://github.com/TerraForged/TerraForged), delivered as a stacked series of small
-native-mod changes. This foundation ports the deterministic Noise2D primitives used by later terrain
-modules. It intentionally does not alter world generation yet.
+An exact Rust translation of [TerraForged](https://github.com/TerraForged/TerraForged) at commit
+`6dd607ebfd41a3b7274e090b1f2cf565d53d1d44` (its 1.19 port, over the seed-first Noise2D and Engine
+0.3.0), delivered as a stacked series of small native-mod changes.
+
+## Status
+
+Choose **World Type: TerraForged** on Create World's World tab (after Single Biome). The world
+saves TerraForged's overworld stem and a `datapacks/terraforged` pack with TerraForged's
+1024-block overworld, and generates its overworld with TerraForged:
+
+- terrain: continents, rivers, lakes, wetlands, the 14 terrain graphs blended by `TerrainBlender`,
+  hydraulic erosion and smoothing (`NoiseGenerator`, `ErodedNoiseGenerator`);
+- biomes: `ClimateNoise`, `BiomeMapManager`'s climate pools and `BiomeSampler`'s ocean, shore and
+  river overrides, also for `/locate biome`;
+- surfaces: the vanilla surface rules over TerraForged's preliminary heights, then `Surface`;
+- caves: TerraForged's five noise caves and their biomes; no vanilla carvers run;
+- structures: vanilla placement over TerraForged's base heights and biomes, with terrain adapted
+  to rigid jigsaw pieces;
+- decoration: `FeatureDecorator` with TerraForged's vegetation (jittered, fitness-gated trees),
+  cave decoration, water smoothing and snow.
+
+The Nether and the End stay vanilla, as in TerraForged. Deliberate fidelity to the pinned source,
+including its quirks: JSON `Bias` nodes decode as 0 (Engine's spec reads a module as a float), cave
+and other non-surface overworld biomes stay in the climate pools (so `deep_dark` can reach the
+surface), unique caves draw from every registered biome, and each chunk is decorated with the one
+biome at its lowest corner.
+
+Differences and gaps:
+
+- Horizon cannot register new biomes yet, so `terraforged:cave` and `terraforged:oak_forest` are
+  missing: global caves keep the biomes above them, and `oak_forest` never generates.
+- TerraForged's pack makes every overworld taller; here only TerraForged worlds get it.
+- Far terrain (Horizon's distant tiles) still samples the vanilla generator.
+- Not ported: the world preview screen, `/terraforged` commands, the boat hook, TerraForged's
+  dimension effects and the unregistered test volcano feature.
+
+## Layers
+
+The layers were added in this order; later notes supersede earlier ones. The first ports the
+deterministic Noise2D primitives.
 
 The next layer adds TerraForged's octave configuration and Perlin, Perlin2, legacy simplex,
 improved simplex and cubic sources, including the original explicit-seed behavior.
