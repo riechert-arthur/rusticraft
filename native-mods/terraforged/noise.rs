@@ -3137,6 +3137,11 @@ impl Module {
         Self(Box::new(ModuleKind::Map(self, min, max)))
     }
 
+    /// `new Abs(source)`: Cereal's factory, which nests absolute values.
+    pub fn abs_node(self) -> Self {
+        Self(Box::new(ModuleKind::Abs(self)))
+    }
+
     /// `new Alpha(source, alpha)`: Cereal's factory, without the builder's range check.
     pub fn alpha_node(self, alpha: Self) -> Self {
         Self(Box::new(ModuleKind::Alpha(self, alpha)))

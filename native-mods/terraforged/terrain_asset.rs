@@ -64,6 +64,11 @@ pub fn decode_terrain_asset(
     ))
 }
 
+/// Decodes one serialized noise graph the way Engine's Cereal specs do.
+pub fn decode_module(value: &Value) -> Result<Module, TerrainAssetError> {
+    module(value)
+}
+
 fn module(value: &Value) -> Result<Module, TerrainAssetError> {
     let object = object(value)?;
     let kind = string(object, "type")?;
@@ -81,6 +86,7 @@ fn module(value: &Value) -> Result<Module, TerrainAssetError> {
             edge_function(string(object, "edge_func")?)?,
             distance_function(string(object, "dist_func")?)?,
         )),
+        "Abs" => Ok(child(object, "source")?.abs_node()),
         "Alpha" => Ok(child(object, "source")?.alpha_node(child(object, "alpha")?)),
         // Engine's Bias factory reads "bias" with DataValue::asFloat although its spec
         // writes a module, so every serialized bias module decodes as 0.
