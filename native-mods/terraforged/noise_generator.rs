@@ -392,6 +392,7 @@ fn create_ocean_terrain() -> Module {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::super::{
+        terraforged_climate::ClimateSettings,
         terraforged_context::{GeneratorContext, GeneratorSettings},
         terraforged_erosion::tests::smooth_and_digest,
         terraforged_terrain_blender::TerrainNoise,
@@ -517,11 +518,7 @@ grid 2 1 -21491124 3ed3d59af446ef82";
         settings.world.seed = CONTINENT_OFFSET;
         settings.world.properties.sea_level = levels.sea_level;
         settings.world.properties.world_height = levels.max_y;
-        settings.climate.biome_shape.biome_size = 220;
-        settings.climate.temperature.falloff = 2;
-        settings.climate.temperature.bias = 0.1;
-        settings.climate.moisture.falloff = 1;
-        settings.climate.moisture.bias = -0.05;
+        settings.climate = ClimateSettings::terraforged();
         settings.world.continent.continent_scale = 400;
         settings.world.control_points.deep_ocean = 0.05;
         settings.world.control_points.shallow_ocean = 0.3;

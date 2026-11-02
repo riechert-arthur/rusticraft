@@ -22,20 +22,17 @@
  * SOFTWARE.
  */
 
-// Adapted from TerraForged Reimagined (https://github.com/Romoslayer/TerraForged-Reimagined, a24d450):
-// `src/main/java/com/terraforged/mod/worldgen/noise/climate/ClimateNoise.java` (with its biome-edge warp and macro
-// noise grouping, which TerraForged 6dd607eb's ClimateNoise lacks), its reconstructed Engine `Seed` (pre-increment
-// draws) and `TerraSettings.Climate` defaults. MIT License, Copyright (c) 2020 TerraForged, Copyright (c) 2026
-// Romoslayer; see `LICENSE-TERRAFORGED-REIMAGINED`.
+// Ported from TerraForged 6dd607eb (https://github.com/TerraForged/TerraForged, 6dd607ebfd41a3b7274e090b1f2cf565d53d1d44):
+// `src/main/java/com/terraforged/mod/worldgen/noise/climate/ClimateNoise.java`, over Engine 0.3.0's `Seed` and
+// `ClimateSettings` and the climate settings of `NoiseGenerator.createContinentNoise`. MIT License, Copyright (c) 2021
+// TerraForged (above).
 
 use super::{
     terraforged::{
         Domain, Module, Source, SourceConfig, SourceKind, clamp, floor, hash, hash_2d, round,
     },
     terraforged_biome_sampler::ClimateSample,
-    terraforged_climate::{
-        BiomeNoise, BiomeShape, ClimateRange, ClimateSettings, Moisture, Temperature, perlin_warp,
-    },
+    terraforged_climate::{ClimateRange, ClimateSettings, Moisture, Temperature, perlin_warp},
     terraforged_continent_cell::CellShape,
     terraforged_engine::{BiomeType, Seed},
     terraforged_terrain_blend_util::random,
@@ -51,16 +48,15 @@ const CELL_SHAPE: CellShape = CellShape::Square;
 /// The graphs below contain no custom module, so seed-first sampling cannot fail.
 const SUPPORTED: &str = "climate noise graphs have only seed-first nodes";
 
-/// TerraForged Reimagined's `ClimateNoise`: the warped, jittered biome cells of the newer source's biome sampler, with
+/// TerraForged 6dd607eb's `ClimateNoise`: the warped, jittered biome cells of the newer source's biome sampler, with
 /// their selection noise (`biomeNoise`), edge distance (`biomeEdgeNoise`), moisture, temperature and climate type.
 /// Sampling is seed-first: the runtime seed reaches every cell hash and noise. This is NOT Engine's
 /// [`super::terraforged_climate::ClimateModule`] (the jar's climate stage): no continent mask, no macro cell noise,
-/// a 4x4 cell search (Engine's is 3x3), and other warps.
+/// a 4x4 cell search (Engine's is 3x3), and other warps. It reads neither `macroNoiseSize` nor `biomeEdgeShape`
+/// (TerraForged Reimagined's fork adds an edge warp and macro grouping; they are not followed).
 pub struct CurrentClimateNoise {
     frequency: f32,
     warp: Domain,
-    edge_warp: Option<Domain>,
-    macro_noise_size: i32,
     moisture: ClimateAxis<Moisture>,
     temperature: ClimateAxis<Temperature>,
 }
@@ -103,47 +99,26 @@ fn warp(domain: &Domain, seed: i32, x: f32, y: f32) -> (f32, f32) {
 }
 
 impl ClimateSettings {
-    /// TerraForged Reimagined's `TerraSettings.Climate` defaults, as `NoiseGenerator.createContinentNoise` copies
-    /// them into the Engine settings (every field `ClimateNoise` reads): temperature offset 0, scale 7, falloff 2,
-    /// 0..0.98, bias 0.1; moisture offset 8461, scale 6, falloff 1, 0..1, bias -0.05; biome size 220, warp scale 150,
-    /// strength 80, macro noise off (0); edge warp simplex, scale 24, 2 octaves, gain 0.5, lacunarity 2.65,
-    /// strength 24. Engine's own defaults ([`ClimateSettings::default`]) differ.
-    pub fn terra_defaults() -> Self {
-        Self {
-            temperature: ClimateRange {
-                seed_offset: 0,
-                ..ClimateRange::new(7, 2, 0.0, 0.98, 0.1)
-            },
-            moisture: ClimateRange {
-                seed_offset: 8461,
-                ..ClimateRange::new(6, 1, 0.0, 1.0, -0.05)
-            },
-            biome_shape: BiomeShape {
-                biome_size: 220,
-                macro_noise_size: 0,
-                biome_warp_scale: 150,
-                biome_warp_strength: 80,
-            },
-            biome_edge_shape: BiomeNoise {
-                strength: 24,
-                ..BiomeNoise::default()
-            },
-        }
+    /// The climate half of `NoiseGenerator.createContinentNoise`'s settings: Engine's defaults
+    /// ([`ClimateSettings::default`]) with biome size 220, temperature falloff 2 and bias 0.1, moisture falloff 1 and
+    /// bias -0.05. Every field `ClimateNoise` reads: temperature offset 0, scale 6, 0..0.98; moisture offset 0, scale
+    /// 6, 0..1; warp scale 150, strength 80 (Engine's).
+    pub fn terraforged() -> Self {
+        let mut settings = Self::default();
+        settings.biome_shape.biome_size = 220;
+        settings.temperature.falloff = 2;
+        settings.temperature.bias = 0.1;
+        settings.moisture.falloff = 1;
+        settings.moisture.bias = -0.05;
+        settings
     }
 }
 
-/// Reimagined's `Seed.next()`: `++seed` (Engine 0.3.0's, which [`Seed::next`] ports, returns `seed++`). Same state
-/// afterwards, the drawn value one higher. `Seed.offset` (`new Seed(value + offset)`) is [`Seed::offset`] for the
-/// root seeds drawn from here.
-fn next(seed: &mut Seed) -> i32 {
-    seed.next().wrapping_add(1)
-}
-
 impl CurrentClimateNoise {
-    /// `new ClimateNoise(seed, settings)`: draws the module seed from `seed`, three from the moisture offset seed
-    /// (noise, then the two warps), two from the temperature offset seed (its warps), then the two biome-warp seeds
-    /// from `seed`, in Java's order. The edge warp is seeded from fixed offsets of the module seed (7919, 104729,
-    /// wrapping) and exists only for a strength above 0.
+    /// `new ClimateNoise(seed, settings)`, drawing with Engine 0.3.0's [`Seed`] (`next()` returns `seed++`): the module
+    /// seed (`this.seed`, which sampling never reads) from `seed`; three from the moisture offset seed (noise, then the
+    /// two warps) and two from the temperature offset seed (its warps), both `new Seed(root + offset)` of `seed`'s
+    /// root ([`Seed::offset`]); then the two biome-warp seeds from `seed`, in Java's order. `seed` ends three draws on.
     pub fn new(seed: &mut Seed, settings: ClimateSettings) -> Self {
         let biome_size = settings.biome_shape.biome_size;
         let temperature_scaler = settings.temperature.scale as f32;
@@ -154,13 +129,14 @@ impl CurrentClimateNoise {
         let moisture_scale = round(moisture_size * biome_frequency);
         let temperature_scale = round(temperature_size * biome_frequency);
         let warp_scale = settings.biome_shape.biome_warp_scale;
-        let module_seed = next(seed);
+        // `this.seed = seed.next()`: drawn, never read.
+        seed.next();
 
         // The warp strengths are Java doubles (`moistScale / 4D`, `tempScale * 4`) narrowed to float by
         // `Source.constant`.
         let mut moisture_seed = seed.offset(settings.moisture.seed_offset);
         let core = Moisture::new(
-            next(&mut moisture_seed),
+            moisture_seed.next(),
             moisture_scale,
             settings.moisture.falloff,
         );
@@ -168,13 +144,13 @@ impl CurrentClimateNoise {
             core,
             range: settings.moisture,
             first: perlin_warp(
-                next(&mut moisture_seed),
+                moisture_seed.next(),
                 (moisture_scale / 2).max(1),
                 1,
                 f64::from(moisture_scale) / 4.0,
             ),
             second: perlin_warp(
-                next(&mut moisture_seed),
+                moisture_seed.next(),
                 (moisture_scale / 6).max(1),
                 2,
                 f64::from(moisture_scale) / 12.0,
@@ -187,13 +163,13 @@ impl CurrentClimateNoise {
             core: Temperature::new(1.0 / temperature_scale as f32, settings.temperature.falloff),
             range: settings.temperature,
             first: perlin_warp(
-                next(&mut temperature_seed),
+                temperature_seed.next(),
                 temperature_scale4,
                 2,
                 f64::from(temperature_scale4),
             ),
             second: perlin_warp(
-                next(&mut temperature_seed),
+                temperature_seed.next(),
                 temperature_scale,
                 1,
                 f64::from(temperature_scale),
@@ -214,44 +190,32 @@ impl CurrentClimateNoise {
                 },
             ))
         };
-        let warp_x = warp_axis(next(seed));
-        let warp_y = warp_axis(next(seed));
+        let warp_x = warp_axis(seed.next());
+        let warp_y = warp_axis(seed.next());
         let strength = f64::from(settings.biome_shape.biome_warp_strength) * 0.75;
         let warp = Domain::domain_warp(warp_x, warp_y, Module::constant(strength as f32));
-
-        let edge = settings.biome_edge_shape;
-        let edge_warp = (edge.strength > 0).then(|| {
-            Domain::domain_warp(
-                edge.build(module_seed.wrapping_add(7919)),
-                edge.build(module_seed.wrapping_add(104_729)),
-                Module::constant(edge.strength as f32),
-            )
-        });
 
         Self {
             frequency: biome_frequency,
             warp,
-            edge_warp,
-            macro_noise_size: settings.biome_shape.macro_noise_size.max(0),
             moisture,
             temperature,
         }
     }
 
-    /// `sample(seed, x, y, sample)`: the biome warp, then the edge warp (when on), both at the runtime `seed`; the
-    /// cell search at `frequency`; then the climate type from temperature and moisture, with Java's temporary
-    /// (`// TODO: Remove`) cold steppe and steppe to grassland swap. Writes only the five climate fields.
+    /// `sample(seed, x, y, sample)`: the biome warp at the runtime `seed`; the cell search at `frequency`; then the
+    /// climate type from temperature and moisture (Engine 0.3.0's `BiomeType.get`, [`BiomeType::at_climate`]), with
+    /// Java's temporary (`// TODO: Remove`) cold steppe and steppe to grassland swap. Writes only the five climate
+    /// fields. Panics where `BiomeType.get` throws: only NaN climate bounds let a value leave 0..1 (Engine's
+    /// `RangeValue` clamps the others into it).
     pub fn sample(&self, seed: i32, x: f32, y: f32, sample: &mut ClimateSample) {
         let (mut px, mut py) = warp(&self.warp, seed, x, y);
-        if let Some(edge_warp) = &self.edge_warp {
-            (px, py) = warp(edge_warp, seed, px, py);
-        }
         px *= self.frequency;
         py *= self.frequency;
         px = CELL_SHAPE.adjust_x(px);
         py = CELL_SHAPE.adjust_y(py);
         self.sample_biome(seed, px, py, sample);
-        sample.climate_type = BiomeType::at_climate_clamped(sample.temperature, sample.moisture);
+        sample.climate_type = BiomeType::at_climate(sample.temperature, sample.moisture);
         if matches!(
             sample.climate_type,
             BiomeType::ColdSteppe | BiomeType::Steppe
@@ -270,7 +234,6 @@ impl CurrentClimateNoise {
         let max_y = floor(y).wrapping_add(2);
         let (mut nearest_x, mut nearest_y) = (x, y);
         let mut nearest_hash = 0;
-        let (mut nearest_cell_x, mut nearest_cell_y) = (0, 0);
         let mut distance = f32::MAX;
         let mut distance2 = f32::MAX;
         for cell_y in min_y..=max_y {
@@ -286,25 +249,14 @@ impl CurrentClimateNoise {
                     distance = d2;
                     (nearest_x, nearest_y) = (px, py);
                     nearest_hash = hash;
-                    (nearest_cell_x, nearest_cell_y) = (cell_x, cell_y);
                 } else if d2 < distance2 {
                     distance2 = d2;
                 }
             }
         }
-        // `Math.floorDiv` by a positive size is `div_euclid`.
-        let biome_hash = if self.macro_noise_size <= 0 {
-            nearest_hash
-        } else {
-            hash_2d(
-                seed,
-                nearest_cell_x.div_euclid(self.macro_noise_size),
-                nearest_cell_y.div_euclid(self.macro_noise_size),
-            )
-        };
         // `MathUtil.rand(hash, 1236785)` = `rand(NoiseUtil.hash(hash, 1236785))`; its map (range 2) is the same in
         // both Noise2D versions.
-        sample.biome_noise = random(hash(biome_hash, 1_236_785));
+        sample.biome_noise = random(hash(nearest_hash, 1_236_785));
         // `NoiseUtil.sqrt`: `(float) Math.sqrt(double)`.
         sample.biome_edge_noise = 1.0 - (f64::from(distance / distance2).sqrt() as f32);
         sample.moisture = self
@@ -322,33 +274,42 @@ impl CurrentClimateNoise {
 
 #[cfg(test)]
 mod tests {
-    use super::super::terraforged_engine::TerrainRegistry;
+    use super::super::{
+        terraforged_climate::{BiomeNoise, BiomeShape},
+        terraforged_engine::TerrainRegistry,
+    };
     use super::*;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
 
-    /// `CurrentClimateOracle.java` (`.local/terraforged/oracles/current_climate/`, `run.sh`): Reimagined a24d450's
-    /// own `ClimateNoise`, `Seed`, `Settings`, `Moisture`, `Temperature` and `BiomeType` compiled from source,
-    /// interpreted and with `-Xcomp`. Per variant: the root seed's next draw after the constructor and an FNV-1a fold
-    /// of every sample's four float bits and climate type; then a fold of `BiomeType.get` over a 1025² grid from -0.5
-    /// to 1.5 (clamped indices).
-    const EXPECTED: [&str; 14] = [
-        "v 0 18749564 bc9efcf98064af2f",
-        "v 1 18749568 1568f4897a4a9173",
-        "v 2 12349 446990327354f5ba",
-        "v 3 0 8979922364b5699c",
-        "v 4 4 e2ef57355131ad56",
-        "v 5 -2147483643 31514a1ffbe5ed3e",
-        "v 6 -2147483643 67f0908fe201d0db",
-        "v 7 987654325 a9ee586ff3265a57",
-        "v 8 -123456780 3ab0d1fe96b2b393",
-        "v 9 46 70e884a8e56d4f66",
-        "v 10 18749571 2d8ecacf0a68e996",
-        "v 11 31341 83c24cdf93ec1e38",
-        "v 12 560 cd01642bac3dc666",
-        "t 9202e7bcea055432",
+    /// `ClimateNoiseOracle.java` (`.local/terraforged/oracles/climate_noise/`, `run.sh`): TerraForged 6dd607eb's own
+    /// `ClimateNoise` compiled from source over Engine 0.3.0 (its `Seed`, `Settings`, `BiomeType`), Noise2D 2cb4843 and
+    /// Engine's seed-first `Moisture`/`Temperature`, interpreted and with `-Xcomp`. Per variant: the root seed's next
+    /// draw after the constructor, the samples that threw (`BiomeType.get` out of range) and an FNV-1a fold of every
+    /// sample's four float bits and climate type (a throwing sample folds `0xffffffff` alone); then a fold of
+    /// `BiomeType.get` over 0..1.
+    const EXPECTED: [&str; 17] = [
+        "v 0 18749567 0 c405b49a305c010c",
+        "v 1 18749563 0 5142d907151e855a",
+        "v 2 12348 0 0f389c48f8e983ac",
+        "v 3 18749563 0 1e5b0a12fb0a0c99",
+        "v 4 18749567 0 2ff4441d5765d424",
+        "v 5 12348 0 416347f9d8ea4661",
+        "v 6 -1 0 123460240c76d771",
+        "v 7 3 0 a0baf4d3e89c24ba",
+        "v 8 -2147483644 0 24d858a6eb03458d",
+        "v 9 -2147483644 0 6a2008e374dccea5",
+        "v 10 987654324 0 8ec8a2ca83895ddc",
+        "v 11 -123456781 0 8f41f942ea348339",
+        "v 12 45 0 d0458c7acd45e04b",
+        "v 13 18749570 0 56059e455e15de05",
+        "v 14 31340 0 f1b810c13e84240c",
+        "v 15 559 1050 284ff75dce96db34",
+        "t 91aa8d6709fe4e12",
     ];
 
     /// root, pre-draws, biome size, warp scale, warp strength, macro, edge type, edge scale, edge octaves, edge
-    /// strength, temperature offset, scale, falloff, moisture offset, scale, falloff (the oracle's `INTS`).
+    /// strength, temperature offset, scale, falloff, moisture offset, scale, falloff (the oracle's `INTS`, variants 3
+    /// on; the macro and edge fields are set to show that 6dd607eb ignores them).
     const INTS: [[i32; 16]; 13] = [
         [
             18749560, 0, 220, 150, 80, 0, 0, 24, 2, 24, 0, 7, 2, 8461, 6, 1,
@@ -422,11 +383,10 @@ mod tests {
         [0.4, 2.2, 0.0, 0.98, 0.1, 0.0, 1.0, -0.05],
         [0.5, 2.65, 0.0, 0.98, 0.1, 0.0, 1.0, -0.05],
         [0.5, 2.65, 0.1, 0.9, -0.3, 0.05, 0.95, 0.4],
-        // NaN bounds pass every value through the range's clamp: climate values leave 0..1 and the type lookup
-        // clamps its indices.
+        // NaN bounds pass every value through the range's clamp, so some leave 0..1 and `BiomeType.get` throws.
         [0.5, 2.65, f32::NAN, f32::NAN, 1.0, f32::NAN, 0.5, -1.0],
     ];
-    /// Noise2D's `Source` entries the oracle uses, in its order (`SIMPLEX_RIDGE` builds a simplex2 noise).
+    /// Noise2D's `Source` entries the oracle uses, in its order.
     const EDGE_TYPES: [SourceKind; 8] = [
         SourceKind::Simplex,
         SourceKind::Simplex2,
@@ -457,9 +417,10 @@ mod tests {
         (hash ^ u64::from(value as u32)).wrapping_mul(0x0000_0100_0000_01b3)
     }
 
-    fn settings(variant: usize) -> ClimateSettings {
-        let (i, f) = (INTS[variant], FLOATS[variant]);
-        let mut settings = ClimateSettings::terra_defaults();
+    /// The oracle's `settings(k)`: every climate field set, on top of Engine's defaults.
+    fn settings(k: usize) -> ClimateSettings {
+        let (i, f) = (INTS[k], FLOATS[k]);
+        let mut settings = ClimateSettings::default();
         settings.temperature = ClimateRange {
             seed_offset: i[10],
             ..ClimateRange::new(i[11], i[12], f[2], f[3], f[4])
@@ -485,6 +446,31 @@ mod tests {
         settings
     }
 
+    /// Variants 0 to 2: `createContinentNoise`'s settings after the continent's four draws, the same without, and
+    /// Engine's plain defaults; then the oracle's `INTS`/`FLOATS` rows.
+    fn variant(v: usize) -> (Seed, ClimateSettings) {
+        match v {
+            0 | 1 => {
+                let mut seed = Seed::new(18_749_560);
+                if v == 0 {
+                    for _ in 0..4 {
+                        seed.next();
+                    }
+                }
+                (seed, ClimateSettings::terraforged())
+            }
+            2 => (Seed::new(12_345), ClimateSettings::default()),
+            _ => {
+                let k = v - 3;
+                let mut seed = Seed::new(INTS[k][0]);
+                for _ in 0..INTS[k][1] {
+                    seed.next();
+                }
+                (seed, settings(k))
+            }
+        }
+    }
+
     fn positions() -> Vec<(f32, f32)> {
         let mut positions = SPECIAL.to_vec();
         for i in -6..=6 {
@@ -496,22 +482,29 @@ mod tests {
     }
 
     #[test]
-    fn current_climate_noise_matches_reimagined_java() {
+    fn climate_noise_matches_6dd607eb_java() {
         let terrains = TerrainRegistry::new();
         let positions = positions();
         let mut actual = Vec::new();
-        for variant in 0..INTS.len() {
-            let mut seed = Seed::new(INTS[variant][0]);
-            for _ in 0..INTS[variant][1] {
-                next(&mut seed);
-            }
-            let noise = CurrentClimateNoise::new(&mut seed, settings(variant));
-            let draws = next(&mut seed);
+        for v in 0..3 + INTS.len() {
+            let (mut seed, settings) = variant(v);
+            let noise = CurrentClimateNoise::new(&mut seed, settings);
+            let draws = seed.next();
             let mut hash = 0xcbf2_9ce4_8422_2325;
+            let mut thrown = 0;
             for runtime_seed in SEEDS {
                 for &(x, y) in &positions {
                     let mut sample = ClimateSample::new(&terrains);
-                    noise.sample(runtime_seed, x, y, &mut sample);
+                    // Java's `BiomeType.get` throws where `at_climate` panics.
+                    if catch_unwind(AssertUnwindSafe(|| {
+                        noise.sample(runtime_seed, x, y, &mut sample)
+                    }))
+                    .is_err()
+                    {
+                        thrown += 1;
+                        hash = fold(hash, -1);
+                        continue;
+                    }
                     for value in [
                         sample.biome_noise.to_bits() as i32,
                         sample.biome_edge_noise.to_bits() as i32,
@@ -523,14 +516,14 @@ mod tests {
                     }
                 }
             }
-            actual.push(format!("v {variant} {draws} {hash:016x}"));
+            actual.push(format!("v {v} {draws} {thrown} {hash:016x}"));
         }
         let mut hash = 0xcbf2_9ce4_8422_2325;
-        for t in -256..=768 {
-            for m in -256..=768 {
+        for t in 0..=255 {
+            for m in 0..=255 {
                 hash = fold(
                     hash,
-                    BiomeType::at_climate_clamped(t as f32 / 512.0, m as f32 / 512.0) as i32,
+                    BiomeType::at_climate(t as f32 / 255.0, m as f32 / 255.0) as i32,
                 );
             }
         }
@@ -538,33 +531,19 @@ mod tests {
         assert_eq!(actual, EXPECTED);
     }
 
-    /// The defaults are TerraSettings' (Engine's own differ in every axis).
+    /// `createContinentNoise`'s climate: Engine's defaults with five fields changed.
     #[test]
-    fn terra_defaults_match_reimagined_terra_settings() {
-        let settings = ClimateSettings::terra_defaults();
+    fn terraforged_settings_match_create_continent_noise() {
+        let settings = ClimateSettings::terraforged();
         let r = |r: ClimateRange| (r.seed_offset, r.scale, r.falloff, r.min, r.max, r.bias);
-        assert_eq!(r(settings.temperature), (0, 7, 2, 0.0, 0.98, 0.1));
-        assert_eq!(r(settings.moisture), (8461, 6, 1, 0.0, 1.0, -0.05));
+        assert_eq!(r(settings.temperature), (0, 6, 2, 0.0, 0.98, 0.1));
+        assert_eq!(r(settings.moisture), (0, 6, 1, 0.0, 1.0, -0.05));
         assert_eq!(
             settings.biome_shape,
             BiomeShape {
                 biome_size: 220,
-                macro_noise_size: 0,
-                biome_warp_scale: 150,
-                biome_warp_strength: 80,
+                ..BiomeShape::default()
             }
-        );
-        let edge = settings.biome_edge_shape;
-        assert!(matches!(edge.kind, SourceKind::Simplex));
-        assert_eq!(
-            (
-                edge.scale,
-                edge.octaves,
-                edge.gain,
-                edge.lacunarity,
-                edge.strength
-            ),
-            (24, 2, 0.5, 2.65, 24)
         );
     }
 }

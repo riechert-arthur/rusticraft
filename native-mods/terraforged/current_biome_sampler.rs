@@ -22,10 +22,9 @@
  * SOFTWARE.
  */
 
-// Adapted from TerraForged Reimagined (https://github.com/Romoslayer/TerraForged-Reimagined, a24d450):
-// `src/main/java/com/terraforged/mod/worldgen/biome/IBiomeSampler.java` (`Sampler` and `createClimate`; the file is
-// the same in TerraForged 6dd607eb), joining the continent noise to Reimagined's `ClimateNoise`. MIT License,
-// Copyright (c) 2020 TerraForged, Copyright (c) 2026 Romoslayer; see `LICENSE-TERRAFORGED-REIMAGINED`.
+// Ported from TerraForged 6dd607eb (https://github.com/TerraForged/TerraForged, 6dd607ebfd41a3b7274e090b1f2cf565d53d1d44):
+// `src/main/java/com/terraforged/mod/worldgen/biome/IBiomeSampler.java` (`Sampler` and `createClimate`), joining the
+// continent noise to its `ClimateNoise`. MIT License, Copyright (c) 2021 TerraForged (above).
 
 use super::{
     terraforged_biome_sampler::ClimateSample, terraforged_current_climate::CurrentClimateNoise,
@@ -46,11 +45,10 @@ use super::{
 /// a second sampler built from one generator gets the same climate here, where Java's would draw the next seeds
 /// (TerraForged builds one sampler per world, in `Source`).
 ///
-/// Seed draws: the continent is 6dd607eb's ([`ContinentNoise`], Engine 0.3.0's post-increment `Seed`: root seed `s`
-/// gives `s..s+3`) and the climate Reimagined's (pre-increment, [`CurrentClimateNoise::new`]). Both leave the seed
-/// at `s + 4`, so the climate gets Reimagined's seeds (`s + 5` on); Reimagined's own continent, with its
-/// pre-increment seed, draws `s+1..s+4` instead. The climate settings are the context's
-/// (`ClimateSettings::terra_defaults` for Reimagined's `createContinentNoise`).
+/// Seed draws: both are 6dd607eb's, with Engine 0.3.0's post-increment `Seed`: root seed `s` gives the continent
+/// `s..s+3` ([`ContinentNoise`]) and the climate its module seed `s + 4` and biome-warp seeds `s + 5`, `s + 6`
+/// ([`CurrentClimateNoise::new`]; its moisture and temperature seeds start at the root plus their offsets). The
+/// climate settings are the context's (`ClimateSettings::terraforged` for `createContinentNoise`).
 ///
 /// [`ContinentNoise`]: super::terraforged_continent_noise::ContinentNoise
 /// [`ContinentNoise::context`]: super::terraforged_continent_noise::ContinentNoise::context
@@ -113,7 +111,6 @@ impl<'a> CurrentBiomeSampler<'a> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::super::{
-        terraforged_climate::ClimateSettings,
         terraforged_context::GeneratorContext,
         terraforged_continent_noise::ContinentNoise,
         terraforged_noise_generator::tests::{Fold, continent_settings, levels, terrain_set},
@@ -121,14 +118,13 @@ pub(crate) mod tests {
     };
     use super::*;
 
-    /// `.local/terraforged/oracles/current_biome_sampler/` (`run.sh`, after `../noise_generator/run.sh`), in two
-    /// halves since the two trees' Engine classes can't share a JVM. `continent` lines: 6dd607eb's real
-    /// `IBiomeSampler.Sampler` over the newer source's real `NoiseGenerator` (as `noise_generator.rs`' oracle, a
-    /// fresh generator per runtime seed), a fold of `getSample`'s terrain fields per levels variant, terrain set and
-    /// runtime seed. `climate` lines: Reimagined's real `Sampler` and `ClimateNoise` with its own `Seed`, over
-    /// `createContinentNoise`'s context and a stand-in continent that draws `ContinentNoise`'s four seeds: the
-    /// context seed's next value after the constructor, then folds of `getSample`'s climate fields, of `getShape`,
-    /// and of `sample()` into a sample whose terrain fields must stay. `freq` lines: the levels' frequency bits.
+    /// `.local/terraforged/oracles/current_biome_sampler/` (`run.sh`, after `../noise_generator/run.sh`): 6dd607eb's
+    /// real `IBiomeSampler.Sampler` and `ClimateNoise` (with Engine's seed-first `Moisture`/`Temperature`, from
+    /// `../climate_noise`) over the newer source's real `NoiseGenerator` (as `noise_generator.rs`' oracle, a fresh
+    /// generator per runtime seed). `continent` lines: a fold of `getSample`'s terrain fields per levels variant,
+    /// terrain set and runtime seed. `climate` lines (terrain set 0): the context seed's next value after the
+    /// sampler's constructor, then folds of `getSample`'s climate fields, of `getShape`, and of `sample()` into a
+    /// sample whose terrain fields must stay. `freq` lines: the levels' frequency bits.
     const EXPECTED: &str = "\
 freq 0 3f800000\n\
 freq 1 3f800000\n\
@@ -169,24 +165,24 @@ continent 2 1 -17 12142f80c30fa5f8\n\
 continent 2 1 2147483647 89e8fdb83d41cc3b\n\
 continent 2 1 -2147483648 50bf3fe69b0e6fca\n\
 continent 2 1 -8763214 ad5187f7d6fd8642\n\
-climate 0 0 18749568 883e1938b107e935 ae577161e1b56f2b 7ad25c5a1fa8bf15\n\
-climate 0 42 18749568 542995659672f6b5 5949cef216b04673 6a535ad78244685\n\
-climate 0 -17 18749568 64601abec611b773 59f4db3c7a4df791 3a13dcc9b113ac33\n\
-climate 0 2147483647 18749568 91fa1f886b3d5fe1 8c0f841f29d2f77c eaba4931b54ce2d9\n\
-climate 0 -2147483648 18749568 fcf6725856e3c613 97b3d98aff8e36bd 7ec5ecf2f5bc1d93\n\
-climate 0 -8763214 18749568 5654d27be02530a 12126dbb03aad16c 5961c361b3c36732\n\
-climate 1 0 18749568 883e1938b107e935 ae577161e1b56f2b 7ad25c5a1fa8bf15\n\
-climate 1 42 18749568 542995659672f6b5 5949cef216b04673 6a535ad78244685\n\
-climate 1 -17 18749568 64601abec611b773 59f4db3c7a4df791 3a13dcc9b113ac33\n\
-climate 1 2147483647 18749568 91fa1f886b3d5fe1 8c0f841f29d2f77c eaba4931b54ce2d9\n\
-climate 1 -2147483648 18749568 fcf6725856e3c613 97b3d98aff8e36bd 7ec5ecf2f5bc1d93\n\
-climate 1 -8763214 18749568 5654d27be02530a 12126dbb03aad16c 5961c361b3c36732\n\
-climate 2 0 18749568 45af1ed7abf5ebd4 cbdb7a23b59722e6 7a16ec4f1b25ce54\n\
-climate 2 42 18749568 1315b99cc82fab39 ab4f9726130663e5 61dd94d2f9f61769\n\
-climate 2 -17 18749568 81260bb5c67d0029 35ea48f40afe1dbe aa85719a71e6d3a9\n\
-climate 2 2147483647 18749568 f056943313b24394 4ffe6d8fe9c419ee a27b08eb90bc6524\n\
-climate 2 -2147483648 18749568 98972347c1aa0e14 5cf896953ba9f3b1 2b85bda68e6432bc\n\
-climate 2 -8763214 18749568 25456bf27da37de6 889c0d15d53069bd 91b5f99798f9aba6\n\
+climate 0 0 18749567 3002699f2b22e19d 4e90b49c4fcbfd2c ba7facada84ffb1f\n\
+climate 0 42 18749567 a2825c48835579ce ca2ff7a30963dcc 7474db02fa85121e\n\
+climate 0 -17 18749567 a2181bccf15e3dd6 bfbecd81d093a9c9 e436894a4a5c60c2\n\
+climate 0 2147483647 18749567 61434c64b8040663 e21f9c9a791e8c62 7b06234da7aeac5f\n\
+climate 0 -2147483648 18749567 62a626a616eaedca 630083cf2b93a5cc 437314b6899d2c00\n\
+climate 0 -8763214 18749567 325f30209d1c77d ad5daec1320fd34a 781fa5fdd8b4bb11\n\
+climate 1 0 18749567 3002699f2b22e19d 4e90b49c4fcbfd2c ba7facada84ffb1f\n\
+climate 1 42 18749567 a2825c48835579ce ca2ff7a30963dcc 7474db02fa85121e\n\
+climate 1 -17 18749567 a2181bccf15e3dd6 bfbecd81d093a9c9 e436894a4a5c60c2\n\
+climate 1 2147483647 18749567 61434c64b8040663 e21f9c9a791e8c62 7b06234da7aeac5f\n\
+climate 1 -2147483648 18749567 62a626a616eaedca 630083cf2b93a5cc 437314b6899d2c00\n\
+climate 1 -8763214 18749567 325f30209d1c77d ad5daec1320fd34a 781fa5fdd8b4bb11\n\
+climate 2 0 18749567 3c204645d7a1fdf9 a44d0ec126008120 71d303ad7526a3fb\n\
+climate 2 42 18749567 9c0c927154333889 9d450e5a756a0cb5 5f3cbc89597caecf\n\
+climate 2 -17 18749567 a7e23e01e2de9c1b b028c04728cc2e31 6e916a1f34c62d19\n\
+climate 2 2147483647 18749567 91c8101c4cc0e09f 885050d295a27282 f7e6da11e710f133\n\
+climate 2 -2147483648 18749567 5c6d696394040d47 a548c505a84f4ba6 1eb6642dfd40bf4d\n\
+climate 2 -8763214 18749567 ff4abb376ab2b025 3534e2b60cd18d16 ce4ea38df48b9821\n\
 ";
 
     const SEEDS: [i32; 6] = [0, 42, -17, i32::MAX, i32::MIN, -8_763_214];
@@ -218,13 +214,10 @@ climate 2 -8763214 18749568 25456bf27da37de6 889c0d15d53069bd 91b5f99798f9aba6\n
         out
     }
 
-    /// `noise_generator.rs`' oracle generator, with Reimagined's `createContinentNoise` climate settings in the
-    /// context (the continent doesn't read them).
+    /// `noise_generator.rs`' oracle generator: `createContinentNoise`'s settings, its climate included.
     pub(crate) fn generator(variant: usize, set: usize) -> NoiseGenerator {
         let levels = levels(variant);
-        let mut settings = continent_settings(levels);
-        settings.climate = ClimateSettings::terra_defaults();
-        let context = GeneratorContext::new(settings);
+        let context = GeneratorContext::new(continent_settings(levels));
         let land = TerrainBlender::new(
             super::super::terraforged_noise_generator::TERRAIN_OFFSET,
             800,
@@ -268,11 +261,11 @@ climate 2 -8763214 18749568 25456bf27da37de6 889c0d15d53069bd 91b5f99798f9aba6\n
                 let sampler = CurrentBiomeSampler::new(&generator);
                 let terrains = &generator.continent().context().terrain;
                 let mut next = generator.continent().context().seed;
-                // Climate: the module seed and the two warp seeds from the context's seed, then Java's `++seed`.
+                // Climate: the module seed and the two warp seeds from the context's seed, then the next draw.
                 for _ in 0..3 {
                     next.next();
                 }
-                let next = next.next().wrapping_add(1);
+                let next = next.next();
                 let mut folds = [Fold::new(), Fold::new(), Fold::new()];
                 for (x, z) in points() {
                     climate(&mut folds[0], &sampler.get_sample(seed, x, z));
@@ -284,6 +277,8 @@ climate 2 -8763214 18749568 25456bf27da37de6 889c0d15d53069bd 91b5f99798f9aba6\n
                     climate(&mut folds[2], &sample);
                     folds[2].float(sample.noise.continent_noise);
                     folds[2].float(sample.noise.river_noise);
+                    assert!(sample.noise.terrain_type.is_same(&terrains.get_by_id(0)));
+                    folds[2].add(i64::from(sample.noise.terrain_type.id()) as u64);
                 }
                 lines.push(format!(
                     "climate {variant} {seed} {next} {:x} {:x} {:x}",
