@@ -601,3 +601,19 @@ id = "decorator"
 file = "crates/horizon-world/src/worldgen/generator_decoration.rs"
 name = "terraforged_decorator"
 source = "decorator.rs"
+
+[[module]]
+id = "boat"
+file = "crates/horizon-client/src/game/boats.rs"
+name = "terraforged_boat"
+source = "boat.rs"
+
+[[injection]]
+id = "float-the-boat"
+target = "horizon_client::game::boats::Game<'_>::boat_status"
+kind = "OVERWRITE"
+helper = "hooks/boat_status.rs"
+bindings = [
+  { name = "game", ty = "&Game<'_>", value = "self" },
+  { name = "b", ty = "&mut Boat", value = "b" },
+]
