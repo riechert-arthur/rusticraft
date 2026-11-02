@@ -32,7 +32,7 @@ use super::terraforged_terrain_blender::TerrainNoise;
 use std::{collections::BTreeMap, sync::Arc};
 
 pub const TERRAIN_TYPE_COUNT: usize = 18;
-pub const TERRAIN_NOISE_COUNT: usize = 13;
+pub const TERRAIN_NOISE_COUNT: usize = 14;
 
 pub fn current_terrain_type_documents() -> [(&'static str, &'static str); TERRAIN_TYPE_COUNT] {
     [
@@ -217,6 +217,12 @@ pub fn current_terrain_noise_documents() -> [(&'static str, &'static str); TERRA
                 "worldgen/terrain_noise/plateau.json"
             )),
         ),
+        (
+            "terraforged:badlands",
+            text(crate::terraforged_data!(
+                "worldgen/terrain_noise/badlands.json"
+            )),
+        ),
     ]
 }
 
@@ -386,6 +392,15 @@ mod tests {
             [
                 1023472680, 1040509796, 1040362919, 1022814116, 1023381098, 1027648070, 1040548193,
                 1041769889,
+            ],
+        ),
+        (
+            "terraforged:badlands",
+            "badlands",
+            1.75,
+            [
+                1041973016, 1041432992, 1025726124, 1041747298, 1041966398, 1041140618, 1042146427,
+                1029825870,
             ],
         ),
     ];
