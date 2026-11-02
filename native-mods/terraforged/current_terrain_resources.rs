@@ -32,7 +32,7 @@ use super::terraforged_terrain_asset_registry::{
 /// The number of bundled terrain types.
 pub const TERRAIN_TYPE_COUNT: usize = 18;
 /// The number of bundled terrain noises.
-pub const TERRAIN_NOISE_COUNT: usize = 8;
+pub const TERRAIN_NOISE_COUNT: usize = 10;
 
 /// TerraForged Reimagined a24d450's `terrain_type` registry files
 /// (<https://github.com/Romoslayer/TerraForged-Reimagined/tree/a24d4503064780790e975cd17495866ae13eef11>,
@@ -205,6 +205,18 @@ pub fn current_terrain_noise_documents() -> [(&'static str, &'static str); TERRA
             "terraforged:mountains_ridge_1",
             text(crate::terraforged_data!(
                 "worldgen/terrain_noise/mountains_ridge_1.json"
+            )),
+        ),
+        (
+            "terraforged:mountains_3",
+            text(crate::terraforged_data!(
+                "worldgen/terrain_noise/mountains_3.json"
+            )),
+        ),
+        (
+            "terraforged:mountains_ridge_2",
+            text(crate::terraforged_data!(
+                "worldgen/terrain_noise/mountains_ridge_2.json"
             )),
         ),
     ]
