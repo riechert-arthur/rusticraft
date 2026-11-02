@@ -551,6 +551,9 @@ built-in identity, custom parent delegation, and current Java's unknown-parent f
 All eighteen current terrain-type JSON resources are bundled into the native build and decoded from
 their original registry keys without requiring a TerraForged checkout at runtime.
 
+The bundled terrain-noise registry begins with TerraForged's complete `plains` and `steppe` graphs,
+decoded directly from their current JSON resources into runtime-seedable Rust modules.
+
 The noise layer is ordinary Rust and can be tested without Minecraft resources:
 
 ```sh

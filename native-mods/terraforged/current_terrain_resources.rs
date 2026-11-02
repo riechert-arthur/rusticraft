@@ -25,10 +25,14 @@
 
 use super::terraforged_engine::TerrainRegistry;
 use super::terraforged_terrain_asset_registry::{
-    TerrainAssetRegistryError, TerrainTypeAssets, decode_terrain_type_assets,
+    TerrainAssetRegistryError, TerrainTypeAssets, decode_terrain_noise_assets,
+    decode_terrain_type_assets,
 };
+use super::terraforged_terrain_blender::TerrainNoise;
+use std::{collections::BTreeMap, sync::Arc};
 
 pub const TERRAIN_TYPE_COUNT: usize = 18;
+pub const TERRAIN_NOISE_COUNT: usize = 2;
 
 pub fn current_terrain_type_documents() -> [(&'static str, &'static str); TERRAIN_TYPE_COUNT] {
     [
@@ -133,6 +137,29 @@ pub fn decode_current_terrain_types(
     decode_terrain_type_assets(current_terrain_type_documents(), registry)
 }
 
+pub fn current_terrain_noise_documents() -> [(&'static str, &'static str); TERRAIN_NOISE_COUNT] {
+    [
+        (
+            "terraforged:plains",
+            text(crate::terraforged_data!(
+                "worldgen/terrain_noise/plains.json"
+            )),
+        ),
+        (
+            "terraforged:steppe",
+            text(crate::terraforged_data!(
+                "worldgen/terrain_noise/steppe.json"
+            )),
+        ),
+    ]
+}
+
+pub fn decode_current_terrain_noises(
+    types: &TerrainTypeAssets,
+) -> Result<BTreeMap<String, Arc<TerrainNoise>>, TerrainAssetRegistryError> {
+    decode_terrain_noise_assets(current_terrain_noise_documents(), types)
+}
+
 fn text(bytes: &'static [u8]) -> &'static str {
     std::str::from_utf8(bytes).expect("TerraForged terrain type JSON is UTF-8")
 }
@@ -162,5 +189,27 @@ mod tests {
             assets.get("terraforged:flats").unwrap().terrain().name(),
             "flats"
         );
+    }
+
+    #[test]
+    fn bundled_flatland_terrain_noises_decode() {
+        let mut registry = TerrainRegistry::new();
+        let types = decode_current_terrain_types(&mut registry).unwrap();
+        let noises = decode_current_terrain_noises(&types).unwrap();
+        assert_eq!(noises.len(), TERRAIN_NOISE_COUNT);
+        assert_eq!(noises["terraforged:plains"].terrain().name(), "flats");
+        assert_eq!(
+            noises["terraforged:plains"].weight().to_bits(),
+            2.5_f32.to_bits()
+        );
+        assert_eq!(
+            noises["terraforged:steppe"].weight().to_bits(),
+            1.5_f32.to_bits()
+        );
+        for noise in noises.values() {
+            for (x, y) in [(0.0, 0.0), (128.5, -63.25), (-4096.0, 8192.0)] {
+                assert!(noise.noise().value(x, y).is_finite());
+            }
+        }
     }
 }
