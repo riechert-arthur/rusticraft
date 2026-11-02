@@ -353,8 +353,10 @@ impl SeededPipeline for TerraForgedPipeline {
                 },
                 preliminary_surface: preliminary,
                 density_context: &mut context,
-                write_min_y: settings.noise_min_y,
-                write_max_y: settings.noise_min_y + settings.noise_height - 1,
+                // SurfaceSystem.buildSurface walks each column down from its own top: the
+                // whole level, not only the vanilla noise range.
+                write_min_y: min,
+                write_max_y: min + height - 1,
             },
             &vanilla.extensions,
         );

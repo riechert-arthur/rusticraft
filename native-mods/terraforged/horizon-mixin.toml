@@ -500,6 +500,7 @@ id = "client_world_type"
 file = "crates/horizon-client/src/save.rs"
 name = "terraforged_world_type"
 source = "client_world_type.rs"
+visibility = "pub"
 
 [[injection]]
 id = "cycle-world-type"
