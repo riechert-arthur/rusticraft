@@ -105,13 +105,15 @@ impl LiveBiomeBindings {
         Self::bind(&registry_entries(data), configured)
     }
 
-    /// `new BiomeMapManager(access)` over `entries` (see [`RegistryBiomeMap::build`]) and the lookups by key. Entry `i` must hold `BiomeId(i)` (as [`GeneratorData`]'s do; panics
-    /// otherwise). Keys match by namespace and path exactly (`Identifier.equals`).
+    /// `new BiomeMapManager(access)` over `entries` (see [`RegistryBiomeMap::build`]) and the lookups by key. Entry
+    /// `i` must hold `BiomeId(i)` (as [`GeneratorData`]'s do; panics otherwise). Keys match by namespace and path
+    /// exactly (`Identifier.equals`).
     ///
-    /// `Err` with the first of plains and the 13 override biomes (in [`BiomeOverride`] order) the registry lacks. Java
-    /// resolves each with `getOrThrow` when a column first needs it and throws there (failing that chunk); the port
-    /// checks them all here, once, so a registry without them is refused before any chunk instead of partway
-    /// through generation. No biome ever stands in for a missing one.
+    /// `Err` with the first climate-file biome the registry lacks, where the `BiomeMapManager` constructor throws
+    /// (see [`RegistryBiomeMap::build`]); then with the first of plains and the 13 override biomes (in
+    /// [`BiomeOverride`] order) it lacks. Java resolves those with `getOrThrow` when a column first needs one and
+    /// throws there (failing that chunk); the port checks them all here, once, so a registry without them is refused
+    /// before any chunk instead of partway through generation. No biome ever stands in for a missing one.
     pub fn bind(
         entries: &[RegistryBiome<BiomeId>],
         configured: &[ClimateWeight],
@@ -134,13 +136,14 @@ impl LiveBiomeBindings {
                 .map(|entry| Arc::clone(&entry.value))
                 .ok_or_else(|| MissingBiome(Arc::from(name)))
         };
+        let map = RegistryBiomeMap::build(entries, configured).map_err(MissingBiome)?;
         let fallback = required(PLAINS)?;
         let overrides = OVERRIDES
             .iter()
             .map(|replacement| required(replacement.key().unwrap()))
             .collect::<Result<_, _>>()?;
         Ok(Self {
-            map: RegistryBiomeMap::build(entries, configured),
+            map,
             fallback,
             overrides,
         })
@@ -161,13 +164,12 @@ impl LiveBiomeBindings {
         Arc::clone(&self.overrides[index])
     }
 
-    /// [`TerraForgedGenerator::surface_biome_sampler`] over `getBiomeMap()` (the `wet` pools; the dry and highland
-    /// pools are not read by 6dd607eb's sampler) and this plains: build ONE per world.
+    /// [`TerraForgedGenerator::surface_biome_sampler`] over `getBiomeMap()` and this plains: build ONE per world.
     pub fn surface_sampler<'a>(
         &'a self,
         generator: &'a TerraForgedGenerator,
     ) -> CurrentSurfaceBiomeSampler<'a, BiomeId> {
-        generator.surface_biome_sampler(&self.map.wet, &self.fallback)
+        generator.surface_biome_sampler(&self.map.pools, &self.fallback)
     }
 
     /// [`TerraForgedGenerator::create_biomes`] with this registry's override biomes. `surface` must come from
@@ -403,14 +405,14 @@ mod tests {
             .iter()
             .for_each(|o| own(&bindings.override_biome(*o)));
         bindings.map.overworld.iter().for_each(own);
-        for pools in [&bindings.map.wet, &bindings.map.dry, &bindings.map.highland] {
-            for climate in super::super::terraforged_engine::BiomeType::VALUES {
-                pools
-                    .get(climate)
-                    .iter()
-                    .flat_map(|p| p.values())
-                    .for_each(own);
-            }
+        for climate in super::super::terraforged_engine::BiomeType::VALUES {
+            bindings
+                .map
+                .pools
+                .get(climate)
+                .iter()
+                .flat_map(|p| p.values())
+                .for_each(own);
         }
         assert!(
             std::panic::catch_unwind(|| bindings.override_biome(BiomeOverride::Input)).is_err()
