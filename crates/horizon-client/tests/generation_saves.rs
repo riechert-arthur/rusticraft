@@ -435,3 +435,59 @@ fn saved_proto_block_entities_keep_their_id() {
     drop(save);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Chunks deleted and generated again (`Streaming::regenerate`, TerraForged's
+/// `/tf regen`) decorate like vanilla's: the ring next to the finished columns
+/// is decorated too, against them, instead of counting as decorated already.
+#[test]
+fn regenerated_chunks_decorate_beside_finished_ones() {
+    let Some(root) = resources() else {
+        return;
+    };
+    let assets = Arc::new(Assets::load(&root).unwrap());
+    let render = Arc::new(assets.reload(&root).unwrap());
+    let facts = BlockFacts::load(&root, assets.registry).unwrap();
+    let visibility = models::load_visibility(&root, assets.registry).unwrap();
+    let context = Arc::new(WorkerContext {
+        tables: Arc::new(MeshTables::new(&assets, &render, &facts, visibility).unwrap()),
+        light: Arc::new(LightTables::load(&root, assets.registry, &facts).unwrap()),
+        biomes: horizon_client::biome::BiomeTable::new(Arc::new(Biomes::load(&root).unwrap())),
+        assets,
+        render: render.clone(),
+    });
+    let generator = Arc::new(Recorder::default());
+    let mut session = Session::new(generator.clone(), context);
+    session.settle_at((0, 0));
+    let keys: Vec<(i32, i32)> = (-1..=1)
+        .flat_map(|x| (-1..=1).map(move |z| (x, z)))
+        .collect();
+    for &key in &keys {
+        session.world.modified.remove(&key);
+        session.streaming.forget(&mut session.world, key.0, key.1);
+        generator.chunks.lock().unwrap().remove(&key);
+        generator.protos.lock().unwrap().remove(&key);
+        generator.finished.lock().unwrap().remove(&key);
+    }
+    session.streaming.regenerate(&keys);
+    session.settle_at((0, 0));
+    let finished = generator.finished.lock().unwrap();
+    for &(x, z) in &keys {
+        let finishes = finished
+            .get(&(x, z))
+            .unwrap_or_else(|| panic!("({x}, {z}) was not generated again"));
+        assert_eq!(finishes.len(), 1, "({x}, {z}) finished twice");
+        let column = &finishes[0];
+        assert!(column.decorated, "({x}, {z}) was finished undecorated");
+        // Its own decoration and that of each regenerated neighbour; the
+        // finished columns around wrote into it before it was deleted.
+        let mut writes = column.writes.clone();
+        writes.sort_unstable();
+        let mut expected: Vec<(i32, i32)> = keys
+            .iter()
+            .copied()
+            .filter(|k| (k.0 - x).abs() <= 1 && (k.1 - z).abs() <= 1)
+            .collect();
+        expected.sort_unstable();
+        assert_eq!(writes, expected, "({x}, {z})");
+    }
+}
