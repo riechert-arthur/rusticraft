@@ -532,6 +532,20 @@ impl Game<'_> {
             }
         }
         let reg = &mut self.ui.registries;
+        // Native mods' biomes (`biome::native_biome_files`) are the game's too.
+        let native = horizon_client::biome::native_biome_files();
+        let exported = reg.by_registry.get_mut("minecraft:worldgen/biome");
+        for ids in [Some(&mut reg.biomes), exported.map(|r| &mut r.ids)]
+            .into_iter()
+            .flatten()
+        {
+            for (name, _) in &native {
+                if !ids.contains(name) {
+                    ids.push(name.clone());
+                }
+            }
+            ids.sort();
+        }
         reg.timelines = self.ui.timelines.keys().cloned().collect();
         reg.time_markers = self
             .ui
