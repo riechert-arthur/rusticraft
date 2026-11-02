@@ -662,3 +662,10 @@ file = "crates/horizon-client-render/src/streaming.rs"
 name = "terraforged_regen"
 source = "regen_streaming.rs"
 visibility = "pub"
+
+[[module]]
+id = "volcano"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_volcano"
+source = "volcano.rs"
+visibility = "pub"

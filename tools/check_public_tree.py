@@ -38,6 +38,7 @@ ORIGINAL_TERRAFORGED_ORACLES = {
     "tools/terraforged/TerraForgedClimateNoiseOracle.java",
     "tools/terraforged/TerraForgedTerrainNoiseOracle.java",
     "tools/terraforged/TerraForgedNoiseCaveOracle.java",
+    "tools/terraforged/TerraForgedVolcanoOracle.java",
 }
 
 
