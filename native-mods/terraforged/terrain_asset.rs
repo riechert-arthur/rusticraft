@@ -24,8 +24,8 @@
  */
 
 use super::terraforged::{
-    CurveFunction, DistanceFunction, Domain, EdgeFunction, Interpolation, Module, Source,
-    SourceConfig, SourceKind,
+    CurveFunction, DistanceFunction, Domain, EdgeFunction, ErosionMode, ErosionRidge,
+    Interpolation, Module, Source, SourceConfig, SourceKind,
 };
 use super::terraforged_engine::Terrain;
 use super::terraforged_terrain_blender::TerrainNoise;
@@ -120,6 +120,17 @@ fn module(value: &Value) -> Result<Module, TerrainAssetError> {
             child(object, "slope_max")?,
             curve(field(object, "curve")?)?,
         )),
+        "Valley" => Ok(ErosionRidge::full(
+            signed(object, "seed")?,
+            signed(object, "octaves")?,
+            number(object, "strength")?,
+            number(object, "grid_size")?,
+            number(object, "amplitude")?,
+            number(object, "lacunarity")?,
+            number(object, "fall_off")?,
+            erosion_mode(string(object, "blend")?)?,
+        )
+        .wrap(child(object, "source")?)),
         "Add" => Ok(Module::add(children(object, "modules")?)),
         "Mult" => Ok(Module::multiply(children(object, "modules")?)),
         "Max" => Ok(Module::max(children(object, "modules")?)),
@@ -175,6 +186,17 @@ fn interpolation(name: &str) -> Result<Interpolation, TerrainAssetError> {
         "CURVE4" => Ok(Interpolation::Curve4),
         other => Err(TerrainAssetError(format!(
             "unknown interpolation {other:?}"
+        ))),
+    }
+}
+
+fn erosion_mode(name: &str) -> Result<ErosionMode, TerrainAssetError> {
+    match name {
+        "CONSTANT" => Ok(ErosionMode::Constant),
+        "INPUT_LINEAR" => Ok(ErosionMode::InputLinear),
+        "OUTPUT_LINEAR" => Ok(ErosionMode::OutputLinear),
+        other => Err(TerrainAssetError(format!(
+            "unknown erosion blend {other:?}"
         ))),
     }
 }
@@ -413,6 +435,50 @@ mod tests {
                 .iter()
                 .all(|value| *value != f32::NAN.to_bits())
         );
+    }
+
+    #[test]
+    fn decodes_engine_valley_erosion_nodes() {
+        let source = serde_json::json!({
+            "type": "Perlin", "seed": 5, "octaves": 2, "gain": 0.5,
+            "frequency": 0.004, "lacunarity": 2.2, "interpolation": "CURVE3"
+        });
+        let source_module = || {
+            Module::source(Source::new(
+                SourceKind::Perlin,
+                SourceConfig {
+                    seed: 5,
+                    octaves: 2,
+                    gain: 0.5,
+                    frequency: 0.004,
+                    lacunarity: 2.2,
+                    interpolation: Interpolation::Curve3,
+                },
+            ))
+        };
+        for (blend, mode) in [
+            ("CONSTANT", ErosionMode::Constant),
+            ("INPUT_LINEAR", ErosionMode::InputLinear),
+            ("OUTPUT_LINEAR", ErosionMode::OutputLinear),
+        ] {
+            let json = serde_json::json!({
+                "type": "Valley", "blend": blend, "amplitude": 0.15, "fall_off": 0.8,
+                "grid_size": 128, "lacunarity": 3.1, "octaves": 2, "seed": 310154,
+                "strength": 0.65, "source": source
+            });
+            let expected = ErosionRidge::full(310154, 2, 0.65, 128.0, 0.15, 3.1, 0.8, mode)
+                .wrap(source_module());
+            assert_eq!(values(&module(&json).unwrap()), values(&expected));
+        }
+        let error = match module(&serde_json::json!({
+            "type": "Valley", "blend": "SIDEWAYS", "amplitude": 0.15, "fall_off": 0.8,
+            "grid_size": 128, "lacunarity": 3.1, "octaves": 2, "seed": 1,
+            "strength": 0.65, "source": constant(0.5)
+        })) {
+            Ok(_) => panic!("unknown erosion blend decoded"),
+            Err(error) => error,
+        };
+        assert_eq!(error.to_string(), "unknown erosion blend \"SIDEWAYS\"");
     }
 
     #[test]
