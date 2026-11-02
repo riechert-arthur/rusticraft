@@ -439,3 +439,51 @@ file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_cave_assets"
 source = "cave_assets.rs"
 visibility = "pub"
+
+[[module]]
+id = "world_preset"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_world_preset"
+source = "world_preset.rs"
+visibility = "pub"
+
+[[module]]
+id = "pipeline"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_pipeline"
+source = "pipeline.rs"
+
+[[injection]]
+id = "add-world-preset"
+target = "horizon_world::worldgen::overrides::WorldgenOverrides::apply"
+kind = "RETURN"
+helper = "hooks/add_preset.rs"
+bindings = [
+  { name = "bundle", ty = "&str", value = "bundle" },
+  { name = "value", ty = "BTreeMap<String, String>", value = "$value" },
+]
+
+[[injection]]
+id = "terraforged-world-generator"
+target = "horizon_world::worldgen::generator::OverworldGenerator::for_world"
+kind = "OVERWRITE"
+helper = "hooks/for_world.rs"
+bindings = [
+  { name = "data", ty = "Arc<GeneratorData>", value = "data" },
+  { name = "seed", ty = "i64", value = "seed" },
+  { name = "preset", ty = "&str", value = "preset" },
+  { name = "dimension", ty = "&str", value = "dimension" },
+  { name = "structures", ty = "bool", value = "structures" },
+]
+
+[[injection]]
+id = "terraforged-dimension-generator"
+target = "horizon_world::worldgen::generator::OverworldGenerator::for_dimension"
+kind = "OVERWRITE"
+helper = "hooks/for_dimension.rs"
+bindings = [
+  { name = "data", ty = "Arc<GeneratorData>", value = "data" },
+  { name = "seed", ty = "i64", value = "seed" },
+  { name = "preset", ty = "&str", value = "preset" },
+  { name = "dimension", ty = "&str", value = "dimension" },
+]
