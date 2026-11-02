@@ -181,9 +181,9 @@ impl TerraForgedPipeline {
         };
         let level = overrides::LevelHeight::of_type(&stem["type"], &data.dimension_types)
             .map(|height| (height.min_y, height.height));
-        // CaveBiomeSampler(800, biomeMapManager): GLOBAL caves use terraforged:cave (not registered in Horizon yet, so
-        // they keep their biomes); UNIQUE caves draw from every registered biome (6dd607eb's UNDERGROUND filter is
-        // commented out), in 26.3's registry order: path, then namespace.
+        // CaveBiomeSampler(800, biomeMapManager): GLOBAL caves use terraforged:cave; UNIQUE caves draw from every
+        // registered biome (6dd607eb's UNDERGROUND filter is commented out), in 26.3's registry order: path, then
+        // namespace.
         let global = data
             .biome_id("terraforged:cave")
             .map(Arc::new)

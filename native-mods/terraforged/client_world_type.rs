@@ -30,6 +30,7 @@
 
 use super::{Result, WorldGen, WorldPreset, read_saved_data, world_gen_settings, write_saved_data};
 use horizon_world::nbt::Tag;
+use horizon_world::worldgen::generator::terraforged_mod_biomes::mod_biome_files;
 use horizon_world::worldgen::generator::terraforged_world_preset::{
     GENERATOR_TYPE, PRESET, overworld_type_json, preset_json,
 };
@@ -166,8 +167,9 @@ const PACK_FOLDER: &str = "terraforged";
 /// The world's own copy of TerraForged's built-in pack, with its taller overworld dimension
 /// type ([`overworld_type_json`], the built-in pack's file): from y -64, 1024 blocks, so the
 /// generator's range, the level shapes and the synced `dimension_type` registry follow it as
-/// for any world pack. TerraForged's built-in pack also holds its worldgen registries; the
-/// port bundles those, so only the dimension type is copied. The Create screen copies the
+/// for any world pack, and TerraForged's two biomes ([`biome_files`]), which the generator
+/// reads from here as from any world pack. TerraForged's built-in pack also holds its other worldgen
+/// registries; the port bundles those, so they are not copied. The Create screen copies the
 /// packs its Data Packs screen showed into `datapacks` first: a folder already named
 /// `terraforged` holding exactly this pack (Re-Create's copy) is kept as it is, and any other
 /// (a pack of the player's own) is left alone and this pack takes the next free name,
@@ -176,12 +178,13 @@ const PACK_FOLDER: &str = "terraforged";
 fn write_pack(dir: &Path) -> Result<()> {
     let datapacks = dir.join("datapacks");
     let meta = pack_meta();
+    let biomes = biome_bytes();
     let mut pack = datapacks.join(PACK_FOLDER);
     for n in 1.. {
         if !pack.exists() {
             break;
         }
-        if is_this_pack(&pack, &meta) {
+        if is_this_pack(&pack, &meta, &biomes) {
             return Ok(());
         }
         pack = datapacks.join(format!("{PACK_FOLDER}-{n}"));
@@ -190,7 +193,44 @@ fn write_pack(dir: &Path) -> Result<()> {
     std::fs::create_dir_all(&types)?;
     std::fs::write(pack.join("pack.mcmeta"), meta)?;
     std::fs::write(types.join("overworld.json"), overworld_type_json())?;
+    for (id, json) in &biomes {
+        let file = pack.join(biome_file(id));
+        if let Some(folder) = file.parent() {
+            std::fs::create_dir_all(folder)?;
+        }
+        std::fs::write(file, json)?;
+    }
     Ok(())
+}
+
+/// TerraForged's own biomes (6dd607eb `ModBiomes`), as `(id, JSON)`: copies of the game's own
+/// 26.3 biomes (`terraforged_mod_biomes`), so the table and the synchronized registry take them
+/// through `native_biome_files`, and the generator from the world's pack ([`write_pack`]). A
+/// biome whose vanilla parent can't be read is left out, with a warning.
+pub fn biome_files() -> Vec<(String, serde_json::Value)> {
+    let (biomes, missing) = mod_biome_files();
+    for reason in missing {
+        log::warn!("TerraForged: biome {reason}; it is left out");
+    }
+    biomes
+}
+
+/// [`biome_files`] as [`write_pack`] writes them.
+fn biome_bytes() -> Vec<(String, Vec<u8>)> {
+    biome_files()
+        .into_iter()
+        .filter_map(|(id, json)| Some((id, serde_json::to_vec_pretty(&json).ok()?)))
+        .collect()
+}
+
+/// The pack file of the biome `id` (`terraforged:<path>`).
+fn biome_file(id: &str) -> std::path::PathBuf {
+    let (namespace, path) = id.split_once(':').unwrap_or(("minecraft", id));
+    Path::new("data")
+        .join(namespace)
+        .join("worldgen")
+        .join("biome")
+        .join(format!("{path}.json"))
 }
 
 fn pack_meta() -> String {
@@ -205,14 +245,17 @@ fn pack_meta() -> String {
     .to_string()
 }
 
-/// Whether the folder `pack` holds exactly the pack [`write_pack`] writes.
-fn is_this_pack(pack: &Path, meta: &str) -> bool {
+/// Whether the folder `pack` holds exactly the pack [`write_pack`] writes, with `biomes`.
+fn is_this_pack(pack: &Path, meta: &str, biomes: &[(String, Vec<u8>)]) -> bool {
     let read = |path: &Path| std::fs::read(path).ok();
     let overworld = pack.join("data/minecraft/dimension_type/overworld.json");
     let files = walk(pack);
-    files.len() == 2
+    files.len() == 2 + biomes.len()
         && read(&pack.join("pack.mcmeta")).as_deref() == Some(meta.as_bytes())
         && read(&overworld).as_deref() == Some(overworld_type_json().as_bytes())
+        && biomes
+            .iter()
+            .all(|(id, json)| read(&pack.join(biome_file(id))).as_ref() == Some(json))
 }
 
 /// The files under `dir` (none when it is not a folder).
@@ -315,6 +358,7 @@ mod tests {
 
     #[test]
     fn a_terraforged_world_saves_and_reloads_as_terraforged() {
+        vanilla_biomes();
         let dir = scratch("round-trip");
         let options = WorldGen {
             preset: WorldPreset::Normal,
@@ -357,7 +401,8 @@ mod tests {
         assert_eq!((height.min_y, height.height), (-64, 1024));
         assert!(is_this_pack(
             &dir.join("datapacks/terraforged"),
-            &pack_meta()
+            &pack_meta(),
+            &biome_bytes()
         ));
         // A world written outside the Create screen has no pack.
         assert!(!vanilla.join("datapacks").exists());
@@ -365,8 +410,33 @@ mod tests {
         std::fs::remove_dir_all(&vanilla).unwrap();
     }
 
+    /// Points the biome copies at the game's 26.3 data when it is there (`HORIZON_TEST_RESOURCES`, else the
+    /// checkout's `.local`); without it the tests check only what needs no vanilla data. Tests that write a pack call
+    /// it first: Horizon's own tests load the same folder in parallel (`Biomes::load` remembers it), so the copies
+    /// must not appear between a write and its check.
+    fn vanilla_biomes() -> bool {
+        let root = std::env::var_os("HORIZON_TEST_RESOURCES")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.local/horizon-client/26.3")
+            });
+        let present = root
+            .join("data/minecraft/worldgen/biome/plains.json")
+            .is_file();
+        if present {
+            horizon_world::worldgen::generator::terraforged_mod_biomes::remember_root(&root);
+        } else {
+            eprintln!(
+                "skipping the biome copies: no 26.3 data at {}",
+                root.display()
+            );
+        }
+        present
+    }
+
     #[test]
     fn only_the_create_screens_write_is_terraforged() {
+        vanilla_biomes();
         let dir = scratch("armed");
         // Nothing armed (`Level::write` for a world without settings): Horizon's write, no pack.
         assert!(write(&dir, 1, WorldGen::default(), &None).is_continue());
@@ -380,7 +450,8 @@ mod tests {
         assert!(is_terraforged(&dir));
         assert!(is_this_pack(
             &dir.join("datapacks/terraforged"),
-            &pack_meta()
+            &pack_meta(),
+            &biome_bytes()
         ));
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -409,6 +480,7 @@ mod tests {
 
     #[test]
     fn a_players_own_terraforged_pack_is_kept() {
+        vanilla_biomes();
         let dir = scratch("clash");
         let own = dir.join("datapacks/terraforged");
         std::fs::create_dir_all(own.join("data/minecraft/dimension_type")).unwrap();
@@ -438,21 +510,21 @@ mod tests {
         );
         assert!(is_this_pack(
             &dir.join("datapacks/terraforged-2"),
-            &pack_meta()
+            &pack_meta(),
+            &biome_bytes()
         ));
         // Re-Create copies the world's pack first: it is kept, and no second copy is made.
         let again = scratch("clash-recreate");
         let copy = again.join("datapacks/terraforged");
-        std::fs::create_dir_all(copy.join("data/minecraft/dimension_type")).unwrap();
-        std::fs::write(copy.join("pack.mcmeta"), pack_meta()).unwrap();
-        std::fs::write(
-            copy.join("data/minecraft/dimension_type/overworld.json"),
-            overworld_type_json(),
-        )
-        .unwrap();
+        let written = dir.join("datapacks/terraforged-2");
+        for file in walk(&written) {
+            let to = copy.join(file.strip_prefix(&written).unwrap());
+            std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+            std::fs::copy(&file, to).unwrap();
+        }
         CREATING.set(true);
         assert!(write(&again, 1, WorldGen::default(), &None).is_break());
-        assert!(is_this_pack(&copy, &pack_meta()));
+        assert!(is_this_pack(&copy, &pack_meta(), &biome_bytes()));
         assert_eq!(
             std::fs::read_dir(again.join("datapacks")).unwrap().count(),
             1
