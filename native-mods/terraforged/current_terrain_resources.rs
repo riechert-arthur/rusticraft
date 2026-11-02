@@ -247,7 +247,7 @@ pub fn current_terrain_noise_documents() -> [(&'static str, &'static str); TERRA
 }
 
 /// Decodes the bundled terrain noises, their `type`s resolved in `types` (from [`decode_current_terrain_types`]), in
-/// registry order: hand `entry_ids()` and `into_values()` to `apply_terrain_overrides`.
+/// registry order (`RegistryKey.entries`, which TerraForged hands to its noise generator unchanged).
 pub fn decode_current_terrain_noises(
     types: &TerrainTypeAssets,
 ) -> Result<TerrainNoiseAssets, TerrainAssetRegistryError> {
@@ -260,13 +260,10 @@ fn text(bytes: &'static [u8]) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::super::terraforged_current_settings::CurrentTerrainSettings;
-    use super::super::terraforged_engine::{TerrainFormSettings, TerrainProperties};
+    use super::super::terraforged_engine::TerrainProperties;
     use super::super::terraforged_terrain_asset::tests::{bits, sample_hash};
     use super::super::terraforged_terrain_asset_registry::tests::{category_name, describe};
-    use super::super::terraforged_terrain_overrides::apply_terrain_overrides;
     use super::*;
-    use std::sync::Arc;
 
     /// `oracles/current_terrain_resources/` (`run.sh`): TerraForged Reimagined a24d450's asset `TerrainType.DIRECT`
     /// and engine `TerrainType` registry over its own 18 terrain_type files, in registry order (shuffled orders give
@@ -483,122 +480,5 @@ terraforged:torridonian|torridonian/terrain:hills|true|weight=40200000|min=00000
         let plateau = noises["terraforged:plateau"].terrain();
         assert!(!plateau.is_flat());
         assert_eq!(plateau.erosion_modifier().to_bits(), 1.0_f32.to_bits());
-    }
-
-    #[test]
-    fn bundled_noise_ids_reach_the_terrain_overrides() {
-        // `GeneratorPreset` zips `RegistryKey.entries` with `entryIds`: overrides are keyed by the path alone.
-        let mut registry = TerrainRegistry::new();
-        let types = decode_current_terrain_types(&mut registry).unwrap();
-        let noises = decode_current_terrain_noises(&types).unwrap();
-        let ids = noises.entry_ids();
-        assert_eq!(
-            ids,
-            [
-                "badlands",
-                "dales",
-                "dolomites",
-                "hills_1",
-                "hills_2",
-                "mountains_1",
-                "mountains_2",
-                "mountains_3",
-                "mountains_ridge_1",
-                "mountains_ridge_2",
-                "plains",
-                "plateau",
-                "steppe",
-                "torridonian"
-            ]
-        );
-        let mut settings = CurrentTerrainSettings::default();
-        settings
-            .terrains
-            .insert("steppe".to_owned(), TerrainFormSettings::new(4.0, 1.0, 1.0));
-        settings.terrains.insert(
-            "terraforged:plains".to_owned(),
-            TerrainFormSettings::new(7.0, 1.0, 1.0),
-        );
-        let plains = Arc::clone(&noises["terraforged:plains"]);
-        let values: Vec<_> = noises.into_values().collect();
-        let applied = apply_terrain_overrides(&values, &ids, &settings);
-        assert_eq!(applied.len(), TERRAIN_NOISE_COUNT);
-        assert!(Arc::ptr_eq(&applied[10], &plains)); // a full-id key matches no terraforged: entry
-        assert_eq!(applied[12].weight().to_bits(), 4.0_f32.to_bits());
-        assert_eq!(applied[12].terrain().name(), "flats");
-    }
-
-    #[test]
-    fn default_overrides_stretch_dales_and_the_mountains_but_not_the_hills() {
-        // `isMountain` matches ids containing "mountain", "dolomites", "torridonian" or "dales" (of the bundled
-        // noises: dales, dolomites, the mountains and torridonian), so the default `mountainWidth` (3.5) stretches
-        // dales, dolomites, the five mountains (fancy mountains are on, so both ridges stay) and torridonian; the two
-        // hills, plateau, badlands and the flatlands have no override and pass through as the same entries.
-        let mut registry = TerrainRegistry::new();
-        let types = decode_current_terrain_types(&mut registry).unwrap();
-        let noises = decode_current_terrain_noises(&types).unwrap();
-        let ids = noises.entry_ids();
-        let values: Vec<_> = noises.into_values().collect();
-        let settings = CurrentTerrainSettings::default();
-        assert_eq!(settings.general.mountain_width.to_bits(), 3.5_f32.to_bits());
-        assert!(settings.general.fancy_mountains);
-        let applied = apply_terrain_overrides(&values, &ids, &settings);
-        assert_eq!(applied.len(), TERRAIN_NOISE_COUNT);
-        let stretched = [
-            "dales",
-            "dolomites",
-            "mountains_1",
-            "mountains_2",
-            "mountains_3",
-            "mountains_ridge_1",
-            "mountains_ridge_2",
-            "torridonian",
-        ];
-        for ((id, applied), original) in ids.iter().zip(&applied).zip(&values) {
-            if stretched.contains(&id.as_str()) {
-                assert!(!Arc::ptr_eq(applied, original), "{id}");
-                assert!(applied.terrain().is_same(original.terrain()), "{id}");
-                assert_eq!(
-                    applied.weight().to_bits(),
-                    original.weight().to_bits(),
-                    "{id}"
-                );
-                assert_ne!(
-                    sample_hash(applied.noise()),
-                    sample_hash(original.noise()),
-                    "{id}"
-                );
-            } else {
-                assert!(Arc::ptr_eq(applied, original), "{id}");
-            }
-        }
-    }
-
-    #[test]
-    fn fancy_mountains_off_drops_the_mountain_ridges() {
-        // `applyTerrainOverrides` drops every id containing "ridge" when fancy mountains are off: of the bundled
-        // noises `mountains_ridge_1` and `mountains_ridge_2`. With a width of 1 nothing is stretched, so the others
-        // pass through.
-        let mut registry = TerrainRegistry::new();
-        let types = decode_current_terrain_types(&mut registry).unwrap();
-        let noises = decode_current_terrain_noises(&types).unwrap();
-        let ids = noises.entry_ids();
-        let values: Vec<_> = noises.into_values().collect();
-        let mut settings = CurrentTerrainSettings::default();
-        settings.general.fancy_mountains = false;
-        settings.general.mountain_width = 1.0;
-        let applied = apply_terrain_overrides(&values, &ids, &settings);
-        let ridges = ["mountains_ridge_1", "mountains_ridge_2"];
-        let kept: Vec<_> = ids
-            .iter()
-            .zip(&values)
-            .filter(|(id, _)| !ridges.contains(&id.as_str()))
-            .map(|(_, noise)| noise)
-            .collect();
-        assert_eq!(kept.len(), TERRAIN_NOISE_COUNT - 2); // both ridges are bundled
-        assert_eq!(applied.len(), kept.len());
-        for (applied, original) in applied.iter().zip(kept) {
-            assert!(Arc::ptr_eq(applied, original));
-        }
     }
 }

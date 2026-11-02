@@ -24,8 +24,8 @@
  */
 
 // Adapted from TerraForged Reimagined (https://github.com/Romoslayer/TerraForged-Reimagined, a24d450): the asset
-// `TerrainType` (`DIRECT` codec, `forName`) with its engine `TerrainType.get`/`getOrCreate`, and `RegistryKey.entries`/
-// `entryIds`, loading the `terrain_type` and `terrain_noise` registries in Minecraft 26.3's registry order. MIT
+// `TerrainType` (`DIRECT` codec, `forName`) with its engine `TerrainType.get`/`getOrCreate`, and `RegistryKey.entries`,
+// loading the `terrain_type` and `terrain_noise` registries in Minecraft 26.3's registry order. MIT
 // License, Copyright (c) 2020 TerraForged, Copyright (c) 2026 Romoslayer; see `LICENSE-TERRAFORGED-REIMAGINED`.
 
 use super::terraforged_biome_registry::identifier_order;
@@ -77,7 +77,7 @@ impl TerrainTypeAsset {
 /// Registry keys as Minecraft 26.3 keys them: each key is read as an `Identifier` (`namespace:path`, no namespace
 /// meaning `minecraft`); a key that is not one, or two keys naming the same identifier, is an error. Sorted by
 /// `Identifier.compareTo` (path, then namespace), the order `RegistryDataLoader` registers entries in and
-/// `RegistryKey.entries`/`entryIds` list them in. Key errors come first (an invalid key in input order, then the
+/// `RegistryKey.entries` lists them in. Key errors come first (an invalid key in input order, then the
 /// first duplicate in sorted order), before any entry is decoded.
 fn sorted_keys<K, J>(
     entries: impl IntoIterator<Item = (K, J)>,
@@ -226,8 +226,8 @@ where
     Ok(assets)
 }
 
-/// A loaded `terrain_noise` registry, in registry order: `RegistryKey.entries` (the noises, as
-/// `GeneratorPreset.createUnerodedNoiseGenerator` hands them to the blender) and `entryIds`.
+/// A loaded `terrain_noise` registry, in registry order: `RegistryKey.entries` (the noises, as TerraForged's
+/// `GeneratorPreset` hands them to its noise generator's blender).
 pub struct TerrainNoiseAssets {
     entries: Vec<(String, Arc<TerrainNoise>)>,
 }
@@ -248,17 +248,6 @@ impl TerrainNoiseAssets {
     /// The full `namespace:path` keys, in registry order.
     pub fn keys(&self) -> impl Iterator<Item = &str> {
         self.entries.iter().map(|(key, _)| key.as_str())
-    }
-
-    /// `RegistryKey.entryIds`: the keys in registry order, `terraforged:` ones by path alone (what
-    /// `apply_terrain_overrides` takes, in the same order as [`Self::into_values`]).
-    pub fn entry_ids(&self) -> Vec<String> {
-        self.keys()
-            .map(|key| match key.strip_prefix("terraforged:") {
-                Some(path) => path.to_owned(),
-                None => key.to_owned(),
-            })
-            .collect()
     }
 
     /// `RegistryKey.entries`: the noises in registry order.
@@ -315,7 +304,7 @@ pub(crate) mod tests {
     /// `.local/terraforged/oracles/terrain_asset_registry/` (`run.sh`): Reimagined a24d450's asset
     /// `TerrainType.DIRECT` and engine `TerrainType` registry, compiled from source against 26.3's server jar (strict
     /// JSON, DFU `JsonOps`, `Identifier`), over these cases (`T`: decoded in order into one registry; `O`: keys
-    /// sorted by `Identifier.compareTo`, then `entryIds`).
+    /// sorted by `Identifier.compareTo`, then Reimagined's `entryIds`, which the tests ignore).
     const ORACLE_CASES: &str = r##"# type cases share one registry, in order
 T {"name":"flats","parent":"flats"}
 T {"name":"hills","parent":"hills"}
@@ -490,12 +479,9 @@ O 34 minecraft:y minecraft:y terraforged:y x:y | minecraft:y minecraft:y y x:y"#
             let entries = keys.split(' ').map(|key| (key, json.as_str()));
             match decode_terrain_noise_assets(entries, &types) {
                 Ok(noises) => {
-                    let rust = format!(
-                        "O {index} {} | {}",
-                        noises.keys().collect::<Vec<_>>().join(" "),
-                        noises.entry_ids().join(" ")
-                    );
-                    assert_eq!(rust, java);
+                    // The oracle also prints Reimagined's `entryIds` after ` | `; only the order is compared.
+                    let rust = format!("O {index} {}", noises.keys().collect::<Vec<_>>().join(" "));
+                    assert_eq!(rust, java.split(" | ").next().unwrap());
                 }
                 // Java lists `y` and `minecraft:y` as one identifier twice; a registry holds it once.
                 Err(error) => {
@@ -618,7 +604,6 @@ O 34 minecraft:y minecraft:y terraforged:y x:y | minecraft:y minecraft:y y x:y"#
             noises.keys().collect::<Vec<_>>(),
             ["terraforged:a", "other:b", "terraforged:z"]
         );
-        assert_eq!(noises.entry_ids(), ["a", "other:b", "z"]);
         assert_eq!(noises["terraforged:a"].terrain().name(), "flats");
         let torridonian = types.resolve("terraforged:torridonian").unwrap();
         assert!(noises["terraforged:z"].terrain().is_same(&torridonian));
@@ -646,7 +631,7 @@ O 34 minecraft:y minecraft:y terraforged:y x:y | minecraft:y minecraft:y y x:y"#
         assert!(types.get("terraforged:flats").is_none());
         let noises =
             decode_terrain_noise_assets([("plains", noise_json("flats"))], &types).unwrap();
-        assert_eq!(noises.entry_ids(), ["minecraft:plains"]);
+        assert_eq!(noises.keys().collect::<Vec<_>>(), ["minecraft:plains"]);
 
         let invalid = decode_terrain_type_assets(
             [("terraforged:Flats", r#"{"name":"flats","parent":"flats"}"#)],
