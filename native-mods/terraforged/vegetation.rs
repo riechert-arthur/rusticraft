@@ -129,7 +129,7 @@ const TAGS: [(&str, &[u8]); 8] = [
 ///
 /// The tags' members are listed as the files name them. 26.3 drops a whole tag that names a biome the registry
 /// lacks (`TagLoader`: "missing following references"), and `trees/patchy` names `terraforged:oak_forest`, which
-/// only a bundled biome provides: whoever binds these configs to a world's registry must apply that rule.
+/// only a bundled biome provides: [`bind_tags`] applies that rule to a world's registry.
 pub fn current_vegetation() -> Result<Vec<VegetationConfig>, String> {
     CONFIGS
         .iter()
@@ -137,6 +137,18 @@ pub fn current_vegetation() -> Result<Vec<VegetationConfig>, String> {
             decode_config(text(json)).map_err(|error| format!("vegetation {name}: {error}"))
         })
         .collect()
+}
+
+/// Binds `configs`' tags to a world's biome registry as 26.3's `TagLoader` loads a tag: a tag naming a biome
+/// `is_registered` does not know fails to load ("missing following references") and is dropped whole, so its
+/// config holds no biome (as an unbound `TagKey` holds none). `trees/patchy` names `terraforged:oak_forest`, which
+/// only a bundled TerraForged biome provides.
+pub fn bind_tags(configs: &mut [VegetationConfig], is_registered: impl Fn(&str) -> bool) {
+    for config in configs {
+        if !config.biomes.iter().all(|biome| is_registered(biome)) {
+            config.biomes.clear();
+        }
+    }
 }
 
 /// `BiomeVegetationManager.getConfig`: the first config whose tag holds the biome (`None` for Java's
@@ -624,6 +636,33 @@ case noise_unknown err
         );
         assert_eq!(tag("minecraft:desert"), None);
         assert_eq!(tag("minecraft:pale_garden"), None);
+    }
+
+    /// 26.3's `TagLoader` drops a tag naming an unregistered biome whole: without `terraforged:oak_forest`,
+    /// `trees/patchy` loses `minecraft:wooded_badlands` too, which then has no config (it is in no other tag).
+    #[test]
+    fn tags_naming_a_missing_biome_are_dropped_whole() {
+        let mut configs = current_vegetation().unwrap();
+        bind_tags(&mut configs, |biome| biome.starts_with("minecraft:"));
+        let patchy = configs
+            .iter()
+            .find(|config| config.tag == "terraforged:trees/patchy")
+            .unwrap();
+        assert!(patchy.biomes.is_empty());
+        assert!(config_for(&configs, "minecraft:wooded_badlands").is_none());
+        assert_eq!(
+            config_for(&configs, "minecraft:birch_forest").map(|config| config.tag.as_str()),
+            Some("terraforged:trees/temperate")
+        );
+        let dropped = configs
+            .iter()
+            .filter(|config| config.biomes.is_empty())
+            .count();
+        assert_eq!(dropped, 1);
+        // With the biome registered, every tag binds.
+        let mut configs = current_vegetation().unwrap();
+        bind_tags(&mut configs, |_| true);
+        assert!(configs.iter().all(|config| !config.biomes.is_empty()));
     }
 
     #[test]
