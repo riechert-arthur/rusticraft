@@ -30,6 +30,7 @@ use super::{
     GeneratorData,
     terraforged_biome_registry::{ClimateWeight, RegistryBiomeMap},
     terraforged_biome_sampler::BiomeOverride,
+    terraforged_current_surface_biomes::CurrentSurfaceBiomeSampler,
     terraforged_generator_facade::TerraForgedGenerator,
 };
 use horizon_core::position::ChunkPos;
@@ -134,6 +135,18 @@ impl LiveBiomeBindings {
             BiomeOverride::River => 12,
         };
         Arc::clone(&self.overrides[index])
+    }
+
+    /// The surface biome at a block column: `Source.getNoiseBiome` scales quarts to blocks.
+    pub fn sample(&self, generator: &TerraForgedGenerator, x: i32, z: i32) -> BiomeId {
+        let sampler = CurrentSurfaceBiomeSampler::new(
+            generator.noise_generator(),
+            &self.map.pools,
+            self.fallback(),
+        );
+        *sampler.sample(generator.seed(), x, z, &|replacement| {
+            self.override_biome(replacement)
+        })
     }
 
     pub fn fill_chunk(

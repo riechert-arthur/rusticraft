@@ -28,17 +28,36 @@
 // vanilla `minecraft:normal` pipeline it wraps.
 
 use super::{
-    BiomeSearch, DecorateStats, GeneratorData, GeneratorError, JigsawPieces, JigsawQuery,
-    LodColumn, OverworldGenerator, ProtoChunk, SeededPipeline, SurfaceSample, WorkerState,
+    BiomeChunk, BiomeId, BiomeRegion, BiomeSearch, Biomes, DecorateStats, GeneratorData,
+    GeneratorError, JigsawPieces, JigsawQuery, LodColumn, OverworldGenerator, Pipeline,
+    PreLightChunkStage, ProtoChunk, SeededPipeline, SurfaceInputs, SurfaceQueries, SurfaceSample,
+    TerrainChunk, UniformSurfaceBiomes, WorkerState, build_surface, overrides, resource, stage,
+    terraforged_generator_facade::TerraForgedGenerator,
+    terraforged_generator_preset::{build as build_noise, terrain_levels},
+    terraforged_live_biomes::LiveBiomeBindings,
+    terraforged_surface_bindings::SurfaceBindings,
     terraforged_world_preset::{GENERATOR_TYPE, PRESET},
 };
+use crate::heightmap::HeightmapType;
 use crate::registry::BlockStateId;
+use horizon_core::biome::obfuscate_seed;
+use horizon_core::density::{DensitySampler, SamplerContext};
+use horizon_core::noise::DensityVolume;
 use horizon_core::position::ChunkPos;
+use horizon_core::random::XoroshiroRandom;
 use serde_json::Value;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+type BlockSets = Arc<BTreeMap<String, Arc<BTreeSet<BlockStateId>>>>;
+
 pub(super) struct TerraForgedPipeline {
-    vanilla: Arc<dyn SeededPipeline>,
+    vanilla: Pipeline<XoroshiroRandom>,
+    generator: TerraForgedGenerator,
+    biomes: LiveBiomeBindings,
+    /// Block states by block and by tag, for TerraForged's surface passes.
+    blocks: BlockSets,
+    block_tags: BlockSets,
 }
 
 /// `OverworldGenerator::for_world` and `for_dimension`, overwritten: a TerraForged
@@ -53,19 +72,118 @@ pub(super) fn build(
     if preset != PRESET || !is_terraforged(&data, dimension) {
         return OverworldGenerator::build(data, seed, preset, dimension, with_structures);
     }
-    let vanilla = OverworldGenerator::build(
-        data,
-        seed,
-        "minecraft:normal",
-        "minecraft:overworld",
-        with_structures,
-    )?;
+    let _ = with_structures;
     Ok(OverworldGenerator {
-        pipeline: Arc::new(TerraForgedPipeline {
-            vanilla: vanilla.pipeline,
-        }),
+        pipeline: Arc::new(TerraForgedPipeline::new(&data, seed)?),
         noise_clamped: None,
     })
+}
+
+impl TerraForgedPipeline {
+    /// `GeneratorPreset.build`: TerraForged's noise and biome source over the vanilla
+    /// overworld's surface rule, fluids and features (`VanillaGen`). TerraForged's own
+    /// structure placement is not wired yet, so the vanilla half runs without structures.
+    fn new(data: &Arc<GeneratorData>, seed: i64) -> Result<Self, GeneratorError> {
+        let preset: Value = serde_json::from_str(
+            data.world_presets
+                .get(PRESET)
+                .ok_or_else(|| resource(format!("missing world preset {PRESET}")))?,
+        )?;
+        let levels =
+            terrain_levels(&preset["dimensions"]["minecraft:overworld"]["generator"]["levels"])
+                .map_err(resource)?;
+        let generator = build_noise(levels).map_err(resource)?;
+        generator.capture_seed(seed);
+        let biomes = LiveBiomeBindings::from_generator_data(data, &[])
+            .map_err(|error| resource(error.to_string()))?;
+        let (blocks, block_tags) = super::super::block_feature::FeatureBlockBindings::bind_tags(
+            data.registry,
+            &data.block_tags,
+        )?;
+        Ok(Self {
+            vanilla: vanilla_overworld(data, seed)?,
+            generator,
+            biomes,
+            blocks,
+            block_tags,
+        })
+    }
+
+    fn biome_chunk(&self, pos: ChunkPos) -> Result<BiomeChunk<BiomeId>, GeneratorError> {
+        let settings = &self.vanilla.settings;
+        let mut chunk =
+            BiomeChunk::new(pos, settings.level_min_y, settings.level_height, BiomeId(0))
+                .map_err(stage("biomes"))?;
+        self.biomes
+            .fill_chunk(&self.generator, &mut chunk, pos)
+            .map_err(stage("biomes"))?;
+        Ok(chunk)
+    }
+
+    fn surface_bindings(&self) -> Result<SurfaceBindings<'static>, GeneratorError> {
+        let snow_layers = self
+            .blocks
+            .get("minecraft:snow")
+            .cloned()
+            .unwrap_or_default();
+        SurfaceBindings::new(self.vanilla.data.registry, &self.block_tags, snow_layers)
+            .map_err(stage("surface"))
+    }
+}
+
+/// The `minecraft:normal` overworld's noise pipeline, as `OverworldGenerator::build` makes
+/// it, without structures.
+fn vanilla_overworld(
+    data: &Arc<GeneratorData>,
+    seed: i64,
+) -> Result<Pipeline<XoroshiroRandom>, GeneratorError> {
+    let preset: Value = serde_json::from_str(
+        data.world_presets
+            .get("minecraft:normal")
+            .ok_or_else(|| resource("missing world preset minecraft:normal"))?,
+    )?;
+    let stem = match data.dimensions.get("minecraft:overworld") {
+        Some(json) => serde_json::from_str(json)?,
+        None => preset["dimensions"]["minecraft:overworld"].clone(),
+    };
+    let generator = stem["generator"].clone();
+    let level = overrides::LevelHeight::of_type(&stem["type"], &data.dimension_types)
+        .map(|height| (height.min_y, height.height));
+    let settings: Value = serde_json::from_str(
+        data.settings
+            .get("minecraft:overworld")
+            .ok_or_else(|| resource("missing noise settings minecraft:overworld"))?,
+    )?;
+    Pipeline::new(
+        Arc::clone(data),
+        seed,
+        XoroshiroRandom::new(seed),
+        &generator,
+        &settings,
+        false,
+        level,
+    )
+}
+
+/// `NoiseChunkUtil.initSurfaceCache`: the vanilla surface rules' preliminary surface is
+/// TerraForged's height at each quart column of the chunk, and the chunk's lowest such
+/// height around it.
+#[derive(Debug)]
+struct PreliminarySurface {
+    heights: BTreeMap<i64, i32>,
+    fallback: i32,
+}
+
+impl DensitySampler for PreliminarySurface {
+    fn sample_value(
+        &self,
+        _context: &mut SamplerContext,
+        position: [i32; 3],
+    ) -> Result<f32, horizon_core::density::SampleError> {
+        let key =
+            super::terraforged_surface_height_cache::column_key(position[0] & !3, position[2] & !3);
+        Ok(*self.heights.get(&key).unwrap_or(&self.fallback) as f32)
+    }
 }
 
 fn is_terraforged(data: &GeneratorData, dimension: &str) -> bool {
@@ -83,7 +201,122 @@ impl SeededPipeline for TerraForgedPipeline {
         worker: &mut WorkerState,
         pos: ChunkPos,
     ) -> Result<ProtoChunk, GeneratorError> {
-        self.vanilla.generate(worker, pos)
+        let vanilla = &self.vanilla;
+        let data = &vanilla.data;
+        let settings = &vanilla.settings;
+        let (min, height) = (settings.level_min_y, settings.level_height);
+        // createBiomes: the 3x3 neighbourhood the surface rules may look into.
+        let mut neighbors = Vec::with_capacity(9);
+        let mut possible = BTreeSet::new();
+        for i in 0..9 {
+            let around =
+                ChunkPos::new(pos.x.wrapping_add(i % 3 - 1), pos.z.wrapping_add(i / 3 - 1));
+            let chunk = self.biome_chunk(around)?;
+            let mut section = 0;
+            while let Some(biomes) = chunk.section(section) {
+                possible.extend(biomes.iter().map(|id| data.biome_name(*id).to_owned()));
+                section += 1;
+            }
+            neighbors.push(chunk);
+        }
+        let center = neighbors[4].clone();
+        let region =
+            BiomeRegion::new(neighbors, obfuscate_seed(vanilla.seed)).map_err(stage("biomes"))?;
+
+        // fillFromNoise.
+        let mut chunk = TerrainChunk::new(pos, min, height, data.registry, data.states.clone())
+            .map_err(stage("noise"))?;
+        chunk.set_generation_stage(PreLightChunkStage::Biomes);
+        let block = |name: &str| {
+            data.registry
+                .default_state(name)
+                .ok_or_else(|| resource(format!("missing block {name}")))
+        };
+        let terrain = self
+            .generator
+            .fill_from_noise(
+                &mut chunk,
+                block("minecraft:stone")?,
+                block("minecraft:water")?,
+            )
+            .map_err(stage("noise"))?;
+        chunk
+            .prime_heightmaps(&[HeightmapType::OceanFloorWg, HeightmapType::WorldSurfaceWg])
+            .map_err(stage("heightmaps"))?;
+
+        // buildSurface: the vanilla rules over TerraForged's heights, then Surface.apply.
+        let mut heights = BTreeMap::new();
+        self.generator.initialize_surface_cache(pos, &mut heights);
+        let fallback = heights
+            .values()
+            .copied()
+            .min()
+            .unwrap_or(settings.sea_level);
+        let preliminary: Arc<dyn DensitySampler> =
+            Arc::new(PreliminarySurface { heights, fallback });
+        let volume = DensityVolume::new(
+            [16, settings.noise_height, 16],
+            [
+                pos.x.wrapping_shl(4),
+                settings.noise_min_y,
+                pos.z.wrapping_shl(4),
+            ],
+            [1; 3],
+        )
+        .map_err(stage("surface"))?;
+        let mut context = std::mem::take(&mut worker.terrain_context);
+        let surface = build_surface(
+            &mut chunk,
+            vanilla.rule.clone(),
+            SurfaceInputs::<XoroshiroRandom, _> {
+                generation: vanilla.generation(),
+                noise_volume: volume,
+                root: vanilla.root,
+                surface: SurfaceQueries {
+                    pipeline: vanilla,
+                    temperatures: &mut worker.temperatures,
+                    biome: Biomes::Region(&region),
+                    uniform_biomes: Some(UniformSurfaceBiomes::new(pos, min, height)),
+                    possible: Some(possible),
+                },
+                preliminary_surface: preliminary,
+                density_context: &mut context,
+                write_min_y: settings.noise_min_y,
+                write_max_y: settings.noise_min_y + settings.noise_height - 1,
+            },
+            &vanilla.extensions,
+        );
+        context.reset();
+        worker.terrain_context = context;
+        surface.map_err(stage("surface"))?;
+        self.surface_bindings()?
+            .apply(
+                &terrain.read(),
+                &mut chunk,
+                self.generator.levels().max_y,
+                self.generator.sea_level(),
+            )
+            .map_err(stage("surface"))?;
+
+        chunk
+            .prime_heightmaps(&[
+                HeightmapType::MotionBlocking,
+                HeightmapType::MotionBlockingNoLeaves,
+                HeightmapType::OceanFloor,
+                HeightmapType::WorldSurface,
+            ])
+            .map_err(stage("heightmaps"))?;
+        chunk.set_generation_stage(PreLightChunkStage::Terrain);
+        Ok(ProtoChunk {
+            terrain: chunk,
+            biomes: center,
+            data: data.clone(),
+            decorated: false,
+            block_entities: Vec::new(),
+            structure_starts: Vec::new(),
+            own_starts: Default::default(),
+            entities: Vec::new(),
+        })
     }
     fn decorate(
         &self,
@@ -160,6 +393,7 @@ impl SeededPipeline for TerraForgedPipeline {
         self.vanilla.ring_positions(worker, set)
     }
     fn spawn_position(&self) -> Result<[i32; 2], GeneratorError> {
+        let _ = &self.generator;
         // ChunkGenerator.getOrigin: a generator without a spawn target spawns at 0 0.
         Ok([0, 0])
     }
@@ -189,8 +423,19 @@ impl SeededPipeline for TerraForgedPipeline {
     ) -> Option<(String, [i32; 3])> {
         self.vanilla.find_closest_biome(worker, search)
     }
-    fn noise_biomes(&self, worker: &mut WorkerState, quarts: &[[i32; 3]]) -> Vec<Option<String>> {
-        self.vanilla.noise_biomes(worker, quarts)
+    fn noise_biomes(&self, _worker: &mut WorkerState, quarts: &[[i32; 3]]) -> Vec<Option<String>> {
+        let data = self.vanilla.data();
+        quarts
+            .iter()
+            .map(|quart| {
+                let biome = self.biomes.sample(
+                    &self.generator,
+                    quart[0].wrapping_shl(2),
+                    quart[2].wrapping_shl(2),
+                );
+                Some(data.biome_name(biome).to_owned())
+            })
+            .collect()
     }
     fn jigsaw_pieces(
         &self,
