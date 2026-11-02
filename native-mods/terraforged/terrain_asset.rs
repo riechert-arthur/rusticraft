@@ -119,9 +119,10 @@ pub fn decode_terrain_asset(
 /// invalid one is an error even where unused). JSON `null` anywhere in the graph is an error (`DataUtil.toData`).
 ///
 /// Supported specs: the octave sources (`Perlin`, `Perlin2`, `Simplex`, `Simplex2`, `Cubic`, `Ridge`, `Billow`,
-/// `SimplexRidge`), `CellEdge`, `Const`, `Alpha`, `Bias`, `Boost`, `Clamp`, `Invert`, `Map`, `Pow`, `PowCurve`,
+/// `SimplexRidge`), `CellEdge`, `Const`, `Abs`, `Alpha`, `Bias`, `Boost`, `Clamp`, `Invert`, `Map`, `Pow`, `PowCurve`,
 /// `Scale`, `Warp` (with `DomainWarp` or `DirectionWarp`), `Blend`, `Terrace`, `AdvTerrace`, `Steps` (with an
-/// `Interpolation` curve), `Add`, `Mult`, `Max`, `Min` and `Sub`: every node the 14 Reimagined terrain assets use;
+/// `Interpolation` curve), `Add`, `Mult`, `Max`, `Min` and `Sub`: every node the 14 Reimagined terrain assets and
+/// the 5 cave assets (`cave_assets.rs`) use;
 /// and Engine 0.3.0's erosion `Valley` (registered by 6dd607eb, whose generated mountain assets use it; Reimagined
 /// a24d450 rejects it). The other registered specs, which Java reads, return an "unsupported" error here.
 pub fn decode_noise(json: &str) -> Result<Module, TerrainAssetError> {
@@ -420,6 +421,7 @@ fn module(object: &Obj) -> Result<Module, TerrainAssetError> {
             )?;
             Module::cell_edge_source(config, 1.0, edge, distance)
         }
+        "Abs" => Module::new_abs(o.child("source")?),
         "Alpha" => Module::new_alpha(o.child("source")?, o.child("alpha")?),
         "Bias" => Module::new_bias(o.child("source")?, o.float("bias", 0.0)),
         "Boost" => Module::new_boost(o.child("source")?, o.int("iterations", 1)),

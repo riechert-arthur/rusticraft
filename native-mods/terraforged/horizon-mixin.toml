@@ -446,3 +446,10 @@ file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_surface_height_cache"
 source = "surface_height_cache.rs"
 visibility = "pub"
+
+[[module]]
+id = "cave_assets"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_cave_assets"
+source = "cave_assets.rs"
+visibility = "pub"
