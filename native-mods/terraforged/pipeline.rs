@@ -535,11 +535,27 @@ impl SeededPipeline for TerraForgedPipeline {
         worker: &mut WorkerState,
         region: &mut [ProtoChunk; 9],
     ) -> Result<DecorateStats, GeneratorError> {
-        let stats = SeededPipeline::decorate(&self.vanilla, worker, region)?;
-        let center = region[4].position();
-        self.generator
-            .drop_chunk(self.generator.seed(), center.x, center.z);
-        Ok(stats)
+        let vanilla = &self.vanilla;
+        let decoration = vanilla
+            .decoration
+            .as_ref()
+            .ok_or_else(|| resource("decoration resources were not loaded"))?;
+        let mut random = vanilla.region_random_at(region[4].position());
+        super::super::generator_decoration::terraforged_decorator::decorate(
+            decoration,
+            &vanilla.data,
+            vanilla.seed,
+            vanilla.generation(),
+            worker,
+            region,
+            &mut random,
+            self.structures.as_ref(),
+            &super::super::generator_decoration::terraforged_decorator::TerraForgedDecoration {
+                generator: &self.generator,
+                caves: &self.caves,
+                surface: &self.surface,
+            },
+        )
     }
     fn data(&self) -> &Arc<GeneratorData> {
         self.vanilla.data()
@@ -829,6 +845,35 @@ mod tests {
             .generate_proto(ChunkPos::new(at[0] >> 4, at[2] >> 4))
             .unwrap();
         assert!(!start.own_starts().is_empty());
+        // TerraForged's decoration runs over a wooded biome near the origin.
+        let wooded = [
+            "minecraft:forest",
+            "minecraft:birch_forest",
+            "minecraft:flower_forest",
+            "minecraft:old_growth_birch_forest",
+            "minecraft:dark_forest",
+            "minecraft:taiga",
+            "minecraft:old_growth_spruce_taiga",
+            "minecraft:jungle",
+        ];
+        let forest = (-12..12)
+            .flat_map(|cx| (-12..12).map(move |cz| ChunkPos::new(cx * 4, cz * 4)))
+            .find(|&at| {
+                let chunk = worker.generate_proto(at).unwrap();
+                let top = chunk.surface_height(8, 8);
+                wooded.contains(&chunk.biome_at(8, top, 8))
+            })
+            .expect("a wooded chunk near the origin");
+        let mut region: [ProtoChunk; 9] = std::array::from_fn(|i| {
+            worker
+                .generate_proto(ChunkPos::new(
+                    forest.x + i as i32 % 3 - 1,
+                    forest.z + i as i32 / 3 - 1,
+                ))
+                .unwrap()
+        });
+        let stats = worker.decorate(&mut region).unwrap();
+        assert!(stats.placed > 0);
     }
 
     #[test]

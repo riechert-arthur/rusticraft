@@ -595,3 +595,9 @@ file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_vegetation"
 source = "vegetation.rs"
 visibility = "pub"
+
+[[module]]
+id = "decorator"
+file = "crates/horizon-world/src/worldgen/generator_decoration.rs"
+name = "terraforged_decorator"
+source = "decorator.rs"
