@@ -42,6 +42,7 @@ use super::{
     terraforged_structure_queries::TfQueries,
     terraforged_structure_terrain::StructureTerrain,
     terraforged_surface_bindings::SurfaceBindings,
+    terraforged_vegetation::{VegetationConfig, current_vegetation},
     terraforged_world_preset::{GENERATOR_TYPE, PRESET},
 };
 use crate::heightmap::HeightmapType;
@@ -62,6 +63,7 @@ pub(super) struct TerraForgedPipeline {
     pub(super) generator: TerraForgedGenerator,
     biomes: LiveBiomeBindings,
     caves: NoiseCaveGenerator<BiomeId>,
+    vegetation: Vec<VegetationConfig>,
     structures: Option<StructureState>,
     /// Block states by block and by tag, for TerraForged's surface passes.
     blocks: BlockSets,
@@ -140,6 +142,7 @@ impl TerraForgedPipeline {
             generator,
             biomes,
             caves,
+            vegetation: current_vegetation().map_err(resource)?,
             structures,
             blocks,
             block_tags,
@@ -425,6 +428,7 @@ impl SeededPipeline for TerraForgedPipeline {
             self.structures.as_ref(),
             &super::super::generator_decoration::terraforged_decorator::TerraForgedDecoration {
                 generator: &self.generator,
+                vegetation: &self.vegetation,
                 caves: &self.caves,
                 surface: &surface,
             },
@@ -707,7 +711,7 @@ mod tests {
             .generate_proto(ChunkPos::new(at[0] >> 4, at[2] >> 4))
             .unwrap();
         assert!(!start.own_starts().is_empty());
-        // TerraForged's decoration runs over a wooded biome near the origin.
+        // TerraForged's decoration plants trees in a wooded biome near the origin.
         let wooded = [
             "minecraft:forest",
             "minecraft:birch_forest",
@@ -736,5 +740,11 @@ mod tests {
         });
         let stats = worker.decorate(&mut region).unwrap();
         assert!(stats.placed > 0);
+        let logs = (0..16)
+            .flat_map(|x| (0..16).map(move |z| (x, z)))
+            .flat_map(|(x, z)| (40..200).map(move |y| (x, y, z)))
+            .filter(|&(x, y, z)| region[4].block_name(x, y, z).ends_with("_log"))
+            .count();
+        assert!(logs > 0, "no tree logs in the decorated chunk");
     }
 }

@@ -31,9 +31,13 @@
 
 use super::*;
 use crate::worldgen::generator::{
+    terraforged_biome_viability::ViabilityContext,
     terraforged_cave_carver::NoiseCaveGenerator,
+    terraforged_continent_cell::{hash_1d, random as rand},
     terraforged_generator_facade::TerraForgedGenerator,
     terraforged_surface_bindings::SurfaceBindings,
+    terraforged_terrain_data::TerrainData,
+    terraforged_vegetation::{VegetationConfig, VegetationFeatures, config_for},
 };
 use horizon_core::random::LegacyRandom;
 
@@ -42,10 +46,14 @@ const LOCAL_MODIFICATIONS: usize = 2;
 const VEGETAL: usize = 9;
 /// `TOP_LAYER_MODIFICATION`.
 const MAX_STAGE: usize = 10;
+const BORDER: f32 = 6.0;
+const X_PRIME: i32 = 1_619;
+const Y_PRIME: i32 = 31_337;
 
 /// What TerraForged adds to the vanilla decoration resources.
 pub(in crate::worldgen) struct TerraForgedDecoration<'a> {
     pub generator: &'a TerraForgedGenerator,
+    pub vegetation: &'a [VegetationConfig],
     pub caves: &'a NoiseCaveGenerator<BiomeId>,
     pub surface: &'a SurfaceBindings<'a>,
 }
@@ -174,7 +182,23 @@ pub(in crate::worldgen) fn decorate(
             origin,
             biome,
         )?;
-        // The vegetal step (PositionSampler) is TerraForged's own; see the next change.
+        let offset = decorator.trees_and_grass(
+            &mut world,
+            &mut random,
+            decoration_seed,
+            center,
+            &terrain,
+            tf,
+        )?;
+        decorator.other(
+            &mut world,
+            &mut random,
+            decoration_seed,
+            offset,
+            origin,
+            biome,
+            tf,
+        )?;
         decorator.vanilla(
             &mut world,
             &mut random,
@@ -416,5 +440,304 @@ impl Decorator<'_> {
             }
         }
         Ok(())
+    }
+
+    fn vegetation(
+        &mut self,
+        biome: BiomeId,
+        tf: &TerraForgedDecoration<'_>,
+    ) -> (Option<usize>, VegetationFeatures) {
+        let name = self.data.biome_name(biome).to_owned();
+        let config = tf
+            .vegetation
+            .iter()
+            .position(|config| config_for(std::slice::from_ref(config), &name).is_some());
+        let steps = self.steps(biome);
+        let vegetal = steps
+            .get(VEGETAL)
+            .map(|ids| ids.iter().map(String::as_str).collect::<Vec<_>>())
+            .unwrap_or_default();
+        let features = VegetationFeatures::create(vegetal, config.is_some());
+        (config, features)
+    }
+
+    /// `PositionSampler.placeTreesAndGrass`; returns the feature-seed offset it reached.
+    fn trees_and_grass(
+        &mut self,
+        world: &mut World<'_>,
+        random: &mut Random,
+        seed: i64,
+        chunk: ChunkPos,
+        terrain: &TerrainData,
+        tf: &TerraForgedDecoration<'_>,
+    ) -> Result<usize, GeneratorError> {
+        let (start_x, start_z) = (chunk.x.wrapping_shl(4), chunk.z.wrapping_shl(4));
+        let sea_level = tf.generator.sea_level();
+        let context = TerrainViability(terrain);
+        // populate: each column's fitness under its biome's config, and the biomes met.
+        let mut viability = [0.0_f32; 256];
+        let mut biome_list: Vec<BiomeId> = Vec::new();
+        for dz in 0..16 {
+            for dx in 0..16 {
+                let (x, z) = (start_x + dx, start_z + dz);
+                let y = top(world, x, z)?;
+                let biome = world
+                    .biome_identity([x, y, z])
+                    .map_err(|e| resource(e.to_string()))?;
+                let (config, _) = self.vegetation(biome, tf);
+                viability[(dz * 16 + dx) as usize] = match config {
+                    Some(config) => tf.vegetation[config].viability.fitness(x, z, &context),
+                    None => super::super::generator::terraforged_biome_viability::Viability::None
+                        .fitness(x, z, &context),
+                };
+                if !biome_list.contains(&biome) {
+                    biome_list.push(biome);
+                }
+            }
+        }
+        let rivers = self
+            .data
+            .biome_tags
+            .get("minecraft:is_river")
+            .cloned()
+            .unwrap_or_default();
+        let mut offset = 0usize;
+        for (i, &biome) in biome_list.iter().enumerate() {
+            // "Remove annoying river trees!"
+            if rivers
+                .iter()
+                .any(|name| name == self.data.biome_name(biome))
+            {
+                continue;
+            }
+            let (config, features) = self.vegetation(biome, tf);
+            match config {
+                None => {
+                    offset = self.place_at_corner(
+                        world,
+                        random,
+                        seed,
+                        offset + i,
+                        start_x,
+                        start_z,
+                        sea_level,
+                        &features,
+                    )?;
+                }
+                Some(index) => {
+                    let config = &tf.vegetation[index];
+                    offset = self.sample(
+                        world,
+                        random,
+                        seed,
+                        offset + i,
+                        chunk,
+                        config,
+                        biome,
+                        &viability,
+                        sea_level,
+                        &features,
+                    )?;
+                    offset = self.grass(
+                        world,
+                        random,
+                        seed,
+                        offset + i,
+                        start_x,
+                        start_z,
+                        terrain,
+                        &features,
+                    );
+                }
+            }
+        }
+        Ok(offset)
+    }
+
+    /// `placeAt(seed, offset, x, z, context)`: a config-less biome's trees and grass at the
+    /// chunk's corner, with their own placement.
+    #[allow(clippy::too_many_arguments)]
+    fn place_at_corner(
+        &mut self,
+        world: &mut World<'_>,
+        random: &mut Random,
+        seed: i64,
+        mut offset: usize,
+        x: i32,
+        z: i32,
+        sea_level: i32,
+        features: &VegetationFeatures,
+    ) -> Result<usize, GeneratorError> {
+        let y = top(world, x, z)?;
+        if y <= sea_level {
+            return Ok(offset);
+        }
+        for (name, unwrap) in &features.trees {
+            random.set_feature_seed(seed, offset as i32, VEGETAL as i32);
+            if self.place(world, random, name, *unwrap, [x, y, z]) {
+                offset += 1;
+            }
+        }
+        for name in &features.grass {
+            random.set_feature_seed(seed, offset as i32, VEGETAL as i32);
+            if self.place(world, random, name, false, [x, y, z]) {
+                offset += 1;
+            }
+        }
+        Ok(offset)
+    }
+
+    /// `PositionSampler.sample` with the jittered `placeAt`: trees on a squashed,
+    /// jittered grid, where the column's fitness beats the cell's roll.
+    #[allow(clippy::too_many_arguments)]
+    fn sample(
+        &mut self,
+        world: &mut World<'_>,
+        random: &mut Random,
+        seed: i64,
+        mut offset: usize,
+        chunk: ChunkPos,
+        config: &VegetationConfig,
+        biome: BiomeId,
+        viability: &[f32; 256],
+        sea_level: i32,
+        features: &VegetationFeatures,
+    ) -> Result<usize, GeneratorError> {
+        let (x, z) = (chunk.x.wrapping_shl(4), chunk.z.wrapping_shl(4));
+        let freq_x = config.frequency;
+        let freq_z = config.frequency * (2.0 / 3.0_f32.sqrt());
+        let min_x = ((x as f32 - BORDER) * freq_x).floor() as i32;
+        let min_z = ((z as f32 - BORDER) * freq_z).floor() as i32;
+        let max_x = ((x as f32 + 15.0 + BORDER) * freq_x).floor() as i32;
+        let max_z = ((z as f32 + 15.0 + BORDER) * freq_z).floor() as i32;
+        let cell_seed = seed as i32;
+        for pz in min_z..=max_z {
+            let ox = (pz & 1) as f32 * 0.5;
+            for px in min_x..=max_x {
+                let hash = crate::worldgen::generator::terraforged::hash_2d(cell_seed, px, pz);
+                let dx = rand(hash_1d(hash, X_PRIME));
+                let dz = rand(hash_1d(hash, Y_PRIME));
+                let sx = px as f32 + ox + dx * config.jitter * 0.65;
+                let sz = pz as f32 + dz * config.jitter;
+                let pos_x = (sx / freq_x).floor() as i32;
+                let pos_z = (sz / freq_z).floor() as i32;
+                if pos_x >> 4 != chunk.x || pos_z >> 4 != chunk.z {
+                    continue;
+                }
+                let y = top(world, pos_x, pos_z)?;
+                if y <= sea_level {
+                    continue;
+                }
+                let at = world
+                    .biome_identity([pos_x, y, pos_z])
+                    .map_err(|e| resource(e.to_string()))?;
+                if at != biome {
+                    continue;
+                }
+                let fitness = viability[((pos_z & 15) * 16 + (pos_x & 15)) as usize];
+                let noise = (1.0 - config.density) * rand(hash);
+                if fitness < noise {
+                    continue;
+                }
+                for (name, unwrap) in &features.trees {
+                    random.set_feature_seed(seed, offset as i32, VEGETAL as i32);
+                    if self.place(world, random, name, *unwrap, [pos_x, y, pos_z]) {
+                        offset += 1;
+                    }
+                }
+            }
+        }
+        Ok(offset)
+    }
+
+    /// `placeGrassAt`: at least two passes of the grass features from the chunk's corner
+    /// at y 0 (the context's maximum fitness is never raised from 0).
+    #[allow(clippy::too_many_arguments)]
+    fn grass(
+        &mut self,
+        world: &mut World<'_>,
+        random: &mut Random,
+        seed: i64,
+        mut offset: usize,
+        x: i32,
+        z: i32,
+        terrain: &TerrainData,
+        features: &VegetationFeatures,
+    ) -> usize {
+        let mut passes = 2;
+        passes += (2.0 * (1.0 - 0.0_f32)).floor() as i32;
+        passes += (4.0 * terrain.river().get(8, 8)).floor() as i32;
+        passes -= (5.0 * terrain.height_at(8, 8) as f32).floor() as i32;
+        let passes = passes.max(2);
+        for i in 0..passes {
+            for name in &features.grass {
+                random.set_feature_seed(seed, (offset as i32).wrapping_add(i), VEGETAL as i32);
+                if self.place(world, random, name, false, [x, 0, z]) {
+                    offset += 1;
+                }
+            }
+        }
+        offset
+    }
+
+    /// `PositionSampler.placeOther`: the rest of the origin biome's vegetal features.
+    #[allow(clippy::too_many_arguments)]
+    fn other(
+        &mut self,
+        world: &mut World<'_>,
+        random: &mut Random,
+        seed: i64,
+        mut offset: usize,
+        origin: [i32; 3],
+        biome: BiomeId,
+        tf: &TerraForgedDecoration<'_>,
+    ) -> Result<(), GeneratorError> {
+        let (_, features) = self.vegetation(biome, tf);
+        for name in &features.other {
+            random.set_feature_seed(seed, offset as i32, VEGETAL as i32);
+            if self.place(world, random, name, false, origin) {
+                offset += 1;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// `chunk.getHeight(OCEAN_FLOOR_WG, x, z)`: the top block, one under the first free one.
+fn top(world: &mut World<'_>, x: i32, z: i32) -> Result<i32, GeneratorError> {
+    world
+        .height(HeightmapType::OceanFloorWg, x, z)
+        .map(|first_free| first_free - 1)
+        .map_err(|e| resource(e.to_string()))
+}
+
+/// `ViabilityContext`: the chunk's terrain data, seed 0 and no biome edges (the original
+/// never sets them).
+struct TerrainViability<'a>(&'a TerrainData);
+
+impl ViabilityContext for TerrainViability<'_> {
+    fn seed(&self) -> i32 {
+        0
+    }
+    fn edge(&self) -> bool {
+        false
+    }
+    fn max_y(&self) -> i32 {
+        self.0.levels().max_y
+    }
+    fn base_height(&self, x: i32, z: i32) -> i32 {
+        self.0.base_height_at(x, z)
+    }
+    fn height(&self, x: i32, z: i32) -> i32 {
+        self.0.height_at(x, z)
+    }
+    fn normalized_gradient(&self, x: i32, z: i32, norm: f32) -> f32 {
+        self.0.normalized_gradient(x, z, norm)
+    }
+    fn river(&self, x: i32, z: i32) -> f32 {
+        self.0.river().get(x, z)
+    }
+    fn climate_shape(&self, _seed: i32, _x: i32, _z: i32) -> f32 {
+        0.0
     }
 }
