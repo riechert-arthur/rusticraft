@@ -32,7 +32,7 @@ use super::terraforged_terrain_asset_registry::{
 /// The number of bundled terrain types.
 pub const TERRAIN_TYPE_COUNT: usize = 18;
 /// The number of bundled terrain noises.
-pub const TERRAIN_NOISE_COUNT: usize = 12;
+pub const TERRAIN_NOISE_COUNT: usize = 13;
 
 /// TerraForged Reimagined a24d450's `terrain_type` registry files
 /// (<https://github.com/Romoslayer/TerraForged-Reimagined/tree/a24d4503064780790e975cd17495866ae13eef11>,
@@ -229,6 +229,12 @@ pub fn current_terrain_noise_documents() -> [(&'static str, &'static str); TERRA
             "terraforged:dolomites",
             text(crate::terraforged_data!(
                 "worldgen/terrain_noise/dolomites.json"
+            )),
+        ),
+        (
+            "terraforged:plateau",
+            text(crate::terraforged_data!(
+                "worldgen/terrain_noise/plateau.json"
             )),
         ),
     ]
