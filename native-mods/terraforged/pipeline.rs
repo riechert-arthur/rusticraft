@@ -114,8 +114,8 @@ impl TerraForgedPipeline {
             data.registry,
             &data.block_tags,
         )?;
-        // CaveBiomeSampler: GLOBAL caves use terraforged:cave (not registered in Horizon
-        // yet, so they keep their biomes); UNIQUE caves draw from every registered biome.
+        // CaveBiomeSampler: GLOBAL caves use terraforged:cave; UNIQUE caves draw from
+        // every registered biome.
         let global = data
             .biome_id("terraforged:cave")
             .map(Arc::new)

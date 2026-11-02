@@ -4,7 +4,7 @@ version = "0.1.0"
 priority = 100
 
 [compatibility]
-horizon_revision = "1b6e55d4f3bd14079551bcad173d0fac8f8225bb"
+horizon_revision = "8d902ee017dd207575b8802cf275b54c07c49cc5"
 
 [[module]]
 id = "noise"
@@ -676,3 +676,10 @@ file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_preview"
 source = "preview.rs"
 visibility = "pub"
+
+[[injection]]
+id = "native-biomes"
+target = "horizon_client_render::biome::native_biome_files"
+kind = "RETURN"
+helper = "hooks/native_biomes.rs"
+bindings = [{ name = "value", ty = "Vec<(String, Value)>", value = "$value" }]

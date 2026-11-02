@@ -27,7 +27,8 @@
 // the original's `default` pack is: its overworld is 1024 blocks tall from y -64, with
 // clouds at 300 (`terraforged:overworld` effects). Horizon reads a pack's dimension type
 // for the build range, the level shapes and the synced registry; it is written once under
-// the game's `config/terraforged` and appended to every world's packs.
+// the game's `config/terraforged` and appended to every world's packs. It also holds
+// TerraForged's two biomes, which `native_biome_files` adds to the game's biome table.
 
 use super::{DataPack, Source};
 use std::path::PathBuf;
@@ -36,6 +37,23 @@ pub const PACK_ID: &str = "terraforged";
 pub const OVERWORLD_MIN_Y: i32 = -64;
 pub const OVERWORLD_HEIGHT: i32 = 1024;
 pub const CLOUD_HEIGHT: f64 = 300.0;
+
+/// TerraForged's own biomes (`ModBiomes`, in 26.3's format), as `(id, JSON)`.
+pub fn biome_files() -> Vec<(String, serde_json::Value)> {
+    [
+        (
+            "terraforged:cave",
+            horizon_world::terraforged_data!("worldgen/biome/cave.json").as_slice(),
+        ),
+        (
+            "terraforged:oak_forest",
+            horizon_world::terraforged_data!("worldgen/biome/oak_forest.json").as_slice(),
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(id, bytes)| Some((id.to_owned(), serde_json::from_slice(bytes).ok()?)))
+    .collect()
+}
 
 /// The overworld dimension type the pack holds: the fields Horizon reads from a pack's type.
 pub fn overworld_type_json() -> String {
@@ -79,6 +97,16 @@ fn materialize() -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(&types)?;
     write(dir.join("pack.mcmeta"), &meta)?;
     write(types.join("overworld.json"), &overworld)?;
+    let biomes = dir
+        .join("data")
+        .join("terraforged")
+        .join("worldgen")
+        .join("biome");
+    std::fs::create_dir_all(&biomes)?;
+    for (id, json) in biome_files() {
+        let path = id.trim_start_matches("terraforged:");
+        write(biomes.join(format!("{path}.json")), &json.to_string())?;
+    }
     Ok(dir)
 }
 
