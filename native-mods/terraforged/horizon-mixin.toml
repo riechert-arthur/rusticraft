@@ -563,3 +563,9 @@ file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_cave_carver"
 source = "cave_carver.rs"
 visibility = "pub"
+
+[[module]]
+id = "structure_queries"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_structure_queries"
+source = "structure_queries.rs"
