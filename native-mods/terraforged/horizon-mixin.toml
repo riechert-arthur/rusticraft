@@ -607,3 +607,19 @@ bindings = [
   { name = "input", ty = "&Input<'_>", value = "self" },
   { name = "value", ty = "(MeshKey, Uniform)", value = "$value" },
 ]
+
+[[module]]
+id = "boat"
+file = "crates/horizon-client/src/game/boats.rs"
+name = "terraforged_boat"
+source = "boat.rs"
+
+[[injection]]
+id = "float-the-boat"
+target = "horizon_client::game::boats::Game<'_>::boat_status"
+kind = "OVERWRITE"
+helper = "hooks/boat_status.rs"
+bindings = [
+  { name = "game", ty = "&Game<'_>", value = "self" },
+  { name = "b", ty = "&mut Boat", value = "b" },
+]
