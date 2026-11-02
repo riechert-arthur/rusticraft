@@ -31,7 +31,6 @@ ORIGINAL_TERRAFORGED_ORACLES = {
     "tools/terraforged/TerraForgedGeneratorQueryOracle.java",
     "tools/terraforged/TerraForgedBiomeChunkFillOracle.java",
     "tools/terraforged/TerraForgedCaveBiomeSamplerOracle.java",
-    "tools/terraforged/TerraForgedBiomePoolOracle.java",
     "tools/terraforged/TerraForgedCurrentClimateOracle.java",
     "tools/terraforged/TerraForgedTerrainNoiseOracle.java",
     "tools/terraforged/TerraForgedNoiseCaveOracle.java",

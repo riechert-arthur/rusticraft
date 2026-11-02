@@ -536,8 +536,9 @@ The cave-biome sampler reproduces independent GLOBAL and UNIQUE pools, equal-wei
 and Java-width seed offsets. Empty pools remain empty, matching Java's null result; no coverage mask
 is applied. `tools/terraforged/run_cave_biome_oracle.py` compiles the original CaveBiomeSampler,
 WeightMap and MathUtil with minimal Minecraft registry stand-ins rather than restating their logic.
-Empty surface and highland climate pools now borrow the nearest original non-empty pool using
-TerraForged's temperature-biased climate distance without order-dependent multi-hop borrowing.
+Climate pools follow `BiomeMapManager`: configured weights first, then every unconfigured
+`#is_overworld` biome (sorted by path, then namespace) at weight 1 in its tag-derived climate,
+untagged biomes in grassland. Empty pools stay empty and never borrow from other climates.
 Initial biome selection follows `BiomeSampler.getInitialBiome`: the climate's pool picks by biome
 noise, and a missing or empty pool gives plains.
 Current climate sampling now preserves biome-scale and optional edge warps, nearest and second-nearest

@@ -36,37 +36,6 @@ const IS_SAVANNA: &str = "minecraft:is_savanna";
 const IS_JUNGLE: &str = "minecraft:is_jungle";
 const IS_TAIGA: &str = "minecraft:is_taiga";
 const IS_FOREST: &str = "minecraft:is_forest";
-const IS_OCEAN: &str = "minecraft:is_ocean";
-const IS_DEEP_OCEAN: &str = "minecraft:is_deep_ocean";
-const IS_RIVER: &str = "minecraft:is_river";
-const IS_BEACH: &str = "minecraft:is_beach";
-const NON_SURFACE: &str = "terraforged:non_surface";
-const WETLAND: &str = "terraforged:wetland";
-const HIGHLAND: &str = "terraforged:highland";
-
-const DEFAULT_WETLANDS: &[&str] = &["minecraft:swamp", "minecraft:mangrove_swamp"];
-const DEFAULT_HIGHLANDS: &[&str] = &[
-    "minecraft:windswept_hills",
-    "minecraft:windswept_gravelly_hills",
-    "minecraft:windswept_forest",
-    "minecraft:windswept_savanna",
-    "minecraft:stony_peaks",
-    "minecraft:snowy_slopes",
-    "minecraft:jagged_peaks",
-    "minecraft:frozen_peaks",
-    "minecraft:grove",
-    "minecraft:badlands",
-    "minecraft:eroded_badlands",
-    "minecraft:wooded_badlands",
-];
-const DEFAULT_NON_SURFACE: &[&str] = &[
-    "minecraft:deep_dark",
-    "minecraft:dripstone_caves",
-    "minecraft:lush_caves",
-    "minecraft:sulfur_caves",
-    "terraforged:cave",
-];
-
 #[derive(Clone)]
 pub struct RegistryBiome<T> {
     pub value: Arc<T>,
@@ -104,35 +73,6 @@ impl<T> RegistryBiome<T> {
         self.has_precipitation && self.temperature < 0.15
     }
 
-    fn is_non_surface(&self) -> bool {
-        self.is(NON_SURFACE)
-            || DEFAULT_NON_SURFACE.contains(&self.name.as_ref())
-            || self
-                .name
-                .split_once(':')
-                .is_some_and(|(_, path)| path.starts_with("cave/") || path.ends_with("_caves"))
-    }
-
-    fn is_water_placed(&self) -> bool {
-        self.is(IS_OCEAN)
-            || self.is(IS_DEEP_OCEAN)
-            || self.is(IS_RIVER)
-            || self.is(IS_BEACH)
-            || self.name.as_ref() == "minecraft:stony_shore"
-    }
-
-    fn is_climate_biome(&self) -> bool {
-        !self.is_non_surface() && !self.is_water_placed()
-    }
-
-    fn is_wetland(&self) -> bool {
-        self.is(WETLAND) || DEFAULT_WETLANDS.contains(&self.name.as_ref())
-    }
-
-    fn is_highland(&self) -> bool {
-        self.is(HIGHLAND) || DEFAULT_HIGHLANDS.contains(&self.name.as_ref())
-    }
-
     pub fn climate_type(&self) -> BiomeType {
         if self.is(IS_BADLANDS) || self.is(HAS_VILLAGE_DESERT) {
             BiomeType::Desert
@@ -155,15 +95,17 @@ impl<T> RegistryBiome<T> {
                 BiomeType::TemperateForest
             }
         } else {
-            let temperature = normalize(self.temperature, -0.7, 1.2);
-            let moisture = normalize(self.downfall, 0.0, 1.0);
-            BiomeType::at_climate(temperature, moisture)
+            BiomeType::Grassland
         }
     }
-}
 
-fn normalize(value: f32, minimum: f32, maximum: f32) -> f32 {
-    ((value - minimum) / (maximum - minimum)).clamp(0.0, 1.0)
+    /// `ResourceLocation.compareTo`: the path first, then the namespace.
+    fn location_key(&self) -> (&str, &str) {
+        match self.name.split_once(':') {
+            Some((namespace, path)) => (path, namespace),
+            None => (self.name.as_ref(), "minecraft"),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -173,15 +115,21 @@ pub struct ClimateWeight {
     pub weight: f32,
 }
 
+// `BiomeMapManager`: the overworld biome list and one weighted pool per climate.
 pub struct RegistryBiomeMap<T> {
     pub overworld: Vec<Arc<T>>,
-    pub wet: BiomePools<T>,
-    pub dry: BiomePools<T>,
-    pub highland: BiomePools<T>,
+    pub pools: BiomePools<T>,
 }
 
 impl<T> RegistryBiomeMap<T> {
-    pub fn build(entries: &[RegistryBiome<T>], configured: &[ClimateWeight]) -> Self {
+    /// `BiomeMapManager.getWeightsMap`: configured climate weights first, in their order,
+    /// then every unconfigured overworld biome at weight 1 in its classified climate. Empty
+    /// pools stay empty (the sampler falls back to plains). An unknown configured biome is
+    /// an error, as `orElseThrow` is.
+    pub fn build(
+        entries: &[RegistryBiome<T>],
+        configured: &[ClimateWeight],
+    ) -> Result<Self, String> {
         let mut overworld: Vec<_> = entries
             .iter()
             .filter(|entry| entry.is(IS_OVERWORLD))
@@ -190,9 +138,10 @@ impl<T> RegistryBiomeMap<T> {
         let mut weighted: [Vec<(Arc<T>, f32)>; 11] = std::array::from_fn(|_| Vec::new());
 
         for assignment in configured {
-            let Some(entry) = entries.iter().find(|entry| entry.name == assignment.biome) else {
-                continue;
-            };
+            let entry = entries
+                .iter()
+                .find(|entry| entry.name == assignment.biome)
+                .ok_or_else(|| format!("unknown climate biome {:?}", assignment.biome))?;
             let pool = &mut weighted[assignment.climate as usize];
             if let Some(existing) = pool
                 .iter_mut()
@@ -211,78 +160,38 @@ impl<T> RegistryBiomeMap<T> {
             }
         }
 
-        overworld.sort_by(|left, right| left.name.cmp(&right.name));
+        overworld.sort_by(|left, right| left.location_key().cmp(&right.location_key()));
         for entry in &overworld {
-            if registered.contains(&entry.name) || !entry.is_climate_biome() {
+            if registered.contains(&entry.name) {
                 continue;
             }
             weighted[entry.climate_type() as usize].push((Arc::clone(&entry.value), 1.0));
         }
 
-        let mut wet = BiomePools::default();
+        let mut pools = BiomePools::default();
         for climate in BiomeType::VALUES {
             let (values, weights): (Vec<_>, Vec<_>) = weighted[climate as usize]
                 .iter()
                 .map(|(value, weight)| (Arc::clone(value), *weight))
                 .unzip();
-            wet.insert(climate, Arc::new(WeightMap::new(values, &weights)));
+            pools.insert(climate, Arc::new(WeightMap::new(values, &weights)));
         }
-        wet.fill_empty_climates();
 
-        let dry = filtered_pools(&wet, entries, |entry| !entry.is_wetland(), true);
-        let mut highland = filtered_pools(&wet, entries, RegistryBiome::is_highland, false);
-        highland.fill_empty_climates();
-
-        Self {
+        Ok(Self {
             overworld: overworld
                 .into_iter()
                 .map(|entry| Arc::clone(&entry.value))
                 .collect(),
-            wet,
-            dry,
-            highland,
-        }
+            pools,
+        })
     }
-}
-
-fn filtered_pools<T>(
-    source: &BiomePools<T>,
-    entries: &[RegistryBiome<T>],
-    keep: impl Fn(&RegistryBiome<T>) -> bool,
-    keep_original_if_empty: bool,
-) -> BiomePools<T> {
-    let mut result = BiomePools::default();
-    for climate in BiomeType::VALUES {
-        let Some(original) = source.get(climate) else {
-            continue;
-        };
-        let kept: Vec<_> = original
-            .values()
-            .iter()
-            .filter(|value| {
-                entries
-                    .iter()
-                    .find(|entry| Arc::ptr_eq(&entry.value, value))
-                    .is_some_and(&keep)
-            })
-            .cloned()
-            .collect();
-        if kept.is_empty() {
-            if keep_original_if_empty {
-                result.insert(climate, Arc::clone(original));
-            }
-        } else {
-            result.insert(
-                climate,
-                Arc::new(WeightMap::new(kept.clone(), &vec![1.0; kept.len()])),
-            );
-        }
-    }
-    result
 }
 
 impl RegistryBiomeMap<BiomeId> {
-    pub fn from_generator_data(data: &GeneratorData, configured: &[ClimateWeight]) -> Self {
+    pub fn from_generator_data(
+        data: &GeneratorData,
+        configured: &[ClimateWeight],
+    ) -> Result<Self, String> {
         let entries: Vec<_> = data
             .biome_names
             .iter()
@@ -363,60 +272,73 @@ mod tests {
     }
 
     #[test]
-    fn builds_configured_and_filtered_registry_pools() {
+    fn untagged_biomes_are_grassland() {
+        assert_eq!(
+            biome("minecraft:mushroom_fields", 0.9, 1.0, &[]).climate_type(),
+            BiomeType::Grassland
+        );
+        assert_eq!(
+            biome("minecraft:snowy_plains", 0.0, 0.5, &[]).climate_type(),
+            BiomeType::Grassland
+        );
+    }
+
+    #[test]
+    fn builds_pools_like_biome_map_manager() {
         let entries = [
             biome("minecraft:plains", 0.8, 0.4, &[IS_OVERWORLD]),
-            biome("minecraft:swamp", 0.8, 0.9, &[IS_OVERWORLD, IS_FOREST]),
-            biome(
-                "minecraft:windswept_hills",
-                0.2,
-                0.3,
-                &[IS_OVERWORLD, IS_FOREST],
-            ),
+            biome("minecraft:swamp", 0.8, 0.9, &[IS_OVERWORLD]),
             biome(
                 "minecraft:dark_forest",
                 0.7,
                 0.8,
                 &[IS_OVERWORLD, IS_FOREST],
             ),
-            biome("minecraft:ocean", 0.5, 0.5, &[IS_OVERWORLD, IS_OCEAN]),
+            biome("minecraft:ocean", 0.5, 0.5, &[IS_OVERWORLD]),
             biome("minecraft:lush_caves", 0.5, 0.5, &[IS_OVERWORLD]),
+            biome("a:zebra", 0.5, 0.5, &[IS_OVERWORLD]),
+            biome("z:apple", 0.5, 0.5, &[IS_OVERWORLD]),
+            biome("minecraft:the_void", 0.5, 0.5, &[]),
         ];
         let configured = [ClimateWeight {
             climate: BiomeType::Desert,
             biome: Arc::from("minecraft:ocean"),
             weight: 3.0,
         }];
-        let map = RegistryBiomeMap::build(&entries, &configured);
+        let map = RegistryBiomeMap::build(&entries, &configured).unwrap();
+        let names = |climate| {
+            map.pools
+                .get(climate)
+                .unwrap()
+                .values()
+                .iter()
+                .map(|value| **value)
+                .collect::<Vec<_>>()
+        };
+        // Sorted by path, then namespace; oceans and caves are not filtered out.
+        assert_eq!(
+            names(BiomeType::Grassland),
+            [
+                "z:apple",
+                "minecraft:lush_caves",
+                "minecraft:plains",
+                "minecraft:swamp",
+                "a:zebra"
+            ]
+        );
+        assert_eq!(names(BiomeType::Desert), ["minecraft:ocean"]);
+        assert_eq!(
+            names(BiomeType::TemperateRainforest),
+            ["minecraft:dark_forest"]
+        );
+        assert!(names(BiomeType::Alpine).is_empty());
+        assert_eq!(map.overworld.len(), 7);
 
-        assert_eq!(map.overworld.len(), 6);
-        assert_eq!(
-            map.wet.get(BiomeType::Desert).unwrap().values()[0].as_ref(),
-            &"minecraft:ocean"
-        );
-        assert!(
-            map.wet
-                .get(BiomeType::TemperateRainforest)
-                .unwrap()
-                .values()
-                .iter()
-                .any(|value| value.as_ref() == &"minecraft:swamp")
-        );
-        assert!(
-            !map.dry
-                .get(BiomeType::TemperateRainforest)
-                .unwrap()
-                .values()
-                .iter()
-                .any(|value| value.as_ref() == &"minecraft:swamp")
-        );
-        assert_eq!(
-            map.highland
-                .get(BiomeType::TemperateForest)
-                .unwrap()
-                .values()[0]
-                .as_ref(),
-            &"minecraft:windswept_hills"
-        );
+        let missing = [ClimateWeight {
+            climate: BiomeType::Desert,
+            biome: Arc::from("minecraft:missing"),
+            weight: 1.0,
+        }];
+        assert!(RegistryBiomeMap::build(&entries, &missing).is_err());
     }
 }

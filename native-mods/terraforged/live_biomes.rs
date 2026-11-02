@@ -75,7 +75,8 @@ impl LiveBiomeBindings {
         data: &GeneratorData,
         configured: &[ClimateWeight],
     ) -> Result<Self, MissingBiome> {
-        let map = RegistryBiomeMap::from_generator_data(data, configured);
+        let map = RegistryBiomeMap::from_generator_data(data, configured)
+            .map_err(|error| MissingBiome(Arc::from(error)))?;
         Self::resolve(map, |name| data.biome_id(name))
     }
 
@@ -144,7 +145,7 @@ impl LiveBiomeBindings {
         generator.fill_biomes(
             chunk,
             position,
-            &self.map.wet,
+            &self.map.pools,
             self.fallback(),
             &|replacement| self.override_biome(replacement),
         )
@@ -165,7 +166,7 @@ mod tests {
             true,
             [Arc::from("minecraft:is_overworld")],
         )];
-        let map = RegistryBiomeMap::build(&entries, &[]);
+        let map = RegistryBiomeMap::build(&entries, &[]).unwrap();
         LiveBiomeBindings::resolve(map, |name| {
             if missing == Some(name) {
                 return None;
