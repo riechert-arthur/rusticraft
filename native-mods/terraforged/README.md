@@ -36,7 +36,10 @@ including its quirks: JSON `Bias` nodes decode as 0 (Engine's spec reads a modul
 and other non-surface overworld biomes stay in the climate pools (so `deep_dark` can reach the
 surface), unique caves draw from every registered biome (TerraForged's two included), `oak_forest`
 is in no climate pool (it lacks `minecraft:is_overworld`), so it never generates on the surface,
-and outside the vegetation step each chunk is decorated with the one biome at its lowest corner.
+and outside the vegetation step each chunk is decorated with the one biome at its lowest corner. Vegetation counts
+only the features that placed (`offset++`) to seed the next, so a tree blocked by a neighbour's
+leaves reseeds the rest of its chunk: the trees depend on the order chunks are decorated in, which
+varies with threads in Java and here alike (`/tf regen` included).
 
 Differences and gaps:
 
@@ -45,8 +48,8 @@ Differences and gaps:
   (`#minecraft:substrate_overworld` and `#minecraft:snow`), the pale garden tree keyword and the
   taller overworld's dimension type. `base_column` reports vanilla's `NoiseColumn` shape (solid from
   the level bottom up to the eroded height), departing from both TerraForged trees.
-- Results never depend on thread scheduling: per-thread carry-over and pooled-object reuse in Java's
-  caches are not reproduced.
+- Apart from the decoration order above, results never depend on thread scheduling: per-thread
+  carry-over and pooled-object reuse in Java's caches are not reproduced.
 - The Create World screen opens on Normal, not TerraForged, and a dedicated server's
   `level-type=terraforged:normal` is not recognized.
 - TerraForged's biomes `terraforged:cave` and `terraforged:oak_forest` exist in TerraForged worlds
