@@ -35,7 +35,8 @@ pub const SHALLOW_OCEAN: f32 = 0.25;
 pub const BEACH: f32 = 0.5;
 pub const COAST: f32 = 0.55;
 pub const INLAND: f32 = 0.6;
-pub const BEACH_SIZE: f32 = COAST - BEACH;
+/// `BiomeSampler.beachSize`: a narrow fringe above `BEACH` (`COAST` is not used here).
+pub const BEACH_SIZE: f32 = 0.005;
 pub const SLOPE_STEP: i32 = 24;
 pub const MAX_FLAT_GRADIENT: f32 = 0.42;
 
@@ -318,10 +319,6 @@ mod tests {
         );
         assert_eq!(
             biome_override(&sample(BEACH + 0.006, BiomeType::Grassland)),
-            BiomeOverride::Beach
-        );
-        assert_eq!(
-            biome_override(&sample(COAST + f32::EPSILON, BiomeType::Grassland)),
             BiomeOverride::Input
         );
     }

@@ -551,8 +551,7 @@ and the Cereal dependency from the original 0.3.1 artifact.
 The current biome-sampler bridge now scales block coordinates by terrain frequency and composes
 continent, river, and climate sampling in Java order. Climate-only and edge-shape queries preserve
 the caller's terrain sample just like `IBiomeSampler.Sampler`.
-The surface override now uses the current source's full `COAST - BEACH` shoreline band instead of
-the obsolete 0.005 fringe, so coastal columns remain beach candidates through the coast marker.
+The surface override keeps TerraForged's 0.005 beach fringe above the `BEACH` control point.
 Surface sampling now composes climate pools, the per-cell mountain roll, four-point slope gate,
 height-adjusted snow compatibility, and final ocean, shore, and river overrides in source order.
 The generator facade now feeds that composed surface sampler into quart-resolution chunk biome
