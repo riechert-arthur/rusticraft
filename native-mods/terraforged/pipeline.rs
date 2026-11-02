@@ -32,6 +32,9 @@ use super::{
     GeneratorError, JigsawPieces, JigsawQuery, LodColumn, OverworldGenerator, Pipeline,
     PreLightChunkStage, ProtoChunk, SeededPipeline, SurfaceInputs, SurfaceQueries, SurfaceSample,
     TerrainChunk, UniformSurfaceBiomes, WorkerState, build_surface, overrides, resource, stage,
+    terraforged_cave_assets::current_caves,
+    terraforged_cave_biome_sampler::CaveBiomeSampler,
+    terraforged_cave_carver::NoiseCaveGenerator,
     terraforged_generator_facade::TerraForgedGenerator,
     terraforged_generator_preset::{build as build_noise, terrain_levels},
     terraforged_live_biomes::LiveBiomeBindings,
@@ -55,6 +58,7 @@ pub(super) struct TerraForgedPipeline {
     vanilla: Pipeline<XoroshiroRandom>,
     generator: TerraForgedGenerator,
     biomes: LiveBiomeBindings,
+    caves: NoiseCaveGenerator<BiomeId>,
     /// Block states by block and by tag, for TerraForged's surface passes.
     blocks: BlockSets,
     block_tags: BlockSets,
@@ -100,10 +104,26 @@ impl TerraForgedPipeline {
             data.registry,
             &data.block_tags,
         )?;
+        // CaveBiomeSampler: GLOBAL caves use terraforged:cave (not registered in Horizon
+        // yet, so they keep their biomes); UNIQUE caves draw from every registered biome.
+        let global = data
+            .biome_id("terraforged:cave")
+            .map(Arc::new)
+            .into_iter()
+            .collect();
+        let special = (0..data.biome_names().len())
+            .map(|id| Arc::new(BiomeId(id as u32)))
+            .collect();
+        let caves = NoiseCaveGenerator::new(
+            current_caves().map_err(resource)?,
+            CaveBiomeSampler::new(800, global, special),
+            seed,
+        );
         Ok(Self {
             vanilla: vanilla_overworld(data, seed)?,
             generator,
             biomes,
+            caves,
             blocks,
             block_tags,
         })
@@ -219,7 +239,7 @@ impl SeededPipeline for TerraForgedPipeline {
             }
             neighbors.push(chunk);
         }
-        let center = neighbors[4].clone();
+        let mut center = neighbors[4].clone();
         let region =
             BiomeRegion::new(neighbors, obfuscate_seed(vanilla.seed)).map_err(stage("biomes"))?;
 
@@ -297,6 +317,21 @@ impl SeededPipeline for TerraForgedPipeline {
                 self.generator.sea_level(),
             )
             .map_err(stage("surface"))?;
+
+        // applyCarvers: TerraForged's noise caves; no vanilla carvers run.
+        let levels = self.generator.levels();
+        self.caves
+            .carve(
+                vanilla.seed as i32,
+                &mut chunk,
+                &mut center,
+                &terrain.read(),
+                levels.min_y,
+                levels.sea_level,
+                block("minecraft:air")?,
+                true,
+            )
+            .map_err(stage("carvers"))?;
 
         chunk
             .prime_heightmaps(&[
@@ -490,5 +525,19 @@ mod tests {
         let mut worker = overworld.worker();
         let chunk = worker.generate_proto(ChunkPos::new(0, 0)).unwrap();
         assert_eq!(chunk.position(), ChunkPos::new(0, 0));
+        // Noise caves open air well below the surface somewhere nearby.
+        let mut cave_air = 0;
+        for (cx, cz) in [(0, 0), (3, -2), (-5, 4), (8, 8)] {
+            let chunk = worker.generate_proto(ChunkPos::new(cx, cz)).unwrap();
+            for x in 0..16 {
+                for z in 0..16 {
+                    let top = chunk.surface_height(x, z);
+                    cave_air += (-60..top - 12)
+                        .filter(|y| chunk.block_name(x, *y, z) == "minecraft:air")
+                        .count();
+                }
+            }
+        }
+        assert!(cave_air > 0);
     }
 }
