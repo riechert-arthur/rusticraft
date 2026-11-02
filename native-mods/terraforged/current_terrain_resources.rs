@@ -32,7 +32,7 @@ use super::terraforged_terrain_blender::TerrainNoise;
 use std::{collections::BTreeMap, sync::Arc};
 
 pub const TERRAIN_TYPE_COUNT: usize = 18;
-pub const TERRAIN_NOISE_COUNT: usize = 12;
+pub const TERRAIN_NOISE_COUNT: usize = 13;
 
 pub fn current_terrain_type_documents() -> [(&'static str, &'static str); TERRAIN_TYPE_COUNT] {
     [
@@ -211,6 +211,12 @@ pub fn current_terrain_noise_documents() -> [(&'static str, &'static str); TERRA
                 "worldgen/terrain_noise/dolomites.json"
             )),
         ),
+        (
+            "terraforged:plateau",
+            text(crate::terraforged_data!(
+                "worldgen/terrain_noise/plateau.json"
+            )),
+        ),
     ]
 }
 
@@ -371,6 +377,15 @@ mod tests {
             [
                 1046179254, 1052026345, 1024010043, 1027683270, 1033553768, 1050312660, 1025260216,
                 1014586180,
+            ],
+        ),
+        (
+            "terraforged:plateau",
+            "plateau",
+            2.0,
+            [
+                1023472680, 1040509796, 1040362919, 1022814116, 1023381098, 1027648070, 1040548193,
+                1041769889,
             ],
         ),
     ];
