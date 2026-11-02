@@ -27,7 +27,7 @@ use super::{
     super::terrain::{TerrainBlockStates, TerrainChunk, TerrainError},
     terraforged_biome_chunk_fill::fill_noise_biomes,
     terraforged_biome_map::BiomePools,
-    terraforged_biome_sampler::{BiomeOverride, InitialBiomeSettings},
+    terraforged_biome_sampler::BiomeOverride,
     terraforged_chunk_fill::fill_chunk,
     terraforged_current_surface_biomes::CurrentSurfaceBiomeSampler,
     terraforged_eroded_noise_generator::ErodedNoiseGenerator,
@@ -164,38 +164,20 @@ impl TerraForgedGenerator {
         Ok(terrain)
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn fill_biomes<T: Clone>(
         &self,
         chunk: &mut BiomeChunk<T>,
         position: ChunkPos,
-        wet: &BiomePools<T>,
-        dry: &BiomePools<T>,
-        highland: &BiomePools<T>,
+        pools: &BiomePools<T>,
         fallback: Arc<T>,
-        settings: InitialBiomeSettings,
-        base_temperature: &impl Fn(&T) -> f32,
         override_biome: &impl Fn(BiomeOverride) -> Arc<T>,
     ) -> Result<(), BiomeFillError<Infallible>> {
-        let surface = CurrentSurfaceBiomeSampler::new(
-            self.noise_generator(),
-            wet,
-            dry,
-            highland,
-            fallback,
-            settings,
-        );
+        let surface = CurrentSurfaceBiomeSampler::new(self.noise_generator(), pools, fallback);
         let seed = self.seed();
         fill_noise_biomes(chunk, position, |x, _y, z| {
             Ok::<_, Infallible>(
                 surface
-                    .sample(
-                        seed,
-                        x.wrapping_shl(2),
-                        z.wrapping_shl(2),
-                        base_temperature,
-                        override_biome,
-                    )
+                    .sample(seed, x.wrapping_shl(2), z.wrapping_shl(2), override_biome)
                     .as_ref()
                     .clone(),
             )
@@ -610,7 +592,7 @@ mod tests {
     }
 
     #[test]
-    fn fill_biomes_connects_surface_and_cave_layers() {
+    fn fill_biomes_samples_the_surface_through_every_section() {
         let generator = generator();
         generator.capture_seed(17);
         let position = ChunkPos::new(-2, 3);
@@ -625,49 +607,20 @@ mod tests {
             }
             pools
         };
-        let wet = pools(10);
-        let dry = pools(20);
-        let highland = pools(30);
-        let settings = InitialBiomeSettings {
-            wetlands: super::super::terraforged_biome_sampler::WetlandSettings {
-                river_size: 0.75,
-                coast_size: 0.7,
-                chance: 1.0,
-            },
-            mountain_usage: 0.0,
-            sea_level: generator.sea_level(),
-        };
-        let temperature = |_: &i32| 0.8;
+        let pools = pools(10);
         let replacement = |_: BiomeOverride| Arc::new(99);
         generator
-            .fill_biomes(
-                &mut chunk,
-                position,
-                &wet,
-                &dry,
-                &highland,
-                Arc::new(1),
-                settings,
-                &temperature,
-                &replacement,
-            )
+            .fill_biomes(&mut chunk, position, &pools, Arc::new(1), &replacement)
             .unwrap();
 
-        let surface = CurrentSurfaceBiomeSampler::new(
-            generator.noise_generator(),
-            &wet,
-            &dry,
-            &highland,
-            Arc::new(1),
-            settings,
-        );
+        let surface =
+            CurrentSurfaceBiomeSampler::new(generator.noise_generator(), &pools, Arc::new(1));
         let quart_x = position.x.wrapping_shl(2);
         let quart_z = position.z.wrapping_shl(2);
         let expected = surface.sample(
             generator.seed(),
             quart_x.wrapping_shl(2),
             quart_z.wrapping_shl(2),
-            &temperature,
             &replacement,
         );
         assert_eq!(*chunk.noise_biome([quart_x, 0, quart_z]), *expected);

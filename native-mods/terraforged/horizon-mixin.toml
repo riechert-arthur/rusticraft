@@ -378,13 +378,6 @@ source = "live_biomes.rs"
 visibility = "pub"
 
 [[module]]
-id = "current_settings"
-file = "crates/horizon-world/src/worldgen/generator.rs"
-name = "terraforged_current_settings"
-source = "current_settings.rs"
-visibility = "pub"
-
-[[module]]
 id = "terrain_overrides"
 file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_terrain_overrides"

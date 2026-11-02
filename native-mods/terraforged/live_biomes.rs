@@ -29,7 +29,7 @@ use super::{
     },
     GeneratorData,
     terraforged_biome_registry::{ClimateWeight, RegistryBiomeMap},
-    terraforged_biome_sampler::{BiomeOverride, InitialBiomeSettings},
+    terraforged_biome_sampler::BiomeOverride,
     terraforged_generator_facade::TerraForgedGenerator,
 };
 use horizon_core::position::ChunkPos;
@@ -68,7 +68,6 @@ pub struct LiveBiomeBindings {
     pub map: RegistryBiomeMap<BiomeId>,
     fallback: Arc<BiomeId>,
     overrides: [Arc<BiomeId>; 13],
-    temperatures: Vec<f32>,
 }
 
 impl LiveBiomeBindings {
@@ -77,17 +76,11 @@ impl LiveBiomeBindings {
         configured: &[ClimateWeight],
     ) -> Result<Self, MissingBiome> {
         let map = RegistryBiomeMap::from_generator_data(data, configured);
-        let temperatures = data
-            .temperatures
-            .iter()
-            .map(|settings| settings.base_temperature)
-            .collect();
-        Self::resolve(map, temperatures, |name| data.biome_id(name))
+        Self::resolve(map, |name| data.biome_id(name))
     }
 
     fn resolve(
         map: RegistryBiomeMap<BiomeId>,
-        temperatures: Vec<f32>,
         mut resolve: impl FnMut(&str) -> Option<BiomeId>,
     ) -> Result<Self, MissingBiome> {
         let mut required = |name: &'static str| {
@@ -115,16 +108,11 @@ impl LiveBiomeBindings {
             map,
             fallback,
             overrides,
-            temperatures,
         })
     }
 
     pub fn fallback(&self) -> Arc<BiomeId> {
         Arc::clone(&self.fallback)
-    }
-
-    pub fn base_temperature(&self, biome: BiomeId) -> f32 {
-        self.temperatures[biome.0 as usize]
     }
 
     pub fn override_biome(&self, replacement: BiomeOverride) -> Arc<BiomeId> {
@@ -152,17 +140,12 @@ impl LiveBiomeBindings {
         generator: &TerraForgedGenerator,
         chunk: &mut BiomeChunk<BiomeId>,
         position: ChunkPos,
-        settings: InitialBiomeSettings,
     ) -> Result<(), BiomeFillError<Infallible>> {
         generator.fill_biomes(
             chunk,
             position,
             &self.map.wet,
-            &self.map.dry,
-            &self.map.highland,
             self.fallback(),
-            settings,
-            &|biome| self.base_temperature(*biome),
             &|replacement| self.override_biome(replacement),
         )
     }
@@ -183,7 +166,7 @@ mod tests {
             [Arc::from("minecraft:is_overworld")],
         )];
         let map = RegistryBiomeMap::build(&entries, &[]);
-        LiveBiomeBindings::resolve(map, (0..14).map(|id| id as f32 / 10.0).collect(), |name| {
+        LiveBiomeBindings::resolve(map, |name| {
             if missing == Some(name) {
                 return None;
             }
@@ -223,10 +206,6 @@ mod tests {
             );
         }
         assert_eq!(*bindings.fallback(), BiomeId(0));
-        assert_eq!(
-            bindings.base_temperature(BiomeId(13)).to_bits(),
-            1.3_f32.to_bits()
-        );
     }
 
     #[test]

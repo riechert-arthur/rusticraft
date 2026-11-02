@@ -25,7 +25,6 @@
 use super::{
     terraforged_biome_map::BiomePools,
     terraforged_engine::{BiomeType, TerrainProperties},
-    terraforged_terrain_blend_util::random,
     terraforged_terrain_data::NoiseSample,
 };
 use std::sync::Arc;
@@ -37,8 +36,6 @@ pub const COAST: f32 = 0.55;
 pub const INLAND: f32 = 0.6;
 /// `BiomeSampler.beachSize`: a narrow fringe above `BEACH` (`COAST` is not used here).
 pub const BEACH_SIZE: f32 = 0.005;
-pub const SLOPE_STEP: i32 = 24;
-pub const MAX_FLAT_GRADIENT: f32 = 0.42;
 
 #[derive(Clone)]
 pub struct ClimateSample {
@@ -129,139 +126,23 @@ pub fn biome_override(sample: &ClimateSample) -> BiomeOverride {
     BiomeOverride::Input
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct WetlandSettings {
-    pub river_size: f32,
-    pub coast_size: f32,
-    pub chance: f32,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum LowlandPool {
-    Wet,
-    Dry,
-}
-
-pub fn lowland_pool(sample: &ClimateSample, wetlands: WetlandSettings) -> LowlandPool {
-    let eligible = sample.noise.river_noise < wetlands.river_size
-        || sample.noise.continent_noise < wetlands.coast_size;
-    let wet = eligible
-        && (wetlands.chance >= 1.0 || cell_roll(sample.biome_noise, 4153) < wetlands.chance);
-    if wet {
-        LowlandPool::Wet
-    } else {
-        LowlandPool::Dry
-    }
-}
-
-pub fn uses_mountain_pool(biome_noise: f32, mountain_usage: f32) -> bool {
-    if mountain_usage <= 0.0 {
-        return false;
-    }
-    mountain_usage >= 1.0 || cell_roll(biome_noise, 7309) < mountain_usage
-}
-
-pub fn is_steep(max_y: i32, west: f32, east: f32, north: f32, south: f32) -> bool {
-    let half = 1.max(SLOPE_STEP / 2);
-    let dx = (east - west) * max_y as f32;
-    let dz = (south - north) * max_y as f32;
-    let gradient = dx.abs().max(dz.abs()) / (half * 2) as f32;
-    gradient > MAX_FLAT_GRADIENT
-}
-
-pub fn freezes(base_temperature: f32, height: i32, sea_level: i32) -> bool {
-    let threshold = sea_level.wrapping_add(17);
-    let mut temperature = base_temperature;
-    if height > threshold {
-        temperature -= (height - threshold) as f32 * 0.05 / 40.0;
-    }
-    temperature < 0.15
-}
-
-pub fn keeps_snow_cover(
-    normal_temperature: f32,
-    highland_temperature: f32,
-    height: i32,
-    sea_level: i32,
-) -> bool {
-    freezes(normal_temperature, height, sea_level)
-        == freezes(highland_temperature, height, sea_level)
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct InitialBiomeSettings {
-    pub wetlands: WetlandSettings,
-    pub mountain_usage: f32,
-    pub sea_level: i32,
-}
-
-pub fn select_initial_biome<T>(
+/// `BiomeSampler.getInitialBiome`: the climate's pool picks by biome noise; a missing or
+/// empty pool gives `fallback` (plains).
+pub fn initial_biome<T>(
+    pools: &BiomePools<T>,
     sample: &ClimateSample,
-    settings: InitialBiomeSettings,
-    wet: &BiomePools<T>,
-    dry: &BiomePools<T>,
-    highland: &BiomePools<T>,
     fallback: &Arc<T>,
-    steep: bool,
-    height: i32,
-    base_temperature: impl Fn(&T) -> f32,
 ) -> Arc<T> {
-    let lowland = match lowland_pool(sample, settings.wetlands) {
-        LowlandPool::Wet => wet,
-        LowlandPool::Dry => dry,
-    };
-    let normal = from_pool(lowland, sample).unwrap_or_else(|| Arc::clone(fallback));
-    if !uses_mountain_pool(sample.biome_noise, settings.mountain_usage) || !steep {
-        return normal;
-    }
-    let Some(highland) = from_pool(highland, sample) else {
-        return normal;
-    };
-    if Arc::ptr_eq(&highland, &normal) {
-        return normal;
-    }
-    if keeps_snow_cover(
-        base_temperature(&normal),
-        base_temperature(&highland),
-        height,
-        settings.sea_level,
-    ) {
-        highland
-    } else {
-        normal
-    }
-}
-
-fn from_pool<T>(pools: &BiomePools<T>, sample: &ClimateSample) -> Option<Arc<T>> {
     pools
-        .get(sample.climate_type)?
-        .get_value(sample.biome_noise)
+        .get(sample.climate_type)
+        .and_then(|pool| pool.get_value(sample.biome_noise))
         .cloned()
-}
-
-pub fn cell_roll(biome_noise: f32, salt: i32) -> f32 {
-    let bits = if biome_noise.is_nan() {
-        0x7fc0_0000_u32
-    } else {
-        biome_noise.to_bits()
-    } as i32;
-    random(hash(bits, salt))
-}
-
-fn hash(seed: i32, value: i32) -> i32 {
-    let mut hash = seed ^ 31_337_i32.wrapping_mul(value);
-    hash = hash
-        .wrapping_mul(hash)
-        .wrapping_mul(hash)
-        .wrapping_mul(60_493);
-    (hash >> 13) ^ hash
+        .unwrap_or_else(|| Arc::clone(fallback))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::{
-        terraforged_engine::TerrainRegistry, terraforged_terrain_blend_util::WeightMap,
-    };
+    use super::super::terraforged_engine::TerrainRegistry;
     use super::*;
 
     fn sample(continent: f32, climate: BiomeType) -> ClimateSample {
@@ -350,177 +231,5 @@ mod tests {
         assert_eq!(river.moisture, 0.3);
         assert_eq!(river.temperature, 0.2);
         assert_eq!(river.climate_type, BiomeType::Tundra);
-    }
-
-    #[test]
-    fn cell_rolls_match_current_java_source() {
-        let fixtures = [
-            (0.0, 1_015_243_200, 1_063_772_364),
-            (0.25, 1_049_933_204, 1_063_146_972),
-            (0.5, 1_047_641_752, 1_039_401_820),
-            (1.0, 1_055_996_260, 1_029_327_800),
-            (f32::from_bits(0x7fc0_1234), 1_053_806_592, 1_063_779_620),
-        ];
-        for (noise, wetland, mountain) in fixtures {
-            assert_eq!(cell_roll(noise, 4153).to_bits(), wetland);
-            assert_eq!(cell_roll(noise, 7309).to_bits(), mountain);
-        }
-    }
-
-    #[test]
-    fn wetland_and_mountain_pool_gates_match_current_source() {
-        let mut sample = ClimateSample::default();
-        sample.biome_noise = 0.5;
-        sample.noise.river_noise = 0.5;
-        sample.noise.continent_noise = 0.8;
-        let settings = WetlandSettings {
-            river_size: 0.75,
-            coast_size: 0.7,
-            chance: 0.3,
-        };
-        assert_eq!(lowland_pool(&sample, settings), LowlandPool::Wet);
-        assert_eq!(
-            lowland_pool(
-                &sample,
-                WetlandSettings {
-                    chance: 0.2,
-                    ..settings
-                }
-            ),
-            LowlandPool::Dry
-        );
-        sample.noise.river_noise = 0.8;
-        assert_eq!(lowland_pool(&sample, settings), LowlandPool::Dry);
-        assert!(uses_mountain_pool(0.5, 0.2));
-        assert!(!uses_mountain_pool(0.5, 0.1));
-        assert!(!uses_mountain_pool(0.5, 0.0));
-        assert!(uses_mountain_pool(0.5, 1.0));
-    }
-
-    #[test]
-    fn slope_and_snow_gates_match_current_java_source() {
-        assert!(!is_steep(480, 0.2, 0.221, 0.4, 0.4));
-        assert!(is_steep(480, 0.2, 0.222, 0.4, 0.4));
-        assert!(is_steep(384, 0.7, 0.6, 0.1, 0.11));
-        assert!(!freezes(0.2, 79, 62));
-        assert!(freezes(0.2, 120, 62));
-        assert!(!freezes(0.6, 200, 62));
-        assert!(freezes(0.1, 79, 62));
-        assert!(keeps_snow_cover(0.6, 0.2, 79, 62));
-        assert!(!keeps_snow_cover(0.6, 0.2, 120, 62));
-    }
-
-    #[derive(Debug)]
-    struct TestBiome {
-        name: &'static str,
-        temperature: f32,
-    }
-
-    fn one_biome_pool(biome: &Arc<TestBiome>) -> Arc<WeightMap<TestBiome>> {
-        Arc::new(WeightMap::new(vec![Arc::clone(biome)], &[1.0]))
-    }
-
-    #[test]
-    fn initial_selection_preserves_java_pool_and_snow_order() {
-        let fallback = Arc::new(TestBiome {
-            name: "fallback",
-            temperature: 0.8,
-        });
-        let wet_biome = Arc::new(TestBiome {
-            name: "wet",
-            temperature: 0.6,
-        });
-        let dry_biome = Arc::new(TestBiome {
-            name: "dry",
-            temperature: 0.6,
-        });
-        let high_biome = Arc::new(TestBiome {
-            name: "high",
-            temperature: 0.2,
-        });
-        let mut wet = BiomePools::default();
-        wet.insert(BiomeType::Grassland, one_biome_pool(&wet_biome));
-        let mut dry = BiomePools::default();
-        dry.insert(BiomeType::Grassland, one_biome_pool(&dry_biome));
-        let mut highland = BiomePools::default();
-        highland.insert(BiomeType::Grassland, one_biome_pool(&high_biome));
-        let settings = InitialBiomeSettings {
-            wetlands: WetlandSettings {
-                river_size: 0.75,
-                coast_size: 0.7,
-                chance: 1.0,
-            },
-            mountain_usage: 1.0,
-            sea_level: 62,
-        };
-        let mut sample = ClimateSample::default();
-        sample.climate_type = BiomeType::Grassland;
-        sample.biome_noise = 0.5;
-        sample.noise.river_noise = 0.5;
-        sample.noise.continent_noise = 0.8;
-
-        let selected = select_initial_biome(
-            &sample,
-            settings,
-            &wet,
-            &dry,
-            &highland,
-            &fallback,
-            false,
-            79,
-            |biome| biome.temperature,
-        );
-        assert_eq!(selected.name, "wet");
-        let selected = select_initial_biome(
-            &sample,
-            settings,
-            &wet,
-            &dry,
-            &highland,
-            &fallback,
-            true,
-            79,
-            |biome| biome.temperature,
-        );
-        assert_eq!(selected.name, "high");
-        let selected = select_initial_biome(
-            &sample,
-            settings,
-            &wet,
-            &dry,
-            &highland,
-            &fallback,
-            true,
-            120,
-            |biome| biome.temperature,
-        );
-        assert_eq!(selected.name, "wet");
-
-        sample.noise.river_noise = 0.9;
-        let selected = select_initial_biome(
-            &sample,
-            settings,
-            &wet,
-            &dry,
-            &BiomePools::default(),
-            &fallback,
-            true,
-            79,
-            |biome| biome.temperature,
-        );
-        assert_eq!(selected.name, "dry");
-        sample.climate_type = BiomeType::Alpine;
-        let selected = select_initial_biome(
-            &sample,
-            settings,
-            &wet,
-            &dry,
-            &highland,
-            &fallback,
-            true,
-            79,
-            |biome| biome.temperature,
-        );
-        assert_eq!(selected.name, "fallback");
     }
 }

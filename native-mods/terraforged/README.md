@@ -538,10 +538,8 @@ is applied. `tools/terraforged/run_cave_biome_oracle.py` compiles the original C
 WeightMap and MathUtil with minimal Minecraft registry stand-ins rather than restating their logic.
 Empty surface and highland climate pools now borrow the nearest original non-empty pool using
 TerraForged's temperature-biased climate distance without order-dependent multi-hop borrowing.
-Surface-biome decisions now preserve per-cell wetland and mountain rolls, centered four-sample
-slope gating, and vanilla-compatible altitude snow checks before accepting a highland substitute.
-Initial biome selection now connects those decisions to wet, dry, and highland climate pools,
-including plains-style fallback, identity no-ops, and snow-incompatible substitution rejection.
+Initial biome selection follows `BiomeSampler.getInitialBiome`: the climate's pool picks by biome
+noise, and a missing or empty pool gives plains.
 Current climate sampling now preserves biome-scale and optional edge warps, nearest and second-nearest
 cell selection, macro-cell grouping, moisture and temperature graphs, edge distance, and the temporary
 steppe-to-grassland remap across runtime seeds. Raw fixture bits come from the current Java sources.
@@ -552,8 +550,8 @@ The current biome-sampler bridge now scales block coordinates by terrain frequen
 continent, river, and climate sampling in Java order. Climate-only and edge-shape queries preserve
 the caller's terrain sample just like `IBiomeSampler.Sampler`.
 The surface override keeps TerraForged's 0.005 beach fringe above the `BEACH` control point.
-Surface sampling now composes climate pools, the per-cell mountain roll, four-point slope gate,
-height-adjusted snow compatibility, and final ocean, shore, and river overrides in source order.
+Surface sampling composes the climate sample, that pool choice and the ocean, shore and river
+overrides in `sampleBiome`'s order.
 The generator facade now feeds that composed surface sampler into quart-resolution chunk biome
 filling, converts quart coordinates back to blocks, and retains the separate deep cave layer.
 
