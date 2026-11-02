@@ -32,7 +32,7 @@ use super::terraforged_terrain_blender::TerrainNoise;
 use std::{collections::BTreeMap, sync::Arc};
 
 pub const TERRAIN_TYPE_COUNT: usize = 18;
-pub const TERRAIN_NOISE_COUNT: usize = 2;
+pub const TERRAIN_NOISE_COUNT: usize = 5;
 
 pub fn current_terrain_type_documents() -> [(&'static str, &'static str); TERRAIN_TYPE_COUNT] {
     [
@@ -151,6 +151,24 @@ pub fn current_terrain_noise_documents() -> [(&'static str, &'static str); TERRA
                 "worldgen/terrain_noise/steppe.json"
             )),
         ),
+        (
+            "terraforged:hills_1",
+            text(crate::terraforged_data!(
+                "worldgen/terrain_noise/hills_1.json"
+            )),
+        ),
+        (
+            "terraforged:hills_2",
+            text(crate::terraforged_data!(
+                "worldgen/terrain_noise/hills_2.json"
+            )),
+        ),
+        (
+            "terraforged:dales",
+            text(crate::terraforged_data!(
+                "worldgen/terrain_noise/dales.json"
+            )),
+        ),
     ]
 }
 
@@ -221,6 +239,33 @@ mod tests {
             [
                 1028606507, 1029134818, 1022905425, 1028641916, 1028182330, 1029685008, 1028097517,
                 1028229816,
+            ],
+        ),
+        (
+            "terraforged:hills_1",
+            "hills",
+            2.0,
+            [
+                1043180974, 1048357924, 1045800170, 1046166903, 1043222715, 1042456505, 1044211833,
+                1040273598,
+            ],
+        ),
+        (
+            "terraforged:hills_2",
+            "hills",
+            2.0,
+            [
+                1043562377, 1042118936, 1047835284, 1048019116, 1044506557, 1043332629, 1052758090,
+                1049135843,
+            ],
+        ),
+        (
+            "terraforged:dales",
+            "hills",
+            1.5,
+            [
+                1017159841, 1026041084, 1043379902, 1035175271, 1017390598, 1023450675, 1025047324,
+                1034384982,
             ],
         ),
     ];
