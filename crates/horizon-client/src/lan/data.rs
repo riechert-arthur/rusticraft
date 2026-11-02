@@ -214,6 +214,14 @@ impl SyncData {
             if PACK_REGISTRIES.contains(key) {
                 pack_entries(path, overlay, &mut entries);
             }
+            if *key == "minecraft:worldgen/biome" {
+                // Native mods' biomes, sent with their data as a pack's are.
+                for (name, json) in crate::biome::native_biome_files() {
+                    if let Some((ns, path)) = name.split_once(':') {
+                        entries.push(((ns.to_owned(), path.to_owned()), json, true));
+                    }
+                }
+            }
             file_order(&mut entries);
             let mut e = Entries {
                 names: Vec::new(),

@@ -268,6 +268,13 @@ pub fn identifier_order(a: &str, b: &str) -> std::cmp::Ordering {
     }
     split(a).cmp(&split(b))
 }
+/// The biomes native mods add, as `(id, biome JSON)`: built-in biomes after vanilla's in the
+/// game's table and the synchronized `minecraft:worldgen/biome` registry. A native mod adds
+/// its own with a RETURN hook here; the generator reads them from the mod's data pack.
+pub fn native_biome_files() -> Vec<(String, Value)> {
+    Vec::new()
+}
+
 impl Biomes {
     pub fn load(root: &Path) -> Result<Self> {
         let maps = Colormaps {
@@ -291,6 +298,12 @@ impl Biomes {
             );
             let v: Value = serde_json::from_slice(&fs::read(&path)?)?;
             list.push(BiomeInfo::from_json(name, &v, &maps));
+        }
+        // Biomes native mods add join after the vanilla ones, which keep their ids.
+        for (name, json) in native_biome_files() {
+            if !list.iter().any(|b: &BiomeInfo| b.name == name) {
+                list.push(BiomeInfo::from_json(name, &json, &maps));
+            }
         }
         let index = list
             .iter()

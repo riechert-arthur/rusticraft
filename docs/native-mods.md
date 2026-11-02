@@ -687,6 +687,14 @@ For mods that run where the world is simulated: a dedicated server, a LAN host, 
   a player's bucket at a block, and their blow on an entity, with the acting player swapped in. Canceled, the bucket
   does nothing and the blow does no harm.
 
+### Biomes
+
+`horizon_client_render::biome::native_biome_files()` returns the biomes native mods add, as `(id, biome
+JSON)` in 26.3's format; a mod adds its own with a RETURN hook on it. They join the game's biome table
+after vanilla's (whose ids stay put) and the synchronized `minecraft:worldgen/biome` registry, sent with their
+data as a pack's biomes are. The generator reads a mod's biomes from its data pack, which keeps them now that the
+table knows them. Saves and the network refer to biomes by name.
+
 ### Mobs
 
 API 37, `crates/horizon-client/src/game/native_mobs.rs`: helpers for server mods, for the level in place, on a server only (on a
