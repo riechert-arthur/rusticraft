@@ -22,7 +22,10 @@
  * SOFTWARE.
  */
 
-use super::terraforged::{Module, cell_vector, floor, value_coord_2d};
+use super::terraforged::{
+    Interpolation, Module, Source, SourceConfig, SourceKind, cell_vector, floor, value_coord_2d,
+};
+use super::terraforged_landforms::noise_warp;
 
 /// The jar's `worldgen.cave.CaveType`: how a cave is spread over the world (`GLOBAL` everywhere, `UNIQUE` through
 /// `UniqueCaveDistributor`'s cells).
@@ -56,7 +59,9 @@ impl CaveType {
     }
 }
 
-/// The jar's `worldgen.asset.NoiseCave`: a cave's elevation, shape and floor noise and its vertical range.
+/// `worldgen.asset.NoiseCave`: a cave's elevation, shape and floor noise and its vertical range. The jar and
+/// TerraForged 6dd607eb agree except that 6dd607eb's samplers take the runtime seed (`Seeds.get`, the world seed
+/// narrowed to an `int`) and pass it to the noise's `getValue(seed, x, z)`; the samplers here are 6dd607eb's.
 #[derive(Clone)]
 pub struct NoiseCave {
     seed: i32,
@@ -121,24 +126,69 @@ impl NoiseCave {
         self.cave_type
     }
 
-    /// `getHeight(x, z)`: `minY` plus the elevation noise scaled to `rangeY`.
-    pub fn height(&self, x: i32, z: i32) -> i32 {
-        scale_value(x, z, 1.0, self.min_y, self.range_y, &self.elevation)
+    /// 6dd607eb's `getHeight(seed, x, z)`: `minY` plus the elevation noise scaled to `rangeY`. `Err` where the noise
+    /// can't be sampled seed-first (see [`Module::try_value_seed_first`]). The jar's `getHeight(x, z)` is this with
+    /// seed 0.
+    pub fn height(&self, seed: i32, x: i32, z: i32) -> Result<i32, &'static str> {
+        scale_value(seed, x, z, 1.0, self.min_y, self.range_y, &self.elevation)
     }
 
-    /// `getCavernSize(x, z, modifier)`: the shape noise scaled to `size * modifier`.
-    pub fn cavern_size(&self, x: i32, z: i32, modifier: f32) -> i32 {
-        scale_value(x, z, modifier, 0, self.size, &self.shape)
+    /// 6dd607eb's `getCavernSize(seed, x, z, modifier)`: the shape noise scaled to `size * modifier`.
+    pub fn cavern_size(
+        &self,
+        seed: i32,
+        x: i32,
+        z: i32,
+        modifier: f32,
+    ) -> Result<i32, &'static str> {
+        scale_value(seed, x, z, modifier, 0, self.size, &self.shape)
     }
 
-    /// `getFloorDepth(x, z, size)`: the floor noise scaled to `size`.
-    pub fn floor_depth(&self, x: i32, z: i32, size: i32) -> i32 {
-        scale_value(x, z, 1.0, 0, size, &self.floor)
+    /// 6dd607eb's `getFloorDepth(seed, x, z, size)`: the floor noise scaled to `size`.
+    pub fn floor_depth(&self, seed: i32, x: i32, z: i32, size: i32) -> Result<i32, &'static str> {
+        scale_value(seed, x, z, 1.0, 0, size, &self.floor)
     }
 }
 
-/// The jar's `worldgen.cave.UniqueCaveDistributor`: jittered cells on staggered rows; a cell whose value is above
-/// `density` is 0, the others `1 - sqrt(nearest / second nearest)` squared distance.
+/// 6dd607eb's `NoiseCaveGenerator.createUniqueNoise(500, DENSITY)`: where `UNIQUE` caves form (the modifier
+/// `NoiseCaveCarver` scales their cavern size by). Its seeds are fixed; the runtime seed reaches the distributor's
+/// cells and the warp's sources through seed-first sampling. (The jar builds it from the context seed instead:
+/// `seed + 1286745` for the distributor, `seed + 781624` for the warp.)
+pub fn unique_cave_noise() -> Module {
+    UniqueCaveDistributor::new(1_286_745, 1.0 / 500.0, 0.75, 0.05)
+        .module()
+        .clamp(Module::constant(0.2), Module::constant(1.0))
+        .map(Module::constant(0.0), Module::constant(1.0))
+        .warp(noise_warp(781_624, 30, 1, 20.0))
+}
+
+/// 6dd607eb's `NoiseCaveGenerator.createBreachNoise(300, BREACH_THRESHOLD)`: `Source.simplexRidge(1567328, 300, 2)`
+/// (the builder's ridge gain 0.975) clamped to `0.7 * 0.8 ..= 0.7` and mapped to 0..1; `CarverChunk.getCarvingMask`
+/// reads it. Sample it seed-first with the runtime seed. (The jar seeds the ridge with the context seed `+ 12`.)
+pub fn cave_breach_noise() -> Module {
+    let threshold = 0.7_f32;
+    Module::source(Source::new(
+        SourceKind::SimplexRidge,
+        SourceConfig {
+            seed: 1_567_328,
+            octaves: 2,
+            gain: 0.975,
+            frequency: 1.0 / 300.0,
+            lacunarity: 2.0,
+            interpolation: Interpolation::Curve3,
+        },
+    ))
+    .clamp(
+        Module::constant(threshold * 0.8),
+        Module::constant(threshold),
+    )
+    .map(Module::constant(0.0), Module::constant(1.0))
+}
+
+/// `worldgen.cave.UniqueCaveDistributor`: jittered cells on staggered rows; a cell whose value is above `density` is
+/// 0, the others `1 - sqrt(nearest / second nearest)` squared distance. 6dd607eb's `getValue(int seed, x, y)` places
+/// the cells with the runtime seed (the parameter shadows the field) but rolls their value with the field; the jar's
+/// `getValue(x, y)` uses the field for both, which is [`UniqueCaveDistributor::value`] with `self.seed`.
 #[derive(Clone, Copy)]
 pub struct UniqueCaveDistributor {
     seed: i32,
@@ -157,9 +207,10 @@ impl UniqueCaveDistributor {
         }
     }
 
-    /// `getValue(x, z)`, in the jar's float order. The loops cover `max - 2 ..= max`, which is empty when `max - 2`
-    /// wraps (Java's `<=` loop too); NaN distances never win, as in Java.
-    pub fn value(&self, mut x: f32, mut z: f32) -> f32 {
+    /// 6dd607eb's `getValue(seed, x, z)`, in Java's float order: cell positions from `seed`, the occupancy roll from
+    /// the distributor's own seed. The loops cover `max - 2 ..= max`, which is empty when `max - 2` wraps (Java's `<=`
+    /// loop too); NaN distances never win, as in Java.
+    pub fn value(&self, seed: i32, mut x: f32, mut z: f32) -> f32 {
         x *= self.frequency;
         z *= self.frequency;
         let max_x = floor(x).wrapping_add(1);
@@ -171,7 +222,7 @@ impl UniqueCaveDistributor {
         for candidate_z in max_z.wrapping_sub(2)..=max_z {
             let offset_x = (candidate_z & 1) as f32 * 0.5;
             for candidate_x in max_x.wrapping_sub(2)..=max_x {
-                let vector = cell_vector(self.seed, candidate_x, candidate_z);
+                let vector = cell_vector(seed, candidate_x, candidate_z);
                 let point_x = candidate_x as f32 + offset_x + vector[0] * self.jitter;
                 let point_z = candidate_z as f32 + vector[1] * self.jitter;
                 let delta_x = x - point_x;
@@ -194,10 +245,16 @@ impl UniqueCaveDistributor {
         }
     }
 
-    /// The distributor as a `Module` (the jar's class implements it): `Noise`'s default bounds 0..1. Like any
-    /// custom module it can't be reseeded (`with_seed` panics, as the jar has no Cereal spec for it).
+    /// The distributor as a `Module` (the class implements it): `Noise`'s default bounds 0..1. Seedless sampling is
+    /// the jar's `getValue(x, z)`, seed-first sampling 6dd607eb's `getValue(seed, x, z)`. Like any custom module it
+    /// can't be reseeded (`with_seed` panics, as neither tree has a Cereal spec for it).
     pub fn module(self) -> Module {
-        Module::custom(0.0, 1.0, move |x, z| self.value(x, z))
+        Module::seeded_custom(
+            0.0,
+            1.0,
+            move |x, z| self.value(self.seed, x, z),
+            move |seed, x, z| self.value(seed, x, z),
+        )
     }
 
     fn cell_value(&self, cell_x: i32, cell_z: i32) -> f32 {
@@ -205,20 +262,26 @@ impl UniqueCaveDistributor {
     }
 }
 
-/// `NoiseCave.getScaleValue`: `minimum + NoiseUtil.floor(noise * range * modifier)`, 0 when `range <= 0`.
-fn scale_value(x: i32, z: i32, modifier: f32, minimum: i32, range: i32, noise: &Module) -> i32 {
+/// 6dd607eb's `NoiseCave.getScaleValue(seed, ...)`: `minimum + NoiseUtil.floor(noise * range * modifier)` (float
+/// math, left to right; the `int` sum wraps), 0 when `range <= 0` without sampling.
+fn scale_value(
+    seed: i32,
+    x: i32,
+    z: i32,
+    modifier: f32,
+    minimum: i32,
+    range: i32,
+    noise: &Module,
+) -> Result<i32, &'static str> {
     if range <= 0 {
-        return 0;
+        return Ok(0);
     }
-    minimum.wrapping_add(floor(
-        noise.value(x as f32, z as f32) * range as f32 * modifier,
-    ))
+    let value = noise.try_value_seed_first(seed, x as f32, z as f32)?;
+    Ok(minimum.wrapping_add(floor(value * range as f32 * modifier)))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::terraforged::{Interpolation, Source, SourceConfig, SourceKind};
-    use super::super::terraforged_landforms::noise_warp;
     use super::*;
     use std::fmt::Write;
 
@@ -493,36 +556,49 @@ r 1 unique f38e08606a465985 -2147483600,100,10 -2147483600,100,10 -2147483600,10
         }
     }
 
-    fn hash_cave(cave: &NoiseCave) -> String {
+    /// The oracles' cave fold at one runtime seed: 64 grid points, then `I_POINTS`.
+    fn fold_cave(cave: &NoiseCave, seed: i32) -> u64 {
         let mut hash = BASIS;
-        let mut out = String::new();
         for i in 0..64 + I_POINTS.len() as i32 {
-            let (x, z) = if i < 64 {
-                (gx(i) as i32, gz(i) as i32)
-            } else {
-                I_POINTS[(i - 64) as usize]
-            };
-            let height = cave.height(x, z);
+            let (x, z) = cave_point(i);
+            let height = cave.height(seed, x, z).unwrap();
             hash = fnv(hash, height as u32);
             for modifier in MODIFIERS {
-                let size = cave.cavern_size(x, z, modifier);
+                let size = cave.cavern_size(seed, x, z, modifier).unwrap();
                 hash = fnv(hash, size as u32);
-                hash = fnv(hash, cave.floor_depth(x, z, size) as u32);
+                hash = fnv(hash, cave.floor_depth(seed, x, z, size).unwrap() as u32);
             }
             for size in [0, -3, 1, 7, i32::MAX] {
-                hash = fnv(hash, cave.floor_depth(x, z, size) as u32);
-            }
-            if i >= 64 {
-                write!(
-                    out,
-                    " {height},{},{}",
-                    cave.cavern_size(x, z, 1.0),
-                    cave.floor_depth(x, z, 11)
-                )
-                .unwrap();
+                hash = fnv(hash, cave.floor_depth(seed, x, z, size).unwrap() as u32);
             }
         }
-        format!("{hash:x}{out}")
+        hash
+    }
+
+    fn cave_point(i: i32) -> (i32, i32) {
+        if i < 64 {
+            (gx(i) as i32, gz(i) as i32)
+        } else {
+            I_POINTS[(i - 64) as usize]
+        }
+    }
+
+    /// The jar oracle's cave line: the jar's seedless samplers are 6dd607eb's at seed 0 (these graphs sample alike
+    /// on both paths).
+    fn hash_cave(cave: &NoiseCave) -> String {
+        let mut out = format!("{:x}", fold_cave(cave, 0));
+        for i in 64..64 + I_POINTS.len() as i32 {
+            let (x, z) = cave_point(i);
+            let height = cave.height(0, x, z).unwrap();
+            write!(
+                out,
+                " {height},{},{}",
+                cave.cavern_size(0, x, z, 1.0).unwrap(),
+                cave.floor_depth(0, x, z, 11).unwrap()
+            )
+            .unwrap();
+        }
+        out
     }
 
     #[test]
@@ -557,7 +633,13 @@ r 1 unique f38e08606a465985 -2147483600,100,10 -2147483600,100,10 -2147483600,10
                 .unwrap();
             }
             for (x, z) in F_POINTS {
-                assert_eq!(bits(distributor.value(x, z)), bits(module.value(x, z)));
+                let jar = distributor.value(D_SEED[d], x, z);
+                assert_eq!(bits(jar), bits(module.value(x, z)));
+                // Seed-first at the field's own seed is the jar's sample.
+                assert_eq!(
+                    bits(jar),
+                    bits(module.try_value_seed_first(D_SEED[d], x, z).unwrap())
+                );
             }
         }
         for index in 0..6 {
@@ -584,5 +666,60 @@ r 1 unique f38e08606a465985 -2147483600,100,10 -2147483600,100,10 -2147483600,10
         }
         assert_eq!(out, ORACLE);
         assert_eq!(CaveType::VALUES.map(CaveType::name), ["global", "unique"]);
+    }
+
+    // From TerraForgedNoiseCaveOracle (6dd607eb; `.local/terraforged/oracles/noise_cave_seeded/`): seed, x, z,
+    // unique, breach.
+    const MODIFIERS_6DD: [(i32, i32, i32, u32, u32); 15] = [
+        (0, 0, 0, 0, 1065353216),
+        (0, 37, -91, 0, 0),
+        (0, -1024, 4096, 0, 1040947585),
+        (0, 12345, -6789, 0, 0),
+        (0, -30001, 15003, 0, 0),
+        (1337, 0, 0, 0, 1065353216),
+        (1337, 37, -91, 0, 0),
+        (1337, -1024, 4096, 0, 0),
+        (1337, 12345, -6789, 0, 0),
+        (1337, -30001, 15003, 0, 0),
+        (-987654321, 0, 0, 0, 1065353216),
+        (-987654321, 37, -91, 0, 0),
+        (-987654321, -1024, 4096, 0, 0),
+        (-987654321, 12345, -6789, 0, 0),
+        (-987654321, -30001, 15003, 0, 0),
+    ];
+
+    // The oracle's first unique-cave hits along a fixed scan: seed, x, z, value.
+    const UNIQUE_HITS: [(i32, i32, i32, u32); 12] = [
+        (0, -887584, 292192, 1032954723),
+        (0, -887487, 292131, 1060519800),
+        (0, -887390, 292070, 1063312299),
+        (0, -887293, 292009, 1053391849),
+        (1337, -896217, 297621, 1025155803),
+        (1337, -896120, 297560, 1037706053),
+        (1337, -881570, 288410, 1042212703),
+        (1337, -880600, 287800, 1049766814),
+        (-987654321, -896314, 297682, 1058922596),
+        (-987654321, -896217, 297621, 1065205434),
+        (-987654321, -896120, 297560, 1059647356),
+        (-987654321, -896023, 297499, 1049694601),
+    ];
+
+    #[test]
+    fn cave_modifiers_match_terraforged_source() {
+        let unique = unique_cave_noise();
+        let breach = cave_breach_noise();
+        for (seed, x, z, unique_bits, breach_bits) in MODIFIERS_6DD {
+            let (x, z) = (x as f32, z as f32);
+            let value = unique.try_value_seed_first(seed, x, z).unwrap();
+            assert_eq!(value.to_bits(), unique_bits, "unique {seed} {x} {z}");
+            let value = breach.try_value_seed_first(seed, x, z).unwrap();
+            assert_eq!(value.to_bits(), breach_bits, "breach {seed} {x} {z}");
+        }
+        for (seed, x, z, bits) in UNIQUE_HITS {
+            let value = unique
+                .try_value_seed_first(seed, x as f32, z as f32)
+                .unwrap();
+            assert_eq!(value.to_bits(), bits, "unique hit {seed} {x} {z}");
+        }
     }
 }

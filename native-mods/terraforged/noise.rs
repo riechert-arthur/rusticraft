@@ -1330,7 +1330,12 @@ struct CacheValue {
 
 enum ModuleKind {
     Constant(f32),
-    Custom(Arc<dyn Fn(f32, f32) -> f32 + Send + Sync + std::panic::RefUnwindSafe>),
+    /// A Java class implementing `Module` itself: `value` is the jar's `getValue(x, y)`, `seeded` (when the class has
+    /// one) Noise2D 2cb4843's `getValue(seed, x, y)`.
+    Custom {
+        value: Arc<dyn Fn(f32, f32) -> f32 + Send + Sync + std::panic::RefUnwindSafe>,
+        seeded: Option<Arc<dyn Fn(i32, f32, f32) -> f32 + Send + Sync + std::panic::RefUnwindSafe>>,
+    },
     Source(Source),
     ErosionRidge {
         ridge: ErosionRidge,
@@ -1789,7 +1794,33 @@ impl Module {
         max: f32,
         value: impl Fn(f32, f32) -> f32 + Send + Sync + std::panic::RefUnwindSafe + 'static,
     ) -> Self {
-        Self::node(ModuleKind::Custom(Arc::new(value)), min, max)
+        Self::node(
+            ModuleKind::Custom {
+                value: Arc::new(value),
+                seeded: None,
+            },
+            min,
+            max,
+        )
+    }
+
+    /// [`Module::custom`] for a class that also has Noise2D 2cb4843's seed-first `getValue(seed, x, y)`: `value` is
+    /// the seedless sample, `seeded` the one [`Module::try_value_seed_first`] takes. Reseeding still panics (no Cereal
+    /// spec), as for any custom module.
+    pub fn seeded_custom(
+        min: f32,
+        max: f32,
+        value: impl Fn(f32, f32) -> f32 + Send + Sync + std::panic::RefUnwindSafe + 'static,
+        seeded: impl Fn(i32, f32, f32) -> f32 + Send + Sync + std::panic::RefUnwindSafe + 'static,
+    ) -> Self {
+        Self::node(
+            ModuleKind::Custom {
+                value: Arc::new(value),
+                seeded: Some(Arc::new(seeded)),
+            },
+            min,
+            max,
+        )
     }
 
     pub fn source(source: Source) -> Self {
@@ -1865,7 +1896,7 @@ impl Module {
     pub fn value(&self, x: f32, y: f32) -> f32 {
         match &self.0.kind {
             ModuleKind::Constant(value) => *value,
-            ModuleKind::Custom(value) => value(x, y),
+            ModuleKind::Custom { value, .. } => value(x, y),
             ModuleKind::Source(source) => source.value(x, y),
             ModuleKind::ErosionRidge { ridge, source } => ridge.value(x, y, source),
             ModuleKind::CellSource { .. }
@@ -2195,7 +2226,8 @@ impl Module {
         }
     }
 
-    /// Noise2D 2cb4843's `getValue(int seed, float x, float y)` for every node but custom modules (the scalar nodes,
+    /// Noise2D 2cb4843's `getValue(int seed, float x, float y)` for every node but custom modules without a seed-first
+    /// sample (see [`Module::seeded_custom`]; the scalar nodes,
     /// `Warp`, the selectors, `Cache`, the terraces, curves and transforms, `Boost`, the cell, cell-edge and sine
     /// sources, `Line` and Engine's erosion `Ridge`): every node passes the call's seed unchanged to its children, except
     /// that the octave, cell and cell-edge sources add their own seed (see [`Source::value_seed_first`]) and a cell's
@@ -2216,6 +2248,10 @@ impl Module {
         let sample = |module: &Module| module.try_value_seed_first(seed, x, y);
         Ok(match &self.0.kind {
             ModuleKind::Constant(value) => *value,
+            ModuleKind::Custom {
+                seeded: Some(seeded),
+                ..
+            } => seeded(seed, x, y),
             ModuleKind::Source(source) => source.value_seed_first(seed, x, y),
             ModuleKind::ErosionRidge { ridge, source } => {
                 ridge.try_value_seed_first(seed, x, y, source)?
@@ -3095,7 +3131,7 @@ impl Module {
         match &self.0.kind {
             // `Const`: the value goes through a `double` and back, so -0.0 and NaN payloads stay.
             ModuleKind::Constant(value) => Self::new_constant(*value),
-            ModuleKind::Custom(_) => {
+            ModuleKind::Custom { .. } => {
                 panic!("Failed to reseed value: no spec registered for a custom module")
             }
             ModuleKind::Source(source) => {
@@ -3119,7 +3155,7 @@ impl Module {
                 };
                 // A custom lookup is left out and read back as the builder's default, `Source.ZERO`.
                 let lookup = match lookup.0.kind {
-                    ModuleKind::Custom(_) => Self::constant(0.0),
+                    ModuleKind::Custom { .. } => Self::constant(0.0),
                     _ => r(lookup),
                 };
                 Self::cell_source(config, 1.0, *function, *distance, lookup)
@@ -3312,7 +3348,7 @@ impl Module {
 /// is dropped.
 fn reseed_list<'a>(modules: impl Iterator<Item = &'a Module>, seed: i32) -> Vec<Module> {
     modules
-        .filter(|module| !matches!(module.0.kind, ModuleKind::Custom(_)))
+        .filter(|module| !matches!(module.0.kind, ModuleKind::Custom { .. }))
         .map(|module| module.reseed(seed))
         .collect()
 }
@@ -4131,8 +4167,8 @@ mod tests {
         assert_eq!((count, acc), (9216, 0x79cb_944a));
     }
 
-    /// A node `try_value_seed_first` rejects: a custom module (a Java class implementing `Module`), which has no
-    /// seed parameter to pass the runtime seed to.
+    /// A node `try_value_seed_first` rejects: a custom module (a Java class implementing `Module`) built without a
+    /// seed-first sample, which has no seed parameter to pass the runtime seed to.
     fn unsupported_seeded_node(value: f32) -> Module {
         Module::custom(value, value, move |_, _| value)
     }
