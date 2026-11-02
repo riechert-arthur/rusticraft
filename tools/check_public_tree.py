@@ -35,6 +35,7 @@ ORIGINAL_TERRAFORGED_ORACLES = {
     "tools/terraforged/TerraForgedBiomeSamplerDecisionOracle.java",
     "tools/terraforged/TerraForgedCurrentClimateOracle.java",
     "tools/terraforged/TerraForgedTerrainNoiseOracle.java",
+    "tools/terraforged/TerraForgedNoiseCaveOracle.java",
 }
 
 

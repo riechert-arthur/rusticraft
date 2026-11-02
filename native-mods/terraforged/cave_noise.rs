@@ -22,7 +22,10 @@
  * SOFTWARE.
  */
 
-use super::terraforged::{Module, cell_vector, floor, value_coord_2d};
+use super::terraforged::{
+    Domain, Interpolation, Module, Source, SourceConfig, SourceKind, cell_vector, floor,
+    value_coord_2d,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CaveType {
@@ -108,17 +111,68 @@ impl NoiseCave {
         self.cave_type
     }
 
-    pub fn height(&self, _seed: i32, x: i32, z: i32) -> i32 {
-        scale_value(x, z, 1.0, self.min_y, self.range_y, &self.elevation)
+    pub fn height(&self, seed: i32, x: i32, z: i32) -> Result<i32, &'static str> {
+        scale_value(seed, x, z, 1.0, self.min_y, self.range_y, &self.elevation)
     }
 
-    pub fn cavern_size(&self, _seed: i32, x: i32, z: i32, modifier: f32) -> i32 {
-        scale_value(x, z, modifier, 0, self.size, &self.shape)
+    pub fn cavern_size(
+        &self,
+        seed: i32,
+        x: i32,
+        z: i32,
+        modifier: f32,
+    ) -> Result<i32, &'static str> {
+        scale_value(seed, x, z, modifier, 0, self.size, &self.shape)
     }
 
-    pub fn floor_depth(&self, _seed: i32, x: i32, z: i32, size: i32) -> i32 {
-        scale_value(x, z, 1.0, 0, size, &self.floor)
+    pub fn floor_depth(&self, seed: i32, x: i32, z: i32, size: i32) -> Result<i32, &'static str> {
+        scale_value(seed, x, z, 1.0, 0, size, &self.floor)
     }
+}
+
+/// `NoiseCaveGenerator.createUniqueNoise(500, DENSITY)`: where unique caves form.
+pub fn unique_cave_noise() -> Module {
+    UniqueCaveDistributor::new(1_286_745, 1.0 / 500.0, 0.75, 0.05)
+        .module()
+        .clamp(Module::constant(0.2), Module::constant(1.0))
+        .map(Module::constant(0.0), Module::constant(1.0))
+        .warp(Domain::domain_warp(
+            perlin(781_624, 30, 1),
+            perlin(781_625, 30, 1),
+            Module::constant(20.0),
+        ))
+}
+
+/// `NoiseCaveGenerator.createBreachNoise(300, BREACH_THRESHOLD)`: where caves may open
+/// towards the surface.
+pub fn cave_breach_noise() -> Module {
+    let threshold = 0.7_f32;
+    builder_source(SourceKind::SimplexRidge, 1_567_328, 300, 2, 0.975)
+        .clamp(
+            Module::constant(threshold * 0.8),
+            Module::constant(threshold),
+        )
+        .map(Module::constant(0.0), Module::constant(1.0))
+}
+
+/// `Source.build(seed, scale, octaves).build(Source.PERLIN)`.
+fn perlin(seed: i32, scale: i32, octaves: usize) -> Module {
+    builder_source(SourceKind::Perlin, seed, scale, octaves, 0.5)
+}
+
+/// Noise2D's `Builder` with its default lacunarity and interpolation.
+fn builder_source(kind: SourceKind, seed: i32, scale: i32, octaves: usize, gain: f32) -> Module {
+    Module::source(Source::new(
+        kind,
+        SourceConfig {
+            seed,
+            octaves,
+            gain,
+            frequency: 1.0 / scale as f32,
+            lacunarity: 2.0,
+            interpolation: Interpolation::Curve3,
+        },
+    ))
 }
 
 #[derive(Clone, Copy)]
@@ -139,7 +193,14 @@ impl UniqueCaveDistributor {
         }
     }
 
-    pub fn value(self, _seed: i32, mut x: f32, mut z: f32) -> f32 {
+    /// The distributor as a graph node, so it can be clamped, mapped and warped.
+    pub fn module(self) -> Module {
+        Module::seeded_custom(0.0, 1.0, move |seed, x, z| self.value(seed, x, z))
+    }
+
+    /// `getValue(int seed, ...)`: cell positions use the runtime seed, which shadows the
+    /// field; the occupancy roll in `cell_value` uses the field.
+    pub fn value(self, seed: i32, mut x: f32, mut z: f32) -> f32 {
         x *= self.frequency;
         z *= self.frequency;
         let max_x = floor(x).wrapping_add(1);
@@ -151,7 +212,7 @@ impl UniqueCaveDistributor {
         for candidate_z in max_z.wrapping_sub(2)..=max_z {
             let offset_x = (candidate_z & 1) as f32 * 0.5;
             for candidate_x in max_x.wrapping_sub(2)..=max_x {
-                let vector = cell_vector(self.seed, candidate_x, candidate_z);
+                let vector = cell_vector(seed, candidate_x, candidate_z);
                 let point_x = candidate_x as f32 + offset_x + vector[0] * self.jitter;
                 let point_z = candidate_z as f32 + vector[1] * self.jitter;
                 let delta_x = x - point_x;
@@ -179,13 +240,20 @@ impl UniqueCaveDistributor {
     }
 }
 
-fn scale_value(x: i32, z: i32, modifier: f32, minimum: i32, range: i32, noise: &Module) -> i32 {
+fn scale_value(
+    seed: i32,
+    x: i32,
+    z: i32,
+    modifier: f32,
+    minimum: i32,
+    range: i32,
+    noise: &Module,
+) -> Result<i32, &'static str> {
     if range <= 0 {
-        return 0;
+        return Ok(0);
     }
-    minimum.wrapping_add(floor(
-        noise.value(x as f32, z as f32) * range as f32 * modifier,
-    ))
+    let value = noise.try_value_seed_first(seed, x as f32, z as f32)?;
+    Ok(minimum.wrapping_add(floor(value * range as f32 * modifier)))
 }
 
 #[cfg(test)]
@@ -210,31 +278,63 @@ mod tests {
         );
         assert_eq!(cave.seed(), 17);
         assert_eq!(cave.cave_type(), CaveType::Unique);
-        assert_eq!(cave.height(91, 12, -8), 16);
-        assert_eq!(cave.cavern_size(91, 12, -8, 0.5), 11);
-        assert_eq!(cave.floor_depth(91, 12, -8, 11), 2);
-        assert_eq!(cave.floor_depth(91, 12, -8, 0), 0);
+        assert_eq!(cave.height(91, 12, -8), Ok(16));
+        assert_eq!(cave.cavern_size(91, 12, -8, 0.5), Ok(11));
+        assert_eq!(cave.floor_depth(91, 12, -8, 11), Ok(2));
+        assert_eq!(cave.floor_depth(91, 12, -8, 0), Ok(0));
     }
 
+    // From tools/terraforged/TerraForgedNoiseCaveOracle.java: seed, x, z, unique, breach.
+    const MODIFIERS: [(i32, i32, i32, u32, u32); 15] = [
+        (0, 0, 0, 0, 1065353216),
+        (0, 37, -91, 0, 0),
+        (0, -1024, 4096, 0, 1040947585),
+        (0, 12345, -6789, 0, 0),
+        (0, -30001, 15003, 0, 0),
+        (1337, 0, 0, 0, 1065353216),
+        (1337, 37, -91, 0, 0),
+        (1337, -1024, 4096, 0, 0),
+        (1337, 12345, -6789, 0, 0),
+        (1337, -30001, 15003, 0, 0),
+        (-987654321, 0, 0, 0, 1065353216),
+        (-987654321, 37, -91, 0, 0),
+        (-987654321, -1024, 4096, 0, 0),
+        (-987654321, 12345, -6789, 0, 0),
+        (-987654321, -30001, 15003, 0, 0),
+    ];
+
+    // The oracle's first unique-cave hits along a fixed scan: seed, x, z, value.
+    const UNIQUE_HITS: [(i32, i32, i32, u32); 12] = [
+        (0, -887584, 292192, 1032954723),
+        (0, -887487, 292131, 1060519800),
+        (0, -887390, 292070, 1063312299),
+        (0, -887293, 292009, 1053391849),
+        (1337, -896217, 297621, 1025155803),
+        (1337, -896120, 297560, 1037706053),
+        (1337, -881570, 288410, 1042212703),
+        (1337, -880600, 287800, 1049766814),
+        (-987654321, -896314, 297682, 1058922596),
+        (-987654321, -896217, 297621, 1065205434),
+        (-987654321, -896120, 297560, 1059647356),
+        (-987654321, -896023, 297499, 1049694601),
+    ];
+
     #[test]
-    fn unique_cave_distribution_matches_terraforged_source() {
-        let cave = UniqueCaveDistributor::new(123, 0.01, 0.75, 1.0);
-        let points = [
-            (0.0, 0.0),
-            (12.5, -81.25),
-            (-450.0, 991.75),
-            (2048.0, -4096.0),
-        ];
-        let values: Vec<_> = points
-            .map(|(x, z)| cave.value(2132, x, z).to_bits())
-            .into_iter()
-            .collect();
-        assert_eq!(values, [0x3e57285c, 0x3e4a155c, 0x3e0fdbd8, 0x3eebde26]);
-        assert_eq!(
-            UniqueCaveDistributor::new(123, 0.01, 0.75, 0.1)
-                .value(2132, 0.0, 0.0)
-                .to_bits(),
-            0
-        );
+    fn cave_modifiers_match_terraforged_source() {
+        let unique = unique_cave_noise();
+        let breach = cave_breach_noise();
+        for (seed, x, z, unique_bits, breach_bits) in MODIFIERS {
+            let (x, z) = (x as f32, z as f32);
+            let value = unique.try_value_seed_first(seed, x, z).unwrap();
+            assert_eq!(value.to_bits(), unique_bits, "unique {seed} {x} {z}");
+            let value = breach.try_value_seed_first(seed, x, z).unwrap();
+            assert_eq!(value.to_bits(), breach_bits, "breach {seed} {x} {z}");
+        }
+        for (seed, x, z, bits) in UNIQUE_HITS {
+            let value = unique
+                .try_value_seed_first(seed, x as f32, z as f32)
+                .unwrap();
+            assert_eq!(value.to_bits(), bits, "unique hit {seed} {x} {z}");
+        }
     }
 }

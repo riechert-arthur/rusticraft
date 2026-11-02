@@ -1334,6 +1334,11 @@ enum ModuleKind {
         min: f32,
         max: f32,
     },
+    SeededCustom {
+        value: std::sync::Arc<dyn Fn(i32, f32, f32) -> f32 + Send + Sync>,
+        min: f32,
+        max: f32,
+    },
     Source(Source),
     ErosionRidge {
         ridge: ErosionRidge,
@@ -1771,7 +1776,9 @@ impl Module {
 
     fn offset_seed(&mut self, seed: i32) {
         match self.0.as_mut() {
-            ModuleKind::Constant(_) | ModuleKind::Custom { .. } => {}
+            ModuleKind::Constant(_)
+            | ModuleKind::Custom { .. }
+            | ModuleKind::SeededCustom { .. } => {}
             ModuleKind::Source(source) => {
                 source.config.seed = source.config.seed.wrapping_add(seed);
             }
@@ -1970,6 +1977,20 @@ impl Module {
         }))
     }
 
+    /// A node implemented outside the graph that reads Noise2D's runtime seed. Unseeded
+    /// sampling passes seed 0.
+    pub fn seeded_custom(
+        min: f32,
+        max: f32,
+        value: impl Fn(i32, f32, f32) -> f32 + Send + Sync + 'static,
+    ) -> Self {
+        Self(Box::new(ModuleKind::SeededCustom {
+            value: std::sync::Arc::new(value),
+            min,
+            max,
+        }))
+    }
+
     pub fn source(source: Source) -> Self {
         Self(Box::new(ModuleKind::Source(source)))
     }
@@ -2020,6 +2041,7 @@ impl Module {
         match self.0.as_ref() {
             ModuleKind::Constant(value) => *value,
             ModuleKind::Custom { value, .. } => value(x, y),
+            ModuleKind::SeededCustom { value, .. } => value(0, x, y),
             ModuleKind::Source(source) => source.value(x, y),
             ModuleKind::ErosionRidge { ridge, source } => ridge.value(x, y, source),
             ModuleKind::CellSource {
@@ -2453,6 +2475,7 @@ impl Module {
         let sample = |module: &Module| module.try_value_seed_first(seed, x, y);
         Ok(match self.0.as_ref() {
             ModuleKind::Constant(value) => *value,
+            ModuleKind::SeededCustom { value, .. } => value(seed, x, y),
             ModuleKind::Source(source) => source.value_seed_first(seed, x, y),
             ModuleKind::ErosionRidge { ridge, source } => {
                 ridge.try_value_seed_first(seed, x, y, source)?
@@ -2932,7 +2955,7 @@ impl Module {
     pub fn min_value(&self) -> f32 {
         match self.0.as_ref() {
             ModuleKind::Constant(value) => *value,
-            ModuleKind::Custom { min, .. } => *min,
+            ModuleKind::Custom { min, .. } | ModuleKind::SeededCustom { min, .. } => *min,
             ModuleKind::Source(source) => source.min_value(),
             ModuleKind::ErosionRidge { .. } => 0.0,
             ModuleKind::CellSource { .. }
@@ -2996,7 +3019,7 @@ impl Module {
     pub fn max_value(&self) -> f32 {
         match self.0.as_ref() {
             ModuleKind::Constant(value) => *value,
-            ModuleKind::Custom { max, .. } => *max,
+            ModuleKind::Custom { max, .. } | ModuleKind::SeededCustom { max, .. } => *max,
             ModuleKind::Source(source) => source.max_value(),
             ModuleKind::ErosionRidge { .. } => 1.0,
             ModuleKind::CellSource { .. }
