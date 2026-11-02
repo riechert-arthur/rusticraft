@@ -575,3 +575,10 @@ kind = "HEAD"
 cancellable = true
 helper = "hooks/world_preset.rs"
 bindings = [{ name = "world", ty = "&Path", value = "world" }]
+
+[[module]]
+id = "cave_carver"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_cave_carver"
+source = "cave_carver.rs"
+visibility = "pub"

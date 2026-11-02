@@ -37,6 +37,9 @@ use super::{
     Pipeline, PreLightChunkStage, ProtoChunk, SeededPipeline, SurfaceInputs, SurfaceQueries,
     SurfaceSample, TerrainChunk, UniformSurfaceBiomes, WorkerState, WorldGenerationContext,
     build_surface, overrides, resource, stage,
+    terraforged_cave_assets::current_caves,
+    terraforged_cave_biome_sampler::CaveBiomeSampler,
+    terraforged_cave_carver::NoiseCaveGenerator,
     terraforged_current_surface_biomes::CurrentSurfaceBiomeSampler,
     terraforged_generator_facade::TerraForgedGenerator,
     terraforged_generator_preset::{build as build_noise, terrain_levels},
@@ -67,6 +70,9 @@ pub(super) struct TerraForgedPipeline {
     /// `ChunkUtil.FILLER` and the water `fillChunk` places.
     stone: BlockStateId,
     water: BlockStateId,
+    /// The air `NoiseCaveCarver.carve` places.
+    air: BlockStateId,
+    caves: NoiseCaveGenerator<BiomeId>,
 }
 
 /// `OverworldGenerator::for_world` and `for_dimension`, overwritten: a TerraForged
@@ -151,6 +157,21 @@ impl TerraForgedPipeline {
         };
         let level = overrides::LevelHeight::of_type(&stem["type"], &data.dimension_types)
             .map(|height| (height.min_y, height.height));
+        // CaveBiomeSampler: GLOBAL caves use terraforged:cave (not registered in Horizon
+        // yet, so they keep their biomes); UNIQUE caves draw from every registered biome.
+        let global = data
+            .biome_id("terraforged:cave")
+            .map(Arc::new)
+            .into_iter()
+            .collect();
+        let special = (0..data.biome_names().len())
+            .map(|id| Arc::new(BiomeId(id as u32)))
+            .collect();
+        let caves = NoiseCaveGenerator::new(
+            current_caves().map_err(resource)?,
+            CaveBiomeSampler::new(800, global, special),
+            seed,
+        );
         Ok(Self {
             vanilla: vanilla_overworld(data, seed, level)?,
             generator,
@@ -158,6 +179,8 @@ impl TerraForgedPipeline {
             surface,
             stone: block("minecraft:stone")?,
             water: block("minecraft:water")?,
+            air: block("minecraft:air")?,
+            caves,
         })
     }
 
@@ -311,7 +334,7 @@ impl SeededPipeline for TerraForgedPipeline {
             .into_iter()
             .map(|id| data.biome_name(id).to_owned())
             .collect();
-        let center = neighbors[4].clone();
+        let mut center = neighbors[4].clone();
         let region =
             BiomeRegion::new(neighbors, obfuscate_seed(vanilla.seed)).map_err(stage("biomes"))?;
 
@@ -383,6 +406,20 @@ impl SeededPipeline for TerraForgedPipeline {
                 self.generator.sea_level(),
             )
             .map_err(stage("surface"))?;
+
+        // applyCarvers: TerraForged's noise caves; no vanilla carvers run.
+        self.caves
+            .carve(
+                self.generator.level_seed() as i32,
+                &mut chunk,
+                &mut center,
+                &terrain.read(),
+                self.generator.min_y(),
+                self.generator.sea_level(),
+                self.air,
+                true,
+            )
+            .map_err(stage("carvers"))?;
 
         chunk
             .prime_heightmaps(&[
@@ -594,6 +631,20 @@ mod tests {
         let mut worker = overworld.worker();
         let chunk = worker.generate_proto(ChunkPos::new(0, 0)).unwrap();
         assert_eq!(chunk.position(), ChunkPos::new(0, 0));
+        // Noise caves open air well below the surface somewhere nearby.
+        let mut cave_air = 0;
+        for (cx, cz) in [(0, 0), (3, -2), (-5, 4), (8, 8)] {
+            let chunk = worker.generate_proto(ChunkPos::new(cx, cz)).unwrap();
+            for x in 0..16 {
+                for z in 0..16 {
+                    let top = chunk.surface_height(x, z);
+                    cave_air += (-60..top - 12)
+                        .filter(|y| chunk.block_name(x, *y, z) == "minecraft:air")
+                        .count();
+                }
+            }
+        }
+        assert!(cave_air > 0);
     }
 
     #[test]
