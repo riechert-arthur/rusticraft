@@ -32,7 +32,7 @@ use super::terraforged_terrain_asset_registry::{
 /// The number of bundled terrain types.
 pub const TERRAIN_TYPE_COUNT: usize = 18;
 /// The number of bundled terrain noises.
-pub const TERRAIN_NOISE_COUNT: usize = 10;
+pub const TERRAIN_NOISE_COUNT: usize = 11;
 
 /// TerraForged Reimagined a24d450's `terrain_type` registry files
 /// (<https://github.com/Romoslayer/TerraForged-Reimagined/tree/a24d4503064780790e975cd17495866ae13eef11>,
@@ -219,6 +219,12 @@ pub fn current_terrain_noise_documents() -> [(&'static str, &'static str); TERRA
                 "worldgen/terrain_noise/mountains_ridge_2.json"
             )),
         ),
+        (
+            "terraforged:torridonian",
+            text(crate::terraforged_data!(
+                "worldgen/terrain_noise/torridonian.json"
+            )),
+        ),
     ]
 }
 
@@ -367,7 +373,8 @@ terraforged:mountains_3|mountains/category:HIGHLAND|true|weight=3fa00000|min=000
 terraforged:mountains_ridge_1|mountains/category:HIGHLAND|true|weight=3fa00000|min=00000000|max=3f800000|hash=2e4f26a6d2b720af
 terraforged:mountains_ridge_2|mountains/category:HIGHLAND|true|weight=3fa00000|min=00000000|max=3f800000|hash=ae6266c76fcd7cce
 terraforged:plains|flats/category:FLATLAND|true|weight=40200000|min=00000000|max=3f800000|hash=54dcba40e02603d8
-terraforged:steppe|flats/category:FLATLAND|true|weight=3fc00000|min=00000000|max=3f800000|hash=93dd73538804253f"##;
+terraforged:steppe|flats/category:FLATLAND|true|weight=3fc00000|min=00000000|max=3f800000|hash=93dd73538804253f
+terraforged:torridonian|torridonian/terrain:hills|true|weight=40200000|min=00000000|max=3f800000|hash=0d9ba14ddc9c79fe"##;
 
     #[test]
     fn bundled_terrain_noises_match_their_sources() {
@@ -415,7 +422,8 @@ terraforged:steppe|flats/category:FLATLAND|true|weight=3fc00000|min=00000000|max
                 "mountains_ridge_1",
                 "mountains_ridge_2",
                 "plains",
-                "steppe"
+                "steppe",
+                "torridonian"
             ]
         );
         let mut settings = CurrentTerrainSettings::default();
@@ -458,6 +466,7 @@ terraforged:steppe|flats/category:FLATLAND|true|weight=3fc00000|min=00000000|max
             "mountains_3",
             "mountains_ridge_1",
             "mountains_ridge_2",
+            "torridonian",
         ];
         for ((id, applied), original) in ids.iter().zip(&applied).zip(&values) {
             if stretched.contains(&id.as_str()) {
