@@ -72,6 +72,13 @@ pub fn terrain_levels(levels: &Value) -> Result<TerrainLevels, String> {
 /// `GeneratorPreset.build`'s noise: terrain noises in registry order (sorted by
 /// location), `createLandTerrain`, `createContinentNoise` and `withErosion`.
 pub fn build(levels: TerrainLevels) -> Result<TerraForgedGenerator, String> {
+    build_with_terrains(levels).map(|(generator, _)| generator)
+}
+
+/// [`build`], with the terrain registry it decoded (`/locateterrain` looks terrains up).
+pub fn build_with_terrains(
+    levels: TerrainLevels,
+) -> Result<(TerraForgedGenerator, Arc<TerrainRegistry>), String> {
     let mut registry = TerrainRegistry::new();
     let types = decode_current_terrain_types(&mut registry).map_err(|error| error.to_string())?;
     let noises = decode_current_terrain_noises(&types).map_err(|error| error.to_string())?;
@@ -89,14 +96,15 @@ pub fn build(levels: TerrainLevels) -> Result<TerraForgedGenerator, String> {
         Arc::clone(&terrains),
     );
     let noise = NoiseGenerator::new(levels, continent, land);
-    Ok(TerraForgedGenerator::new(
+    let generator = TerraForgedGenerator::new(
         levels,
         ErodedNoiseGenerator::new(
             noise,
             ErosionFilterSettings::default(),
             HeightmapSmoothingSettings::default(),
         ),
-    ))
+    );
+    Ok((generator, terrains))
 }
 
 /// `NoiseGenerator.createContinentNoise`'s settings.
