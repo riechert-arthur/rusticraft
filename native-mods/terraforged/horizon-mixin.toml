@@ -569,3 +569,10 @@ id = "structure_queries"
 file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_structure_queries"
 source = "structure_queries.rs"
+
+[[module]]
+id = "vegetation"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_vegetation"
+source = "vegetation.rs"
+visibility = "pub"
