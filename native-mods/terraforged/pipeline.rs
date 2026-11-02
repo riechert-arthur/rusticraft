@@ -462,11 +462,6 @@ impl SeededPipeline for TerraForgedPipeline {
             [1; 3],
         )
         .map_err(stage("surface"))?;
-        let write_max_y = generation
-            .min_y
-            .saturating_add(generation.height)
-            .saturating_sub(1)
-            .min(min.saturating_add(height).saturating_sub(1));
         let mut context = std::mem::take(&mut worker.terrain_context);
         let surface = build_surface(
             &mut chunk,
@@ -484,8 +479,10 @@ impl SeededPipeline for TerraForgedPipeline {
                 },
                 preliminary_surface: preliminary,
                 density_context: &mut context,
-                write_min_y: generation.min_y,
-                write_max_y,
+                // SurfaceSystem.buildSurface walks each column down from its own top: the
+                // whole level, not only the vanilla noise range.
+                write_min_y: min,
+                write_max_y: min + height - 1,
             },
             &vanilla.extensions,
         );
