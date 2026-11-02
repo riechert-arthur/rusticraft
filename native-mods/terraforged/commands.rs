@@ -255,7 +255,7 @@ fn regen(game: &mut Game<'_>, player: &NativeServerPlayer, radius: i32) {
 /// `ContinentPreview`'s window as a picture of the view around the player, in the world's
 /// folder.
 fn preview(game: &mut Game<'_>, player: &NativeServerPlayer, size: u32, zoom: f32) {
-    use horizon_world::worldgen::generator::terraforged_preview::{Preview, SEED, View};
+    use horizon_world::worldgen::generator::terraforged_preview::{Preview, View};
     let Some(world) = game.native_world_dir() else {
         return;
     };
@@ -266,8 +266,11 @@ fn preview(game: &mut Game<'_>, player: &NativeServerPlayer, size: u32, zoom: f3
         x: player.position[0] as f32,
         y: player.position[2] as f32,
     };
+    // The world's runtime seed (`Generator.seed`), not Previewer's fixed 273651: the map
+    // is of this world.
+    let seed = game.level.seed as i32;
     let written = Preview::new().and_then(|preview| {
-        let pixels = preview.render(SEED, view);
+        let pixels = preview.render(seed, view);
         let path = world.join("terraforged-preview.png");
         let file = std::fs::File::create(&path).map_err(|e| e.to_string())?;
         let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), size, size);
