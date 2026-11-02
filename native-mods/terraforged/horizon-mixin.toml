@@ -448,6 +448,13 @@ source = "world_preset.rs"
 visibility = "pub"
 
 [[module]]
+id = "generator_preset"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_generator_preset"
+source = "generator_preset.rs"
+visibility = "pub"
+
+[[module]]
 id = "pipeline"
 file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_pipeline"

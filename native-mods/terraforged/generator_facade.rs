@@ -307,6 +307,25 @@ impl TerraForgedGenerator {
         fill_biomes(seed, chunk, position, surface, override_biome)
     }
 
+    /// The biomes [`Self::create_biomes`] gives `position`, without its terrain-cache hint: for a caller that reads a
+    /// chunk's biomes again (the surface stage's 3x3 region around another chunk), where Java reads the biomes that
+    /// chunk's own `createBiomes` stored. Hinting there would start (or, after [`Self::drop_chunk`], restart) that
+    /// chunk's terrain generation, and nothing would drop it. Same `surface` rule and errors as
+    /// [`Self::create_biomes`].
+    pub fn sample_chunk_biomes<T: Clone>(
+        &self,
+        chunk: &mut BiomeChunk<T>,
+        position: ChunkPos,
+        surface: &CurrentSurfaceBiomeSampler<'_, T>,
+        override_biome: impl Fn(BiomeOverride) -> Arc<T>,
+    ) -> Result<(), BiomeFillError<&'static str>> {
+        assert!(
+            std::ptr::eq(surface.noise(), self.noise_generator()),
+            "sample_chunk_biomes: the surface sampler was not built over this generator"
+        );
+        fill_biomes(self.seed(), chunk, position, surface, override_biome)
+    }
+
     /// TerraForged 6dd607eb's `NoiseChunkUtil.getNoiseChunk` → `initChunk` → `initSurfaceCache` for `chunk`: asks
     /// for the chunk's terrain task with the captured [`Self::seed`] (Java's `getChunkDataAsync(Seeds.get(state),
     /// pos)`, which starts the generation even when the cache turns out to be filled), then, only if `cache` is empty,
