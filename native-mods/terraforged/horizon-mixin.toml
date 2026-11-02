@@ -4,7 +4,7 @@ version = "0.1.0"
 priority = 100
 
 [compatibility]
-horizon_revision = "8d902ee017dd207575b8802cf275b54c07c49cc5"
+horizon_revision = "22595ccafa34f0fdcd1bffd3bb5cd211b95a5f33"
 
 [[module]]
 id = "noise"
@@ -654,13 +654,6 @@ id = "regen_save"
 file = "crates/horizon-client/src/save.rs"
 name = "terraforged_regen"
 source = "regen_save.rs"
-visibility = "pub"
-
-[[module]]
-id = "regen_streaming"
-file = "crates/horizon-client-render/src/streaming.rs"
-name = "terraforged_regen"
-source = "regen_streaming.rs"
 visibility = "pub"
 
 [[module]]
