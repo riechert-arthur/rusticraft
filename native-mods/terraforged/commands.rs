@@ -205,7 +205,9 @@ fn regen(game: &mut Game<'_>, player: &NativeServerPlayer, radius: i32) {
     game.native_feedback(italic("Deleting chunks"));
     // Flush out any chunks queued to be written, and the jobs still holding protos.
     game.streaming.save(&mut game.world, true);
-    horizon_client::streaming::terraforged_regen::discard(&mut game.streaming, &keys);
+    // Generated again with their edge decorated against the chunks around, which
+    // it writes into, as Java's WorldGenRegion does with full neighbours.
+    game.streaming.regenerate(&keys);
     let set: std::collections::HashSet<(i32, i32)> = keys.iter().copied().collect();
     let _ = game.entity_chunks(&set, true);
     for &(x, z) in &keys {

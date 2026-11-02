@@ -34,7 +34,10 @@ The Nether and the End stay vanilla, as in TerraForged. Deliberate fidelity to t
 including its quirks: JSON `Bias` nodes decode as 0 (Engine's spec reads a module as a float), cave
 and other non-surface overworld biomes stay in the climate pools (so `deep_dark` can reach the
 surface), unique caves draw from every registered biome, `oak_forest` is registered but no climate
-places it, and each chunk is decorated with the one biome at its lowest corner.
+places it, and each chunk is decorated with the one biome at its lowest corner. Vegetation counts only the
+features that placed (`offset++`) to seed the next, so a tree blocked by a neighbour's leaves
+reseeds the rest of its chunk: the trees depend on the order chunks are decorated in, which varies
+with threads in Java and here alike (`/tf regen` included).
 
 Differences:
 
