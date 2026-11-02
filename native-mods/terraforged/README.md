@@ -7,34 +7,41 @@ An exact Rust translation of [TerraForged](https://github.com/TerraForged/TerraF
 ## Status
 
 Choose **World Type: TerraForged** on Create World's World tab (after Single Biome). The world
-saves TerraForged's overworld stem and a `datapacks/terraforged` pack with TerraForged's
-1024-block overworld, and generates its overworld with TerraForged:
+saves TerraForged's overworld stem and generates its overworld with TerraForged:
 
 - terrain: continents, rivers, lakes, wetlands, the 14 terrain graphs blended by `TerrainBlender`,
-  hydraulic erosion and smoothing (`NoiseGenerator`, `ErodedNoiseGenerator`);
+  hydraulic erosion and smoothing (`NoiseGenerator`, `ErodedNoiseGenerator`), also in Horizon's
+  distant tiles;
 - biomes: `ClimateNoise`, `BiomeMapManager`'s climate pools and `BiomeSampler`'s ocean, shore and
-  river overrides, also for `/locate biome`;
+  river overrides, also for `/locate biome`, plus TerraForged's own `terraforged:cave` and
+  `terraforged:oak_forest`;
 - surfaces: the vanilla surface rules over TerraForged's preliminary heights, then `Surface`;
-- caves: TerraForged's five noise caves and their biomes; no vanilla carvers run;
+- caves: TerraForged's five noise caves and their biomes (global caves are `terraforged:cave`); no
+  vanilla carvers run;
 - structures: vanilla placement over TerraForged's base heights and biomes, with terrain adapted
   to rigid jigsaw pieces;
 - decoration: `FeatureDecorator` with TerraForged's vegetation (jittered, fitness-gated trees),
   cave decoration, water smoothing and snow.
 
+As with TerraForged's own data pack, every world (TerraForged or not) gets the 1024-block
+overworld and clouds at y=300, from a built-in pack in the game's `config/terraforged`. Boats a
+player rides rise to a river's stepped water surface (`BoatHook`). Operators get
+`/locateterrain <terrain> [radius]`, `/tf regen <radius>`, `/tf export structures` and
+`/tf preview [size] [zoom]`, which writes the continent preview (`Previewer`) as a PNG in the world
+folder. The test volcano feature is ported and, as in TerraForged, places nothing.
+
 The Nether and the End stay vanilla, as in TerraForged. Deliberate fidelity to the pinned source,
 including its quirks: JSON `Bias` nodes decode as 0 (Engine's spec reads a module as a float), cave
 and other non-surface overworld biomes stay in the climate pools (so `deep_dark` can reach the
-surface), unique caves draw from every registered biome, and each chunk is decorated with the one
-biome at its lowest corner.
+surface), unique caves draw from every registered biome, `oak_forest` is registered but no climate
+places it, and each chunk is decorated with the one biome at its lowest corner.
 
-Differences and gaps:
+Differences:
 
-- Horizon cannot register new biomes yet, so `terraforged:cave` and `terraforged:oak_forest` are
-  missing: global caves keep the biomes above them, and `oak_forest` never generates.
-- TerraForged's pack makes every overworld taller; here only TerraForged worlds get it.
-- Far terrain (Horizon's distant tiles) still samples the vanilla generator.
-- Not ported: the world preview screen, `/terraforged` commands, the boat hook, TerraForged's
-  dimension effects and the unregistered test volcano feature.
+- The preview is a command that writes an image; TerraForged's `Previewer` is a Swing developer
+  window, with no in-game screen at this commit.
+- The built-in pack's taller overworld and clouds also change vanilla tests in a modded build (the
+  cloud height and the pack lists).
 
 ## Layers
 
