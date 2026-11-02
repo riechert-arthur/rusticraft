@@ -28,8 +28,8 @@
 // MIT License, Copyright (c) 2020 TerraForged, Copyright (c) 2026 Romoslayer; see `LICENSE-TERRAFORGED-REIMAGINED`.
 
 use super::terraforged::{
-    CurveFunction, DistanceFunction, Domain, EdgeFunction, Interpolation, Module, Source,
-    SourceConfig, SourceKind,
+    CurveFunction, DistanceFunction, Domain, EdgeFunction, ErosionMode, ErosionRidge,
+    Interpolation, Module, Source, SourceConfig, SourceKind,
 };
 use super::terraforged_engine::Terrain;
 use super::terraforged_terrain_blender::TerrainNoise;
@@ -383,6 +383,11 @@ const DISTANCE_FUNCTIONS: [(&str, DistanceFunction); 3] = [
     ("MANHATTAN", DistanceFunction::Manhattan),
     ("NATURAL", DistanceFunction::Natural),
 ];
+const EROSION_MODES: [(&str, ErosionMode); 3] = [
+    ("CONSTANT", ErosionMode::Constant),
+    ("INPUT_LINEAR", ErosionMode::InputLinear),
+    ("OUTPUT_LINEAR", ErosionMode::OutputLinear),
+];
 const CELL_FUNCTIONS: [(&str, ()); 3] =
     [("CELL_VALUE", ()), ("NOISE_LOOKUP", ()), ("DISTANCE", ())];
 
@@ -453,6 +458,17 @@ fn module(object: &Obj) -> Result<Module, TerrainAssetError> {
             o.child("slope_max")?,
             curve(o.fields.get("curve"))?,
         ),
+        "Valley" => ErosionRidge::full(
+            o.int("seed", 1337),
+            o.int("octaves", 1),
+            o.float("strength", 1.0),
+            o.float("grid_size", 100.0),
+            o.float("amplitude", 0.5),
+            o.float("lacunarity", 2.25),
+            o.float("fall_off", 0.75),
+            o.name("blend", ErosionMode::Constant, &EROSION_MODES)?,
+        )
+        .wrap(o.child("source")?),
         "Add" => Module::add(o.children()?),
         "Mult" => Module::multiply(o.children()?),
         "Max" => Module::max(o.children()?),
