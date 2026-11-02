@@ -32,7 +32,7 @@ use super::terraforged_terrain_blender::TerrainNoise;
 use std::{collections::BTreeMap, sync::Arc};
 
 pub const TERRAIN_TYPE_COUNT: usize = 18;
-pub const TERRAIN_NOISE_COUNT: usize = 10;
+pub const TERRAIN_NOISE_COUNT: usize = 11;
 
 pub fn current_terrain_type_documents() -> [(&'static str, &'static str); TERRAIN_TYPE_COUNT] {
     [
@@ -199,6 +199,12 @@ pub fn current_terrain_noise_documents() -> [(&'static str, &'static str); TERRA
                 "worldgen/terrain_noise/mountains_ridge_2.json"
             )),
         ),
+        (
+            "terraforged:torridonian",
+            text(crate::terraforged_data!(
+                "worldgen/terrain_noise/torridonian.json"
+            )),
+        ),
     ]
 }
 
@@ -341,6 +347,15 @@ mod tests {
             [
                 1057109522, 1054545869, 1044555117, 1037750288, 1034193216, 1056275860, 1034989550,
                 1038625019,
+            ],
+        ),
+        (
+            "terraforged:torridonian",
+            "torridonian",
+            2.5,
+            [
+                1047582828, 1048108531, 1043633265, 1044897225, 1047707145, 1044081214, 1049507874,
+                1051061988,
             ],
         ),
     ];
