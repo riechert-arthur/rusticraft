@@ -32,6 +32,7 @@
 // `Source.getNoiseBiome`. Stages TerraForged does not replace yet run on
 // the vanilla overworld pipeline it wraps (`VanillaGen`).
 
+use super::super::generator_structures::{Starts, StructureState};
 use super::{
     BiomeChunk, BiomeId, BiomeRegion, BiomeSearch, Biomes, DecorateStats, GeneratorData,
     GeneratorError, JigsawPieces, JigsawQuery, LodColumn, NoiseSettings, OverworldGenerator,
@@ -46,6 +47,8 @@ use super::{
     terraforged_generator_facade::TerraForgedGenerator,
     terraforged_generator_preset::{build as build_noise, terrain_levels},
     terraforged_live_biomes::LiveBiomeBindings,
+    terraforged_structure_queries::TfQueries,
+    terraforged_structure_terrain::StructureTerrain,
     terraforged_surface_bindings::SurfaceBindings,
     terraforged_surface_height_cache::column_key,
     terraforged_world_preset::{GENERATOR_TYPE, PRESET},
@@ -63,10 +66,10 @@ use std::sync::Arc;
 
 pub(super) struct TerraForgedPipeline {
     /// `VanillaGen`: the `minecraft:overworld` noise settings' surface rule, fluids, features and carvers, with
-    /// the vanilla overworld's biome source. TerraForged's own structure placement is not wired yet, so it runs
-    /// without structures.
-    vanilla: Pipeline<XoroshiroRandom>,
-    generator: TerraForgedGenerator,
+    /// the vanilla overworld's biome source. It runs without structures: TerraForged's own placement
+    /// ([`StructureState`] over TerraForged's heights and biomes) replaces them.
+    pub(super) vanilla: Pipeline<XoroshiroRandom>,
+    pub(super) generator: TerraForgedGenerator,
     biomes: LiveBiomeBindings,
     surface: SurfaceBindings,
     /// `ChunkUtil.FILLER` and the water `fillChunk` places.
@@ -75,6 +78,8 @@ pub(super) struct TerraForgedPipeline {
     /// The air `NoiseCaveCarver.carve` places.
     air: BlockStateId,
     caves: NoiseCaveGenerator<BiomeId>,
+    /// `ChunkGenerator`'s structure placement, when the world generates structures.
+    structures: Option<StructureState>,
 }
 
 /// `OverworldGenerator::for_world` and `for_dimension`, overwritten: a TerraForged
@@ -94,10 +99,8 @@ pub(super) fn build(
     let Some(stem) = stem else {
         return OverworldGenerator::build(data, seed, preset, dimension, with_structures);
     };
-    // TerraForged's structures come with the structure stage (not wired yet).
-    let _ = with_structures;
     Ok(OverworldGenerator {
-        pipeline: Arc::new(TerraForgedPipeline::new(&data, seed, &stem)?),
+        pipeline: Arc::new(TerraForgedPipeline::new(&data, seed, &stem, with_structures)?),
         noise_clamped: None,
     })
 }
@@ -140,7 +143,12 @@ impl TerraForgedPipeline {
     /// `Generator.CODEC` over `stem` (its `levels`, then `GeneratorPreset.build`) with the level seed captured as
     /// `createState` does, the registry biome bindings and the surface passes' block bindings. The build range is
     /// the stem's dimension type's; TerraForged's levels are not mapped onto it: the fill clips them to it.
-    fn new(data: &Arc<GeneratorData>, seed: i64, stem: &Value) -> Result<Self, GeneratorError> {
+    fn new(
+        data: &Arc<GeneratorData>,
+        seed: i64,
+        stem: &Value,
+        with_structures: bool,
+    ) -> Result<Self, GeneratorError> {
         let levels = terrain_levels(stem["generator"].get("levels")).map_err(resource)?;
         let generator = build_noise(levels).map_err(resource)?;
         generator.capture_seed(seed);
@@ -175,6 +183,14 @@ impl TerraForgedPipeline {
             CaveBiomeSampler::new(800, global, special),
             seed,
         );
+        // ChunkGenerator's structure placement over Source.possibleBiomes (the overworld
+        // biome list).
+        let structures = if with_structures {
+            let possible = biomes.map.overworld.iter().map(|id| **id).collect();
+            StructureState::new(data, &possible, data.rings_for(seed, &stem["generator"]))?
+        } else {
+            None
+        };
         Ok(Self {
             vanilla: vanilla_overworld(data, seed, level)?,
             generator,
@@ -184,6 +200,7 @@ impl TerraForgedPipeline {
             water: block("minecraft:water")?,
             air: block("minecraft:air")?,
             caves,
+            structures,
         })
     }
 
@@ -196,6 +213,19 @@ impl TerraForgedPipeline {
             settings.level_height.min(self.generator.gen_depth()),
             self.generator.sea_level(),
         )
+    }
+
+    /// `Source.getNoiseBiome` at a block column.
+    pub(super) fn biome_at(&self, x: i32, z: i32) -> BiomeId {
+        self.biomes.sample(&self.generator, x, z)
+    }
+
+    fn queries<'a>(&'a self, worker: &'a mut WorkerState) -> TfQueries<'a> {
+        TfQueries {
+            pipeline: self,
+            worker,
+            valid: BTreeSet::new(),
+        }
     }
 
     /// `pos`'s biomes, as `createBiomes` fills them. Only the chunk being generated hints the terrain cache
@@ -346,9 +376,32 @@ impl SeededPipeline for TerraForgedPipeline {
         let mut chunk = TerrainChunk::new(pos, min, height, data.registry, data.states.clone())
             .map_err(stage("noise"))?;
         chunk.set_generation_stage(PreLightChunkStage::Biomes);
+        // createStructures / createReferences, then the structure terrain the fill adapts.
+        let (references, own_starts) = match &self.structures {
+            Some(structures) => {
+                let mut queries = self.queries(worker);
+                (
+                    structures.references(&mut queries, pos),
+                    structures.starts_at(&mut queries, pos),
+                )
+            }
+            None => (Vec::new(), Starts::default()),
+        };
+        let adaptation = match &self.structures {
+            Some(structures) => {
+                StructureTerrain::from_starts(&structures.registry, &references, pos)
+            }
+            None => StructureTerrain::from_rigid_pieces(Vec::new()),
+        };
         let terrain = self
             .generator
-            .fill_from_noise(&mut chunk, self.stone, self.water)
+            .fill_from_noise_with_structures(
+                &mut chunk,
+                self.stone,
+                self.water,
+                self.air,
+                &adaptation,
+            )
             .map_err(stage("noise"))?;
 
         // buildSurface: SurfaceDecorator.decorate, then decoratePost.
@@ -442,8 +495,8 @@ impl SeededPipeline for TerraForgedPipeline {
             data: data.clone(),
             decorated: false,
             block_entities: Vec::new(),
-            structure_starts: Vec::new(),
-            own_starts: Default::default(),
+            structure_starts: references,
+            own_starts,
             entities: Vec::new(),
         })
     }
@@ -499,7 +552,12 @@ impl SeededPipeline for TerraForgedPipeline {
         worker: &mut WorkerState,
         pos: ChunkPos,
     ) -> Vec<Arc<super::super::structure::start::StructureStart>> {
-        self.vanilla.structure_starts(worker, pos)
+        match &self.structures {
+            Some(structures) => structures
+                .starts_at(&mut self.queries(worker), pos)
+                .to_vec(),
+            None => Vec::new(),
+        }
     }
     fn structure_start(
         &self,
@@ -507,7 +565,10 @@ impl SeededPipeline for TerraForgedPipeline {
         structure: &str,
         chunk: ChunkPos,
     ) -> Option<Arc<super::super::structure::start::StructureStart>> {
-        self.vanilla.structure_start(worker, structure, chunk)
+        self.structures
+            .as_ref()?
+            .structure_start(&mut self.queries(worker), structure, chunk)
+            .map(Arc::new)
     }
     fn unsupported_features(&self) -> Vec<(String, String)> {
         self.vanilla.unsupported_features()
@@ -519,14 +580,21 @@ impl SeededPipeline for TerraForgedPipeline {
         structure: &str,
         pieces: &[Value],
     ) -> Result<(), String> {
-        self.vanilla
-            .use_saved_start(worker, chunk, structure, pieces)
+        let structures = self
+            .structures
+            .as_ref()
+            .ok_or("structures were not loaded")?;
+        structures.use_saved_start(&mut self.queries(worker), chunk, structure, pieces)
     }
     fn forget_structure_starts(&self) {
-        self.vanilla.forget_structure_starts()
+        if let Some(structures) = &self.structures {
+            structures.forget_starts();
+        }
     }
     fn ring_positions(&self, worker: &mut WorkerState, set: &str) -> Option<Vec<ChunkPos>> {
-        self.vanilla.ring_positions(worker, set)
+        self.structures
+            .as_ref()?
+            .ring_positions(&mut self.queries(worker), set)
     }
     fn spawn_position(&self) -> Result<[i32; 2], GeneratorError> {
         // ChunkGenerator.getOrigin: a generator without a spawn target spawns at 0 0.
@@ -546,7 +614,9 @@ impl SeededPipeline for TerraForgedPipeline {
         radius: i32,
         skip: &dyn Fn(&str, ChunkPos) -> bool,
     ) -> Option<(String, [i32; 3])> {
-        self.vanilla.locate(worker, names, from, radius, skip)
+        self.structures
+            .as_ref()?
+            .locate(&mut self.queries(worker), names, from, radius, skip)
     }
     fn debug_density_line(&self, _feet: [i32; 3]) -> Option<String> {
         None
@@ -585,7 +655,44 @@ impl SeededPipeline for TerraForgedPipeline {
         worker: &mut WorkerState,
         query: &JigsawQuery<'_>,
     ) -> Option<JigsawPieces> {
-        self.vanilla.jigsaw_pieces(worker, query)
+        // JigsawPlacement.generateJigsaw: addPieces with no heightmap
+        // projection, MaxDistance(128), no aliases, no padding and
+        // waterlogging applied. The pieces draw from the GenerationContext's
+        // random, seeded from the level seed and the position's chunk, not
+        // from the level random.
+        let structures = self.structures.as_ref()?;
+        let mut random =
+            horizon_core::random::WorldgenRandom::new(horizon_core::random::LegacyRandom::new(0));
+        random.set_large_feature_seed(
+            self.vanilla.seed,
+            query.position[0] >> 4,
+            query.position[2] >> 4,
+        );
+        let aliases = BTreeMap::new();
+        let config = super::super::structure::jigsaw::JigsawConfig {
+            start_pool: query.pool,
+            start_jigsaw: Some(query.target),
+            max_depth: query.max_depth,
+            use_expansion_hack: false,
+            project_to: None,
+            max_distance: [128, 128],
+            aliases: &aliases,
+            padding: [0, 0],
+            waterlogging: true,
+        };
+        let (_, pieces) = super::super::structure::jigsaw::assemble(
+            &config,
+            &mut self.queries(worker),
+            &structures.registry.pools,
+            &structures.resources,
+            &structures.bindings,
+            &mut random,
+            query.position,
+        )?;
+        Some(JigsawPieces {
+            pieces,
+            resources: structures.resources.clone(),
+        })
     }
 }
 
@@ -651,6 +758,20 @@ mod tests {
             }
         }
         assert!(cave_air > 0);
+        // Villages place on TerraForged's terrain and biomes.
+        let villages = [
+            "minecraft:village_plains",
+            "minecraft:village_desert",
+            "minecraft:village_savanna",
+            "minecraft:village_snowy",
+            "minecraft:village_taiga",
+        ]
+        .map(String::from);
+        let (_, at) = worker.locate(&villages, [0, 64, 0], 100).unwrap();
+        let start = worker
+            .generate_proto(ChunkPos::new(at[0] >> 4, at[2] >> 4))
+            .unwrap();
+        assert!(!start.own_starts().is_empty());
     }
 
     #[test]
@@ -900,7 +1021,7 @@ mod tests {
         // decorating a chunk drops its entry, as `applyBiomeDecoration` does.
         let Some(data) = data() else { return };
         let stem = terraforged_stem(&data, PRESET, "minecraft:overworld").unwrap();
-        let pipeline = Arc::new(TerraForgedPipeline::new(&data, 11, &stem).unwrap());
+        let pipeline = Arc::new(TerraForgedPipeline::new(&data, 11, &stem, false).unwrap());
         let overworld = OverworldGenerator {
             pipeline: Arc::clone(&pipeline) as Arc<dyn SeededPipeline>,
             noise_clamped: None,
