@@ -25,11 +25,14 @@
 
 use super::terraforged_engine::TerrainRegistry;
 use super::terraforged_terrain_asset_registry::{
-    TerrainAssetRegistryError, TerrainTypeAssets, decode_terrain_type_assets,
+    TerrainAssetRegistryError, TerrainNoiseAssets, TerrainTypeAssets, decode_terrain_noise_assets,
+    decode_terrain_type_assets,
 };
 
 /// The number of bundled terrain types.
 pub const TERRAIN_TYPE_COUNT: usize = 18;
+/// The number of bundled terrain noises.
+pub const TERRAIN_NOISE_COUNT: usize = 2;
 
 /// TerraForged Reimagined a24d450's `terrain_type` registry files
 /// (<https://github.com/Romoslayer/TerraForged-Reimagined/tree/a24d4503064780790e975cd17495866ae13eef11>,
@@ -139,6 +142,35 @@ pub fn decode_current_terrain_types(
     registry: &mut TerrainRegistry,
 ) -> Result<TerrainTypeAssets, TerrainAssetRegistryError> {
     decode_terrain_type_assets(current_terrain_type_documents(), registry)
+}
+
+/// TerraForged Reimagined a24d450's flatland `terrain_noise` registry files, `plains` and `steppe`
+/// (<https://github.com/Romoslayer/TerraForged-Reimagined/tree/a24d4503064780790e975cd17495866ae13eef11>,
+/// `src/main/resources/default/data/terraforged/worldgen/terrain_noise/`, MIT, (c) 2020 TerraForged, (c) 2026
+/// Romoslayer), bundled unchanged in `data/worldgen/terrain_noise/`, as (registry key, JSON) pairs.
+pub fn current_terrain_noise_documents() -> [(&'static str, &'static str); TERRAIN_NOISE_COUNT] {
+    [
+        (
+            "terraforged:plains",
+            text(crate::terraforged_data!(
+                "worldgen/terrain_noise/plains.json"
+            )),
+        ),
+        (
+            "terraforged:steppe",
+            text(crate::terraforged_data!(
+                "worldgen/terrain_noise/steppe.json"
+            )),
+        ),
+    ]
+}
+
+/// Decodes the bundled terrain noises, their `type`s resolved in `types` (from [`decode_current_terrain_types`]), in
+/// registry order: hand `entry_ids()` and `into_values()` to `apply_terrain_overrides`.
+pub fn decode_current_terrain_noises(
+    types: &TerrainTypeAssets,
+) -> Result<TerrainNoiseAssets, TerrainAssetRegistryError> {
+    decode_terrain_noise_assets(current_terrain_noise_documents(), types)
 }
 
 fn text(bytes: &'static [u8]) -> &'static str {
@@ -254,6 +286,28 @@ terraforged:wetland|wetland|wetland/category:WETLAND|wetland/category:WETLAND|WE
         for (key, json) in current_terrain_type_documents() {
             let name = key.strip_prefix("terraforged:").unwrap();
             assert!(json.contains(&format!(r#""name": "{name}""#)), "{key}");
+        }
+    }
+
+    #[test]
+    fn bundled_flatland_terrain_noises_decode() {
+        let mut registry = TerrainRegistry::new();
+        let types = decode_current_terrain_types(&mut registry).unwrap();
+        let noises = decode_current_terrain_noises(&types).unwrap();
+        assert_eq!(noises.len(), TERRAIN_NOISE_COUNT);
+        assert_eq!(noises["terraforged:plains"].terrain().name(), "flats");
+        assert_eq!(
+            noises["terraforged:plains"].weight().to_bits(),
+            2.5_f32.to_bits()
+        );
+        assert_eq!(
+            noises["terraforged:steppe"].weight().to_bits(),
+            1.5_f32.to_bits()
+        );
+        for (_, noise) in noises.iter() {
+            for (x, y) in [(0.0, 0.0), (128.5, -63.25), (-4096.0, 8192.0)] {
+                assert!(noise.noise().value(x, y).is_finite());
+            }
         }
     }
 }
