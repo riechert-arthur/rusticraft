@@ -24,8 +24,9 @@
 
 // Adapted from TerraForged Reimagined (https://github.com/Romoslayer/TerraForged-Reimagined, a24d450): the registry
 // lookups of `BiomeSampler.getInitialBiome` (`getBiomes().getOrThrow(Biomes.PLAINS)`) and `getBiomeOverride`
-// (`BiomeMapManager.get`), and `getBaseTemperature` as the samplers read it. MIT License, Copyright (c) 2020 TerraForged, Copyright (c) 2026
-// Romoslayer; see `LICENSE-TERRAFORGED-REIMAGINED`.
+// (`BiomeMapManager.get`) against 26.3's registry lookup (6dd607eb's `getHolderOrThrow` does the same on 1.18's
+// `Registry`). MIT License, Copyright (c) 2020 TerraForged, Copyright (c) 2026 Romoslayer; see
+// `LICENSE-TERRAFORGED-REIMAGINED`.
 
 use super::{
     super::{
@@ -36,7 +37,7 @@ use super::{
     terraforged_biome_registry::{
         ClimateWeight, RegistryBiome, RegistryBiomeMap, identifier, registry_entries,
     },
-    terraforged_biome_sampler::{BiomeOverride, WetlandSettings},
+    terraforged_biome_sampler::BiomeOverride,
     terraforged_current_surface_biomes::CurrentSurfaceBiomeSampler,
     terraforged_generator_facade::TerraForgedGenerator,
 };
@@ -86,7 +87,6 @@ pub struct LiveBiomeBindings {
     pub map: RegistryBiomeMap<BiomeId>,
     fallback: Arc<BiomeId>,
     overrides: Vec<Arc<BiomeId>>,
-    temperatures: Vec<f32>,
 }
 
 // Chunk workers share one set of bindings (and the surface sampler built over it).
@@ -143,18 +143,12 @@ impl LiveBiomeBindings {
             map: RegistryBiomeMap::build(entries, configured),
             fallback,
             overrides,
-            temperatures: entries.iter().map(|entry| entry.temperature).collect(),
         })
     }
 
     /// `minecraft:plains`, `getInitialBiome`'s fallback.
     pub fn fallback(&self) -> Arc<BiomeId> {
         Arc::clone(&self.fallback)
-    }
-
-    /// `biome.value().getBaseTemperature()`. Panics for an id outside this registry.
-    pub fn base_temperature(&self, biome: &BiomeId) -> f32 {
-        self.temperatures[biome.0 as usize]
     }
 
     /// `BiomeMapManager.get(key)` for an override. Panics on [`BiomeOverride::Input`], which keeps the sampled
@@ -167,27 +161,16 @@ impl LiveBiomeBindings {
         Arc::clone(&self.overrides[index])
     }
 
-    /// [`TerraForgedGenerator::surface_biome_sampler`] over these pools and this plains: build ONE per world.
-    /// `wetlands` and `mountain_usage` are Reimagined's `TerraSettings.rivers.wetlands` and
-    /// `miscellaneous.mountainBiomeUsage`; its defaults are `WetlandSettings::default()` and
-    /// `MiscellaneousSettings::default().mountain_biome_usage` (`terraforged_current_settings`).
+    /// [`TerraForgedGenerator::surface_biome_sampler`] over `getBiomeMap()` (the `wet` pools; the dry and highland
+    /// pools are not read by 6dd607eb's sampler) and this plains: build ONE per world.
     pub fn surface_sampler<'a>(
         &'a self,
         generator: &'a TerraForgedGenerator,
-        wetlands: WetlandSettings,
-        mountain_usage: f32,
     ) -> CurrentSurfaceBiomeSampler<'a, BiomeId> {
-        generator.surface_biome_sampler(
-            &self.map.wet,
-            &self.map.dry,
-            &self.map.highland,
-            &self.fallback,
-            wetlands,
-            mountain_usage,
-        )
+        generator.surface_biome_sampler(&self.map.wet, &self.fallback)
     }
 
-    /// [`TerraForgedGenerator::create_biomes`] with this registry's base temperatures and override biomes. `surface` must come from [`Self::surface_sampler`] on the same bindings and generator.
+    /// [`TerraForgedGenerator::create_biomes`] with this registry's override biomes. `surface` must come from [`Self::surface_sampler`] on the same bindings and generator.
     pub fn create_biomes(
         &self,
         generator: &TerraForgedGenerator,
@@ -195,20 +178,15 @@ impl LiveBiomeBindings {
         position: ChunkPos,
         surface: &CurrentSurfaceBiomeSampler<'_, BiomeId>,
     ) -> Result<(), BiomeFillError<&'static str>> {
-        generator.create_biomes(
-            chunk,
-            position,
-            surface,
-            |biome| self.base_temperature(biome),
-            |replacement| self.override_biome(replacement),
-        )
+        generator.create_biomes(chunk, position, surface, |replacement| {
+            self.override_biome(replacement)
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::super::{
-        terraforged_current_surface_biomes::tests::WETLANDS,
         terraforged_eroded_noise_generator::ErodedNoiseGenerator,
         terraforged_erosion::{ErosionFilterSettings, HeightmapSmoothingSettings},
         terraforged_noise_generator::tests::generator,
@@ -252,7 +230,7 @@ mod tests {
             let all = std::iter::once(bindings.fallback())
                 .chain(OVERRIDES.map(|o| bindings.override_biome(o)));
             for biome in all {
-                let bits = bindings.base_temperature(&biome).to_bits();
+                let bits = entries[biome.0 as usize].temperature.to_bits();
                 line += &format!(" {}={bits:x}", names[biome.0 as usize]);
             }
             self.emit(line);
@@ -402,7 +380,7 @@ mod tests {
     }
 
     /// Every pool, list and lookup holds the registry entry's own `Arc`, and the chunk hook fills from them: the
-    /// whole column is the surface sampler's biome with these overrides and temperatures (no cave layer, so the cave
+    /// whole column is the surface sampler's biome with these overrides (no cave layer, so the cave
     /// biome in the registry is never used).
     #[test]
     fn bindings_share_the_registry_arcs_and_fill_chunks() {
@@ -446,7 +424,7 @@ mod tests {
             ),
         );
         g.capture_seed(7);
-        let surface = bindings.surface_sampler(&g, WETLANDS, 1.0);
+        let surface = bindings.surface_sampler(&g);
         let position = ChunkPos::new(-3, 5);
         let mut chunk = BiomeChunk::new(position, -64, 384, BiomeId(u32::MAX)).unwrap();
         bindings
@@ -458,13 +436,7 @@ mod tests {
                 (position.z << 2) + (quart >> 2),
             );
             let expected = surface
-                .sample_biome(
-                    7,
-                    x << 2,
-                    z << 2,
-                    |b| bindings.base_temperature(b),
-                    |r| bindings.override_biome(r),
-                )
+                .sample_biome(7, x << 2, z << 2, |r| bindings.override_biome(r))
                 .unwrap();
             for y in [-16, -1, 0, 79] {
                 assert_eq!(*chunk.noise_biome([x, y, z]), *expected);
