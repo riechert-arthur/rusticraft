@@ -58,6 +58,10 @@ pub(in crate::game) fn register(game: &Game<'_>, commands: &mut Vec<NativeComman
     ));
     commands.push(NativeCommand::op("tf export structures", 2));
     commands.push(NativeCommand::op("tf regen <radius:integer>", 2));
+    commands.push(NativeCommand::op(
+        "tf preview [size:integer] [zoom:number]",
+        2,
+    ));
 }
 
 /// A TerraForged command: answers and returns true, or leaves the line to others.
@@ -88,6 +92,15 @@ pub(in crate::game) fn perform(
             };
             let cursor = command.trim_end().len() - word.len();
             syntax_failure(game, command, cursor, message);
+            true
+        }
+        ["tf", "preview", rest @ ..] if rest.len() <= 2 => {
+            let size = rest.first().map_or(Ok(400), |s| s.parse::<u32>());
+            let zoom = rest.get(1).map_or(Ok(1.0), |z| z.parse::<f32>());
+            let (Ok(size), Ok(zoom)) = (size, zoom) else {
+                return false;
+            };
+            preview(game, player, size.clamp(16, 4096), zoom.max(0.0001));
             true
         }
         ["locateterrain", terrain, rest @ ..] if rest.len() <= 1 => {
@@ -385,4 +398,48 @@ fn regen(game: &mut Game<'_>, player: &NativeServerPlayer, radius: i32) {
         }
     }
     game.feedback(Text::colored("Regen complete!", text::GREEN));
+}
+
+/// `ContinentPreview`'s window as a picture of the view around the player, in the world's
+/// folder.
+fn preview(game: &mut Game<'_>, player: &NativeServerPlayer, size: u32, zoom: f32) {
+    use horizon_world::worldgen::generator::terraforged_preview::{Preview, SEED, View};
+    let Some(world) = game.native_world_dir() else {
+        return;
+    };
+    let view = View {
+        width: size,
+        height: size,
+        zoom,
+        x: player.position[0] as f32,
+        y: player.position[2] as f32,
+    };
+    let written = Preview::new().and_then(|preview| {
+        let pixels = preview.render(SEED, view);
+        let path = world.join("terraforged-preview.png");
+        let file = std::fs::File::create(&path).map_err(|e| e.to_string())?;
+        let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), size, size);
+        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_depth(png::BitDepth::Eight);
+        let bytes: Vec<u8> = pixels
+            .iter()
+            .flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8])
+            .collect();
+        encoder
+            .write_header()
+            .and_then(|mut writer| writer.write_image_data(&bytes))
+            .map_err(|e| e.to_string())?;
+        Ok(path)
+    });
+    game.native_feedback(match written {
+        Ok(path) => {
+            // The window's corner label: the area shown, in blocks.
+            let blocks = (size as f32 * zoom).floor();
+            Text::colored(
+                format!("Preview {blocks}x{blocks}: {}", path.display()),
+                GREEN,
+            )
+        }
+        Err(error) => Text::colored(format!("Preview failed: {error}"), RED),
+    });
 }
