@@ -25,7 +25,7 @@
 use super::{
     terraforged::{Source, SourceConfig, SourceKind, floor, hash_2d, noise_map, sin_lookup},
     terraforged_biome_sampler::ClimateSample,
-    terraforged_climate::{BiomeNoise, BiomeShape, ClimateRange, ClimateSettings},
+    terraforged_climate::{ClimateRange, ClimateSettings},
     terraforged_continent_cell::{CellShape, random},
     terraforged_engine::{BiomeType, Seed},
 };
@@ -36,8 +36,6 @@ const JITTER: f32 = 0.8;
 pub struct CurrentClimateNoise {
     frequency: f32,
     warp: CurrentWarp,
-    edge_warp: Option<CurrentWarp>,
-    macro_noise_size: i32,
     moisture: CurrentMoisture,
     temperature: CurrentTemperature,
 }
@@ -70,35 +68,16 @@ struct CurrentAxis {
 }
 
 impl ClimateSettings {
-    pub fn terra_defaults() -> Self {
-        Self {
-            temperature: ClimateRange {
-                seed_offset: 0,
-                scale: 7,
-                falloff: 2,
-                min: 0.0,
-                max: 0.98,
-                bias: 0.1,
-            },
-            moisture: ClimateRange {
-                seed_offset: 8461,
-                scale: 6,
-                falloff: 1,
-                min: 0.0,
-                max: 1.0,
-                bias: -0.05,
-            },
-            biome_shape: BiomeShape {
-                biome_size: 220,
-                macro_noise_size: 0,
-                biome_warp_scale: 150,
-                biome_warp_strength: 80,
-            },
-            biome_edge_shape: BiomeNoise {
-                strength: 24,
-                ..BiomeNoise::default()
-            },
-        }
+    /// The climate half of `NoiseGenerator.createContinentNoise`: Engine's defaults with
+    /// TerraForged's biome size, falloffs and biases.
+    pub fn terraforged() -> Self {
+        let mut settings = Self::default();
+        settings.biome_shape.biome_size = 220;
+        settings.temperature.falloff = 2;
+        settings.temperature.bias = 0.1;
+        settings.moisture.falloff = 1;
+        settings.moisture.bias = -0.05;
+        settings
     }
 }
 
@@ -111,13 +90,14 @@ impl CurrentClimateNoise {
         );
         let temperature_scale =
             round(settings.temperature.scale as f32 * biome_size as f32 * biome_frequency);
-        let module_seed = current_next(seed);
+        // `this.seed = seed.next()`: drawn, though sampling uses the runtime seed.
+        seed.next();
 
         let mut moisture_seed = seed.offset(settings.moisture.seed_offset);
         let moisture = CurrentMoisture {
             source: source(
                 SourceKind::Simplex,
-                current_next(&mut moisture_seed),
+                seed_next(&mut moisture_seed),
                 moisture_scale,
                 1,
                 0.5,
@@ -127,13 +107,13 @@ impl CurrentClimateNoise {
             range: settings.moisture,
             warps: [
                 noise_warp(
-                    current_next(&mut moisture_seed),
+                    seed_next(&mut moisture_seed),
                     (moisture_scale / 2).max(1),
                     1,
                     moisture_scale as f32 / 4.0,
                 ),
                 noise_warp(
-                    current_next(&mut moisture_seed),
+                    seed_next(&mut moisture_seed),
                     (moisture_scale / 6).max(1),
                     2,
                     moisture_scale as f32 / 12.0,
@@ -148,13 +128,13 @@ impl CurrentClimateNoise {
             range: settings.temperature,
             warps: [
                 noise_warp(
-                    current_next(&mut temperature_seed),
+                    seed_next(&mut temperature_seed),
                     temperature_scale.wrapping_mul(4),
                     2,
                     temperature_scale.wrapping_mul(4) as f32,
                 ),
                 noise_warp(
-                    current_next(&mut temperature_seed),
+                    seed_next(&mut temperature_seed),
                     temperature_scale,
                     1,
                     temperature_scale as f32,
@@ -165,7 +145,7 @@ impl CurrentClimateNoise {
         let warp = CurrentWarp::new(
             axis(
                 SourceKind::Simplex2,
-                current_next(seed),
+                seed_next(seed),
                 settings.biome_shape.biome_warp_scale,
                 3,
                 0.3,
@@ -174,7 +154,7 @@ impl CurrentClimateNoise {
             ),
             axis(
                 SourceKind::Simplex2,
-                current_next(seed),
+                seed_next(seed),
                 settings.biome_shape.biome_warp_scale,
                 3,
                 0.3,
@@ -183,30 +163,16 @@ impl CurrentClimateNoise {
             ),
             settings.biome_shape.biome_warp_strength as f32 * 0.75,
         );
-        let edge = settings.biome_edge_shape;
-        let edge_warp = (edge.strength > 0).then(|| {
-            CurrentWarp::new(
-                axis_from_edge(edge, module_seed.wrapping_add(7919)),
-                axis_from_edge(edge, module_seed.wrapping_add(104729)),
-                edge.strength as f32,
-            )
-        });
-
         Self {
             frequency: biome_frequency,
             warp,
-            edge_warp,
-            macro_noise_size: settings.biome_shape.macro_noise_size.max(0),
             moisture,
             temperature,
         }
     }
 
     pub fn sample(&self, seed: i32, x: f32, y: f32, sample: &mut ClimateSample) {
-        let (mut px, mut py) = self.warp.point(seed, x, y);
-        if let Some(edge_warp) = &self.edge_warp {
-            (px, py) = edge_warp.point(seed, px, py);
-        }
+        let (px, py) = self.warp.point(seed, x, y);
         self.sample_biome(seed, px * self.frequency, py * self.frequency, sample);
         sample.climate_type = BiomeType::at_climate(sample.temperature, sample.moisture);
         if matches!(
@@ -225,8 +191,6 @@ impl CurrentClimateNoise {
         let mut nearest_x = x;
         let mut nearest_y = y;
         let mut nearest_hash = 0;
-        let mut nearest_cell_x = 0;
-        let mut nearest_cell_y = 0;
         let mut distance = f32::MAX;
         let mut distance2 = f32::MAX;
         for cell_y in min_y..=max_y {
@@ -243,23 +207,12 @@ impl CurrentClimateNoise {
                     nearest_x = point_x;
                     nearest_y = point_y;
                     nearest_hash = hash;
-                    nearest_cell_x = cell_x;
-                    nearest_cell_y = cell_y;
                 } else if candidate < distance2 {
                     distance2 = candidate;
                 }
             }
         }
-        let biome_hash = if self.macro_noise_size <= 0 {
-            nearest_hash
-        } else {
-            hash_2d(
-                seed,
-                nearest_cell_x.div_euclid(self.macro_noise_size),
-                nearest_cell_y.div_euclid(self.macro_noise_size),
-            )
-        };
-        sample.biome_noise = random(hash(biome_hash, 1_236_785));
+        sample.biome_noise = random(hash(nearest_hash, 1_236_785));
         sample.biome_edge_noise = 1.0 - (f64::from(distance / distance2).sqrt() as f32);
         sample.moisture = self.moisture.sample(seed, nearest_x, nearest_y);
         sample.temperature = self.temperature.sample(seed, nearest_x, nearest_y);
@@ -373,18 +326,6 @@ fn axis(
     CurrentAxis::new(source(kind, seed, scale, octaves, gain, lacunarity), bias)
 }
 
-fn axis_from_edge(edge: BiomeNoise, seed: i32) -> CurrentAxis {
-    axis(
-        edge.kind,
-        seed,
-        edge.scale,
-        edge.octaves as usize,
-        edge.gain,
-        edge.lacunarity,
-        -0.5,
-    )
-}
-
 fn noise_warp(seed: i32, scale: i32, octaves: usize, strength: f32) -> CurrentWarp {
     CurrentWarp::new(
         axis(SourceKind::Perlin, seed, scale, octaves, 0.5, 2.0, 0.0),
@@ -401,8 +342,9 @@ fn noise_warp(seed: i32, scale: i32, octaves: usize, strength: f32) -> CurrentWa
     )
 }
 
-fn current_next(seed: &mut Seed) -> i32 {
-    seed.next().wrapping_add(1)
+/// Engine's `Seed.next()`: post-increment.
+fn seed_next(seed: &mut Seed) -> i32 {
+    seed.next()
 }
 
 fn hash(seed: i32, value: i32) -> i32 {
@@ -426,60 +368,56 @@ fn round(value: f32) -> i32 {
 mod tests {
     use super::*;
 
-    const EXPECTED: &str = "0 0 0 0 0 1044776238 1051578720 1054621251 1057775741\n4\n\
-0 0 0 1095237632 -1064828928 1044776238 1058031458 1054621251 1057775741\n4\n\
-0 0 0 -1013522432 1118715904 1063971310 1062455666 1059451134 1058145270\n4\n\
-0 0 0 1166016512 -973078528 1062709976 1059453098 1038948135 1063843243\n2\n\
-0 0 17 0 0 1058014743 1061561172 1056280905 1057818388\n4\n\
-0 0 17 1095237632 -1064828928 1058014743 1062865876 1056280905 1057818388\n4\n\
-0 0 17 -1013522432 1118715904 1037098944 1062249098 1058467233 1058176449\n4\n\
-0 0 17 1166016512 -973078528 1061532368 1051910600 1062014466 1063679813\n0\n\
-0 0 -918273 0 0 1046097730 1048580968 1056447699 1057817323\n4\n\
-0 0 -918273 1095237632 -1064828928 1046097730 1034118976 1056447699 1057817323\n4\n\
-0 0 -918273 -1013522432 1118715904 1061664042 1059104430 1052770310 1057927609\n4\n\
-0 0 -918273 1166016512 -973078528 1048095194 1056990287 1057488805 1063644379\n1\n\
-4 24 0 0 0 1044776238 1051578720 1054621251 1057775741\n4\n\
-4 24 0 1095237632 -1064828928 1044776238 1058040281 1054621251 1057775741\n4\n\
-4 24 0 -1013522432 1118715904 1059038518 1062652544 1059451134 1058145270\n4\n\
-4 24 0 1166016512 -973078528 1050246776 1059557320 1038948135 1063843243\n2\n\
-4 24 17 0 0 1058014743 1061561172 1056280905 1057818388\n4\n\
-4 24 17 1095237632 -1064828928 1058014743 1062716763 1056280905 1057818388\n4\n\
-4 24 17 -1013522432 1118715904 1048907656 1062823764 1058467233 1058176449\n4\n\
-4 24 17 1166016512 -973078528 1050843112 1052795782 1062014466 1063679813\n0\n\
-4 24 -918273 0 0 1046097730 1048580968 1056447699 1057817323\n4\n\
-4 24 -918273 1095237632 -1064828928 1046097730 1028578128 1056447699 1057817323\n4\n\
-4 24 -918273 -1013522432 1118715904 1057969119 1059457728 1052770310 1057927609\n4\n\
-4 24 -918273 1166016512 -973078528 1059398336 1055449562 1057488805 1063644379\n1\n";
+    // From tools/terraforged/TerraForgedClimateNoiseOracle.java.
+    const EXPECTED: &str = "0 0 0 1044776238 1051578720 1054095142 1057794348\n\
+4\n\
+0 1095237632 -1064828928 1044776238 1059660976 1054095142 1057794348\n\
+4\n\
+0 -1013522432 1118715904 1063971310 1061875646 1058343735 1057985947\n\
+4\n\
+0 1166016512 -973078528 1062709976 1058703423 1056241885 1049829261\n\
+8\n\
+17 0 0 1058014743 1061561172 1055700551 1057803069\n\
+4\n\
+17 1095237632 -1064828928 1058014743 1061105634 1055700551 1057803069\n\
+4\n\
+17 -1013522432 1118715904 1037098944 1058405905 1057937990 1057953692\n\
+4\n\
+17 1166016512 -973078528 1061532368 1020104128 1058429305 1051751210\n\
+8\n\
+-918273 0 0 1046097730 1048580968 1056555689 1057775741\n\
+4\n\
+-918273 1095237632 -1064828928 1046097730 1054842604 1056555689 1057775741\n\
+4\n\
+-918273 -1013522432 1118715904 1061664042 1058148434 1051463758 1057964102\n\
+5\n\
+-918273 1166016512 -973078528 1048095194 1042181076 1042757377 1051139959\n\
+8\n";
 
     #[test]
-    fn current_climate_noise_matches_java() {
+    fn climate_noise_matches_terraforged_source() {
         let mut actual = String::new();
-        for (macro_size, edge_strength) in [(0, 0), (4, 24)] {
-            let mut settings = ClimateSettings::terra_defaults();
-            settings.biome_shape.macro_noise_size = macro_size;
-            settings.biome_edge_shape.strength = edge_strength;
-            let mut root = Seed::new(12_345);
-            let noise = CurrentClimateNoise::new(&mut root, settings);
-            for runtime_seed in [0, 17, -918_273] {
-                for (x, y) in [
-                    (0.0, 0.0),
-                    (12.5, -4.25),
-                    (-301.75, 87.125),
-                    (4096.0, -8192.0),
-                ] {
-                    let mut sample = ClimateSample::default();
-                    noise.sample(runtime_seed, x, y, &mut sample);
-                    actual.push_str(&format!(
-                        "{macro_size} {edge_strength} {runtime_seed} {} {} {} {} {} {}\n",
-                        x.to_bits() as i32,
-                        y.to_bits() as i32,
-                        sample.biome_noise.to_bits() as i32,
-                        sample.biome_edge_noise.to_bits() as i32,
-                        sample.moisture.to_bits() as i32,
-                        sample.temperature.to_bits() as i32,
-                    ));
-                    actual.push_str(&format!("{}\n", sample.climate_type.id()));
-                }
+        let mut root = Seed::new(12_345);
+        let noise = CurrentClimateNoise::new(&mut root, ClimateSettings::terraforged());
+        for runtime_seed in [0, 17, -918_273] {
+            for (x, y) in [
+                (0.0_f32, 0.0_f32),
+                (12.5, -4.25),
+                (-301.75, 87.125),
+                (4096.0, -8192.0),
+            ] {
+                let mut sample = ClimateSample::default();
+                noise.sample(runtime_seed, x, y, &mut sample);
+                actual.push_str(&format!(
+                    "{runtime_seed} {} {} {} {} {} {}\n",
+                    x.to_bits() as i32,
+                    y.to_bits() as i32,
+                    sample.biome_noise.to_bits() as i32,
+                    sample.biome_edge_noise.to_bits() as i32,
+                    sample.moisture.to_bits() as i32,
+                    sample.temperature.to_bits() as i32,
+                ));
+                actual.push_str(&format!("{}\n", sample.climate_type.id()));
             }
         }
         assert_eq!(actual, EXPECTED);

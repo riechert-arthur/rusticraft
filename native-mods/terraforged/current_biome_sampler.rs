@@ -91,7 +91,7 @@ mod tests {
         let levels = TerrainLevels::new(false, 1.0, -64, 480, 128, 62, 22);
         let terrains = Arc::new(TerrainRegistry::new());
         let mut settings = GeneratorSettings::default();
-        settings.climate = ClimateSettings::terra_defaults();
+        settings.climate = ClimateSettings::terraforged();
         let continent = ContinentNoise::new(
             levels,
             GeneratorContext::new(settings),

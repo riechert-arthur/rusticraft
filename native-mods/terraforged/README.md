@@ -541,12 +541,11 @@ Climate pools follow `BiomeMapManager`: configured weights first, then every unc
 untagged biomes in grassland. Empty pools stay empty and never borrow from other climates.
 Initial biome selection follows `BiomeSampler.getInitialBiome`: the climate's pool picks by biome
 noise, and a missing or empty pool gives plains.
-Current climate sampling now preserves biome-scale and optional edge warps, nearest and second-nearest
-cell selection, macro-cell grouping, moisture and temperature graphs, edge distance, and the temporary
-steppe-to-grassland remap across runtime seeds. Raw fixture bits come from the current Java sources.
-`tools/terraforged/TerraForgedCurrentClimateOracle.java` regenerates the 24 samples when compiled with
-the current TerraForged `noise` and `engine` source trees, their `terraforged/biome_types.bin` resource,
-and the Cereal dependency from the original 0.3.1 artifact.
+Climate sampling follows the pinned `ClimateNoise`: one biome warp, nearest and second-nearest cell
+selection, moisture and temperature graphs, edge distance and the steppe-to-grassland remap, with
+`createContinentNoise`'s settings and Engine's post-increment seeds.
+`tools/terraforged/TerraForgedClimateNoiseOracle.java` regenerates its 12 samples; its header lists
+the classpath (the pinned classes over the seeded Noise2D, and the 0.3.1 jar for Engine's data classes).
 The current biome-sampler bridge now scales block coordinates by terrain frequency and composes
 continent, river, and climate sampling in Java order. Climate-only and edge-shape queries preserve
 the caller's terrain sample just like `IBiomeSampler.Sampler`.
