@@ -648,3 +648,17 @@ bindings = [
   { name = "command", ty = "&str", value = "command" },
   { name = "ran", ty = "&mut bool", value = "&mut *ran" },
 ]
+
+[[module]]
+id = "regen_save"
+file = "crates/horizon-client/src/save.rs"
+name = "terraforged_regen"
+source = "regen_save.rs"
+visibility = "pub"
+
+[[module]]
+id = "regen_streaming"
+file = "crates/horizon-client-render/src/streaming.rs"
+name = "terraforged_regen"
+source = "regen_streaming.rs"
+visibility = "pub"
