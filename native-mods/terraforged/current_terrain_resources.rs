@@ -32,7 +32,7 @@ use super::terraforged_terrain_blender::TerrainNoise;
 use std::{collections::BTreeMap, sync::Arc};
 
 pub const TERRAIN_TYPE_COUNT: usize = 18;
-pub const TERRAIN_NOISE_COUNT: usize = 8;
+pub const TERRAIN_NOISE_COUNT: usize = 10;
 
 pub fn current_terrain_type_documents() -> [(&'static str, &'static str); TERRAIN_TYPE_COUNT] {
     [
@@ -187,6 +187,18 @@ pub fn current_terrain_noise_documents() -> [(&'static str, &'static str); TERRA
                 "worldgen/terrain_noise/mountains_ridge_1.json"
             )),
         ),
+        (
+            "terraforged:mountains_3",
+            text(crate::terraforged_data!(
+                "worldgen/terrain_noise/mountains_3.json"
+            )),
+        ),
+        (
+            "terraforged:mountains_ridge_2",
+            text(crate::terraforged_data!(
+                "worldgen/terrain_noise/mountains_ridge_2.json"
+            )),
+        ),
     ]
 }
 
@@ -311,6 +323,24 @@ mod tests {
             [
                 1042479441, 1046453625, 1032500516, 1048851351, 1049707534, 1042506253, 1036087417,
                 1027194770,
+            ],
+        ),
+        (
+            "terraforged:mountains_3",
+            "mountains",
+            1.25,
+            [
+                1035540649, 1033909635, 1048309267, 1049966277, 1040230721, 1032601262, 1042478690,
+                1045635304,
+            ],
+        ),
+        (
+            "terraforged:mountains_ridge_2",
+            "mountains",
+            1.25,
+            [
+                1057109522, 1054545869, 1044555117, 1037750288, 1034193216, 1056275860, 1034989550,
+                1038625019,
             ],
         ),
     ];
