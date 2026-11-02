@@ -519,10 +519,40 @@ impl SeededPipeline for TerraForgedPipeline {
     }
     fn find_closest_biome(
         &self,
-        worker: &mut WorkerState,
+        _worker: &mut WorkerState,
         search: &BiomeSearch<'_>,
     ) -> Option<(String, [i32; 3])> {
-        self.vanilla.find_closest_biome(worker, search)
+        // BiomeSource.findClosestBiome3d over Source.possibleBiomes. TerraForged's noise
+        // biome is the same at every height, so a column answers at its first y.
+        let data = self.vanilla.data();
+        let candidates: BTreeSet<BiomeId> = self
+            .biomes
+            .map
+            .overworld
+            .iter()
+            .map(|id| **id)
+            .filter(|id| (search.allowed)(data.biome_name(*id)))
+            .collect();
+        if candidates.is_empty() {
+            return None;
+        }
+        let y = *super::out_from_origin(
+            search.origin[1],
+            search.min_y + 1,
+            search.max_y + 1,
+            search.vertical,
+        )
+        .first()?;
+        let radius = search.radius.div_euclid(search.horizontal);
+        for [sx, sz] in super::spiral_around(radius) {
+            let x = search.origin[0].wrapping_add(sx.wrapping_mul(search.horizontal));
+            let z = search.origin[2].wrapping_add(sz.wrapping_mul(search.horizontal));
+            let biome = self.biome_at(x & !3, z & !3);
+            if candidates.contains(&biome) {
+                return Some((data.biome_name(biome).to_owned(), [x, y, z]));
+            }
+        }
+        None
     }
     fn noise_biomes(&self, _worker: &mut WorkerState, quarts: &[[i32; 3]]) -> Vec<Option<String>> {
         let data = self.vanilla.data();
