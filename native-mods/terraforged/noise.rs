@@ -3114,6 +3114,32 @@ impl Module {
         Self(Box::new(ModuleKind::Map(self, min, max)))
     }
 
+    /// `new Alpha(source, alpha)`: Cereal's factory, without the builder's range check.
+    pub fn alpha_node(self, alpha: Self) -> Self {
+        Self(Box::new(ModuleKind::Alpha(self, alpha)))
+    }
+
+    /// `new Bias(source, bias)`: Cereal's factory, which keeps a zero bias.
+    pub fn bias_node(self, bias: Self) -> Self {
+        Self(Box::new(ModuleKind::Bias(self, bias)))
+    }
+
+    /// `new Boost(source, iterations)`: at least one iteration over the mapped source.
+    pub fn boost_node(self, iterations: usize) -> Self {
+        let mapped = self.map(Self::constant(0.0), Self::constant(1.0));
+        Self(Box::new(ModuleKind::Boost(mapped, iterations.max(1))))
+    }
+
+    /// `new Clamp(source, min, max)`: Cereal's factory, which keeps redundant clamps.
+    pub fn clamp_node(self, min: Self, max: Self) -> Self {
+        Self(Box::new(ModuleKind::Clamp(self, min, max)))
+    }
+
+    /// `new Invert(source)`: Cereal's factory, which nests inversions.
+    pub fn invert_node(self) -> Self {
+        Self(Box::new(ModuleKind::Invert(self)))
+    }
+
     pub fn power(self, power: Self) -> Self {
         Self(Box::new(ModuleKind::Power(self, power)))
     }

@@ -81,11 +81,16 @@ fn module(value: &Value) -> Result<Module, TerrainAssetError> {
             edge_function(string(object, "edge_func")?)?,
             distance_function(string(object, "dist_func")?)?,
         )),
-        "Alpha" => Ok(child(object, "source")?.alpha(child(object, "alpha")?)),
-        "Bias" => Ok(child(object, "source")?.bias(child(object, "bias")?)),
-        "Boost" => Ok(child(object, "source")?.boost(unsigned(object, "iterations")?)),
-        "Clamp" => Ok(child(object, "source")?.clamp(child(object, "min")?, child(object, "max")?)),
-        "Invert" => Ok(child(object, "source")?.invert()),
+        "Alpha" => Ok(child(object, "source")?.alpha_node(child(object, "alpha")?)),
+        // Engine's Bias factory reads "bias" with DataValue::asFloat although its spec
+        // writes a module, so every serialized bias module decodes as 0.
+        "Bias" => Ok(child(object, "source")?
+            .bias_node(Module::constant(cereal_float(field(object, "bias")?)))),
+        "Boost" => Ok(child(object, "source")?.boost_node(unsigned(object, "iterations")?)),
+        "Clamp" => {
+            Ok(child(object, "source")?.clamp_node(child(object, "min")?, child(object, "max")?))
+        }
+        "Invert" => Ok(child(object, "source")?.invert_node()),
         "Map" => Ok(child(object, "source")?.map(child(object, "min")?, child(object, "max")?)),
         "Pow" => Ok(child(object, "source")?.power(child(object, "power")?)),
         "PowCurve" => Ok(child(object, "source")?.power_curve(number(object, "power")?)),
@@ -241,6 +246,12 @@ fn children(
         .collect()
 }
 
+/// Cereal's `DataValue.asFloat`: numbers keep their value; objects, lists and
+/// strings are not numbers and read as 0.
+fn cereal_float(value: &Value) -> f32 {
+    value.as_f64().map_or(0.0, |value| value as f32)
+}
+
 fn object(value: &Value) -> Result<&Map<String, Value>, TerrainAssetError> {
     value
         .as_object()
@@ -394,7 +405,8 @@ mod tests {
                     Interpolation::Curve3,
                 )
                 .alpha(Module::constant(0.75)),
-            Module::constant(0.4).invert().bias(Module::constant(-0.1)),
+            // Serialized bias modules decode as 0, as Engine 0.3.0 does.
+            Module::constant(0.4).invert().bias(Module::constant(0.0)),
             Module::constant(0.5)
                 .scale(Module::constant(0.6))
                 .power(Module::constant(2.0)),
@@ -479,6 +491,21 @@ mod tests {
             Err(error) => error,
         };
         assert_eq!(error.to_string(), "unknown erosion blend \"SIDEWAYS\"");
+    }
+
+    #[test]
+    fn decodes_bias_like_engine_cereal() {
+        let bias = |bias: serde_json::Value| {
+            module(&serde_json::json!({"type": "Bias", "source": constant(0.5), "bias": bias}))
+                .unwrap()
+        };
+        assert_eq!(bias(serde_json::json!(0.25)).value(0.0, 0.0), 0.75);
+        assert_eq!(bias(constant(0.25)).value(0.0, 0.0), 0.5);
+        let negative_zero = module(&serde_json::json!({"type": "Bias",
+            "source": constant(-0.0), "bias": constant(0.25)}))
+        .unwrap();
+        assert_eq!(negative_zero.min_value().to_bits(), 0.0_f32.to_bits());
+        assert_eq!(negative_zero.value(1.0, 2.0).to_bits(), 0.0_f32.to_bits());
     }
 
     #[test]

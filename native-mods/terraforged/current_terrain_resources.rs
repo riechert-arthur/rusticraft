@@ -191,25 +191,52 @@ mod tests {
         );
     }
 
+    // Sample points and raw f32 bits from tools/terraforged/TerraForgedTerrainNoiseOracle.java.
+    const NOISE_POINTS: [(f32, f32); 8] = [
+        (0.0, 0.0),
+        (128.5, -63.25),
+        (-4096.0, 8192.0),
+        (1234.75, 987.5),
+        (-30000.5, 15000.25),
+        (7.125, -7.875),
+        (65536.0, -65536.0),
+        (301.0, 4022.5),
+    ];
+
+    #[allow(clippy::type_complexity)]
+    const EXPECTED_NOISES: [(&str, &str, f32, [u32; 8]); TERRAIN_NOISE_COUNT] = [
+        (
+            "terraforged:plains",
+            "flats",
+            2.5,
+            [
+                1033843302, 1036612047, 1032918386, 1033591155, 1033703030, 1034165600, 1034728482,
+                1032267292,
+            ],
+        ),
+        (
+            "terraforged:steppe",
+            "flats",
+            1.5,
+            [
+                1028606507, 1029134818, 1022905425, 1028641916, 1028182330, 1029685008, 1028097517,
+                1028229816,
+            ],
+        ),
+    ];
+
     #[test]
-    fn bundled_flatland_terrain_noises_decode() {
+    fn bundled_terrain_noises_decode() {
         let mut registry = TerrainRegistry::new();
         let types = decode_current_terrain_types(&mut registry).unwrap();
         let noises = decode_current_terrain_noises(&types).unwrap();
         assert_eq!(noises.len(), TERRAIN_NOISE_COUNT);
-        assert_eq!(noises["terraforged:plains"].terrain().name(), "flats");
-        assert_eq!(
-            noises["terraforged:plains"].weight().to_bits(),
-            2.5_f32.to_bits()
-        );
-        assert_eq!(
-            noises["terraforged:steppe"].weight().to_bits(),
-            1.5_f32.to_bits()
-        );
-        for noise in noises.values() {
-            for (x, y) in [(0.0, 0.0), (128.5, -63.25), (-4096.0, 8192.0)] {
-                assert!(noise.noise().value(x, y).is_finite());
-            }
+        for (key, terrain, weight, bits) in EXPECTED_NOISES {
+            let noise = &noises[key];
+            assert_eq!(noise.terrain().name(), terrain, "{key}");
+            assert_eq!(noise.weight().to_bits(), weight.to_bits(), "{key}");
+            let values = NOISE_POINTS.map(|(x, y)| noise.noise().value(x, y).to_bits());
+            assert_eq!(values, bits, "{key}");
         }
     }
 }
