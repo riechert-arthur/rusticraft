@@ -32,7 +32,7 @@ use super::terraforged_terrain_blender::TerrainNoise;
 use std::{collections::BTreeMap, sync::Arc};
 
 pub const TERRAIN_TYPE_COUNT: usize = 18;
-pub const TERRAIN_NOISE_COUNT: usize = 11;
+pub const TERRAIN_NOISE_COUNT: usize = 12;
 
 pub fn current_terrain_type_documents() -> [(&'static str, &'static str); TERRAIN_TYPE_COUNT] {
     [
@@ -205,6 +205,12 @@ pub fn current_terrain_noise_documents() -> [(&'static str, &'static str); TERRA
                 "worldgen/terrain_noise/torridonian.json"
             )),
         ),
+        (
+            "terraforged:dolomites",
+            text(crate::terraforged_data!(
+                "worldgen/terrain_noise/dolomites.json"
+            )),
+        ),
     ]
 }
 
@@ -356,6 +362,15 @@ mod tests {
             [
                 1047582828, 1048108531, 1043633265, 1044897225, 1047707145, 1044081214, 1049507874,
                 1051061988,
+            ],
+        ),
+        (
+            "terraforged:dolomites",
+            "dolomites",
+            1.25,
+            [
+                1046179254, 1052026345, 1024010043, 1027683270, 1033553768, 1050312660, 1025260216,
+                1014586180,
             ],
         ),
     ];
