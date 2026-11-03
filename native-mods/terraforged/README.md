@@ -128,6 +128,17 @@ order, each one's flags, and `get_dominant`, which keeps the later category. Eng
 this `Seed` is `Copy`, so code that draws from it takes `&mut Seed`. Its tests check every category's flags, the
 ordinals and dominance, and the seed cursor's wrapping against a Java oracle.
 
+The terrain descriptor layer adds Engine's `Terrain` (`engine.rs`): an id, a name and a category, with every `ITerrain`
+flag delegated to its category or a parent terrain, plus the `ConfiguredTerrain` variants (their own erosion modifier,
+mountain and river-override flags), the volcano terrains (which also override coasts and are volcanoes) and
+`CompositeTerrain`, named `first-second`, flat only when both are and with the smaller erosion modifier (`Math.min`, so
+-0.0 beats +0.0 and NaN wins). As in Engine, terrains compare by identity (`Terrain::is_same`, no `==`), the render hue
+is `NoiseUtil.valCoord2D` of the name's Java (UTF-16) string hash, `with_id` delegates to the terrain's parent or to the
+terrain itself (so a composite's own flat flag and erosion are not carried over), and a composite always takes its first
+terrain's category and flags: Engine's `getDominant` compares the first terrain's category with itself. Its tests check
+ids, names, categories, hue and erosion bits and every flag against a Java oracle. The `TerrainType` registry, which
+assigns the ids, is not part of this layer.
+
 ## Status: development only
 
 These layers only add the noise functions and Engine's terrain types. They change nothing in the game, so there is
