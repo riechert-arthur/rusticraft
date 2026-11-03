@@ -203,11 +203,19 @@ four and ignores the settings: a 1-octave Perlin at scale 400, clamped to 0.3..0
 to a 3-octave Billow at scale 350 (gain 0.8, lacunarity 4, raised to 1.25); the result is raised to 1.125, warped
 (scale 300, 1 octave, strength 100) and scaled by 0.4. As in Engine, a vertical scale whose product with 0.6 or 0.55
 is exactly 1 leaves that hill landform unscaled. The same grid test covers the three, with the same settings cases and
-two such vertical scales. The other landforms, the ocean and land bases, and TerraForged's `RandSeed` (ModTerrains
-builds its landforms from a `SplittableRandom` seed rather than Engine's counter) are not ported yet.
+two such vertical scales.
 
-The plateau LandForms layer adds the warped valley, ridge top, surface detail and controlled four-step
-terrace composition used by TerraForged\'s plateau terrain.
+The plateau LandForms layer adds `plateau`, which draws nine seeds and ignores the horizontal scales. Its valley is an
+inverted 1-octave Ridge at scale 500 warped twice (1 octave each: scale 100, strength 150; scale 20, strength 15). Its
+top, a 3-octave Ridge at scale 150 (lacunarity 2.45) warped twice (scale 300, strength 150; scale 40, 2 octaves,
+strength 20) and scaled by 0.15, is multiplied by the valley clamped to 0.02..0.1 and mapped to 0..1. The valley times
+a 1-octave cubic at scale 500 (times 0.6, plus 0.3), plus the top, goes through a four-step terrace (lower curve 0.9,
+upper curve 0.15, lower height 0.35, blend 0.4); a 3-octave Perlin surface at scale 20 (times 0.05, warped at scale
+40, 2 octaves, strength 20) is added and the sum is scaled by `0.475 * globalVerticalScale`, computed in double as in
+Engine. The grid test covers it with the same settings cases, a start seed where the surface warp's second axis seed
+wraps, and a vertical scale whose product with 0.475 is exactly 1. The other landforms, the ocean and land bases, and
+TerraForged's `RandSeed` (ModTerrains builds its landforms from a `SplittableRandom` seed rather than Engine's
+counter) are not ported yet.
 
 ## Status: development only
 
