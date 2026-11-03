@@ -752,7 +752,10 @@ impl Module {
             } => {
                 let value = control.value(x, y);
                 if *falloff == 0.0 {
-                    if value > *upper_min {
+                    // Engine's hard edge: only values above `upperBound` pick the upper source.
+                    if value < *lower_max {
+                        lower.value(x, y)
+                    } else if value > *upper_min {
                         upper.value(x, y)
                     } else {
                         lower.value(x, y)
@@ -2305,5 +2308,209 @@ mod tests {
                 expected_values
             );
         }
+    }
+
+    #[test]
+    fn selector_edges_match_engine_0_3_0() {
+        // Java `Selectors` oracle (`.local/terraforged/oracles/selectors/`): constant controls on and between the
+        // edges, reversed bounds, zero and negative falloffs. NaN prints as `floatToIntBits` (0x7fc00000).
+        const EXPECTED: &str = "\
+sel0 0x3dcccccd 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+sel0inv 0x3dcccccd 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+sel 0x3dcccccd 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+selinv 0x3dcccccd 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+selneg 0x3dcccccd 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+blend 0x3dcccccd 0xbe800000 0x3fcccccd | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000\n\
+var 0x3dcccccd 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+base 0x3dcccccd 0x3dcccccd 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+base0 0x3dcccccd 0x3dcccccd 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+baseneg 0x3dcccccd 0x3dcccccd 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+sel0 0x3e99999a 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+sel0inv 0x3e99999a 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+sel 0x3e99999a 0xbe800000 0x3fcccccd | 0x3f4ccccd 0x3f184a34 0x3f0bb24d 0x3ec924a8\n\
+selinv 0x3e99999a 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+selneg 0x3e99999a 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+blend 0x3e99999a 0xbe800000 0x3fcccccd | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000\n\
+var 0x3e99999a 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+base 0x3e99999a 0x3e99999a 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+base0 0x3e99999a 0x3e99999a 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+baseneg 0x3e99999a 0x3e99999a 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+sel0 0x3eb851ec 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+sel0inv 0x3eb851ec 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+sel 0x3eb851ec 0xbe800000 0x3fcccccd | 0x3faccccd 0x3f8bec3e 0x3f7a489d 0x3f2810d1\n\
+selinv 0x3eb851ec 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+selneg 0x3eb851ec 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+blend 0x3eb851ec 0xbe800000 0x3fcccccd | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000\n\
+var 0x3eb851ec 0xbe800000 0x3fcccccd | 0x3e75c292 0xbdd3fd70 0xbda942b6 0x3c197ec0\n\
+base 0x3eb851ec 0x3eb851ec 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+base0 0x3eb851ec 0x3eb851ec 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+baseneg 0x3eb851ec 0x3eb851ec 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+sel0 0x3f000000 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+sel0inv 0x3f000000 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+sel 0x3f000000 0xbe800000 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+selinv 0x3f000000 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+selneg 0x3f000000 0xbe800000 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+blend 0x3f000000 0xbe800000 0x3fcccccd | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000\n\
+var 0x3f000000 0xbe800000 0x3fcccccd | 0x3f4ccccd 0x3f184a34 0x3f0bb24d 0x3ec924a8\n\
+base 0x3f000000 0x3f000000 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f457eaf\n\
+base0 0x3f000000 0x3f000000 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+baseneg 0x3f000000 0x3f000000 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+sel0 0x3f333333 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+sel0inv 0x3f333333 0xbe800000 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+sel 0x3f333333 0xbe800000 0x3fcccccd | 0x3f4ccccd 0x3f184a33 0x3f0bb24e 0x3ec924a8\n\
+selinv 0x3f333333 0xbe800000 0x3fcccccd | 0x3f4ccccd 0x3f184a34 0x3f0bb24d 0x3ec924a8\n\
+selneg 0x3f333333 0xbe800000 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+blend 0x3f333333 0xbe800000 0x3fcccccd | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000\n\
+var 0x3f333333 0xbe800000 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+base 0x3f333333 0x3f333333 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f365a6b\n\
+base0 0x3f333333 0x3f333333 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+baseneg 0x3f333333 0x3f333333 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+sel0 0x3f51eb85 0xbe800000 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+sel0inv 0x3f51eb85 0xbe800000 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+sel 0x3f51eb85 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+selinv 0x3f51eb85 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+selneg 0x3f51eb85 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+blend 0x3f51eb85 0xbe800000 0x3fcccccd | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000\n\
+var 0x3f51eb85 0xbe800000 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+base 0x3f51eb85 0x3f51eb85 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f51eb85\n\
+base0 0x3f51eb85 0x3f51eb85 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f51eb85\n\
+baseneg 0x3f51eb85 0x3f51eb85 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+sel0 0x3f666666 0xbe800000 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+sel0inv 0x3f666666 0xbe800000 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+sel 0x3f666666 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+selinv 0x3f666666 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+selneg 0x3f666666 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+blend 0x3f666666 0xbe800000 0x3fcccccd | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000\n\
+var 0x3f666666 0xbe800000 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+base 0x3f666666 0x3f666666 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f958832 0x3f666666\n\
+base0 0x3f666666 0x3f666666 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f666666\n\
+baseneg 0x3f666666 0x3f666666 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+sel0 0x7fc00000 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+sel0inv 0x7fc00000 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+sel 0x7fc00000 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+selinv 0x7fc00000 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+selneg 0x7fc00000 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+blend 0x7fc00000 0xbe800000 0x3fcccccd | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000\n\
+var 0x7fc00000 0xbe800000 0x3fcccccd | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000\n\
+base 0x7fc00000 0x7fc00000 0x7fc00000 | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+base0 0x7fc00000 0x7fc00000 0x7fc00000 | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+baseneg 0x7fc00000 0x7fc00000 0x7fc00000 | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+blendwide 0xbe800000 0x3fcccccd | 0x3f4ccccd 0x3f0760c8 0x3f0ea1c7 0x3e9978a0\n\
+blendzero 0xbe800000 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3c197ec0\n\
+basectl 0xbe800000 0x3f800000 | 0x3eb98c02 0x3e32940c 0x3ebc62d2 0x3da4e1f8";
+        let source = |kind, seed, scale: f32, octaves, gain| {
+            Module::source(Source::new(
+                kind,
+                SourceConfig {
+                    seed,
+                    octaves,
+                    gain,
+                    frequency: 1.0 / scale,
+                    lacunarity: 2.0,
+                    interpolation: Interpolation::Curve3,
+                },
+            ))
+        };
+        let hex = |value: f32| {
+            let bits = if value.is_nan() {
+                0x7fc0_0000
+            } else {
+                value.to_bits()
+            };
+            format!("0x{bits:08x}")
+        };
+        let mut lines = Vec::new();
+        let mut print = |name: String, module: Module| {
+            let mut line = format!(
+                "{name} {} {} |",
+                hex(module.min_value()),
+                hex(module.max_value())
+            );
+            for (x, y) in [
+                (0.0, 0.0),
+                (12.25, -98.75),
+                (-4096.5, 8192.25),
+                (64.0, 64.0),
+            ] {
+                line += &format!(" {}", hex(module.value(x, y)));
+            }
+            lines.push(line);
+        };
+        let lower = source(SourceKind::Simplex, 502, 120.0, 2, 0.5)
+            .scale(Module::constant(0.5))
+            .bias(Module::constant(-0.25));
+        let upper = source(SourceKind::Ridge, 503, 96.0, 3, 0.975)
+            .scale(Module::constant(1.5))
+            .bias(Module::constant(0.1));
+        let variable = source(SourceKind::Simplex, 504, 64.0, 2, 0.5);
+        let (l, u) = (|| lower.clone(), || upper.clone());
+        for c in [0.1, 0.3, 0.36, 0.5, 0.7, 0.82, 0.9, f32::NAN] {
+            let k = || Module::constant(c);
+            let t = hex(c);
+            print(
+                format!("sel0 {t}"),
+                k().select(l(), u(), 0.3, 0.7, 0.0, Interpolation::Linear),
+            );
+            print(
+                format!("sel0inv {t}"),
+                k().select(l(), u(), 0.7, 0.3, 0.0, Interpolation::Linear),
+            );
+            print(
+                format!("sel {t}"),
+                k().select(l(), u(), 0.3, 0.7, 0.12, Interpolation::Curve3),
+            );
+            print(
+                format!("selinv {t}"),
+                k().select(l(), u(), 0.7, 0.3, 0.12, Interpolation::Curve4),
+            );
+            print(
+                format!("selneg {t}"),
+                k().select(l(), u(), 0.3, 0.7, -0.12, Interpolation::Linear),
+            );
+            print(
+                format!("blend {t}"),
+                k().blend(l(), u(), 0.5, 0.2, Interpolation::Curve3),
+            );
+            let var = k().variable_blend(
+                variable.clone(),
+                l(),
+                u(),
+                0.5,
+                0.05,
+                0.3,
+                Interpolation::Linear,
+            );
+            print(format!("var {t}"), var);
+            print(
+                format!("base {t}"),
+                k().base(u(), 0.3, Interpolation::Curve3),
+            );
+            print(
+                format!("base0 {t}"),
+                k().base(u(), 0.0, Interpolation::Curve3),
+            );
+            print(
+                format!("baseneg {t}"),
+                k().base(u(), -0.2, Interpolation::Linear),
+            );
+        }
+        let control = source(SourceKind::Perlin, 501, 80.0, 3, 0.5);
+        print(
+            "blendwide".into(),
+            control
+                .clone()
+                .blend(l(), u(), 0.45, 5.0, Interpolation::Linear),
+        );
+        print(
+            "blendzero".into(),
+            control
+                .clone()
+                .blend(l(), u(), 0.45, 0.0, Interpolation::Linear),
+        );
+        print(
+            "basectl".into(),
+            l().base(control, 0.4, Interpolation::Curve4),
+        );
+        assert_eq!(lines, EXPECTED.lines().collect::<Vec<_>>());
     }
 }
