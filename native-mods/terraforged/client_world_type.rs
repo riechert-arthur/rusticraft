@@ -30,6 +30,7 @@
 
 use super::{Result, WorldGen, WorldPreset, read_saved_data, world_gen_settings, write_saved_data};
 use horizon_world::nbt::Tag;
+use horizon_world::worldgen::generator::terraforged_settings::{self, Settings};
 use horizon_world::worldgen::generator::terraforged_world_preset::{
     GENERATOR_TYPE, PRESET, preset_json,
 };
@@ -80,25 +81,59 @@ pub fn press(world_type: &mut WorldPreset, id: u8) -> ControlFlow<()> {
     ControlFlow::Break(())
 }
 
-/// Whether a saved world's overworld is TerraForged's.
-pub fn is_terraforged(world: &Path) -> bool {
-    world_gen_settings(world)
-        .as_ref()
-        .and_then(|settings| settings.get("dimensions"))
-        .and_then(|dimensions| dimensions.get("minecraft:overworld"))
-        .and_then(|overworld| overworld.get("generator"))
-        .and_then(|generator| generator.get("type"))
-        .is_some_and(
-            |kind| matches!(kind, Tag::String(text) if text.to_string_lossy() == GENERATOR_TYPE),
-        )
+/// A saved world's overworld generator, when it is TerraForged's.
+fn terraforged_generator(world: &Path) -> Option<Tag> {
+    let generator = world_gen_settings(world)?
+        .get("dimensions")?
+        .get("minecraft:overworld")?
+        .get("generator")?
+        .clone();
+    let kind = generator.get("type")?;
+    matches!(kind, Tag::String(text) if text.to_string_lossy() == GENERATOR_TYPE)
+        .then_some(generator)
 }
 
-/// `WorldGen::preset`: TerraForged worlds generate with TerraForged's preset.
+/// Whether a saved world's overworld is TerraForged's.
+pub fn is_terraforged(world: &Path) -> bool {
+    terraforged_generator(world).is_some()
+}
+
+/// `WorldGen::preset`: TerraForged worlds generate with TerraForged's preset, and
+/// with the Horizon settings the world was created with.
 pub fn preset(world: &Path) -> ControlFlow<&'static str> {
-    if is_terraforged(world) {
-        ControlFlow::Break(PRESET)
-    } else {
-        ControlFlow::Continue(())
+    match terraforged_generator(world) {
+        Some(generator) => {
+            let saved = generator.get("horizon_settings").map(to_json);
+            terraforged_settings::set(
+                saved.map_or_else(Settings::default, |json| Settings::from_json(&json)),
+            );
+            ControlFlow::Break(PRESET)
+        }
+        None => ControlFlow::Continue(()),
+    }
+}
+
+/// The settings a new TerraForged world starts with: `config/terraforged/settings.json`,
+/// written with every setting off the first time.
+pub fn new_world_settings() -> Settings {
+    let path = crate::logging::game_home()
+        .join("config")
+        .join("terraforged")
+        .join("settings.json");
+    match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map(|json| Settings::from_json(&json))
+            .unwrap_or_default(),
+        Err(_) => {
+            let defaults = Settings::default();
+            if let Some(dir) = path.parent()
+                && std::fs::create_dir_all(dir).is_ok()
+            {
+                let text = serde_json::to_string_pretty(&defaults.to_json()).unwrap_or_default();
+                let _ = std::fs::write(&path, text + "\n");
+            }
+            defaults
+        }
     }
 }
 
@@ -119,8 +154,15 @@ pub fn write(
     ControlFlow::Break(written.and_then(|()| {
         let mut settings = read_saved_data(dir, "world_gen_settings")
             .ok_or_else(|| std::io::Error::other("world_gen_settings was not written"))?;
+        let mut stem = overworld_stem();
+        if let Some(Tag::Compound(generator)) = stem.get_mut("generator") {
+            generator.insert(
+                "horizon_settings".into(),
+                to_tag(&new_world_settings().to_json()),
+            );
+        }
         if let Some(Tag::Compound(dimensions)) = settings.get_mut("dimensions") {
-            dimensions.insert("minecraft:overworld".into(), overworld_stem());
+            dimensions.insert("minecraft:overworld".into(), stem);
         }
         write_saved_data(dir, "world_gen_settings", settings)
     }))
@@ -152,6 +194,23 @@ fn to_tag(value: &serde_json::Value) -> Tag {
                 .map(|(key, value)| (key.as_str(), to_tag(value))),
         ),
         serde_json::Value::Null => Tag::End,
+    }
+}
+
+/// NBT to JSON as `NbtOps` to `JsonOps` converts, for the settings: bytes are booleans.
+fn to_json(tag: &Tag) -> serde_json::Value {
+    match tag {
+        Tag::Byte(value) => serde_json::Value::Bool(*value != 0),
+        Tag::Int(value) => (*value).into(),
+        Tag::Float(bits) => f64::from(f32::from_bits(*bits)).into(),
+        Tag::String(text) => text.to_string_lossy().into(),
+        Tag::List(values) => values.iter().map(to_json).collect(),
+        Tag::Compound(entries) => entries
+            .iter()
+            .map(|(key, value)| (key.to_string_lossy().to_string(), to_json(value)))
+            .collect::<serde_json::Map<_, _>>()
+            .into(),
+        _ => serde_json::Value::Null,
     }
 }
 

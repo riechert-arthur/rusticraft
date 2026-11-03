@@ -4,7 +4,7 @@ version = "0.1.0"
 priority = 100
 
 [compatibility]
-horizon_revision = "22595ccafa34f0fdcd1bffd3bb5cd211b95a5f33"
+horizon_revision = "8f447ec23a40edf70d00008fbb24b179ee88a1a7"
 
 [[module]]
 id = "noise"
@@ -438,6 +438,13 @@ id = "cave_assets"
 file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_cave_assets"
 source = "cave_assets.rs"
+visibility = "pub"
+
+[[module]]
+id = "settings"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_settings"
+source = "settings.rs"
 visibility = "pub"
 
 [[module]]
