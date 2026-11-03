@@ -282,16 +282,65 @@ mod tests {
     }
 
     #[test]
-    fn category_dominance_matches_engine_0_3_0() {
+    fn category_ordinals_and_dominance_match_engine_0_3_0() {
+        // EngineTypesOracle: TerrainCategory.values()[i].ordinal() and, row by row,
+        // values()[i].getDominant(values()[j]).ordinal().
+        for (ordinal, category) in TerrainCategory::VALUES.into_iter().enumerate() {
+            assert_eq!(category as usize, ordinal, "{category:?}");
+        }
         for first in TerrainCategory::VALUES {
             for second in TerrainCategory::VALUES {
-                let expected = if first as u8 > second as u8 {
-                    first
-                } else {
-                    second
-                };
-                assert_eq!(first.get_dominant(second), expected);
+                let expected = (first as usize).max(second as usize);
+                assert_eq!(
+                    first.get_dominant(second),
+                    TerrainCategory::VALUES[expected]
+                );
             }
+        }
+    }
+
+    #[test]
+    fn terrain_property_defaults_match_engine_0_3_0() {
+        // ITerrain's defaults derive isSubmerged, overridesRiver and overridesCoast from the
+        // other flags; a type overriding only one flag inherits the derived ones.
+        struct Only(u8);
+        impl TerrainProperties for Only {
+            fn is_river(&self) -> bool {
+                self.0 == 1
+            }
+            fn is_shallow_ocean(&self) -> bool {
+                self.0 == 2
+            }
+            fn is_deep_ocean(&self) -> bool {
+                self.0 == 3
+            }
+            fn is_coast(&self) -> bool {
+                self.0 == 4
+            }
+            fn is_lake(&self) -> bool {
+                self.0 == 5
+            }
+            fn is_volcano(&self) -> bool {
+                self.0 == 6
+            }
+        }
+        // (flag, isSubmerged, overridesRiver, overridesCoast)
+        let expected = [
+            (0, false, false, false),
+            (1, true, false, false),
+            (2, true, true, false),
+            (3, true, true, false),
+            (4, false, true, false),
+            (5, true, false, false),
+            (6, false, false, true),
+        ];
+        for (flag, submerged, river, coast) in expected {
+            let terrain = Only(flag);
+            assert_eq!(terrain.is_submerged(), submerged, "{flag}");
+            assert_eq!(terrain.overrides_river(), river, "{flag}");
+            assert_eq!(terrain.overrides_coast(), coast, "{flag}");
+            assert!(!terrain.is_overground() && !terrain.is_flat() && !terrain.is_mountain());
+            assert_eq!(terrain.erosion_modifier().to_bits(), 0x3f80_0000);
         }
     }
 }
