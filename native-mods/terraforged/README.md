@@ -16,7 +16,8 @@ The graph layer adds Engine's `Module` graph: constants, source nodes, the Abs, 
 Power, Scale and Threshold modifiers and the Add, Multiply and Max combiners, with the shortcuts of Engine's builder
 methods (`map`, `clamp`, `pow`, `bias`...). Its tests check the bounds each node reports as well as raw sample bits,
 including Engine's quirks: Threshold reports its source's bounds rather than 0..1, and Max's minimum is the larger of
-the first source's minimum and the other sources' maxima.
+the first source's minimum and the other sources' maxima. `Module::constant` is `Source.constant`, which returns its
+shared `ZERO` for -0.0, so it samples +0.0.
 
 The domain layer adds Engine's coordinate warps (`Domain.DIRECT`, `DomainWarp`, `DirectionWarp`, `AddWarp`,
 `CompoundWarp` and `CumulativeWarp`) and the `Warp` module that samples its source at the warped point. Its tests check

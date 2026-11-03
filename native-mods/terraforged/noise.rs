@@ -638,7 +638,17 @@ impl Module {
         Self::node(kind, source.min_value(), source.max_value())
     }
 
+    /// `Source.constant(double)`: 0 (either sign), 0.5 and 1 give the shared `ZERO`, `HALF` and `ONE`, so -0.0
+    /// becomes +0.0; any other value is `new Constant((float) value)`. (Java compares the double before its cast,
+    /// so a negative double too small for a float, such as -1e-50, keeps -0.0f there; callers pass the float.)
     pub fn constant(value: f32) -> Self {
+        let value = if value == 0.0 { 0.0 } else { value };
+        Self::node(ModuleKind::Constant(value), value, value)
+    }
+
+    /// `new Constant(float)`, which keeps -0.0 (only Java oracles in the tests build these).
+    #[cfg(test)]
+    fn new_constant(value: f32) -> Self {
         Self::node(ModuleKind::Constant(value), value, value)
     }
 
@@ -2892,7 +2902,7 @@ ctl5 0xbe800000 0x40600000 | 0x3f000000 0x3f0f52e0 0x3f012753 0x3f0a143e";
                 .scale(Module::constant(1.5))
                 .bias(Module::constant(0.1)),
             source(SourceKind::Perlin, 504, 64.0, 2, 0.5),
-            Module::constant(-0.0),
+            Module::new_constant(-0.0),
             Module::constant(3.5),
         ];
         let controls = [
@@ -2926,7 +2936,7 @@ ctl5 0xbe800000 0x40600000 | 0x3f000000 0x3f0f52e0 0x3f012753 0x3f0a143e";
             for control in controls {
                 print(
                     format!("n{count} b{} {}", hex(blend), hex(control)),
-                    Module::constant(control).multi_blend(
+                    Module::new_constant(control).multi_blend(
                         blend,
                         interpolation,
                         sources[..count].to_vec(),
@@ -3077,7 +3087,7 @@ flat 0x00000000";
                         hex(height)
                     );
                     for value in values {
-                        let module = Module::constant(value)
+                        let module = Module::new_constant(value)
                             .clamp(Module::constant(0.0), Module::constant(1.0))
                             .terrace(
                                 Module::constant(ramp),
@@ -3133,5 +3143,33 @@ flat 0x00000000";
                 0.35,
             )
             .value(0.0, 0.0);
+    }
+
+    #[test]
+    fn constant_shares_source_zero_for_negative_zero() {
+        // Java `Constants` oracle (`.local/terraforged/oracles/constant/`): `Source.constant(-0.0)` returns the shared
+        // `ZERO` (+0.0), so `Source.constant(-0.0).scale(2)` samples +0.0, and `new Constant(-0.0f)` scaled by
+        // `Source.constant(-0.0)` samples -0.0.
+        let zero = Module::constant(-0.0);
+        assert_eq!(
+            [zero.min_value(), zero.max_value(), zero.value(3.0, 4.0)].map(f32::to_bits),
+            [0; 3]
+        );
+        assert_eq!(
+            zero.scale(Module::constant(2.0)).value(0.0, 0.0).to_bits(),
+            0x0000_0000
+        );
+        assert_eq!(
+            Module::new_constant(-0.0)
+                .scale(Module::constant(-0.0))
+                .value(0.0, 0.0)
+                .to_bits(),
+            0x8000_0000
+        );
+        assert_eq!(
+            [0.5, 1.0, -1.0, 0.25].map(|value| Module::constant(value).value(0.0, 0.0).to_bits()),
+            [0x3f00_0000, 0x3f80_0000, 0xbf80_0000, 0x3e80_0000]
+        );
+        assert!(Module::constant(f32::NAN).value(0.0, 0.0).is_nan());
     }
 }
