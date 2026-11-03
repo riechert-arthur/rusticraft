@@ -56,11 +56,48 @@ pub struct ErodedNoiseGenerator {
     generator: NoiseGenerator,
     smoothing: HeightmapSmoothingSettings,
     regions: ErosionRegionCache<Vec<f32>>,
+    river_start: RiverStart,
+}
+
+/// What every chunk sample's river noise starts at in [`ErodedNoiseGenerator::generate`], before the rivers carve it.
+/// 6dd607eb keeps one `NoiseResource` per worker thread and reuses its 18x18 samples for every chunk the thread
+/// generates, never resetting their river noise, which the carver only multiplies (by factors in 0..=1 inside a valley)
+/// and sets back to 1 only seaward of the beach. So a sample starts where the same position of the thread's previous
+/// chunk left it: 1 in a new resource, falling with every valley it has passed through, and exactly 0, for good, once
+/// one of them was a river bed. A few dozen chunks into play nearly every inland sample is there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RiverStart {
+    /// The default: the 0 Java's reused samples settle at in play (TerraForged's dense forests), the same for every
+    /// chunk, whatever the threads or the order.
+    InPlay,
+    /// A new resource's 1 (`NoiseSample`'s default), what TerraForged's code intends: the `sparse_forests` setting,
+    /// and what the Java oracles replay (they start every chunk from a new resource).
+    Fresh,
+}
+
+impl RiverStart {
+    /// The value a sample's river noise starts at.
+    pub const fn value(self) -> f32 {
+        match self {
+            Self::InPlay => 0.0,
+            Self::Fresh => 1.0,
+        }
+    }
+
+    /// The world's choice: [`Self::Fresh`] with `sparse_forests`, else [`Self::InPlay`].
+    pub fn for_settings(settings: super::terraforged_settings::Settings) -> Self {
+        if settings.sparse_forests {
+            Self::Fresh
+        } else {
+            Self::InPlay
+        }
+    }
 }
 
 impl ErodedNoiseGenerator {
     /// `new ErodedNoiseGenerator(generator, filters)`: `filters.erosion`'s six values become the region-wide
     /// [`ErosionFilter`]'s settings on a [`ErosionRegionLayout::MAP_SIZE`] map; `filters.smoothing` is kept as is.
+    /// Chunk samples' river noise starts as the world's settings say ([`RiverStart::for_settings`]).
     pub fn new(
         generator: NoiseGenerator,
         erosion: ErosionFilterSettings,
@@ -71,7 +108,19 @@ impl ErodedNoiseGenerator {
             generator,
             smoothing,
             regions: ErosionRegionCache::new(),
+            river_start: RiverStart::for_settings(super::terraforged_settings::current()),
         }
+    }
+
+    /// The same generator with chunk samples' river noise starting at `start`.
+    pub fn with_river_start(mut self, start: RiverStart) -> Self {
+        self.river_start = start;
+        self
+    }
+
+    /// What chunk samples' river noise starts at.
+    pub fn river_start(&self) -> RiverStart {
+        self.river_start
     }
 
     /// How many eroded regions are cached.
@@ -152,10 +201,11 @@ impl ErodedNoiseGenerator {
     ///
     /// Java fills every position into its own `NoiseSample` of a pooled `NoiseResource`, so a new resource starts each
     /// position from the defaults (river noise 1), while a reused one carries the river noise the carver multiplies
-    /// over from the same position of whichever chunk used that resource before. The port resets the sample at every
-    /// position (Java's new resource), so a chunk's data never depends on the chunks generated before it or on which
-    /// thread generated them; it also fills a new `NoiseData` per call, whose own `sample` stays the defaults (Java
-    /// never writes it here).
+    /// over from the same position of whichever chunk used that resource before ([`RiverStart`]). The port resets the
+    /// sample at every position and starts its river noise at [`Self::river_start`]: the 0 reused samples settle at
+    /// in play by default, a new resource's 1 with `sparse_forests` (and for the Java oracles). Either way a chunk's
+    /// data never depends on the chunks generated before it or on which thread generated them; it also fills a new
+    /// `NoiseData` per call, whose own `sample` stays the defaults (Java never writes it here).
     ///
     /// `Err` (and no `consumer` call) where the region build fails, where Java's `getRegion` throws out of `generate`.
     /// As in Java, a failure after the region is read (a failing sample, or a panic, the consumer's included) is not
@@ -187,6 +237,7 @@ impl ErodedNoiseGenerator {
                 for dx in NoiseData::MIN..NoiseData::MAX {
                     let noise_x = self.noise_coord(start_x.wrapping_add(dx));
                     sample.reset(terrains);
+                    sample.river_noise = self.river_start.value();
                     self.generator.sample_terrain(
                         seed,
                         noise_x,
@@ -592,13 +643,16 @@ chunk 2 2147483647 -3 5 3fba3fdd57ea00f8";
 
     /// Every element of twelve chunks' `NoiseData` (negative chunks, both sides of region boundaries, region corners,
     /// river chunks, block coordinates wrapping at the `int` limits; seeds 0, MIN and MAX) against Reimagined's Java.
+    /// The oracle clears its resource pool before every chunk, so this is the fresh-resource path
+    /// ([`RiverStart::Fresh`], `sparse_forests`), not the in-play default.
     #[test]
     fn eroded_chunks_match_reimagined_java() {
         let mut lines = Vec::new();
         for (group, &(variant, set, seed, droplets, lifetime, smoothing, chunks)) in
             CHUNK_GROUPS.iter().enumerate()
         {
-            let eroded = eroded(variant, set, droplets, lifetime, smoothing);
+            let eroded = eroded(variant, set, droplets, lifetime, smoothing)
+                .with_river_start(RiverStart::Fresh);
             for &(chunk_x, chunk_z) in chunks {
                 let hash = chunk_digest(&eroded, seed, chunk_x, chunk_z);
                 lines.push(format!(
@@ -610,12 +664,19 @@ chunk 2 2147483647 -3 5 3fba3fdd57ea00f8";
     }
 
     /// A chunk is, position by position, a new sample's raw terrain with the uncached region build's height at the
-    /// chunk's offset (the border reading the region's margin), then the rivers; the consumer runs once. Its 16x16
-    /// interior equals `eroded_height_noise` (the height Reimagined's `getBaseHeight`, and so the port's `base_height`
-    /// and `base_column`, places structures at).
+    /// chunk's offset (the border reading the region's margin), then the rivers carving a river noise that starts at
+    /// the generator's [`RiverStart`] (both are checked); the consumer runs once. Its 16x16 interior equals
+    /// `eroded_height_noise` (the height Reimagined's `getBaseHeight`, and so the port's `base_height` and
+    /// `base_column`, places structures at).
     #[test]
     fn chunks_are_raw_samples_with_eroded_heights() {
-        let eroded = eroded(0, 1, 50, 25, 1);
+        for start in [RiverStart::InPlay, RiverStart::Fresh] {
+            raw_samples_with_eroded_heights(start);
+        }
+    }
+
+    fn raw_samples_with_eroded_heights(start: RiverStart) {
+        let eroded = eroded(0, 1, 50, 25, 1).with_river_start(start);
         let seed = 91;
         let terrains = Arc::clone(&eroded.generator().continent().context().terrain);
         // (-1, 0) and (-8, 7) sit on the edges of region (-1, 0): their borders read its margin.
@@ -636,6 +697,7 @@ chunk 2 2147483647 -3 5 3fba3fdd57ea00f8";
                             let (x, z) = (chunk_x * 16 + dx, chunk_z * 16 + dz);
                             let (noise_x, noise_z) = (eroded.noise_coord(x), eroded.noise_coord(z));
                             let mut sample = NoiseSample::new(&terrains);
+                            sample.river_noise = start.value();
                             eroded
                                 .generator()
                                 .sample_terrain(seed, noise_x, noise_z, &mut sample, &mut blender)
@@ -680,6 +742,86 @@ chunk 2 2147483647 -3 5 3fba3fdd57ea00f8";
                 .unwrap();
             assert_eq!(calls, 1);
         }
+    }
+
+    /// The river noise is the only thing the start changes: by default (the 0 Java's reused samples settle at in
+    /// play) every land position carves to 0, and only seaward of the beach does the carver set 1; a fresh start
+    /// (`sparse_forests`) keeps the 1 away from the valleys. `new` takes the start from the world's settings.
+    #[test]
+    fn river_noise_starts_settled_by_default_and_fresh_with_sparse_forests() {
+        let settings = |sparse_forests| super::super::terraforged_settings::Settings {
+            sparse_forests,
+            ..super::super::terraforged_settings::FAITHFUL
+        };
+        assert_eq!(
+            RiverStart::for_settings(settings(false)),
+            RiverStart::InPlay
+        );
+        assert_eq!(RiverStart::for_settings(settings(true)), RiverStart::Fresh);
+        for (sparse_forests, start) in [(false, RiverStart::InPlay), (true, RiverStart::Fresh)] {
+            super::super::terraforged_settings::set_for_thread(Some(settings(sparse_forests)));
+            assert_eq!(eroded(0, 0, 0, 25, 0).river_start(), start);
+            for deterministic in [false, true] {
+                super::super::terraforged_settings::set_for_thread(Some(
+                    super::super::terraforged_settings::Settings {
+                        deterministic,
+                        ..settings(sparse_forests)
+                    },
+                ));
+                assert_eq!(eroded(0, 0, 0, 25, 0).river_start(), start);
+            }
+        }
+        super::super::terraforged_settings::set_for_thread(None);
+        assert_eq!(eroded(0, 0, 0, 25, 0).river_start(), RiverStart::InPlay);
+
+        let (in_play, fresh) = (
+            eroded(0, 1, 50, 25, 1),
+            eroded(0, 1, 50, 25, 1).with_river_start(RiverStart::Fresh),
+        );
+        let seed = 0;
+        let (mut land, mut sea, mut away_from_rivers) = (0, 0, 0);
+        // River chunks of the oracle's first group, and chunks around them.
+        for (chunk_x, chunk_z) in [(24, 16), (25, 16), (0, 0), (7, 7), (-1, -1)] {
+            let read = |generator: &ErodedNoiseGenerator| {
+                let mut out = None;
+                generator
+                    .generate(seed, chunk_x, chunk_z, |data| {
+                        let cells = (NoiseData::MIN..NoiseData::MAX).flat_map(|dz| {
+                            (NoiseData::MIN..NoiseData::MAX).map(move |dx| (dx, dz))
+                        });
+                        out = Some(
+                            cells
+                                .map(|(dx, dz)| {
+                                    (
+                                        data.height().get(dx, dz).to_bits(),
+                                        data.base().get(dx, dz).to_bits(),
+                                        data.terrain().get(dx, dz).unwrap().id(),
+                                        data.river().get(dx, dz),
+                                    )
+                                })
+                                .collect::<Vec<_>>(),
+                        );
+                    })
+                    .unwrap();
+                out.unwrap()
+            };
+            for (a, b) in read(&in_play).into_iter().zip(read(&fresh)) {
+                assert_eq!((a.0, a.1, a.2), (b.0, b.1, b.2));
+                if a.3 == 1.0 {
+                    // Seaward of the beach both are reset to 1.
+                    assert_eq!(b.3, 1.0);
+                    sea += 1;
+                } else {
+                    assert_eq!(a.3.to_bits(), 0.0f32.to_bits(), "{a:?} vs {b:?}");
+                    land += 1;
+                    away_from_rivers += usize::from(b.3 > 0.5);
+                }
+            }
+        }
+        assert!(
+            land > 0 && away_from_rivers > 0,
+            "{land} {sea} {away_from_rivers}"
+        );
     }
 
     fn fold_sample(sample: &NoiseSample) -> u64 {

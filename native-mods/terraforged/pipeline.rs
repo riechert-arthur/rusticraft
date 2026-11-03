@@ -1827,6 +1827,7 @@ mod tests {
         };
         let on = differences(Settings {
             deterministic: true,
+            ..Settings::default()
         });
         let off = differences(Settings::default());
         eprintln!(

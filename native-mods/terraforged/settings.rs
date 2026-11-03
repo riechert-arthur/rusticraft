@@ -16,6 +16,12 @@ pub struct Settings {
     /// feature index, on the ground under any trees, instead of from how many
     /// placed before it (the original's count, which a neighbour's tree changes).
     pub deterministic: bool,
+    /// Start each chunk sample's river noise at 1, a fresh sample's value and what
+    /// TerraForged's code intends, instead of the 0 TerraForged's reused samples settle
+    /// at in play (the default, see `ErodedNoiseGenerator::generate`): tree fitness
+    /// (`SaturationViability`, 1 - river noise) then falls away from rivers and lakes,
+    /// and so do the forests.
+    pub sparse_forests: bool,
 }
 
 impl Default for Settings {
@@ -27,6 +33,7 @@ impl Default for Settings {
 /// The original's behaviour: every setting off.
 pub const FAITHFUL: Settings = Settings {
     deterministic: false,
+    sparse_forests: false,
 };
 
 static CURRENT: RwLock<Settings> = RwLock::new(FAITHFUL);
@@ -61,12 +68,14 @@ impl Settings {
         let flag = |key: &str, default: bool| value[key].as_bool().unwrap_or(default);
         Self {
             deterministic: flag("deterministic", FAITHFUL.deterministic),
+            sparse_forests: flag("sparse_forests", FAITHFUL.sparse_forests),
         }
     }
 
     pub fn to_json(self) -> Value {
         let mut map = Map::new();
         map.insert("deterministic".into(), self.deterministic.into());
+        map.insert("sparse_forests".into(), self.sparse_forests.into());
         Value::Object(map)
     }
 }
@@ -79,6 +88,7 @@ mod tests {
     fn json_round_trips_and_defaults_missing_keys() {
         let on = Settings {
             deterministic: true,
+            sparse_forests: true,
         };
         assert_eq!(Settings::from_json(&on.to_json()), on);
         assert_eq!(Settings::from_json(&serde_json::json!({})), FAITHFUL);
