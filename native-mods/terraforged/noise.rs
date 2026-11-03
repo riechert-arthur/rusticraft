@@ -743,6 +743,7 @@ impl Module {
         Self::modifier(ModuleKind::Threshold(self, threshold), &source)
     }
 
+    /// `Module.warp(Domain)`: samples the source at the warped point; reports the source's bounds.
     pub fn warp(self, domain: Domain) -> Self {
         let source = self.clone();
         Self::modifier(ModuleKind::Warp(self, domain), &source)
@@ -770,66 +771,76 @@ impl Module {
     }
 }
 
+/// Engine's `Domain`: a coordinate warp. Cloning shares the node, as Java shares domain instances.
 #[derive(Clone)]
-pub struct Domain(Box<DomainKind>);
+pub struct Domain(Arc<DomainKind>);
 
-#[derive(Clone)]
 enum DomainKind {
+    /// `Domain.DIRECT`.
     Direct,
+    /// `DomainWarp`: both axis modules are already mapped to -0.5..0.5.
     DomainWarp {
         x: Module,
         y: Module,
         distance: Module,
     },
-    Direction {
-        direction: Module,
-        strength: Module,
-    },
+    /// `DirectionWarp`.
+    Direction { direction: Module, strength: Module },
+    /// `AddWarp`.
     Add(Domain, Domain),
+    /// `CompoundWarp`.
     Compound(Domain, Domain),
+    /// `CumulativeWarp`.
     Cumulative(Domain, Domain),
 }
 
 impl Domain {
+    fn node(kind: DomainKind) -> Self {
+        Self(Arc::new(kind))
+    }
+
+    /// `Domain.DIRECT`.
     pub fn direct() -> Self {
-        Self(Box::new(DomainKind::Direct))
+        Self::node(DomainKind::Direct)
     }
 
+    /// `Domain.warp(Module, Module, Module)` (`new DomainWarp`): each axis is mapped to -0.5..0.5 unless it already
+    /// reports exactly those bounds (`Module.map`'s own shortcut is the same test).
     pub fn domain_warp(x: Module, y: Module, distance: Module) -> Self {
-        let map_axis = |axis: Module| {
-            if axis.min_value() == -0.5 && axis.max_value() == 0.5 {
-                axis
-            } else {
-                axis.map(Module::constant(-0.5), Module::constant(0.5))
-            }
-        };
-        Self(Box::new(DomainKind::DomainWarp {
-            x: map_axis(x),
-            y: map_axis(y),
+        let map = |axis: Module| axis.map(Module::constant(-0.5), Module::constant(0.5));
+        Self::node(DomainKind::DomainWarp {
+            x: map(x),
+            y: map(y),
             distance,
-        }))
+        })
     }
 
+    /// `Domain.direction(Module, Module)` (`new DirectionWarp`).
     pub fn direction(direction: Module, strength: Module) -> Self {
-        Self(Box::new(DomainKind::Direction {
+        Self::node(DomainKind::Direction {
             direction,
             strength,
-        }))
+        })
     }
 
+    /// `Domain.add(Domain)` (`AddWarp`): the two offsets summed.
     #[allow(clippy::should_implement_trait)]
     pub fn add(self, next: Self) -> Self {
-        Self(Box::new(DomainKind::Add(self, next)))
+        Self::node(DomainKind::Add(self, next))
     }
 
+    /// `Domain.warp(Domain)` (`CompoundWarp`): `next`'s offset at the point warped by `self`.
     pub fn compound(self, next: Self) -> Self {
-        Self(Box::new(DomainKind::Compound(self, next)))
+        Self::node(DomainKind::Compound(self, next))
     }
 
+    /// `Domain.then(Domain)` (`CumulativeWarp`): Engine returns `next`'s warped *coordinate* as the offset, so
+    /// `x()` adds the input coordinate once more.
     pub fn then(self, next: Self) -> Self {
-        Self(Box::new(DomainKind::Cumulative(self, next)))
+        Self::node(DomainKind::Cumulative(self, next))
     }
 
+    /// `Domain.getOffsetX`.
     pub fn offset_x(&self, x: f32, y: f32) -> f32 {
         match self.0.as_ref() {
             DomainKind::Direct => 0.0,
@@ -849,6 +860,7 @@ impl Domain {
         }
     }
 
+    /// `Domain.getOffsetY`.
     pub fn offset_y(&self, x: f32, y: f32) -> f32 {
         match self.0.as_ref() {
             DomainKind::Direct => 0.0,
@@ -868,10 +880,12 @@ impl Domain {
         }
     }
 
+    /// `Domain.getX`.
     pub fn x(&self, x: f32, y: f32) -> f32 {
         x + self.offset_x(x, y)
     }
 
+    /// `Domain.getY`.
     pub fn y(&self, x: f32, y: f32) -> f32 {
         y + self.offset_y(x, y)
     }
