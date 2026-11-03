@@ -581,7 +581,8 @@ enum ModuleKind {
         max_blend: f32,
         interpolation: Interpolation,
     },
-    /// `Select`: `lower`/`upper` hold the two curves' `(min, max, range)`, fixed in the constructor.
+    /// `Select`: `lower_curve`/`upper_curve` hold Engine's `(curveMin, curveMax, curveRange)` per bound, fixed in the
+    /// constructor.
     Select {
         control: Module,
         lower: Module,
@@ -2200,6 +2201,7 @@ mod tests {
 
     #[test]
     fn selectors_match_engine_0_3_0() {
+        // Java `SelectorSweep` oracle (`.local/terraforged/oracles/selectors/`).
         let source = |kind, seed, scale: f32, octaves, gain| {
             Module::source(Source::new(
                 kind,
