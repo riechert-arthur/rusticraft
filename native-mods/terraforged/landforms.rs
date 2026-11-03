@@ -176,11 +176,13 @@ mod tests {
 
     #[allow(clippy::type_complexity)]
     #[rustfmt::skip]
-    const ORACLE: [(&str, &str, i32, i32, u32, u32, u64); 22] = [
+    const ORACLE: [(&str, &str, i32, i32, u32, u32, u64); 24] = [
         ("default", "steppe", 12345, 12350, 0xbca3d70a, 0x3d75c28f, 0x639d1d83e3e0f2eb),
         ("default", "plains", 12345, 12350, 0xbca3d70a, 0x3e020c4b, 0x6e4af950d6b9b37f),
         ("default", "steppe", -998877, -998872, 0xbca3d70a, 0x3d75c28f, 0x7a376023496a4361),
         ("default", "plains", -998877, -998872, 0xbca3d70a, 0x3e020c4b, 0x70dc912c2a72e694),
+        ("default", "steppe", 2147483643, -2147483648, 0xbca3d70a, 0x3d75c28f, 0xffdf4562b5fae442),
+        ("default", "plains", 2147483643, -2147483648, 0xbca3d70a, 0x3e020c4b, 0x5b03f6d91ab51dc4),
         ("modterrains", "steppe", 9712416, 9712421, 0xbca3d70a, 0x3d75c28f, 0x8f72e0ca682b02ca),
         ("modterrains", "plains", 9712416, 9712421, 0xbca3d70a, 0x3e051eb9, 0x8a73fd5503b12098),
         ("scaled", "steppe", 2147483645, -2147483646, 0xbca3d70a, 0x3d75c28f, 0xb918d2033648e902),
