@@ -491,8 +491,8 @@ fn nearest_cell(
     let mut nearest = f32::MAX;
     for dy in -1..=1 {
         for dx in -1..=1 {
-            let cell_x = xi + dx;
-            let cell_y = yi + dy;
+            let cell_x = xi.wrapping_add(dx);
+            let cell_y = yi.wrapping_add(dy);
             let vector = cell_vector(seed, cell_x, cell_y);
             let delta_x = cell_x as f32 + vector[0] * displacement - x;
             let delta_y = cell_y as f32 + vector[1] * displacement - y;
@@ -528,8 +528,8 @@ pub fn cell_edge(
     let mut second = f32::MAX;
     for dy in -1..=1 {
         for dx in -1..=1 {
-            let cell_x = xi + dx;
-            let cell_y = yi + dy;
+            let cell_x = xi.wrapping_add(dx);
+            let cell_y = yi.wrapping_add(dy);
             let vector = cell_vector(seed, cell_x, cell_y);
             let delta_x = cell_x as f32 + vector[0] * displacement - x;
             let delta_y = cell_y as f32 + vector[1] * displacement - y;
@@ -2743,6 +2743,102 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn cellular_extremes_and_ties_match_engine_0_3_0() {
+        // Lattice ints that wrap past i32::MAX (Java's `xi + dx`), NaN and infinite coordinates, and zero
+        // displacement, where neighbouring cells tie and only the first strictly nearer one wins.
+        let points = [
+            (3.0e9, -3.0e9),
+            (2147483520.0, -2147483648.0),
+            (f32::NAN, 5.5),
+            (f32::INFINITY, f32::NEG_INFINITY),
+            (0.5, 0.5),
+            (-0.5, 7.0),
+            (12.25, -98.75),
+            (-4096.5, 8192.25),
+        ];
+        const NAN: u32 = 0x7fc00000;
+        let canon = |v: f32| if v.is_nan() { NAN } else { v.to_bits() };
+        let edges = [
+            EdgeFunction::Distance2,
+            EdgeFunction::Distance2Add,
+            EdgeFunction::Distance2Sub,
+            EdgeFunction::Distance2Mul,
+            EdgeFunction::Distance2Div,
+        ];
+        // Java's `31 * h + bits` over every cell and cellEdge sample, per distance function, in the order
+        // seed, displacement, then CELL_VALUE followed by each EdgeFunc.
+        let cases = [
+            (DistanceFunction::Euclidean, 0xdd682a28_u32),
+            (DistanceFunction::Manhattan, 0x78dddcdf),
+            (DistanceFunction::Natural, 0x98b233f2),
+        ];
+        for (distance, expected) in cases {
+            let mut hash = 1_i32;
+            let mut mix = |v: f32| hash = hash.wrapping_mul(31).wrapping_add(canon(v) as i32);
+            for seed in [1201, i32::MIN] {
+                for displacement in [0.0, 0.9, -1.5] {
+                    for (x, y) in points {
+                        mix(cell_value(x, y, seed, displacement, distance));
+                    }
+                    for edge in edges {
+                        for (x, y) in points {
+                            mix(cell_edge(x, y, seed, displacement, edge, distance));
+                        }
+                    }
+                }
+            }
+            assert_eq!(hash as u32, expected);
+        }
+        let row = |f: &dyn Fn(f32, f32) -> f32| points.map(|(x, y)| canon(f(x, y)));
+        assert_eq!(
+            row(&|x, y| cell_value(x, y, i32::MIN, 0.0, DistanceFunction::Manhattan)),
+            [
+                0x3ec2d266, 0xbf470fc7, 0x3f1ff100, 0xbf561ba4, 0, 0x3e584b85, 0xbf5f69e4,
+                0x3dfbaa33,
+            ]
+        );
+        assert_eq!(
+            row(&|x, y| cell_edge(
+                x,
+                y,
+                1201,
+                0.0,
+                EdgeFunction::Distance2,
+                DistanceFunction::Euclidean
+            )),
+            [
+                0x5da160e5, 0xbf800000, 0x7f7fffff, 0x7f7fffff, 0xbf000000, 0xbf400000, 0xbec00000,
+                0xbf300000,
+            ]
+        );
+        assert_eq!(
+            row(&|x, y| cell_edge(
+                x,
+                y,
+                i32::MIN,
+                -1.5,
+                EdgeFunction::Distance2Div,
+                DistanceFunction::Natural
+            )),
+            [0, NAN, 0, 0, 0xbf2ad6c4, 0xbebf4dfa, 0xbf13465d, 0xbee2b4a8]
+        );
+        let bounds = edges.map(|edge| {
+            let (min, max, range) = edge.bounds();
+            [min.to_bits(), max.to_bits(), range.to_bits()]
+        });
+        assert_eq!(
+            bounds,
+            [
+                [0xbf800000, 0x3f800000, 0x40000000],
+                [0xbf800000, 0x3fcccccd, 0x40266666],
+                [0xbf800000, 0x3f4ccccd, 0x3fe66666],
+                [0xbf800000, 0x3f333333, 0x3fd9999a],
+                [0xbf800000, 0, 0x3f800000],
+            ]
+        );
     }
 
     #[test]
