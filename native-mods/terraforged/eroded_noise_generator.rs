@@ -244,8 +244,11 @@ impl NoiseGeneratorContract for ErodedNoiseGenerator {
                     let sample = &mut resource.chunk_samples[index];
                     self.generator
                         .sample_terrain(seed, noise_x, noise_z, sample, &mut blender);
-                    sample.height_noise =
-                        region[row.wrapping_add(offset_x).wrapping_add(delta_x) as usize];
+                    let eroded = region[row.wrapping_add(offset_x).wrapping_add(delta_x) as usize];
+                    resource
+                        .chunk
+                        .set_deposit_index(index, eroded - sample.height_noise);
+                    sample.height_noise = eroded;
                     // The original reuses its samples from chunk to chunk without resetting
                     // the river noise, which the carver only multiplies: a column keeps
                     // the product of every chunk its worker sampled before, so after a few

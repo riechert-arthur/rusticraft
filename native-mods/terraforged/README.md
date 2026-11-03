@@ -89,6 +89,11 @@ leaves existing worlds as they are.
   `auto_scale` would widen them with the range), so they grow steeper as well as taller: at 1.8, land
   stands about 1.8 times as high above the sea, rivers cut deep canyons, and the highest summits rise
   less (the terrain noise rarely reaches them).
+- `erosion_deposits`: shows what the erosion pass deposited. Each column's change from erosion is
+  compared with the 7x7 around it; where it came out at least as high (it lost less than its
+  surroundings, so their sediment settles there) up to three blocks of the natural surface turn into
+  gravel and clay in river and lake beds, gravel on the banks beside them, and scree (gravel and
+  cobblestone) at the foot of slopes. Snow from decoration still covers it on cold slopes.
 
 ## Layers
 

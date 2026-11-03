@@ -29,6 +29,9 @@ pub struct Settings {
     /// multiple of the original's: up to 2 fills most of the 1024-block overworld.
     /// Landforms keep their width, so they get steeper as well as taller.
     pub height_scale: f32,
+    /// Show what the erosion pass deposited: gravel and clay in river and lake beds,
+    /// gravel on their banks, scree at the foot of slopes.
+    pub erosion_deposits: bool,
 }
 
 impl Default for Settings {
@@ -43,6 +46,7 @@ pub const FAITHFUL: Settings = Settings {
     sparse_forests: false,
     corrected_biomes: false,
     height_scale: 1.0,
+    erosion_deposits: false,
 };
 
 /// The range `height_scale` is held to: the world's top is 959.
@@ -87,6 +91,7 @@ impl Settings {
                 .map_or(FAITHFUL.height_scale, |scale| {
                     (scale as f32).clamp(*HEIGHT_SCALES.start(), *HEIGHT_SCALES.end())
                 }),
+            erosion_deposits: flag("erosion_deposits", FAITHFUL.erosion_deposits),
         }
     }
 
@@ -96,6 +101,7 @@ impl Settings {
         map.insert("sparse_forests".into(), self.sparse_forests.into());
         map.insert("corrected_biomes".into(), self.corrected_biomes.into());
         map.insert("height_scale".into(), f64::from(self.height_scale).into());
+        map.insert("erosion_deposits".into(), self.erosion_deposits.into());
         Value::Object(map)
     }
 }
@@ -111,6 +117,7 @@ mod tests {
             sparse_forests: true,
             corrected_biomes: true,
             height_scale: 1.5,
+            erosion_deposits: true,
         };
         assert_eq!(Settings::from_json(&on.to_json()), on);
         assert_eq!(Settings::from_json(&serde_json::json!({})), FAITHFUL);

@@ -546,6 +546,12 @@ impl SeededPipeline for TerraForgedPipeline {
                 self.generator.sea_level(),
             )
             .map_err(stage("surface"))?;
+        if self.settings.erosion_deposits
+            && let Some(blocks) = super::terraforged_deposits::DepositBlocks::new(data.registry)
+        {
+            super::terraforged_deposits::apply(&terrain.read(), &mut chunk, &blocks)
+                .map_err(stage("deposits"))?;
+        }
 
         // applyCarvers: TerraForged's noise caves; no vanilla carvers run.
         let levels = self.generator.levels();
@@ -1281,5 +1287,58 @@ mod tests {
             "{} columns: one height {height:?}, biome {biome:?}, lod_grid {grid:?}",
             columns.len()
         );
+    }
+
+    /// `erosion_deposits` lays gravel, clay and cobblestone over the surface where erosion
+    /// deposited; without it the surface keeps the original's blocks.
+    #[test]
+    fn erosion_deposits_show_on_the_surface() {
+        let Some(data) = data() else { return };
+        let count = |deposits| {
+            super::terraforged_settings::set_for_thread(Some(
+                super::terraforged_settings::Settings {
+                    erosion_deposits: deposits,
+                    ..super::terraforged_settings::FAITHFUL
+                },
+            ));
+            let overworld = OverworldGenerator::for_world(
+                Arc::clone(&data),
+                98765,
+                PRESET,
+                "minecraft:overworld",
+                false,
+            )
+            .unwrap();
+            super::terraforged_settings::set_for_thread(None);
+            let mut worker = overworld.worker();
+            let mut found = std::collections::BTreeMap::<&str, usize>::new();
+            for cx in -5..=5 {
+                for cz in -5..=5 {
+                    let chunk = worker.generate_proto(ChunkPos::new(cx, cz)).unwrap();
+                    for x in 0..16 {
+                        for z in 0..16 {
+                            let top = chunk.surface_height(x, z);
+                            for y in top - 4..=top {
+                                let name = chunk.block_name(x, y, z);
+                                for kind in [
+                                    "minecraft:gravel",
+                                    "minecraft:clay",
+                                    "minecraft:cobblestone",
+                                ] {
+                                    if name == kind {
+                                        *found.entry(kind).or_default() += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            found
+        };
+        let (off, on) = (count(false), count(true));
+        eprintln!("deposits off {off:?} on {on:?}");
+        let total = |m: &std::collections::BTreeMap<&str, usize>| m.values().sum::<usize>();
+        assert!(total(&on) > total(&off) + 200, "off {off:?} on {on:?}");
     }
 }
