@@ -219,6 +219,179 @@ pub fn cubic(x: f32, y: f32, seed: i32) -> f32 {
     cubic_lerp(rows[0], rows[1], rows[2], rows[3], y - y1 as f32) * 0.44444445
 }
 
+#[derive(Clone, Copy)]
+pub struct SourceConfig {
+    pub seed: i32,
+    pub octaves: usize,
+    pub gain: f32,
+    pub frequency: f32,
+    pub lacunarity: f32,
+    pub interpolation: Interpolation,
+}
+
+impl Default for SourceConfig {
+    fn default() -> Self {
+        Self {
+            seed: 1337,
+            octaves: 1,
+            gain: 0.5,
+            frequency: 1.0,
+            lacunarity: 2.0,
+            interpolation: Interpolation::Curve3,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub enum SourceKind {
+    Perlin,
+    Perlin2,
+    Simplex,
+    Simplex2,
+    Cubic,
+}
+
+#[derive(Clone, Copy)]
+pub struct Source {
+    config: SourceConfig,
+    kind: SourceKind,
+    min: f32,
+    max: f32,
+    range: f32,
+}
+
+impl Source {
+    pub fn new(kind: SourceKind, config: SourceConfig) -> Self {
+        let bound = match kind {
+            SourceKind::Perlin | SourceKind::Perlin2 => octave_bound(
+                &[1.0, 0.9, 0.83, 0.75, 0.64, 0.62, 0.61],
+                config,
+                config.gain,
+            ),
+            SourceKind::Simplex | SourceKind::Simplex2 => {
+                octave_bound(&[1.0, 0.989, 0.81, 0.781, 0.708, 0.702, 0.696], config, 1.0)
+            }
+            SourceKind::Cubic => cubic_bound(0.75, config.octaves, config.gain),
+        };
+        let range = bound - -bound;
+        Self {
+            config,
+            kind,
+            min: -bound,
+            max: bound,
+            // PerlinNoise and PerlinNoise2 take `Math.abs`: their bound is negative for a negative gain.
+            range: match kind {
+                SourceKind::Perlin | SourceKind::Perlin2 => range.abs(),
+                _ => range,
+            },
+        }
+    }
+
+    pub fn value(self, x: f32, y: f32) -> f32 {
+        self.evaluate(x, y, self.config.seed, false)
+    }
+
+    pub fn value_seeded(self, x: f32, y: f32, seed: i32) -> f32 {
+        self.evaluate(x, y, seed, true)
+    }
+
+    /// `Module.minValue()`: only `CubicNoise` overrides it, with its raw octave bound (not the mapped
+    /// output range); the other sources keep `Noise`'s default of 0.
+    pub fn min_value(self) -> f32 {
+        match self.kind {
+            SourceKind::Cubic => self.min,
+            _ => 0.0,
+        }
+    }
+
+    /// `Module.maxValue()`: the raw bound for `CubicNoise`, `Noise`'s default of 1 for the others.
+    pub fn max_value(self) -> f32 {
+        match self.kind {
+            SourceKind::Cubic => self.max,
+            _ => 1.0,
+        }
+    }
+
+    fn evaluate(self, mut x: f32, mut y: f32, seed: i32, explicit_seed: bool) -> f32 {
+        x *= self.config.frequency;
+        y *= self.config.frequency;
+        if matches!(self.kind, SourceKind::Cubic) {
+            let mut sum = cubic(x, y, seed);
+            let mut amplitude = 1.0;
+            let mut current_seed = seed;
+            for _ in 1..self.config.octaves {
+                x *= self.config.lacunarity;
+                y *= self.config.lacunarity;
+                current_seed = current_seed.wrapping_add(1);
+                amplitude *= self.config.gain;
+                sum += cubic(x, y, current_seed) * amplitude;
+            }
+            return map(sum, self.min, self.max, self.range);
+        }
+
+        let mut sum = 0.0;
+        let mut amplitude = if matches!(self.kind, SourceKind::Perlin | SourceKind::Perlin2) {
+            self.config.gain
+        } else {
+            1.0
+        };
+        for octave in 0..self.config.octaves {
+            let octave_seed = seed.wrapping_add(octave as i32);
+            let signal = match self.kind {
+                SourceKind::Perlin => perlin(x, y, octave_seed, self.config.interpolation),
+                SourceKind::Perlin2 if !explicit_seed => {
+                    perlin2(x, y, octave_seed, self.config.interpolation)
+                }
+                SourceKind::Perlin2 => perlin(x, y, octave_seed, self.config.interpolation),
+                SourceKind::Simplex => legacy_simplex(x, y, octave_seed),
+                SourceKind::Simplex2 => simplex(x, y, octave_seed),
+                SourceKind::Cubic => unreachable!(),
+            };
+            sum += signal * amplitude;
+            x *= self.config.lacunarity;
+            y *= self.config.lacunarity;
+            amplitude *= self.config.gain;
+        }
+        map(sum, self.min, self.max, self.range)
+    }
+}
+
+fn octave_bound(signals: &[f32; 7], config: SourceConfig, mut amplitude: f32) -> f32 {
+    let signal = signals[config.octaves.min(signals.len() - 1)];
+    let mut sum = 0.0;
+    for _ in 0..config.octaves {
+        sum += signal * amplitude;
+        amplitude *= config.gain;
+    }
+    sum
+}
+
+fn cubic_bound(signal: f32, octaves: usize, gain: f32) -> f32 {
+    let mut amplitude = 1.0;
+    let mut value = signal;
+    for _ in 1..octaves {
+        amplitude *= gain;
+        value += signal * amplitude;
+    }
+    value
+}
+
+fn map(value: f32, min: f32, max: f32, range: f32) -> f32 {
+    let clamped = if value < min {
+        min
+    } else if value > max {
+        max
+    } else {
+        value
+    };
+    let difference = clamped - min;
+    if difference > range {
+        1.0
+    } else {
+        difference / range
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -347,5 +520,171 @@ mod tests {
             bits(points.map(|(x, y)| cubic(x, y, 918273))),
             [0xbea370a8, 0x3ea40cd4, 0xbe4d83e2, 0x3d2b86ab]
         );
+    }
+
+    #[test]
+    fn octave_sources_match_engine_0_3_0() {
+        let config = SourceConfig {
+            seed: 8128,
+            octaves: 5,
+            gain: 0.47,
+            frequency: 0.0078125,
+            lacunarity: 2.13,
+            interpolation: Interpolation::Curve4,
+        };
+        let points = [
+            (0.0, 0.0),
+            (12.25, -98.75),
+            (-4096.5, 8192.25),
+            (123456.75, -0.125),
+        ];
+        let cases = [
+            (
+                SourceKind::Perlin,
+                [0x3f000000, 0x3ecb61fa, 0x3eb19ea9, 0x3f352d0f],
+                [0x3f000000, 0x3ebc4868, 0x3ef9e565, 0x3ea831a9],
+            ),
+            (
+                SourceKind::Perlin2,
+                [0x3f000000, 0x3f00ddf5, 0x3edd96ab, 0x3f186b18],
+                [0x3f000000, 0x3ebc4868, 0x3ef9e565, 0x3ea831a9],
+            ),
+            (
+                SourceKind::Simplex,
+                [0x3f000000, 0x3f14e4f8, 0x3f168604, 0x3f5d81ab],
+                [0x3f000000, 0x3f351311, 0x3f12ee34, 0x3f3d7a61],
+            ),
+            (
+                SourceKind::Simplex2,
+                [0x3f000000, 0x3f1a1e36, 0x3f1c2785, 0x3f74e215],
+                [0x3f000000, 0x3f4257d5, 0x3f17a9c1, 0x3f4cd8fa],
+            ),
+            (
+                SourceKind::Cubic,
+                [0x3f097eca, 0x3f1ca60a, 0x3ef5738d, 0x3f19b1d4],
+                [0x3f0bac93, 0x3f04f827, 0x3ee8f0cb, 0x3ef94bc2],
+            ),
+        ];
+        for (kind, expected, expected_seeded) in cases {
+            let source = Source::new(kind, config);
+            assert_eq!(bits(points.map(|(x, y)| source.value(x, y))), expected);
+            assert_eq!(
+                bits(points.map(|(x, y)| source.value_seeded(x, y, -991))),
+                expected_seeded
+            );
+        }
+    }
+
+    #[test]
+    fn source_bounds_and_edge_configs_match_engine_0_3_0() {
+        // Negative gain (PerlinNoise's `Math.abs` range), more octaves than the signal table, a seed that
+        // wraps per octave, zero octaves (0/0 = NaN after `map`) and a plain two-octave config.
+        let configs = [
+            (2147483646, 9, -0.6, 0.031, 1.9, Interpolation::Curve4),
+            (-7, 0, 0.5, 0.25, 2.0, Interpolation::Linear),
+            (1337, 2, 0.5, 1.0, 2.0, Interpolation::Curve3),
+        ];
+        let kinds = [
+            SourceKind::Perlin,
+            SourceKind::Perlin2,
+            SourceKind::Simplex,
+            SourceKind::Simplex2,
+            SourceKind::Cubic,
+        ];
+        let points = [(0.0, 0.0), (3.5, -17.25), (-1000.125, 250.75)];
+        // Per config and kind: minValue, maxValue, getValue(x, y) and getValue(x, y, Integer.MAX_VALUE).
+        let expected: [[(u32, u32, [u32; 3], [u32; 3]); 5]; 3] = [
+            [
+                (0, 0x3f800000, [0; 3], [0; 3]),
+                (0, 0x3f800000, [0; 3], [0; 3]),
+                (
+                    0,
+                    0x3f800000,
+                    [0x3f000000, 0, 0],
+                    [0x3f000000, 0, 0x3ded045d],
+                ),
+                (
+                    0,
+                    0x3f800000,
+                    [0x3f000000, 0, 0],
+                    [0x3f000000, 0, 0x3ca115dd],
+                ),
+                (
+                    0xbef26b2d,
+                    0x3ef26b2d,
+                    [0x3ebd193a, 0x3ed8de12, 0x3e98209c],
+                    [0x3f35b51d, 0x3f3d793c, 0],
+                ),
+            ],
+            [
+                (0, 0x3f800000, [NAN; 3], [NAN; 3]),
+                (0, 0x3f800000, [NAN; 3], [NAN; 3]),
+                (0, 0x3f800000, [NAN; 3], [NAN; 3]),
+                (0, 0x3f800000, [NAN; 3], [NAN; 3]),
+                (
+                    0xbf400000,
+                    0x3f400000,
+                    [0x3efe88c4, 0x3f032de8, 0x3ed472b4],
+                    [0x3f4bd987, 0x3ee2e739, 0x3e8f95ed],
+                ),
+            ],
+            [
+                (
+                    0,
+                    0x3f800000,
+                    [0x3f000000, 0x3f2e2f4b, 0x3f085555],
+                    [0x3f000000, 0x3f01346f, 0x3f192829],
+                ),
+                (
+                    0,
+                    0x3f800000,
+                    [0x3f000000, 0x3eec18aa, 0x3f06c11b],
+                    [0x3f000000, 0x3f01346f, 0x3f192829],
+                ),
+                (
+                    0,
+                    0x3f800000,
+                    [0x3f000000, 0x3efc1cbf, 0x3f415051],
+                    [0x3f000000, 0x3eef7b45, 0x3e10910a],
+                ),
+                (
+                    0,
+                    0x3f800000,
+                    [0x3f000000, 0x3efb23ee, 0x3f51a465],
+                    [0x3f000000, 0x3eeb5a17, 0x3d52d533],
+                ),
+                (
+                    0xbf900000,
+                    0x3f900000,
+                    [0x3ecc2ffc, 0x3f162025, 0x3f1fb20c],
+                    [0x3f329104, 0x3ee08b97, 0x3f2547da],
+                ),
+            ],
+        ];
+        // Any NaN matches NAN: Java printed x86's default 0xffc00000, which rustc may constant-fold differently.
+        const NAN: u32 = 0x7fc00000;
+        let canon = |v: f32| if v.is_nan() { NAN } else { v.to_bits() };
+        for ((seed, octaves, gain, frequency, lacunarity, interpolation), rows) in
+            configs.into_iter().zip(expected)
+        {
+            let config = SourceConfig {
+                seed,
+                octaves,
+                gain,
+                frequency,
+                lacunarity,
+                interpolation,
+            };
+            for (kind, (min, max, plain, seeded)) in kinds.into_iter().zip(rows) {
+                let source = Source::new(kind, config);
+                assert_eq!(source.min_value().to_bits(), min);
+                assert_eq!(source.max_value().to_bits(), max);
+                assert_eq!(points.map(|(x, y)| canon(source.value(x, y))), plain);
+                assert_eq!(
+                    points.map(|(x, y)| canon(source.value_seeded(x, y, i32::MAX))),
+                    seeded
+                );
+            }
+        }
     }
 }
