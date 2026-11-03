@@ -182,7 +182,10 @@ enum Job {
     /// Decorate a column next to finished ones (`Streaming::regenerate`):
     /// the finished neighbours (`None`) are generated again for the job, and
     /// what decoration writes into them comes back as block writes.
-    DecorateEdge(i32, i32, Box<[Option<Proto>; 9]>),
+    /// With `false`, the job only replays a finished column's decoration into
+    /// the regenerated proto chunks beside it (`Streaming::regenerate`): what it
+    /// writes into finished columns, its own included, is dropped.
+    DecorateEdge(i32, i32, Box<[Option<Proto>; 9]>, bool),
     Finish(Proto),
     Light(i32, i32, Box<Region>, u64, bool),
     Mesh(i32, i32, i32, Box<Region>, u64, MeshSettings),
@@ -348,6 +351,15 @@ pub struct Streaming {
     /// Columns that decorate even next to finished ones, writing into them
     /// (`regenerate`).
     edge_decoration: FxHashSet<(i32, i32)>,
+    /// Finished columns beside regenerated ones whose decoration is replayed
+    /// into them (`regenerate`), and those whose replay is in flight.
+    spill: FxHashSet<(i32, i32)>,
+    spilling: FxHashSet<(i32, i32)>,
+    /// The columns `regenerate` was given.
+    regenerated: FxHashSet<(i32, i32)>,
+    /// Where vanilla's order (`vanilla_order`) put the regenerated columns and
+    /// the replays around them when they were first decorated.
+    regen_rank: FxHashMap<(i32, i32), u64>,
     decorating: usize,
     /// Save jobs in flight.
     saving: usize,
@@ -676,8 +688,8 @@ impl Streaming {
                                     generator.decorate(&mut worker, &mut region);
                                     Done::Decorated(x, z, region)
                                 }
-                                Job::DecorateEdge(x, z, region) => {
-                                    decorate_edge(&*generator, &mut worker, x, z, *region)
+                                Job::DecorateEdge(x, z, region, apply) => {
+                                    decorate_edge(&*generator, &mut worker, x, z, *region, apply)
                                 }
                                 Job::Finish(proto) => Done::Generated(generator.finish(proto)),
                                 Job::Save(protos) => {
@@ -759,6 +771,10 @@ impl Streaming {
             light_views: Default::default(),
             decorated: Default::default(),
             edge_decoration: Default::default(),
+            spill: Default::default(),
+            spilling: Default::default(),
+            regenerated: Default::default(),
+            regen_rank: Default::default(),
             decorating: 0,
             saving: 0,
             decoration_order: DecorationOrder::default(),
@@ -937,8 +953,39 @@ impl Streaming {
             self.light_snapshots.remove(key);
         }
         self.edge_decoration.extend(keys.iter().copied());
+        // The columns around keep what their decoration wrote into the deleted
+        // chunks only in the save that was deleted: their decoration is played
+        // again into the new proto chunks before those decorate themselves.
+        self.regenerated.extend(keys.iter().copied());
+        for &(x, z) in keys {
+            for dz in -1..=1 {
+                for dx in -1..=1 {
+                    let key = (x + dx, z + dz);
+                    if !self.regenerated.contains(&key) {
+                        self.spill.insert(key);
+                    }
+                }
+            }
+        }
+        // Decorate and replay in the order the world was first decorated in,
+        // as seen from where the player is: features that collide (a tree where
+        // another's leaves are) then come out as they did.
+        self.regen_rank =
+            horizon_world::worldgen::decoration_order::vanilla_order(self.center, self.radius)
+                .into_iter()
+                .enumerate()
+                .map(|(rank, key)| (key, rank as u64))
+                .collect();
         self.generation_scan.exhausted = false;
         self.order_area = None;
+    }
+    /// Whether a job holds the proto chunk at `key` (checked out).
+    fn decorating_at(&self, key: (i32, i32)) -> bool {
+        matches!(self.protos.get(&key), Some(None))
+    }
+    /// A regenerated column's or replay's place in `regen_rank`; last if none.
+    fn regen_rank(&self, key: (i32, i32)) -> u64 {
+        self.regen_rank.get(&key).copied().unwrap_or(u64::MAX)
     }
     fn receive_decorated_edge(
         &mut self,
@@ -950,7 +997,9 @@ impl Streaming {
     ) {
         self.generation_scan.exhausted = false;
         self.decorating -= 1;
-        self.decorated.insert((x, z));
+        if !self.spilling.remove(&(x, z)) {
+            self.decorated.insert((x, z));
+        }
         for (i, proto) in region.into_iter().enumerate() {
             let Some(proto) = proto else {
                 continue;
@@ -970,6 +1019,70 @@ impl Streaming {
             {
                 let _ = world.set(bx, by, bz, state);
             }
+        }
+    }
+    /// Replay the decoration of finished columns into the regenerated proto
+    /// chunks beside them (`spill`), once those are generated and before they
+    /// decorate. The replay's other neighbours are generated again for it.
+    fn schedule_spill(&mut self, workers: usize) {
+        let mut pending: Vec<(u64, (i32, i32))> = self
+            .spill
+            .iter()
+            .map(|&k| (self.regen_rank(k), k))
+            .collect();
+        pending.sort_unstable();
+        for (own, (x, z)) in pending {
+            if self.decorating >= workers * 2 {
+                break;
+            }
+            let near: Vec<(i32, i32)> = (-2..=2)
+                .flat_map(|dz| (-2..=2).map(move |dx| (x + dx, z + dz)))
+                .filter(|n| self.regenerated.contains(n))
+                .collect();
+            // Regenerated columns ranked before it decorate first, the rest after.
+            let earlier_done = near.iter().all(|&n| {
+                self.regen_rank(n) > own || (self.decorated.contains(&n) && !self.decorating_at(n))
+            });
+            let later_waiting = near
+                .iter()
+                .all(|&n| self.regen_rank(n) < own || !self.decorated.contains(&n));
+            if !later_waiting {
+                // Too late: a column it writes into decorated already.
+                self.spill.remove(&(x, z));
+                continue;
+            }
+            let area: Vec<(i32, i32)> = (0..9)
+                .map(|i| (x + (i % 3) - 1, z + (i / 3) - 1))
+                .filter(|n| self.regenerated.contains(n))
+                .collect();
+            if !earlier_done
+                || !area
+                    .iter()
+                    .all(|n| matches!(self.protos.get(n), Some(Some(_))))
+            {
+                continue;
+            }
+            self.spill.remove(&(x, z));
+            let region: Vec<Option<Proto>> = (0..9)
+                .map(|i| {
+                    let n = (x + (i % 3) - 1, z + (i / 3) - 1);
+                    if !self.regenerated.contains(&n) {
+                        return None;
+                    }
+                    self.light_views.remove(&n);
+                    self.protos.insert(n, None).flatten()
+                })
+                .collect();
+            let Ok(region) = <[Option<Proto>; 9]>::try_from(region) else {
+                continue;
+            };
+            self.spilling.insert((x, z));
+            self.decorating += 1;
+            self.submit(
+                Some((x, z)),
+                1,
+                Job::DecorateEdge(x, z, Box::new(region), false),
+            );
         }
     }
     fn receive_decorated(&mut self, x: i32, z: i32, region: [Proto; 9]) {
@@ -1385,8 +1498,10 @@ impl Streaming {
             }
             let ready = (-1..=1).all(|dz| {
                 (-1..=1).all(|dx| {
-                    self.decorated.contains(&(x + dx, z + dz))
-                        || world.chunks.contains_key(&(x + dx, z + dz))
+                    let n = (x + dx, z + dz);
+                    (self.decorated.contains(&n) || world.chunks.contains_key(&n))
+                        && !self.spill.contains(&n)
+                        && !self.spilling.contains(&n)
                 })
             });
             if ready && let Some(Some(_)) = self.protos.get(&(x, z)) {
@@ -1466,9 +1581,25 @@ impl Streaming {
                 w.0 = self.decoration_order.rank_or_append(w.2, w.3);
             }
             wanted.sort_unstable();
+            self.schedule_spill(workers);
             for (_, _, x, z) in wanted {
                 if self.decorating >= workers * 2 {
                     break;
+                }
+                // Replays ranked before it within two (their writes reach what it
+                // reads and writes) go first.
+                let replaying = |s: &Self| {
+                    let own = s.regen_rank((x, z));
+                    (-2..=2).any(|dz| {
+                        (-2..=2).any(|dx| {
+                            let n = (x + dx, z + dz);
+                            (s.spill.contains(&n) || s.spilling.contains(&n))
+                                && s.regen_rank(n) < own
+                        })
+                    })
+                };
+                if replaying(self) {
+                    continue;
                 }
                 if self
                     .decoration_order
@@ -1507,7 +1638,11 @@ impl Streaming {
                         continue;
                     };
                     self.decorating += 1;
-                    self.submit(Some((x, z)), 1, Job::DecorateEdge(x, z, Box::new(region)));
+                    self.submit(
+                        Some((x, z)),
+                        1,
+                        Job::DecorateEdge(x, z, Box::new(region), true),
+                    );
                     continue;
                 }
                 if !keys
@@ -2317,6 +2452,7 @@ fn decorate_edge<G: ChunkGenerator>(
     x: i32,
     z: i32,
     region: [Option<Proto>; 9],
+    apply: bool,
 ) -> Done {
     let mut owned = [false; 9];
     let mut filled: Vec<Proto> = Vec::with_capacity(9);
@@ -2337,7 +2473,7 @@ fn decorate_edge<G: ChunkGenerator>(
     };
     generator.decorate(worker, &mut filled);
     let mut writes = Vec::new();
-    for (i, proto) in filled.iter().enumerate() {
+    for (i, proto) in filled.iter().enumerate().filter(|_| apply) {
         let (Some(old), Some(new)) = (
             &before[i],
             generator.light_view(proto).filter(|_| !owned[i]),
