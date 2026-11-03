@@ -995,6 +995,9 @@ struct Node {
     max: f32,
 }
 
+/// Engine's `Line` source: a segment from (x1, y1) to (x2, y2) whose value falls from 1 on the segment to 0 at its
+/// `radius` (sampled per point, as a squared distance), narrowed near its ends by `fade_in`/`fade_out` (fractions of
+/// the squared length) and scaled by `feather`. As a module it reports the `Noise` defaults 0..1.
 #[derive(Clone)]
 pub struct Line {
     x1: f32,
@@ -1319,7 +1322,6 @@ impl Line {
         dx * dx + dy * dy
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn sign(x: f32, y: f32, x1: f32, y1: f32, x2: f32, y2: f32) -> i32 {
         let value = (x - x1) * (y2 - y1) - (y - y1) * (x2 - x1);
         if value == 0.0 {
@@ -1350,14 +1352,15 @@ impl Line {
                 <= 0
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn distance_on_line(x: f32, y: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
         let dx = bx - ax;
         let dy = by - ay;
         ((x - ax) * dx + (y - ay) * dy) / (dx * dx + dy * dy)
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// `Line.distance2Line`: -1 when the projection falls outside the segment. Not `!(0.0..=1.0).contains(..)`:
+    /// a NaN projection (a zero-length segment) falls through to a NaN distance, as in Engine.
+    #[allow(clippy::manual_range_contains)]
     pub fn distance2_line(x: f32, y: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
         let dx = bx - ax;
         let dy = by - ay;
@@ -1368,7 +1371,6 @@ impl Line {
         Self::dist2(x, y, ax + dx * projection, ay + dy * projection)
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn distance2_line_including_ends(
         x: f32,
         y: f32,
@@ -1389,7 +1391,6 @@ impl Line {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn relative_ccw(x1: f32, y1: f32, mut x2: f32, mut y2: f32, mut px: f32, mut py: f32) -> i32 {
         x2 -= x1;
         y2 -= y1;
@@ -3775,6 +3776,8 @@ mod tests {
 
     #[test]
     fn line_source_matches_engine_0_3_0() {
+        // Expected bits come from Engine 0.3.0 (`Line` and its static helpers); NaNs are compared as one value
+        // because their sign and payload depend on the CPU.
         let radius = Module::source(Source::new(
             SourceKind::Simplex,
             SourceConfig {
@@ -3787,21 +3790,17 @@ mod tests {
             },
         ))
         .map(Module::constant(16.0), Module::constant(100.0));
-        let line = Line::new(
-            -10.0,
-            5.0,
-            30.0,
-            25.0,
-            radius,
-            Module::constant(0.2),
-            Module::constant(0.3),
-            0.4,
-        );
-        let module = Module::line(line.clone());
-        assert_eq!(
-            [module.min_value().to_bits(), module.max_value().to_bits()],
-            [0, 0x3f800000]
-        );
+        let c = Module::constant;
+        let lines = [
+            // Fades in and out, feathered.
+            Line::new(-10.0, 5.0, 30.0, 25.0, radius, c(0.2), c(0.3), 0.4),
+            // No feathering, no fades (zero and negative fade lengths are ignored).
+            Line::new(-10.0, 5.0, 30.0, 25.0, c(50.0), c(0.0), c(-1.0), 0.0),
+            // A zero-length line: every distance is 0/0.
+            Line::new(3.0, 4.0, 3.0, 4.0, c(9.0), c(0.5), c(0.5), 0.25),
+            // A NaN fade-in is ignored; a fade-out longer than the line fades it everywhere.
+            Line::new(0.0, 0.0, 20.0, 0.0, c(30.0), c(f32::NAN), c(2.0), 1.0),
+        ];
         let points = [
             (-10.0, 5.0),
             (30.0, 25.0),
@@ -3811,42 +3810,153 @@ mod tests {
             (35.0, 28.0),
             (0.0, 0.0),
             (22.0, 14.0),
+            (f32::NAN, 3.0),
+            (f32::INFINITY, 0.0),
+            (-0.0, -0.0),
+            (1e20, -1e20),
         ];
-        let expected = [
-            [0xffc00000, 0, 0x3f570a3e, 0x3f570a3e, 0, 0],
-            [0xffc00000, 0, 0x3f570a3e, 0x3f570a3e, 0, 0],
-            [0x3f6eeef0, 0x3f555555, 0x3f570a3e, 0x3f570a3e, 0, 0],
-            [0x3f096fb8, 0x3f355555, 0x3ee6ee27, 0x3ef7cf76, 0, 0],
-            [0, 0x3dae147b, 0, 0x3c34235f, 1, 0],
-            [0, 0x3d681b4f, 0, 0, 0, 1],
-            [0, 0x3ea00000, 0, 0, 0, 0],
-            [0, 0x3e9dddde, 0x3d01b31a, 0x3dd4df5f, 0, 0],
+        let expected: [[[u32; 6]; 12]; 4] = [
+            [
+                [0x7fc00000, 0x00000000, 0x3f570a3e, 0x3f570a3e, 0, 0],
+                [0x7fc00000, 0x00000000, 0x3f570a3e, 0x3f570a3e, 0, 0],
+                [0x3f6eeef0, 0x3f555555, 0x3f570a3e, 0x3f570a3e, 0, 0],
+                [0x3f096fb8, 0x3f355555, 0x3ee6ee27, 0x3ef7cf76, 0, 0],
+                [0x00000000, 0x3dae147b, 0x00000000, 0x3c34235f, 1, 0],
+                [0x00000000, 0x3d681b4f, 0x00000000, 0x00000000, 0, 1],
+                [0x00000000, 0x3ea00000, 0x00000000, 0x00000000, 0, 0],
+                [0x00000000, 0x3e9dddde, 0x3d01b31a, 0x3dd4df5f, 0, 0],
+                [0x7fc00000, 0x3f800000, 0x7fc00000, 0x7fc00000, 1, 0],
+                [0x00000000, 0x3f800000, 0x00000000, 0x00000000, 0, 1],
+                [0x00000000, 0x3ea00000, 0x00000000, 0x00000000, 0, 0],
+                [0x00000000, 0x3f800000, 0x00000000, 0x00000000, 0, 1],
+            ],
+            [
+                [0x7fc00000, 0x00000000, 0x3f800000, 0x3f800000, 0, 0],
+                [0x7fc00000, 0x00000000, 0x3f800000, 0x3f800000, 0, 0],
+                [0x3f800000, 0x3f800000, 0x3f800000, 0x3f800000, 0, 0],
+                [0x3f19999a, 0x3f800000, 0x3eaaaaac, 0x3ed2d2d2, 0, 0],
+                [0x3ea3d70a, 0x3f800000, 0x00000000, 0x00000000, 1, 0],
+                [0x3ea3d70a, 0x3f800000, 0x00000000, 0x00000000, 0, 1],
+                [0x00000000, 0x3f800000, 0x00000000, 0x00000000, 0, 0],
+                [0x3e5d2f18, 0x3f800000, 0x00000000, 0x00000000, 0, 0],
+                [0x7fc00000, 0x3f800000, 0x7fc00000, 0x7fc00000, 1, 0],
+                [0x00000000, 0x3f800000, 0x00000000, 0x00000000, 0, 1],
+                [0x00000000, 0x3f800000, 0x00000000, 0x00000000, 0, 0],
+                [0x00000000, 0x3f800000, 0x00000000, 0x00000000, 0, 1],
+            ],
+            [
+                [0x7fc00000, 0x3f800000, 0x7fc00000, 0x7fc00000, 0, 0],
+                [0x7fc00000, 0x3f800000, 0x7fc00000, 0x7fc00000, 0, 0],
+                [0x7fc00000, 0x3f800000, 0x7fc00000, 0x7fc00000, 0, 0],
+                [0x7fc00000, 0x3f800000, 0x7fc00000, 0x7fc00000, 0, 0],
+                [0x7fc00000, 0x3f800000, 0x7fc00000, 0x7fc00000, 0, 0],
+                [0x7fc00000, 0x3f800000, 0x7fc00000, 0x7fc00000, 0, 0],
+                [0x7fc00000, 0x3f800000, 0x7fc00000, 0x7fc00000, 0, 0],
+                [0x7fc00000, 0x3f800000, 0x7fc00000, 0x7fc00000, 0, 0],
+                [0x7fc00000, 0x3f800000, 0x7fc00000, 0x7fc00000, 1, 0],
+                [0x7fc00000, 0x3f800000, 0x7fc00000, 0x7fc00000, 1, 0],
+                [0x7fc00000, 0x3f800000, 0x7fc00000, 0x7fc00000, 0, 0],
+                [0x7fc00000, 0x3f800000, 0x7fc00000, 0x7fc00000, 0, 0],
+            ],
+            [
+                [0x00000000, 0x3f800000, 0x00000000, 0x00000000, 1, 0],
+                [0x00000000, 0x3f680000, 0x00000000, 0x00000000, 0, 1],
+                [0x00000000, 0x3ed00000, 0x00000000, 0x00000000, 0, 0],
+                [0x00000000, 0x3f200000, 0x00000000, 0x00000000, 0, 0],
+                [0x00000000, 0x3f800000, 0x00000000, 0x00000000, 1, 0],
+                [0x00000000, 0x3f800000, 0x00000000, 0x00000000, 0, 1],
+                [0x7fc00000, 0x00000000, 0x3f19999a, 0x3f19999a, 0, 0],
+                [0x00000000, 0x3e800000, 0x00000000, 0x00000000, 0, 1],
+                [0x7fc00000, 0x3f800000, 0x7fc00000, 0x7fc00000, 1, 0],
+                [0x00000000, 0x3f800000, 0x00000000, 0x00000000, 0, 1],
+                [0x7fc00000, 0x00000000, 0x3f19999a, 0x3f19999a, 0, 0],
+                [0x00000000, 0x3f800000, 0x00000000, 0x00000000, 0, 1],
+            ],
         ];
+        for (line, expected) in lines.iter().zip(expected) {
+            let module = Module::line(line.clone());
+            assert_eq!(
+                [module.min_value().to_bits(), module.max_value().to_bits()],
+                [0, 0x3f800000]
+            );
+            let actual = points.map(|(x, y)| {
+                let values = canonical_bits([
+                    module.value(x, y),
+                    line.width_modifier(x, y),
+                    line.value_with_width(x, y, 0.6),
+                    line.value_with_min_width(x, y, 4.0, 0.6),
+                ]);
+                [
+                    values[0],
+                    values[1],
+                    values[2],
+                    values[3],
+                    u32::from(line.clip_start(x, y)),
+                    u32::from(line.clip_end(x, y)),
+                ]
+            });
+            assert_eq!(actual, expected);
+        }
+
         assert_eq!(
-            points.map(|(x, y)| [
-                line.value(x, y).to_bits(),
-                line.width_modifier(x, y).to_bits(),
-                line.value_with_width(x, y, 0.6).to_bits(),
-                line.value_with_min_width(x, y, 4.0, 0.6).to_bits(),
-                line.clip_start(x, y) as u32,
-                line.clip_end(x, y) as u32,
+            bits([
+                Line::dist2(1.0, 2.0, 4.0, 6.0),
+                Line::dist2(-0.0, 0.0, 0.0, -0.0)
             ]),
-            expected
-        );
-        assert_eq!(Line::dist2(1.0, 2.0, 4.0, 6.0).to_bits(), 0x41c80000);
-        assert_eq!(Line::sign(2.0, 3.0, 0.0, 0.0, 4.0, 4.0), -1);
-        assert!(Line::intersect(0.0, 0.0, 4.0, 4.0, 0.0, 4.0, 4.0, 0.0));
-        assert_eq!(
-            Line::distance_on_line(2.0, 3.0, 0.0, 0.0, 4.0, 4.0).to_bits(),
-            0x3f200000
+            [0x41c80000, 0x00000000]
         );
         assert_eq!(
-            Line::distance2_line(2.0, 3.0, 0.0, 0.0, 4.0, 4.0).to_bits(),
-            0x3f000000
+            [
+                Line::sign(2.0, 3.0, 0.0, 0.0, 4.0, 4.0),
+                Line::sign(2.0, 2.0, 0.0, 0.0, 4.0, 4.0),
+                Line::sign(3.0, 2.0, 0.0, 0.0, 4.0, 4.0),
+                Line::sign(f32::NAN, 2.0, 0.0, 0.0, 4.0, 4.0),
+            ],
+            [-1, 0, 1, 1]
         );
+        // Crossing; collinear disjoint, overlapping, touching at an end, before the start; parallel; a T
+        // junction; all points equal; a NaN endpoint.
+        let segments: [[f32; 8]; 9] = [
+            [0.0, 0.0, 4.0, 4.0, 0.0, 4.0, 4.0, 0.0],
+            [0.0, 0.0, 1.0, 1.0, 2.0, 2.0, 3.0, 3.0],
+            [0.0, 0.0, 2.0, 2.0, 1.0, 1.0, 3.0, 3.0],
+            [0.0, 0.0, 2.0, 2.0, 2.0, 2.0, 3.0, 3.0],
+            [0.0, 0.0, 2.0, 2.0, -1.0, -1.0, -3.0, -3.0],
+            [0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            [0.0, 0.0, 4.0, 0.0, 2.0, 0.0, 2.0, 5.0],
+            [0.0; 8],
+            [f32::NAN, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0, 0.0],
+        ];
         assert_eq!(
-            Line::distance2_line_including_ends(8.0, 9.0, 0.0, 0.0, 4.0, 4.0).to_bits(),
-            0x42240000
+            segments.map(|[a, b, c, d, e, f, g, h]| Line::intersect(a, b, c, d, e, f, g, h)),
+            [true, false, true, true, false, false, true, true, true]
+        );
+        // On the segment, past its end, before its start, a zero-length segment (0/0), a NaN point.
+        let queries: [[f32; 6]; 6] = [
+            [2.0, 3.0, 0.0, 0.0, 4.0, 4.0],
+            [8.0, 9.0, 0.0, 0.0, 4.0, 4.0],
+            [-3.0, -1.0, 0.0, 0.0, 4.0, 4.0],
+            [5.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+            [f32::NAN, 0.0, 0.0, 0.0, 4.0, 4.0],
+            [1.0, 7.0, -2.0, 3.0, 6.0, -5.0],
+        ];
+        assert_eq!(
+            queries.map(|[x, y, ax, ay, bx, by]| {
+                let values = canonical_bits([
+                    Line::distance_on_line(x, y, ax, ay, bx, by),
+                    Line::distance2_line(x, y, ax, ay, bx, by),
+                    Line::distance2_line_including_ends(x, y, ax, ay, bx, by),
+                ]);
+                [values[0], values[1], values[2]]
+            }),
+            [
+                [0x3f200000, 0x3f000000, 0x3f000000],
+                [0x40080000, 0xbf800000, 0x42240000],
+                [0xbf000000, 0xbf800000, 0x41200000],
+                [0x7fc00000, 0x7fc00000, 0x7fc00000],
+                [0x7fc00000, 0x7fc00000, 0x7fc00000],
+                [0xbd800000, 0xbf800000, 0x41c80000],
+            ]
         );
     }
 
