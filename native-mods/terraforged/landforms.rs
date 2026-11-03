@@ -27,6 +27,8 @@ use super::{
     terraforged_engine::{Seed, TerrainSettings},
 };
 
+/// Engine's `LandForms`: builds each landform's noise graph from the terrain settings. Only `steppe` and `plains`
+/// are ported so far, so Engine's `levels` and `ground` constructor arguments are not taken yet.
 pub struct LandForms {
     settings: TerrainSettings,
 }
@@ -36,6 +38,7 @@ impl LandForms {
         Self { settings }
     }
 
+    /// `LandForms.steppe(Seed)`: draws five seeds in Engine's order; ignores the global vertical scale.
     pub fn steppe(&self, seed: &mut Seed) -> Module {
         let scale_h = java_round(250.0 * self.settings.steppe.horizontal_scale);
         let erosion =
@@ -53,6 +56,7 @@ impl LandForms {
             .bias(Module::constant(-0.02))
     }
 
+    /// `LandForms.plains(Seed)`: draws five seeds in Engine's order; scales by `0.15 * globalVerticalScale`.
     pub fn plains(&self, seed: &mut Seed) -> Module {
         let scale_h = java_round(250.0 * self.settings.plains.horizontal_scale);
         let erosion =
@@ -73,6 +77,7 @@ impl LandForms {
     }
 }
 
+/// `Source.build(seed, scale, octaves).lacunarity(lacunarity).perlin()` (Engine's builder defaults otherwise).
 fn perlin(seed: i32, scale: i32, octaves: usize, lacunarity: f32) -> Module {
     Module::source(Source::new(
         SourceKind::Perlin,
@@ -87,6 +92,7 @@ fn perlin(seed: i32, scale: i32, octaves: usize, lacunarity: f32) -> Module {
     ))
 }
 
+/// The domain of `Module.warp(seed, scale, octaves, strength)`: Perlin axes seeded `seed` and `seed + 1`.
 fn noise_warp(seed: i32, scale: i32, octaves: usize, strength: f32) -> Domain {
     Domain::domain_warp(
         perlin(seed, scale, octaves, 2.0),

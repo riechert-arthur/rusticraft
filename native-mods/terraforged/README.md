@@ -182,12 +182,21 @@ scale of 1 (and fancy mountains off for the two `mountains_ridge` terrains), and
 values rather than these: 1.5 for steppe, 2.5 for plains, 2 for each hills terrain, 1.5 for dales, 2 for plateau,
 1.75 for badlands, 2.5 for torridonian and 1.25 for each mountains terrain and dolomites, with no volcano entry.
 
-The first LandForms layer adds executable steppe and plains graphs with exact octave configuration,
-seed consumption, erosion alpha, axis warping, large-scale warping and final vertical scaling.
+The first LandForms layer adds Engine's `LandForms` (`landforms.rs`, module `terraforged_landforms`) with its first two
+landforms, `steppe` and `plains`. Each draws five seeds from the `Seed` in Engine's order: a 3-octave Perlin erosion
+noise (scale `2 * scaleH`, lacunarity 3.75, alpha 0.45), the two 3-octave Perlin axes of a warp by `scaleH / 4`
+(lacunarity 3 for steppe, 3.5 for plains), the 1-octave Perlin base (scale `scaleH`) that the erosion multiplies, and
+the seed of a 1-octave Perlin warp at scale 256 (strength 200 for steppe, 256 for plains; its second axis uses that
+seed + 1). `scaleH` is `Math.round(250 * horizontalScale)` of the landform's settings. Steppe then scales by 0.08,
+plains by `0.15 * globalVerticalScale`, and both subtract 0.02. Its tests check the seed afterwards, the bounds and the
+bits of every sample over a grid of positive, negative and large coordinates against a Java oracle, for Engine's
+default settings, ModTerrains' (a global vertical scale of 1) and degenerate scales (zero, negative, NaN, huge, and
+`Math.round`'s edges). The other landforms, the ocean and land bases, and TerraForged's `RandSeed` (ModTerrains
+builds its landforms from a `SplittableRandom` seed rather than Engine's counter) are not ported yet.
 
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels and its settings. They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings and its first landforms. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
