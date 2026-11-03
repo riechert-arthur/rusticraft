@@ -22,6 +22,11 @@
  * SOFTWARE.
  */
 
+/// Engine's `Seed`: a root and a cursor that `next` post-increments, wrapping like Java's `int`.
+///
+/// Engine shares one mutable `Seed` by reference, so every builder that calls `next()` advances
+/// the caller's cursor. This type is `Copy`: pass `&mut Seed` wherever Engine passes a `Seed` it
+/// draws from, or the copy's draws are lost to the caller.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Seed {
     root: i32,
