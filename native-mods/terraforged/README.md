@@ -170,12 +170,21 @@ jitter of 0.7, skipping and size variance of 0.25, and 5 distortion octaves with
 ported. These are Engine's defaults, not the values TerraForged generates with: its `NoiseGenerator` sets the seed,
 sea level and world height from its own levels and replaces the continent scale and control points.
 
-The terrain-settings layer adds exact global and per-landform weights plus vertical, horizontal and
-base scaling controls consumed by TerraForged's terrain distribution and LandForms graph.
+The terrain-settings layer adds Engine's `TerrainSettings` (`engine.rs`) with Engine's defaults: `General`
+(`GeneralTerrainSettings`: a terrain seed offset of 0, a terrain region size of 1200, a global vertical scale of
+0.98, a global horizontal scale of 1 and fancy mountains on) and one `Terrain` entry (`TerrainFormSettings`: weight,
+base scale, vertical scale and horizontal scale) per landform, with weights of 1 for steppe, 2 for plains, 2 for
+hills, 1.5 for dales, 1.5 for plateau, 1 for badlands, 2 for torridonian, 2.5 for mountains and 5 for volcano, and
+every scale at 1. Its test checks every default's bits, and those of both `Terrain` constructors, against Engine
+0.3.0. Engine's serializer, its `@Range` limits and `Terrain.apply` are not ported. These are Engine's defaults, not
+what TerraForged generates with: its `ModTerrains` builds its landforms from these settings with a global vertical
+scale of 1 (and fancy mountains off for the two `mountains_ridge` terrains), and weights its terrains with its own
+values rather than these: 1.5 for steppe, 2.5 for plains, 2 for each hills terrain, 1.5 for dales, 2 for plateau,
+1.75 for badlands, 2.5 for torridonian and 1.25 for each mountains terrain and dolomites, with no volcano entry.
 
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types and its world levels. They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels and its settings. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
