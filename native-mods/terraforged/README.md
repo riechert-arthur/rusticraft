@@ -87,6 +87,12 @@ threads never wait on one another and a busy cache simply samples its source. Un
 with `==`, the cache compares their bits: -0.0 does not hit +0.0's entry (and a NaN coordinate can hit), so a cached
 sample is always the sample of the same input, whichever coordinate another thread sampled last.
 
+The cellular primitive layer adds `NoiseUtil`'s 256-point cell table, the `DistanceFunc` metrics (Euclidean,
+Manhattan, Natural), the five `EdgeFunc` functions with their bounds, and the 3×3 searches of `Noise.cell` (for the
+`CELL_VALUE` cell function only) and `Noise.cellEdge`. As in Engine, neighbour cell coordinates wrap like Java `int`s
+and, among tied cells, the first one found (row by row from the lower corner) wins. Their tests check raw bits against a
+Java oracle, including NaN and infinite coordinates. The graph sources built on them come in a later layer.
+
 ## Status: development only
 
 This layer only adds the noise functions. It changes nothing in the game, so there is nothing for players to install
