@@ -4842,6 +4842,8 @@ steps c2 0x7fc00000 0x3f4ccccd 0x3e4ccccd 0xbf800000 0x40000000 | 0x7fc00000 0x7
         assert_eq!(actual, EXPECTED);
     }
 
+    /// Samples through `Cache`, checked against Engine 0.3.0 (repeats, ±0 and NaN coordinates), its bounds, its
+    /// sharing between clones and `cache()` of a cache, and the entry it keeps.
     #[test]
     fn cache_matches_engine_0_3_0() {
         let module = Module::source(Source::new(
