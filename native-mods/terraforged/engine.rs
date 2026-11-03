@@ -273,7 +273,16 @@ impl Terrain {
         category: TerrainCategory,
         delegate: TerrainDelegate,
     ) -> Self {
-        Self(Arc::new(TerrainData {
+        Self(Arc::new(Self::data(id, name, category, delegate)))
+    }
+
+    fn data(
+        id: i32,
+        name: impl Into<Arc<str>>,
+        category: TerrainCategory,
+        delegate: TerrainDelegate,
+    ) -> TerrainData {
+        TerrainData {
             id,
             name: name.into(),
             category,
@@ -284,7 +293,7 @@ impl Terrain {
             river_override: None,
             coast_override: None,
             volcano: None,
-        }))
+        }
     }
 
     pub fn configured_erosion(
@@ -344,33 +353,47 @@ impl Terrain {
         is_mountain: bool,
         overrides_river: bool,
     ) -> Self {
-        let mut terrain = Self::new(id, name, category);
-        let data = Arc::get_mut(&mut terrain.0).unwrap();
+        Self(Arc::new(Self::configured_data(
+            id,
+            name,
+            category,
+            erosion,
+            is_mountain,
+            overrides_river,
+        )))
+    }
+
+    fn configured_data(
+        id: i32,
+        name: impl Into<Arc<str>>,
+        category: TerrainCategory,
+        erosion: f32,
+        is_mountain: bool,
+        overrides_river: bool,
+    ) -> TerrainData {
+        let mut data = Self::data(id, name, category, TerrainDelegate::Category(category));
         data.erosion = Some(erosion);
         data.mountain = Some(is_mountain);
         data.river_override = Some(overrides_river);
-        terrain
+        data
     }
 
     pub fn volcano(id: i32, name: impl Into<Arc<str>>, category: TerrainCategory) -> Self {
-        let mut terrain = Self::configured_mountain(id, name, category, true, true);
-        let data = Arc::get_mut(&mut terrain.0).unwrap();
+        let erosion = category.erosion_modifier();
+        let mut data = Self::configured_data(id, name, category, erosion, true, true);
         data.coast_override = Some(true);
         data.volcano = Some(true);
-        terrain
+        Self(Arc::new(data))
     }
 
     pub fn composite(id: i32, first: Self, second: Self) -> Self {
         let name: Arc<str> = format!("{}-{}", first.name(), second.name()).into();
-        let category = first.category();
         let flat = first.is_flat() && second.is_flat();
         let erosion = java_min(first.erosion_modifier(), second.erosion_modifier());
-        let mut terrain = Self::with_parent(id, name, first);
-        let data = Arc::get_mut(&mut terrain.0).unwrap();
-        data.category = category;
+        let mut data = Self::data(id, name, first.category(), TerrainDelegate::Terrain(first));
         data.flat = Some(flat);
         data.erosion = Some(erosion);
-        terrain
+        Self(Arc::new(data))
     }
 
     pub fn id(&self) -> i32 {
@@ -913,5 +936,9 @@ mod tests {
         assert!(river.clone().is_same(&river));
         assert!(!river.with_id(7).is_same(&river));
         assert!(!Terrain::new(7, "river_custom", River).is_same(&river));
+
+        // Terrains are shared by world-generation threads.
+        fn send_sync<T: Send + Sync>() {}
+        send_sync::<Terrain>();
     }
 }
