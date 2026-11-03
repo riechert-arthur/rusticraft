@@ -6,7 +6,9 @@ An exact Rust translation of [TerraForged](https://github.com/TerraForged/TerraF
 
 ## Status
 
-Choose **World Type: TerraForged** on Create World's World tab (after Single Biome). The world
+Choose **World Type: TerraForged** on Create World's World tab (after Single Biome). The tab then shows
+TerraForged's continent map of the 4096 blocks around spawn for the typed seed, under the seed box,
+redrawn as the seed changes (a blank seed is random: the map shows once one is typed). The world
 saves TerraForged's overworld stem and generates its overworld with TerraForged:
 
 - terrain: continents, rivers, lakes, wetlands, the 14 terrain graphs blended by `TerrainBlender`,
