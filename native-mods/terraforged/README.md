@@ -16,7 +16,8 @@ The graph layer adds Engine's `Module` graph: constants, source nodes, the Abs, 
 Power, Scale and Threshold modifiers and the Add, Multiply and Max combiners, with the shortcuts of Engine's builder
 methods (`map`, `clamp`, `pow`, `bias`...). Its tests check the bounds each node reports as well as raw sample bits,
 including Engine's quirks: Threshold reports its source's bounds rather than 0..1, and Max's minimum is the larger of
-the first source's minimum and the other sources' maxima.
+the first source's minimum and the other sources' maxima. `Module::constant` is `Source.constant`, which returns its
+shared `ZERO` for -0.0, so it samples +0.0.
 
 The domain layer adds Engine's coordinate warps (`Domain.DIRECT`, `DomainWarp`, `DirectionWarp`, `AddWarp`,
 `CompoundWarp` and `CumulativeWarp`) and the `Warp` module that samples its source at the warped point. Its tests check
@@ -37,6 +38,12 @@ one evenly spaced slot per source and blends neighbouring slots, with Engine's s
 lookup and reported bounds (the smallest minimum and largest maximum of the sources, 0 and 0 without sources). Where
 Engine throws (a control far enough outside 0..1 to pick a slot that does not exist, or sampling a `MultiBlend` without
 sources), this port panics.
+
+The terrace layer adds `Terrace` (`Module.terrace(ramp, cliff, rampHeight, steps, blendRange)`): it clamps its source
+to 0..0.999999 and snaps it to flat steps, rising to the next step through a ramp (scaled by `rampHeight`) and a cliff.
+As in Engine, the steps are fixed when it is built and start at 0, not at the source's minimum, spaced by the source's
+range over `steps - 1`; it reports the source's bounds. Where Engine throws (sampling a NaN, or a terrace with no
+steps), this port panics.
 
 ## Status: development only
 
