@@ -169,6 +169,11 @@ don't generate, so they need none.
   `levels` (where `auto_scale` widens the land too), and TerraForged Reimagined's
   `globalVerticalScale` multiplies only the land terrain's noise through terrain overrides, which this
   port, following 6dd607eb, doesn't apply.
+- `erosion_deposits`: shows what the erosion pass deposited. Each column's change from erosion is
+  compared with the 7x7 around it; where it came out at least as high (it lost less than its
+  surroundings, so their sediment settles there) up to three blocks of the natural surface turn into
+  gravel and clay in river and lake beds, gravel on the banks beside them, and scree (gravel and
+  cobblestone) at the foot of slopes. Snow from decoration still covers it on cold slopes.
 
 ## Layers
 

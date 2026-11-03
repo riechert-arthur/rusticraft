@@ -248,10 +248,13 @@ impl ErodedNoiseGenerator {
                         &mut sample,
                         &mut blender,
                     )?;
+                    let raw = sample.height_noise;
                     sample.height_noise = region[row.wrapping_add(dx) as usize];
                     self.generator
                         .sample_river(seed, noise_x, noise_z, &mut sample);
                     chunk.set_noise(dx, dz, &sample);
+                    // Not Java's: what erosion changed (`erosion_deposits`), before the rivers carve.
+                    chunk.set_deposit(dx, dz, region[row.wrapping_add(dx) as usize] - raw);
                 }
             }
             consumer(&chunk);
