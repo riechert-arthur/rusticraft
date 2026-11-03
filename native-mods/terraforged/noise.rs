@@ -479,8 +479,9 @@ pub fn value_coord_2d(seed: i32, x: i32, y: i32) -> f32 {
 struct CellResult {
     x: i32,
     y: i32,
-    vector: [f32; 2],
-    distance: f32,
+    /// The nearest cell's feature vector; `None` (Java's null `vec2f`) when no distance beat `Float.MAX_VALUE`,
+    /// as for NaN or infinite coordinates.
+    vector: Option<[f32; 2]>,
 }
 
 fn cell_vector(seed: i32, x: i32, y: i32) -> [f32; 2] {
@@ -499,8 +500,7 @@ fn nearest_cell(
     let mut result = CellResult {
         x: xi,
         y: yi,
-        vector: [0.0; 2],
-        distance: f32::MAX,
+        vector: None,
     };
     let mut nearest = f32::MAX;
     for dy in -1..=1 {
@@ -516,8 +516,7 @@ fn nearest_cell(
                 result = CellResult {
                     x: cell_x,
                     y: cell_y,
-                    vector,
-                    distance: candidate,
+                    vector: Some(vector),
                 };
             }
         }
@@ -1216,6 +1215,12 @@ impl Module {
         )
     }
 
+    /// Engine's `CellNoise` (`Builder.cell()`): `config` gives the seed and frequency (the octave settings are
+    /// unused), `displacement` is the builder's `displacement`. `CellValue` maps the nearest cell's value from -1..1
+    /// to 0..1, `NoiseLookup` samples `lookup` unmapped at the nearest cell's feature point (unscaled by
+    /// `displacement`), and `Distance` always returns 0. As in Engine it reports the `Noise` defaults 0..1 whatever
+    /// the function or `lookup`'s bounds. Where Engine throws (`NoiseLookup` at NaN or infinite coordinates, where
+    /// no cell is found), this panics.
     pub fn cell_source(
         config: SourceConfig,
         displacement: f32,
@@ -1236,6 +1241,8 @@ impl Module {
         )
     }
 
+    /// Engine's `CellEdgeNoise` (`Builder.cellEdge()`): `edge` of the two nearest cells' distances, mapped to 0..1
+    /// from the edge function's bounds; it reports 0..1.
     pub fn cell_edge_source(
         config: SourceConfig,
         displacement: f32,
@@ -1265,21 +1272,26 @@ impl Module {
                 distance,
                 lookup,
             } => {
-                let x = x * config.frequency;
-                let y = y * config.frequency;
-                let cell = nearest_cell(x, y, config.seed, *displacement, *distance);
+                let nearest = || {
+                    let (x, y) = (x * config.frequency, y * config.frequency);
+                    nearest_cell(x, y, config.seed, *displacement, *distance)
+                };
                 match function {
                     CellFunction::CellValue => {
+                        let cell = nearest();
                         map(value_coord_2d(config.seed, cell.x, cell.y), -1.0, 1.0, 2.0)
                     }
-                    CellFunction::NoiseLookup => lookup.value(
-                        cell.x as f32 + cell.vector[0],
-                        cell.y as f32 + cell.vector[1],
-                    ),
-                    CellFunction::Distance => {
-                        let _ = cell.distance - 1.0;
-                        0.0
+                    CellFunction::NoiseLookup => {
+                        let cell = nearest();
+                        let Some(vector) = cell.vector else {
+                            panic!(
+                                "Engine throws a NullPointerException: no cell is nearer than Float.MAX_VALUE"
+                            );
+                        };
+                        lookup.value(cell.x as f32 + vector[0], cell.y as f32 + vector[1])
                     }
+                    // `CellFunc.DISTANCE.mapValue` always returns 0; its (side-effect free) search is skipped.
+                    CellFunction::Distance => 0.0,
                 }
             }
             ModuleKind::CellEdgeSource {
@@ -3079,6 +3091,173 @@ mod tests {
                 Module::cell_edge_source(edge_config, 0.7, edge, DistanceFunction::Natural);
             assert_eq!(bits(points.map(|(x, y)| module.value(x, y))), expected);
         }
+    }
+
+    #[test]
+    fn cellular_source_extremes_match_engine_0_3_0() {
+        // Negative and minimal seeds, negative displacement, every metric, and NaN, infinite, huge and -0.0
+        // coordinates.
+        let points = [
+            (0.0, 0.0),
+            (12.25, -98.75),
+            (-4096.5, 8192.25),
+            (123456.75, -0.125),
+            (64.0, 64.0),
+            (-128.0, 32.0),
+            (777.0, -333.0),
+            (-1024.0, -2048.0),
+        ];
+        let extreme = [
+            (3.0e9, -3.0e9),
+            (f32::NAN, 5.5),
+            (f32::INFINITY, 1.0),
+            (-0.0, -0.0),
+        ];
+        let config = |seed, frequency| SourceConfig {
+            seed,
+            octaves: 4,
+            gain: 0.3,
+            frequency,
+            lacunarity: 3.0,
+            interpolation: Interpolation::Curve3,
+        };
+        let lookup = Module::source(Source::new(
+            SourceKind::Simplex,
+            SourceConfig {
+                seed: 1303,
+                octaves: 3,
+                gain: 0.5,
+                frequency: 1.0 / 64.0,
+                lacunarity: 2.0,
+                interpolation: Interpolation::Curve3,
+            },
+        ))
+        .map(Module::constant(-0.5), Module::constant(1.5));
+        let cases = [
+            (
+                DistanceFunction::Euclidean,
+                [
+                    0x3f000000, 0x3e3ba476, 0x3e44c392, 0x3f44ff90, 0x3f2846d0, 0x3ecff46c,
+                    0x3d3a0000, 0x3ebf3a86,
+                ],
+                [
+                    0x00000000, 0x3f5e8cc3, 0x3e50017c, 0x3b1a1c00, 0x3eb9a76a, 0x3eb696cc,
+                    0x3f6f272f, 0x3df90e18,
+                ],
+                [0x3f800000, 0x3f800000, 0x3f800000, 0x3e846d37],
+            ),
+            (
+                DistanceFunction::Manhattan,
+                [
+                    0x3da79170, 0x3e3ba476, 0x3e44c392, 0x3f44ff90, 0x3f2846d0, 0x3ecff46c,
+                    0x3e8fcdb4, 0x3ebf3a86,
+                ],
+                [
+                    0x00000000, 0x3f6f46b6, 0x3f02a617, 0x3d46a060, 0x3f23d700, 0x3f26667a,
+                    0x3f78e1cd, 0x3ed171e2,
+                ],
+                [0x3f800000, 0x3f800000, 0x3f800000, 0x3ed0962d],
+            ),
+            (
+                DistanceFunction::Natural,
+                [
+                    0x3da79170, 0x3e3ba476, 0x3e44c392, 0x3f44ff90, 0x3f2846d0, 0x3ecff46c,
+                    0x3d3a0000, 0x3ebf3a86,
+                ],
+                [
+                    0x00000000, 0x3f69b377, 0x3ec96e50, 0x3cd4bb80, 0x3f0a355a, 0x3f0bf02c,
+                    0x3f75fe0c, 0x3e964078,
+                ],
+                [0x3f800000, 0x3f800000, 0x3f800000, 0x3f2a81b2],
+            ),
+        ];
+        let lookup_bits = [
+            0x3edaa908, 0x3eeed8d0, 0x3ea7af50, 0x3f2e894a, 0xbe212e52, 0x3ebc1e7c, 0x3ed45a30,
+            0x3e9d2338,
+        ];
+        for (metric, value_bits, edge_bits, extreme_edge_bits) in cases {
+            let cell = |seed, frequency, displacement, function, lookup| {
+                Module::cell_source(
+                    config(seed, frequency),
+                    displacement,
+                    function,
+                    metric,
+                    lookup,
+                )
+            };
+            let value = cell(
+                i32::MIN,
+                0.37,
+                -1.25,
+                CellFunction::CellValue,
+                Module::constant(0.0),
+            );
+            let noise = cell(-77, 0.37, -1.25, CellFunction::NoiseLookup, lookup.clone());
+            let edge = Module::cell_edge_source(
+                config(-77, 0.37),
+                0.0,
+                EdgeFunction::Distance2Div,
+                metric,
+            );
+            assert_eq!(bits(points.map(|(x, y)| value.value(x, y))), value_bits);
+            assert_eq!(bits(points.map(|(x, y)| noise.value(x, y))), lookup_bits);
+            assert_eq!(bits(points.map(|(x, y)| edge.value(x, y))), edge_bits);
+
+            let value = cell(5, 1.0, 1.0, CellFunction::CellValue, Module::constant(0.0));
+            let noise = cell(5, 1.0, 1.0, CellFunction::NoiseLookup, lookup.clone());
+            let distance = cell(5, 1.0, 1.0, CellFunction::Distance, Module::constant(0.0));
+            let edge =
+                Module::cell_edge_source(config(5, 1.0), 1.0, EdgeFunction::Distance2, metric);
+            assert_eq!(
+                bits(extreme.map(|(x, y)| value.value(x, y))),
+                [0x3eb612e6, 0x3e981034, 0x3f6b2c3e, 0x3f007362]
+            );
+            assert_eq!(
+                bits([extreme[0], extreme[3]].map(|(x, y)| noise.value(x, y))),
+                [0x3f000000, 0x3f0034e4]
+            );
+            assert_eq!(bits(extreme.map(|(x, y)| distance.value(x, y))), [0; 4]);
+            assert_eq!(
+                bits(extreme.map(|(x, y)| edge.value(x, y))),
+                extreme_edge_bits
+            );
+            for module in [value, noise, distance, edge] {
+                assert_eq!([module.min_value(), module.max_value()], [0.0, 1.0]);
+            }
+        }
+        // `Builder`'s default lookup is `Source.ZERO`.
+        let default_lookup = Module::cell_source(
+            config(1337, 1.0),
+            1.0,
+            CellFunction::NoiseLookup,
+            DistanceFunction::Euclidean,
+            Module::constant(0.0),
+        );
+        assert_eq!(
+            bits(points.map(|(x, y)| default_lookup.value(x, y))),
+            [0; 8]
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Engine throws")]
+    fn cell_lookup_panics_where_engine_throws() {
+        // Engine: every distance is NaN, so `vec2f` stays null and `NOISE_LOOKUP` throws a NullPointerException.
+        Module::cell_source(
+            SourceConfig {
+                seed: 5,
+                octaves: 1,
+                gain: 0.5,
+                frequency: 1.0,
+                lacunarity: 2.0,
+                interpolation: Interpolation::Curve3,
+            },
+            1.0,
+            CellFunction::NoiseLookup,
+            DistanceFunction::Euclidean,
+            Module::constant(0.0),
+        )
+        .value(f32::NAN, 5.5);
     }
 
     #[test]
