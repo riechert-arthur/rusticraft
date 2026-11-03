@@ -839,8 +839,8 @@ pub struct WorldSettings {
     pub properties: WorldProperties,
 }
 
-/// Engine's heightmap `ControlPoints`: the configured points if [`ControlPoints::validate`]
-/// accepts them, else the defaults, plus `coast_marker` halfway from coast to inland.
+/// Engine's `TerrainSettings.Terrain`: one landform's weight and its base, vertical and
+/// horizontal scales. Engine's `apply` (scale, bias, then `TerrainPopulator.clamp`) is not ported.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TerrainFormSettings {
     pub weight: f32,
@@ -850,6 +850,7 @@ pub struct TerrainFormSettings {
 }
 
 impl TerrainFormSettings {
+    /// Engine's `Terrain(weight, vertical, horizontal)`; `base_scale` keeps its default of 1.
     pub const fn new(weight: f32, vertical_scale: f32, horizontal_scale: f32) -> Self {
         Self {
             weight,
@@ -866,6 +867,7 @@ impl Default for TerrainFormSettings {
     }
 }
 
+/// Engine's `TerrainSettings.General` with its defaults.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GeneralTerrainSettings {
     pub terrain_seed_offset: i32,
@@ -887,6 +889,9 @@ impl Default for GeneralTerrainSettings {
     }
 }
 
+/// Engine's `TerrainSettings` with its defaults. TerraForged's `ModTerrains` builds its landforms
+/// with a global vertical scale of 1 (and without fancy mountains for the ridge variants) and
+/// weights them with its own values, not these weights.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TerrainSettings {
     pub general: GeneralTerrainSettings,
@@ -918,6 +923,8 @@ impl Default for TerrainSettings {
     }
 }
 
+/// Engine's heightmap `ControlPoints`: the configured points if [`ControlPoints::validate`]
+/// accepts them, else the defaults, plus `coast_marker` halfway from coast to inland.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ControlPoints {
     pub deep_ocean: f32,
@@ -2135,5 +2142,19 @@ mod tests {
             assert_eq!(form.vertical_scale.to_bits(), 0x3f800000);
             assert_eq!(form.horizontal_scale.to_bits(), 0x3f800000);
         }
+
+        let bits = |form: TerrainFormSettings| {
+            [
+                form.weight.to_bits(),
+                form.base_scale.to_bits(),
+                form.vertical_scale.to_bits(),
+                form.horizontal_scale.to_bits(),
+            ]
+        };
+        assert_eq!(bits(TerrainFormSettings::default()), [0x3f800000; 4]);
+        assert_eq!(
+            bits(TerrainFormSettings::new(3.5, 0.25, 7.0)),
+            [0x40600000, 0x3f800000, 0x3e800000, 0x40e00000]
+        );
     }
 }
