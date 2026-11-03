@@ -612,6 +612,14 @@ enum ModuleKind {
         steps: Vec<TerraceStep>,
         max_index: i32,
     },
+    /// `LegacyTerrace`: the steps and `maxIndex`, fixed in the constructor.
+    LegacyTerrace {
+        source: Module,
+        lower_curve: Module,
+        upper_curve: Module,
+        steps: Vec<TerraceStep>,
+        max_index: i32,
+    },
     /// `Select`: `lower_curve`/`upper_curve` hold Engine's `(curveMin, curveMax, curveRange)` per bound, fixed in the
     /// constructor.
     Select {
@@ -849,6 +857,43 @@ impl Module {
                     value = lerp(value, next.value, cliff_alpha);
                 }
                 value
+            }
+            ModuleKind::LegacyTerrace {
+                source,
+                lower_curve,
+                upper_curve,
+                steps,
+                max_index,
+            } => {
+                let noise_value = clamp(source.value(x, y), 0.0, 1.0);
+                let index = round(noise_value * *max_index as f32);
+                // `round` keeps a clamped sample (NaN rounds to 0) inside the steps; only a terrace without steps
+                // (`maxIndex` -1) leaves them, where Engine throws.
+                let step = usize::try_from(index)
+                    .ok()
+                    .and_then(|index| steps.get(index))
+                    .expect("LegacyTerrace samples a step outside its steps, where Engine throws");
+                let index = index as usize;
+                // As in Engine, a sample below the first step's window returns it without checking the upper window
+                // (which can matter for a blend range above 1, where the windows invert).
+                if noise_value < step.lower_bound {
+                    if index > 0 {
+                        let lower = &steps[index - 1];
+                        let alpha = (noise_value - lower.upper_bound)
+                            / (step.lower_bound - lower.upper_bound);
+                        let alpha = 1.0 - Interpolation::Curve3.apply(alpha);
+                        let range = step.value - lower.value;
+                        return step.value - alpha * range * upper_curve.value(x, y);
+                    }
+                } else if noise_value > step.upper_bound && (index as i32) < *max_index {
+                    let upper = &steps[index + 1];
+                    let alpha =
+                        (noise_value - step.upper_bound) / (upper.lower_bound - step.upper_bound);
+                    let alpha = Interpolation::Curve3.apply(alpha);
+                    let range = upper.value - step.value;
+                    return step.value + alpha * range * lower_curve.value(x, y);
+                }
+                step.value
             }
             ModuleKind::Select {
                 control,
@@ -1134,28 +1179,36 @@ impl Module {
         steps: usize,
         blend_range: f32,
     ) -> Self {
-        // Java's `int maxIndex = steps - 1`: -1 without steps.
-        let max_index = steps as i32 - 1;
-        let range = self.max_value() - self.min_value();
-        let spacing = range / max_index as f32;
-        let steps = (0..steps)
-            .map(|index| {
-                let value = index as f32 * spacing;
-                let blend = spacing * blend_range;
-                let bound = (spacing - blend) / 2.0;
-                TerraceStep {
-                    value,
-                    lower_bound: value - bound,
-                    upper_bound: value + bound,
-                }
-            })
-            .collect();
+        let (steps, max_index) = terrace_steps(&self, steps, blend_range);
         let source = self.clone();
         let kind = ModuleKind::Terrace {
             source: self,
             ramp,
             cliff,
             ramp_height,
+            steps,
+            max_index,
+        };
+        Self::modifier(kind, &source)
+    }
+
+    /// `Module.legacyTerrace(lowerCurve, upperCurve, steps, blendRange)` (`LegacyTerrace`): clamps its source to
+    /// 0..1 and snaps it to the nearest of `steps` evenly spaced steps (built as `terrace`'s), with Curve3 transitions
+    /// scaled by `lower_curve` towards the next step and by `upper_curve` from the previous one. Reports the source's
+    /// bounds. For Engine's `legacyTerrace(double, double, ...)`, pass `Module::constant` curves.
+    pub fn legacy_terrace(
+        self,
+        lower_curve: Self,
+        upper_curve: Self,
+        steps: usize,
+        blend_range: f32,
+    ) -> Self {
+        let (steps, max_index) = terrace_steps(&self, steps, blend_range);
+        let source = self.clone();
+        let kind = ModuleKind::LegacyTerrace {
+            source: self,
+            lower_curve,
+            upper_curve,
             steps,
             max_index,
         };
@@ -1333,6 +1386,27 @@ impl Domain {
 }
 
 /// The shortcut test shared by `Module.clamp` and `Module.map`.
+/// The steps and `maxIndex` that Engine's `Terrace` and `LegacyTerrace` constructors build: `count` steps from 0,
+/// spaced by the source's range over `count - 1`. Java's `int maxIndex = steps - 1` is -1 without steps.
+fn terrace_steps(source: &Module, count: usize, blend_range: f32) -> (Vec<TerraceStep>, i32) {
+    let max_index = count as i32 - 1;
+    let range = source.max_value() - source.min_value();
+    let spacing = range / max_index as f32;
+    let steps = (0..count)
+        .map(|index| {
+            let value = index as f32 * spacing;
+            let blend = spacing * blend_range;
+            let bound = (spacing - blend) / 2.0;
+            TerraceStep {
+                value,
+                lower_bound: value - bound,
+                upper_bound: value + bound,
+            }
+        })
+        .collect();
+    (steps, max_index)
+}
+
 fn constant_bounds(source: &Module, min: &Module, max: &Module) -> bool {
     min.min_value() == min.max_value()
         && min.min_value() == source.min_value()
@@ -3171,5 +3245,183 @@ flat 0x00000000";
             [0x3f00_0000, 0x3f80_0000, 0xbf80_0000, 0x3e80_0000]
         );
         assert!(Module::constant(f32::NAN).value(0.0, 0.0).is_nan());
+    }
+
+    #[test]
+    fn legacy_terrace_matches_engine_0_3_0() {
+        // Java `LegacyTerraces` oracle (`.local/terraforged/oracles/legacyterrace/`): noise legacy terraces (one over a
+        // source whose range does not start at 0, one with a blend range above 1), then constant samples swept over
+        // step counts, blend ranges and curves (built with `legacyTerrace(double, double, ...)`), an unclamped
+        // zero-range source and a NaN sample (which rounds to step 0 rather than throwing).
+        const EXPECTED: &str = "\
+noise0 0x00000000 0x3f800000 | 0x3f2aaaab 0x3f07908d 0x3f260e7a 0x3f000000 0x3f2aaaab 0x3f2aaaab 0x3f000000 0x3f000000 0x3f2aaaab 0x3eaaaaab 0x3eaaaaab 0x3f000000 0x3f2aaaab 0x3f000000 0x3efa81c9 0x3eb0e272 0x3f2aaaab 0x3eaaaaab 0x3f000000 0x3eaaaaab 0x3f2aaaab 0x3f2aaaab 0x3f2aaaab 0x3f1d3ab0\n\
+noise1 0xbe4ccccd 0x3fa66666 | 0x3f82a6ac 0x3fa94d0e 0x3f99a170 0x3f31facc 0x3f856972 0x3f614caa 0x3f2f6cd0 0x3f39a118 0x3f68632a 0x3ec00000 0x3ec00000 0x3f0de122 0x3f7bd91e 0x3f0c942a 0x3f18f446 0x3f1bc71e 0x3f810af7 0x3ec00000 0x3f0aaaaf 0x3ec00000 0x3f5377a5 0x3f7a265a 0x3f648384 0x3fac7f16\n\
+noise2 0x00000000 0x3f800000 | 0x3f000000 0x3f000000 0x3f000000 0x3f000000 0x3f000000 0x3f000000 0x3f000000 0x3f000000 0x3f000000 0x3f000000 0x3f000000 0x3f000000 0x3f000000 0x3f000000 0x3f000000 0x3f000000 0x3f000000 0x3f000000 0x3f000000 0x3f000000 0x3f000000 0x3f000000 0x3f000000 0x3f000000\n\
+noise3 0x00000000 0x3f800000 | 0x3f223329 0x3f2093e2 0x3f25bd32 0x3f15cd86 0x3f22301c 0x3f2902f4 0x3f1a3893 0x3f233b3c 0x3f29f172 0x3ea9b6cc 0x3ea3d567 0x3eda09ae 0x3f28ddd4 0x3ed300ac 0x3ec2607a 0x3eaa5ea1 0x3f23c025 0x3ea6c86d 0x3ed67a5b 0x3ea96ca2 0x3f24c8e4 0x3f28e380 0x3f24a7a3 0x3f1a5ed1\n\
+s1 b0x00000000 l0x3e800000 u0x3f400000 | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000\n\
+s1 b0x00000000 l0x3f800000 u0x3f800000 | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000\n\
+s1 b0x00000000 l0x40000000 u0xbf800000 | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000\n\
+s1 b0x3eb33333 l0x3e800000 u0x3f400000 | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000\n\
+s1 b0x3eb33333 l0x3f800000 u0x3f800000 | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000\n\
+s1 b0x3eb33333 l0x40000000 u0xbf800000 | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000\n\
+s1 b0x3fc00000 l0x3e800000 u0x3f400000 | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000\n\
+s1 b0x3fc00000 l0x3f800000 u0x3f800000 | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000\n\
+s1 b0x3fc00000 l0x40000000 u0xbf800000 | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000\n\
+s1 b0xbe99999a l0x3e800000 u0x3f400000 | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000\n\
+s1 b0xbe99999a l0x3f800000 u0x3f800000 | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000\n\
+s1 b0xbe99999a l0x40000000 u0xbf800000 | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000\n\
+s2 b0x00000000 l0x3e800000 u0x3f400000 | 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x00000000\n\
+s2 b0x00000000 l0x3f800000 u0x3f800000 | 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x00000000\n\
+s2 b0x00000000 l0x40000000 u0xbf800000 | 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x00000000\n\
+s2 b0x3eb33333 l0x3e800000 u0x3f400000 | 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x3cf1d1bf 0x3f200000 0x3f695457 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x00000000\n\
+s2 b0x3eb33333 l0x3f800000 u0x3f800000 | 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x3df1d1bf 0x3f000000 0x3f61c5c9 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x00000000\n\
+s2 b0x3eb33333 l0x40000000 u0xbf800000 | 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x3e71d1bf 0x3fc00000 0x3f8f1d1c 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x00000000\n\
+s2 b0x3fc00000 l0x3e800000 u0x3f400000 | 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x3d84bda2 0x3d9c06fa 0x3dcd1a78 0x3f200000 0x3f331613 0x3f457d62 0x3f56872b 0x3f6584aa 0x3f6c0832 0x3f71c716 0x3f71c71c 0x3f71c71c 0x00000000\n\
+s2 b0x3fc00000 l0x3f800000 u0x3f800000 | 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x3e84bda2 0x3e9c06fa 0x3ecd1a78 0x3f000000 0x3f1972c4 0x3f31fc82 0x3f48b439 0x3f5cb0e2 0x3f656042 0x3f6d0972 0x3f6d097b 0x3f6d097b 0x00000000\n\
+s2 b0x3fc00000 l0x40000000 u0xbf800000 | 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x3f04bda2 0x3f1c06fa 0x3f4d1a78 0x3fc00000 0x3fb3469e 0x3fa701bf 0x3f9ba5e4 0x3f91a78f 0x3f8d4fdf 0x3f897b47 0x3f897b42 0x3f897b42 0x00000000\n\
+s2 b0xbe99999a l0x3e800000 u0x3f400000 | 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x00000000\n\
+s2 b0xbe99999a l0x3f800000 u0x3f800000 | 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x00000000\n\
+s2 b0xbe99999a l0x40000000 u0xbf800000 | 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x00000000\n\
+s7 b0x00000000 l0x3e800000 u0x3f400000 | 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x3e2aaaab 0x3e2aaaab 0x3e2aaaab 0x3e2aaaab 0x3e2aaaab 0x3e2aaaab 0x3e2aaaab 0x3eaaaaab 0x3eaaaaab 0x3eaaaaab 0x3f000000 0x3f2aaaab 0x3f2aaaab 0x3f555556 0x3f555556 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x00000000\n\
+s7 b0x00000000 l0x3f800000 u0x3f800000 | 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x3e2aaaab 0x3e2aaaab 0x3e2aaaab 0x3e2aaaab 0x3e2aaaab 0x3e2aaaab 0x3e2aaaab 0x3eaaaaab 0x3eaaaaab 0x3eaaaaab 0x3f000000 0x3f2aaaab 0x3f2aaaab 0x3f555556 0x3f555556 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x00000000\n\
+s7 b0x00000000 l0x40000000 u0xbf800000 | 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x3e2aaaab 0x3e2aaaab 0x3e2aaaab 0x3e2aaaab 0x3e2aaaab 0x3e2aaaab 0x3e2aaaab 0x3eaaaaab 0x3eaaaaab 0x3eaaaaab 0x3f000000 0x3f2aaaab 0x3f2aaaab 0x3f555556 0x3f555556 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x00000000\n\
+s7 b0x3eb33333 l0x3e800000 u0x3f400000 | 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x2612f052 0x3c8d8971 0x3e1b8d8f 0x3e2aaaab 0x3e2aaaab 0x3e2aaaab 0x3e2aaaab 0x3e2aaaab 0x3e2aaaab 0x3e8aaaab 0x3eaaaaab 0x3ead2f85 0x3f000000 0x3f26e365 0x3f2aaaab 0x3f555556 0x3f5697c2 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x00000000\n\
+s7 b0x3eb33333 l0x3f800000 u0x3f800000 | 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x2712f052 0x3d8d8971 0x3e1683db 0x3e2aaaab 0x3e2aaaab 0x3e2aaaab 0x3e2aaaab 0x3e2aaaab 0x3e2aaaab 0x3e800000 0x3eaaaaab 0x3eb4be12 0x3f000000 0x3f25a0f8 0x3f2aaaab 0x3f555556 0x3f5a5f07 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x00000000\n\
+s7 b0x3eb33333 l0x40000000 u0xbf800000 | 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x2792f052 0x3e0d8971 0x3e3ed17b 0x3e2aaaab 0x3e2aaaab 0x3e2aaaab 0x3e2aaaab 0x3e2aaaab 0x3e2aaaab 0x3ed55556 0x3eaaaaab 0x3ebed179 0x3f000000 0x3f2fb45e 0x3f2aaaab 0x3f555556 0x3f5f68b8 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x00000000\n\
+s7 b0x3fc00000 l0x3e800000 u0x3f400000 | 0x00000000 0x00000000 0x00000000 0x00000000 0x3c50094e 0x3c6008e4 0x3c6008e6 0x3ca3d774 0x3deec81a 0x3e00a900 0x3e19031c 0x3e212f69 0x3e2a3fde 0x3e38ab39 0x3e38ab3a 0x3e8aaaab 0x3e9cd7ba 0x3eb33670 0x3efb425e 0x3f1dd903 0x3f2a8ff8 0x3f4e6bdd 0x3f599b38 0x3f763f91 0x3f7da129 0x3f7da130 0x3f7da130 0x00000000\n\
+s7 b0x3fc00000 l0x3f800000 u0x3f800000 | 0x00000000 0x00000000 0x00000000 0x00000000 0x3d50094e 0x3d6008e4 0x3d6008e6 0x3da3d774 0x3dcc9906 0x3de550e3 0x3e132097 0x3e1e0653 0x3e2a1c44 0x3e62ace4 0x3e62ace5 0x3e800000 0x3e983c14 0x3eccd9be 0x3ef9add3 0x3f199321 0x3f2a8711 0x3f4c1e0a 0x3f666cdf 0x3f72ff6c 0x3f7cd6e1 0x3f7cd6ea 0x3f7cd6ea 0x00000000\n\
+s7 b0x3fc00000 l0x40000000 u0xbf800000 | 0x00000000 0x00000000 0x00000000 0x00000000 0x3dd0094e 0x3de008e4 0x3de008e6 0x3e23d774 0x3e6f08d3 0x3e62ace4 0x3e4234bf 0x3e374f03 0x3e2b3912 0x3e8d578f 0x3e8d5790 0x3ed55556 0x3ebd1942 0x3eef08d2 0x3f032916 0x3f3bc235 0x3f2ace45 0x3f5e8ca2 0x3f778469 0x3f86804a 0x3f819490 0x3f81948b 0x3f81948b 0x00000000\n\
+s7 b0xbe99999a l0x3e800000 u0x3f400000 | 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x3e2aaaab 0x3e2aaaab 0x3e2aaaab 0x3e2aaaab 0x3e2aaaab 0x3e2aaaab 0x3e2aaaab 0x3eaaaaab 0x3eaaaaab 0x3eaaaaab 0x3f000000 0x3f2aaaab 0x3f2aaaab 0x3f555556 0x3f555556 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x00000000\n\
+s7 b0xbe99999a l0x3f800000 u0x3f800000 | 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x3e2aaaab 0x3e2aaaab 0x3e2aaaab 0x3e2aaaab 0x3e2aaaab 0x3e2aaaab 0x3e2aaaab 0x3eaaaaab 0x3eaaaaab 0x3eaaaaab 0x3f000000 0x3f2aaaab 0x3f2aaaab 0x3f555556 0x3f555556 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x00000000\n\
+s7 b0xbe99999a l0x40000000 u0xbf800000 | 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x3e2aaaab 0x3e2aaaab 0x3e2aaaab 0x3e2aaaab 0x3e2aaaab 0x3e2aaaab 0x3e2aaaab 0x3eaaaaab 0x3eaaaaab 0x3eaaaaab 0x3f000000 0x3f2aaaab 0x3f2aaaab 0x3f555556 0x3f555556 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x00000000\n\
+flat 0x7fc00000\n\
+nan 0x00000000";
+        let source = |kind, seed, scale: f32, octaves, gain| {
+            Module::source(Source::new(
+                kind,
+                SourceConfig {
+                    seed,
+                    octaves,
+                    gain,
+                    frequency: 1.0 / scale,
+                    lacunarity: 2.0,
+                    interpolation: Interpolation::Curve3,
+                },
+            ))
+        };
+        let hex = |value: f32| {
+            let bits = if value.is_nan() {
+                0x7fc0_0000
+            } else {
+                value.to_bits()
+            };
+            format!("0x{bits:08x}")
+        };
+        let mut lines = Vec::new();
+        let terrain = source(SourceKind::Perlin, 701, 96.0, 4, 0.5);
+        let lower = source(SourceKind::Simplex, 702, 72.0, 3, 0.5);
+        let upper = source(SourceKind::Ridge, 703, 128.0, 3, 0.975);
+        let terrace = |source: &Module, steps, blend| {
+            source
+                .clone()
+                .legacy_terrace(lower.clone(), upper.clone(), steps, blend)
+        };
+        let shifted = terrain
+            .clone()
+            .scale(Module::constant(1.5))
+            .bias(Module::constant(-0.2));
+        for (index, module) in [
+            terrace(&terrain, 7, 0.35),
+            terrace(&shifted, 5, 0.6),
+            terrace(&terrain, 3, 0.0),
+            terrace(&terrain, 4, 1.5),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut line = format!(
+                "noise{index} {} {} |",
+                hex(module.min_value()),
+                hex(module.max_value())
+            );
+            for i in 0..24 {
+                let (x, y) = (-1500.0 + i as f32 * 131.37, 900.0 - i as f32 * 77.21);
+                line += &format!(" {}", hex(module.value(x, y)));
+            }
+            lines.push(line);
+        }
+        let values = [
+            -0.05,
+            -0.0,
+            0.0,
+            0.03,
+            0.05,
+            0.05416666,
+            0.05416667,
+            0.08,
+            0.1,
+            0.1125,
+            0.15,
+            0.16666667,
+            0.2,
+            0.22083333,
+            0.22083335,
+            0.25,
+            0.3,
+            0.4,
+            0.5,
+            0.6,
+            0.7,
+            0.8,
+            0.9,
+            0.95,
+            0.999999,
+            1.0,
+            1.05,
+            f32::NAN,
+        ];
+        for steps in [1, 2, 7] {
+            for blend in [0.0, 0.35, 1.5, -0.3] {
+                for [lower, upper] in [[0.25, 0.75], [1.0, 1.0], [2.0, -1.0]] {
+                    let mut line =
+                        format!("s{steps} b{} l{} u{} |", hex(blend), hex(lower), hex(upper));
+                    for value in values {
+                        let module = Module::new_constant(value)
+                            .clamp(Module::constant(0.0), Module::constant(1.0))
+                            .legacy_terrace(
+                                Module::constant(lower),
+                                Module::constant(upper),
+                                steps,
+                                blend,
+                            );
+                        line += &format!(" {}", hex(module.value(0.0, 0.0)));
+                    }
+                    lines.push(line);
+                }
+            }
+        }
+        let one = || Module::constant(1.0);
+        let flat = Module::constant(0.5).legacy_terrace(one(), one(), 7, 0.35);
+        lines.push(format!("flat {}", hex(flat.value(0.0, 0.0))));
+        let nan = Module::constant(f32::NAN)
+            .clamp(Module::constant(0.0), one())
+            .legacy_terrace(one(), one(), 7, 0.35);
+        lines.push(format!("nan {}", hex(nan.value(0.0, 0.0))));
+        assert_eq!(lines, EXPECTED.lines().collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn legacy_terrace_without_steps_panics_where_engine_throws() {
+        // Engine builds a legacy terrace with no steps but throws `ArrayIndexOutOfBoundsException` whenever it samples
+        // one (`steps[round(value * -1)]`), for every sample in 0..1.
+        for value in [0.0, 0.4, 0.6, 1.0] {
+            let module = Module::constant(value)
+                .clamp(Module::constant(0.0), Module::constant(1.0))
+                .legacy_terrace(Module::constant(1.0), Module::constant(1.0), 0, 0.35);
+            let panic = std::panic::catch_unwind(|| module.value(0.0, 0.0))
+                .expect_err("a legacy terrace without steps samples nothing");
+            let message = panic.downcast_ref::<String>().map_or("", String::as_str);
+            assert!(message.contains("Engine throws"), "{message}");
+        }
     }
 }
