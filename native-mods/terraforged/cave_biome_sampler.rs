@@ -55,6 +55,18 @@ impl<T> CaveBiomeSampler<T> {
         self.frequency
     }
 
+    /// Whether a cave may hold `biome` (it is in the global or the unique pool).
+    pub fn may_hold(&self, biome: &T) -> bool
+    where
+        T: PartialEq,
+    {
+        self.global
+            .values()
+            .iter()
+            .chain(self.unique.values())
+            .any(|value| **value == *biome)
+    }
+
     pub fn get_underground_biome(
         &self,
         seed: i32,
