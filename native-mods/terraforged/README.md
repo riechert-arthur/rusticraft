@@ -5,8 +5,8 @@ An exact Rust translation of
 native-mod changes. This foundation ports the deterministic Noise2D primitives used by later terrain
 modules. It intentionally does not alter world generation yet.
 
-The next layer adds TerraForged's octave configuration and Perlin, Perlin2, legacy simplex,
-improved simplex and cubic sources, including the original explicit-seed behavior.
+On top of them sit TerraForged's octave sources (Perlin, Perlin2, legacy simplex, improved simplex and
+cubic) with their configuration, output bounds and the original explicit-seed behavior.
 
 ## Status: development only
 
