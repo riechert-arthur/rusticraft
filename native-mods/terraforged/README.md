@@ -111,8 +111,14 @@ itself never returns one: as in Engine, a NaN coordinate reads entry 0 and an in
 to an index. Its tests check raw bits against a Java oracle for all three branches, including NaN, infinite and
 extrapolating alphas and NaN, infinite and huge coordinates.
 
-The line source layer adds dynamic radius, endpoint fading, feathering, clipping, intersection and
-distance helpers for TerraForged's finite line masks.
+The line source layer adds Engine's `Line` (`Line::new`, `Module::line`): a segment whose value falls from 1 on the
+segment to 0 where the squared distance reaches its `radius` module's sample (plus an optional minimum), narrowed near
+each end by the `fade_in`/`fade_out` modules (fractions of the squared length; zero, negative and NaN fades are
+ignored) and scaled by its feather. It reports the `Noise` defaults 0..1. It also ports `Line`'s clipping tests and
+static helpers (`dist2`, `sign`, `intersect`, `distance_on_line`, `distance2_line`,
+`distance2_line_including_ends`). As in Engine, a zero-length line and the line's own endpoints sample NaN (0/0). Its
+tests check raw bits against a Java oracle, including those NaNs, NaN and infinite points and every collinear case of
+`intersect`.
 
 ## Status: development only
 
