@@ -438,7 +438,8 @@ fn saved_proto_block_entities_keep_their_id() {
 
 /// Chunks deleted and generated again (`Streaming::regenerate`, TerraForged's
 /// `/tf regen`) decorate like vanilla's: the ring next to the finished columns
-/// is decorated too, against them, instead of counting as decorated already.
+/// is decorated too, against them, instead of counting as decorated already,
+/// and the finished columns' decoration is replayed into them.
 #[test]
 fn regenerated_chunks_decorate_beside_finished_ones() {
     let Some(root) = resources() else {
@@ -478,16 +479,13 @@ fn regenerated_chunks_decorate_beside_finished_ones() {
         assert_eq!(finishes.len(), 1, "({x}, {z}) finished twice");
         let column = &finishes[0];
         assert!(column.decorated, "({x}, {z}) was finished undecorated");
-        // Its own decoration and that of each regenerated neighbour; the
-        // finished columns around wrote into it before it was deleted.
+        // Each neighbour's decoration once, as when it was first generated: the
+        // regenerated ones decorate again, the finished ones are replayed.
         let mut writes = column.writes.clone();
         writes.sort_unstable();
-        let mut expected: Vec<(i32, i32)> = keys
-            .iter()
-            .copied()
-            .filter(|k| (k.0 - x).abs() <= 1 && (k.1 - z).abs() <= 1)
+        let expected: Vec<(i32, i32)> = (-1..=1)
+            .flat_map(|dx| (-1..=1).map(move |dz| (x + dx, z + dz)))
             .collect();
-        expected.sort_unstable();
         assert_eq!(writes, expected, "({x}, {z})");
     }
 }
