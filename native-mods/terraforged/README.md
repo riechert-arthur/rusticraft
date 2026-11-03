@@ -34,8 +34,9 @@ built.
 
 The multi-blend layer adds `MultiBlend` (`Module.blend(blend, sources...)`): it splits the control's 0..1 range into
 one evenly spaced slot per source and blends neighbouring slots, with Engine's slot edges, `NoiseUtil.round` slot
-lookup and reported bounds (the smallest minimum and largest maximum of the sources). A control far enough outside
-0..1 to pick a slot that does not exist makes Engine throw; this port panics there.
+lookup and reported bounds (the smallest minimum and largest maximum of the sources, 0 and 0 without sources). Where
+Engine throws (a control far enough outside 0..1 to pick a slot that does not exist, or sampling a `MultiBlend` without
+sources), this port panics.
 
 ## Status: development only
 
