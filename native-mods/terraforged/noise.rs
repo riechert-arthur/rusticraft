@@ -41,6 +41,49 @@ impl Interpolation {
     }
 }
 
+/// Engine's `CurveFunc`: an `Interpolation`, a `MidPointCurve` or an `SCurve`.
+#[derive(Clone, Copy)]
+pub enum CurveFunction {
+    Interpolation(Interpolation),
+    /// `MidPointCurve(mid, steepness)`: `NoiseUtil.curve`, a logistic curve over `NoiseUtil.exp`.
+    Midpoint {
+        midpoint: f32,
+        steepness: f32,
+    },
+    /// `SCurve`, built with [`CurveFunction::s_curve`].
+    SCurve(SCurve),
+}
+
+/// `SCurve`'s fields, private so that only [`CurveFunction::s_curve`] (Engine's constructor) sets them.
+#[derive(Clone, Copy)]
+pub struct SCurve {
+    lower: f32,
+    upper: f32,
+}
+
+impl CurveFunction {
+    fn apply(self, value: f32) -> f32 {
+        match self {
+            Self::Interpolation(interpolation) => interpolation.apply(value),
+            Self::Midpoint {
+                midpoint,
+                steepness,
+            } => noise_curve(value, midpoint, steepness),
+            Self::SCurve(SCurve { lower, upper }) => java_pow(value, lower + upper * value),
+        }
+    }
+
+    /// `new SCurve(lower, upper)`: a negative `upper` is raised to at least `-lower` (`Math.max`).
+    pub fn s_curve(lower: f32, upper: f32) -> Self {
+        let upper = if upper < 0.0 {
+            java_max(-lower, upper)
+        } else {
+            upper
+        };
+        Self::SCurve(SCurve { lower, upper })
+    }
+}
+
 const GRAD_2D: [[f32; 2]; 8] = [
     [-1.0, -1.0],
     [1.0, -1.0],
@@ -464,6 +507,20 @@ fn clamp(value: f32, min: f32, max: f32) -> f32 {
     }
 }
 
+/// `NoiseUtil.curve(t, mid, steepness)`.
+fn noise_curve(value: f32, midpoint: f32, steepness: f32) -> f32 {
+    1.0 / (1.0 + noise_exp(-steepness * (value - midpoint)))
+}
+
+/// `NoiseUtil.exp`: `(1 + x / 256)^256` by eight squarings, not `Math.exp`.
+fn noise_exp(mut value: f32) -> f32 {
+    value = 1.0 + value / 256.0;
+    for _ in 0..8 {
+        value *= value;
+    }
+    value
+}
+
 fn map(value: f32, min: f32, max: f32, range: f32) -> f32 {
     let clamped = clamp(value, min, max);
     let difference = clamped - min;
@@ -633,6 +690,34 @@ enum ModuleKind {
         mod_range: f32,
         steps: i32,
         octaves: i32,
+    },
+    /// `Curve`: a fixed `CurveFunc` applied to the source sample.
+    Curve {
+        source: Module,
+        function: CurveFunction,
+    },
+    /// `VariableCurve`: `NoiseUtil.curve` with a sampled midpoint and steepness (`gradient`).
+    VariableCurve {
+        source: Module,
+        midpoint: Module,
+        gradient: Module,
+    },
+    /// `PowerCurve`: `min`, `max`, `midpoint` and `range` fixed from the source's bounds in the constructor.
+    PowerCurve {
+        source: Module,
+        min: f32,
+        max: f32,
+        midpoint: f32,
+        range: f32,
+        power: f32,
+    },
+    /// `Steps`: step count and slope window sampled per point.
+    Steps {
+        source: Module,
+        steps: Module,
+        slope_min: Module,
+        slope_max: Module,
+        curve: CurveFunction,
     },
     /// `Select`: `lower_curve`/`upper_curve` hold Engine's `(curveMin, curveMax, curveRange)` per bound, fixed in the
     /// constructor.
@@ -949,6 +1034,53 @@ impl Module {
                     alpha *= mask;
                 }
                 lerp(value, result, alpha)
+            }
+            ModuleKind::Curve { source, function } => function.apply(source.value(x, y)),
+            ModuleKind::VariableCurve {
+                source,
+                midpoint,
+                gradient,
+            } => noise_curve(
+                source.value(x, y),
+                midpoint.value(x, y),
+                gradient.value(x, y),
+            ),
+            ModuleKind::PowerCurve {
+                source,
+                min,
+                max,
+                midpoint,
+                range,
+                power,
+            } => {
+                let value = source.value(x, y);
+                let value = if value >= *midpoint {
+                    *midpoint + java_pow(value - *midpoint, *power)
+                } else {
+                    *midpoint - java_pow(*midpoint - value, *power)
+                };
+                map(value, *min, *max, *range)
+            }
+            ModuleKind::Steps {
+                source,
+                steps,
+                slope_min,
+                slope_max,
+                curve,
+            } => {
+                let noise_value = source.value(x, y);
+                let min = slope_min.value(x, y);
+                let max = slope_max.value(x, y);
+                let step_count = steps.value(x, y);
+                let range = max - min;
+                if range <= 0.0 {
+                    return (noise_value * step_count) as i32 as f32 / step_count;
+                }
+                let inverted = 1.0 - noise_value;
+                let value = (inverted * step_count) as i32 as f32 / step_count;
+                let delta = inverted - value;
+                let alpha = map(delta * step_count, min, max, range);
+                1.0 - lerp(value, inverted, curve.apply(alpha))
             }
             ModuleKind::Select {
                 control,
@@ -1304,6 +1436,70 @@ impl Module {
         Self::modifier(kind, &source)
     }
 
+    /// `Module.curve(CurveFunc)` (`Curve`); Engine's `curve(mid, steepness)` passes a `MidPointCurve`.
+    pub fn curve(self, function: CurveFunction) -> Self {
+        let source = self.clone();
+        Self::modifier(
+            ModuleKind::Curve {
+                source: self,
+                function,
+            },
+            &source,
+        )
+    }
+
+    /// `Module.curve(Module, Module)` (`VariableCurve`): `NoiseUtil.curve` with a sampled midpoint and steepness.
+    pub fn variable_curve(self, midpoint: Self, gradient: Self) -> Self {
+        let source = self.clone();
+        let kind = ModuleKind::VariableCurve {
+            source: self,
+            midpoint,
+            gradient,
+        };
+        Self::modifier(kind, &source)
+    }
+
+    /// `Module.powCurve(n)` (`PowerCurve`): the curve's bounds and midpoint are fixed from the source's bounds when it
+    /// is built; it reports the source's bounds.
+    pub fn power_curve(self, power: f32) -> Self {
+        let source_min = self.min_value();
+        let source_max = self.max_value();
+        let source_midpoint = source_min + (source_max - source_min) / 2.0;
+        let min = source_midpoint - java_pow(source_midpoint - source_min, power);
+        let max = source_midpoint + java_pow(source_max - source_midpoint, power);
+        let range = max - min;
+        let source = self.clone();
+        let kind = ModuleKind::PowerCurve {
+            source: self,
+            min,
+            max,
+            midpoint: min + range / 2.0,
+            range,
+            power,
+        };
+        Self::modifier(kind, &source)
+    }
+
+    /// `Module.steps(Module, Module, Module, CurveFunc)` (`Steps`). Engine's `steps(int, double, double...)` overloads
+    /// pass `Source.constant(...)` and default to `Interpolation.LINEAR` with slopes 0 and 0.
+    pub fn steps(
+        self,
+        steps: Self,
+        slope_min: Self,
+        slope_max: Self,
+        curve: CurveFunction,
+    ) -> Self {
+        let source = self.clone();
+        let kind = ModuleKind::Steps {
+            source: self,
+            steps,
+            slope_min,
+            slope_max,
+            curve,
+        };
+        Self::modifier(kind, &source)
+    }
+
     /// `Module.select(Module, Module, lowerBound, upperBound, falloff, Interpolation)` (Engine's five-argument
     /// form uses `Interpolation.CURVE3`).
     pub fn select(
@@ -1474,7 +1670,6 @@ impl Domain {
     }
 }
 
-/// The shortcut test shared by `Module.clamp` and `Module.map`.
 /// The steps and `maxIndex` that Engine's `Terrace` and `LegacyTerrace` constructors build: `count` steps from 0,
 /// spaced by the source's range over `count - 1`. Java's `int maxIndex = steps - 1` is -1 without steps.
 fn terrace_steps(source: &Module, count: usize, blend_range: f32) -> (Vec<TerraceStep>, i32) {
@@ -1496,6 +1691,7 @@ fn terrace_steps(source: &Module, count: usize, blend_range: f32) -> (Vec<Terrac
     (steps, max_index)
 }
 
+/// The shortcut test shared by `Module.clamp` and `Module.map`.
 fn constant_bounds(source: &Module, min: &Module, max: &Module) -> bool {
     min.min_value() == min.max_value()
         && min.min_value() == source.min_value()
@@ -1541,8 +1737,14 @@ fn fold_bounds(
     rest.iter().fold(first(head), total)
 }
 
+/// `NoiseUtil.pow(float, float)`: `(float) Math.pow(value, power)`. Java returns NaN for a NaN power and for a base of
+/// ±1 with an infinite power, where C's `pow` (Rust's `powf`) returns 1 for a base of 1 (or -1 and an infinite power).
 fn java_pow(value: f32, power: f32) -> f32 {
-    (f64::from(value).powf(f64::from(power))) as f32
+    let (value, power) = (f64::from(value), f64::from(power));
+    if power.is_nan() || (value.abs() == 1.0 && power.is_infinite()) {
+        return f32::NAN;
+    }
+    value.powf(power) as f32
 }
 
 fn java_max(first: f32, second: f32) -> f32 {
@@ -3768,6 +3970,419 @@ raw 0x40400000 0x40400000 0x40400000 0x3f800000";
                 hex(module.value(0.0, 0.0))
             ));
         }
+        assert_eq!(lines, EXPECTED.lines().collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn curve_modifiers_match_engine_0_3_0() {
+        // The `points` lines of the Java `Curves` oracle (`.local/terraforged/oracles/curves/`).
+        let source = |kind, seed, scale: f32, octaves, gain| {
+            Module::source(Source::new(
+                kind,
+                SourceConfig {
+                    seed,
+                    octaves,
+                    gain,
+                    frequency: 1.0 / scale,
+                    lacunarity: 2.0,
+                    interpolation: Interpolation::Curve3,
+                },
+            ))
+        };
+        let base = source(SourceKind::Perlin, 901, 96.0, 4, 0.5);
+        let points = [
+            (0.0, 0.0),
+            (12.25, -98.75),
+            (-4096.5, 8192.25),
+            (123456.75, -0.125),
+            (64.0, 64.0),
+            (-128.0, 32.0),
+            (777.0, -333.0),
+            (-1024.0, -2048.0),
+        ];
+        let cases = [
+            (
+                base.clone().curve(CurveFunction::Midpoint {
+                    midpoint: 0.4,
+                    steepness: 6.0,
+                }),
+                [
+                    0x3f255467, 0x3f42e2dd, 0x3f0fcb78, 0x3f24d9c2, 0x3f4c0704, 0x3f606716,
+                    0x3f121320, 0x3edb3db7,
+                ],
+            ),
+            (
+                base.clone().curve(CurveFunction::s_curve(0.5, -0.2)),
+                [
+                    0x3f420300, 0x3f51b756, 0x3f36cc95, 0x3f41c3b0, 0x3f56f9f6, 0x3f647114,
+                    0x3f3800c8, 0x3f236a93,
+                ],
+            ),
+            (
+                base.clone().variable_curve(
+                    source(SourceKind::Simplex, 902, 80.0, 3, 0.5),
+                    source(SourceKind::Ridge, 903, 128.0, 2, 0.975),
+                ),
+                [
+                    0x3f000000, 0x3f065e28, 0x3ef0ed3b, 0x3f0513bd, 0x3f03d748, 0x3f0aaa49,
+                    0x3efe7b16, 0x3eea1d84,
+                ],
+            ),
+            (
+                base.clone().power_curve(0.8),
+                [
+                    0x3f000000, 0x3f2148a1, 0x3ed1e2d7, 0x3efdbc37, 0x3f2ad941, 0x3f43b07c,
+                    0x3ed5b8cd, 0x3e9f3786,
+                ],
+            ),
+            (
+                base.clone().steps(
+                    Module::constant(9.5),
+                    Module::constant(0.2),
+                    Module::constant(0.8),
+                    CurveFunction::Interpolation(Interpolation::Curve4),
+                ),
+                [
+                    0x3f001a52, 0x3f17c488, 0x3ef1d004, 0x3eff64d8, 0x3f260dbe, 0x3f3cd8b8,
+                    0x3ef2751a, 0x3ebca1b0,
+                ],
+            ),
+            (
+                base.steps(
+                    Module::constant(7.0),
+                    Module::constant(0.5),
+                    Module::constant(0.5),
+                    CurveFunction::Interpolation(Interpolation::Curve3),
+                ),
+                [
+                    0x3edb6db7, 0x3f124925, 0x3edb6db7, 0x3edb6db7, 0x3f124925, 0x3f36db6e,
+                    0x3edb6db7, 0x3e924925,
+                ],
+            ),
+        ];
+        for (module, expected) in cases {
+            assert_eq!(
+                [module.min_value().to_bits(), module.max_value().to_bits()],
+                [0x00000000, 0x3f800000]
+            );
+            assert_eq!(bits(points.map(|(x, y)| module.value(x, y))), expected);
+        }
+    }
+
+    #[test]
+    fn curve_sweep_matches_engine_0_3_0() {
+        // Java `Curves` oracle (`.local/terraforged/oracles/curves/`): noise curves (including a power curve over a
+        // source whose range is not 0..1 and steps whose count and slopes are noise), then constant samples (signed
+        // zeros, values outside 0..1, NaN and infinities) through midpoint and variable curves (`NoiseUtil.exp`
+        // overflowing and NaN controls), S-curves (a negative `upper` raised to `-lower`), Curve4, power curves over
+        // -1..2 bounds and over a constant's empty range, and steps over counts (0, negative, huge, NaN) and slope
+        // windows (empty, inverted, NaN).
+        const EXPECTED: &str = "\
+noise0 0x00000000 0x3f800000 | 0x3f5501b4 0x3f2555c4 0x3ecfea00 0x3f489afa 0x3f0e6243 0x3f456e3e 0x3f011bc9 0x3f0961d1 0x3f50c10e 0x3f2781ab 0x3ea77285 0x3e8e6eef 0x3f234baa 0x3f3a9796 0x3f3638d1 0x3ec95c4f 0x3f3518ff 0x3f095c35 0x3f247068 0x3f1caa61 0x3f122cb1 0x3f55b332 0x3efa1ea0 0x3f2c21ba
+noise1 0x00000000 0x3f800000 | 0x3f5c8663 0x3f4203c5 0x3f1fd133 0x3f54f838 0x3f360cf6 0x3f532652 0x3f2ed77b 0x3f335f8b 0x3f59d6ed 0x3f432366 0x3f115b3c 0x3f06899a 0x3f40f5e7 0x3f4d2b09 0x3f4ad4da 0x3f1da91b 0x3f4a3c41 0x3f335c5d 0x3f418d3d 0x3f3d87b9 0x3f380e33 0x3f5cf966 0x3f2c9107 0x3f45896e
+noise2 0x00000000 0x3f800000 | 0x3f091877 0x3efd721f 0x3f0154ca 0x3f192179 0x3f011407 0x3efe9412 0x3ee45fc0 0x3f0afbba 0x3ef993bd 0x3efb5c2d 0x3f0309e6 0x3ed1f9dc 0x3f07b7c5 0x3f0f700c 0x3f070c9a 0x3ee7c4e5 0x3efc1847 0x3efe9f0d 0x3f038e17 0x3effbc02 0x3efec708 0x3efc0156 0x3ef2b1e0 0x3efd811e
+noise3 0x00000000 0x3f800000 | 0x3f34f363 0x3f00087f 0x3e975c7e 0x3f27350e 0x3ecf8f5e 0x3f23e621 0x3ebafe8e 0x3ec79073 0x3f300c9e 0x3f03d3dd 0x3e761ace 0x3e514d92 0x3ef8d037 0x3f18defb 0x3f146ce5 0x3e92d320 0x3f13451e 0x3ec7873b 0x3efc4832 0x3ee958d0 0x3ed5e448 0x3f35c631 0x3eb50fd7 0x3f099dd7
+noise4 0x00000000 0x3f800000 | 0x3f2f286c 0x3f001ba2 0x3ebc03aa 0x3f1e8486 0x3ef0d732 0x3f1a21a6 0x3ed0bd12 0x3ee8770e 0x3f2e188c 0x3f026d60 0x3e8f23ca 0x3e86bc62 0x3efd0eec 0x3f1435e5 0x3f141c3a 0x3eb8e6ae 0x3f13e1ba 0x3ee8689c 0x3efebdc2 0x3ef3a514 0x3ef277ac 0x3f2f286c 0x3ec8ea4c 0x3f09b6e0
+noise5 0x00000000 0x3f800000 | 0x3f124925 0x3edb6db7 0x3e924925 0x3f124925 0x3edb6db7 0x3f124925 0x3e924925 0x3e924925 0x3f124925 0x3edb6db7 0x3e124925 0x3e124925 0x3edb6db7 0x3edb6db7 0x3edb6db7 0x3e924925 0x3edb6db7 0x3e924925 0x3edb6db7 0x3edb6db7 0x3edb6db7 0x3f124925 0x3e924925 0x3edb6db7
+noise6 0xbe4ccccd 0x3fa66666 | 0x3f0e16a8 0x3f000000 0x3ee4a7cb 0x3f06a589 0x3efc0352 0x3f0554fd 0x3ef657c2 0x3efa2892 0x3f0b0d10 0x3f000511 0x3ece3e93 0x3ebb3355 0x3efff759 0x3f022154 0x3f014d50 0x3ee19835 0x3f012028 0x3efa2630 0x3efffe55 0x3eff6759 0x3efd30e2 0x3f0ea485 0x3ef421a7 0x3f0032b2
+noise7 0x00000000 0x3f800000 | 0x3f2c0e0d 0x3f0986c8 0x3ebd97ce 0x3ecdaca2 0x3ee0f226 0x3f1ab034 0x3ecf3080 0x00000000 0x3f259f7c 0x3f0d148b 0x00000000 0x3e784408 0x3e84704b 0x3f0b7301 0x3f0dd42a 0x3eb3c1ee 0x3f0cfb8a 0x3eea2448 0x3effc89a 0x3ef5b8fa 0x3eee3f48 0x3f2bb6b6 0x3edadbb2 0x3f0a800c
+mid 0x3ecccccd 0x40c00000 0x00000000 0x00000000 | 0x3b9bcece 0x3dac17c9 0x3dac17c9 0x3e94290f 0x3f000000 0x3f255467 0x3f64493f 0x3f795bc9 0x3f7fae58 0x3f7ffc50 0x3f7ffffe 0x7fc00000 0x00000000 0x00000000
+mid 0x3f000000 0xc47a0000 0x00000000 0x00000000 | 0x00000000 0x3f7fffb2 0x3f7fffb2 0x3f800000 0x3f800000 0x3f000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x7fc00000 0x00000000 0x00000000
+mid 0x3f000000 0x447a0000 0x00000000 0x00000000 | 0x00000000 0x00000000 0x00000000 0x00000000 0x0294494b 0x3f000000 0x3f800000 0x3f7fffb2 0x00000000 0x00000000 0x00000000 0x7fc00000 0x00000000 0x00000000
+mid 0x3f000000 0x00000000 0x00000000 0x00000000 | 0x3f000000 0x3f000000 0x3f000000 0x3f000000 0x3f000000 0x3f000000 0x3f000000 0x3f000000 0x3f000000 0x3f000000 0x3f000000 0x7fc00000 0x7fc00000 0x7fc00000
+mid 0x7fc00000 0x40800000 0x00000000 0x00000000 | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000
+mid 0x3f000000 0x7f800000 0x00000000 0x00000000 | 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x7fc00000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x7fc00000 0x00000000 0x00000000
+var 0x3ecccccd 0x40c00000 0x00000000 0x00000000 | 0x3b9bcece 0x3dac17c9 0x3dac17c9 0x3e94290f 0x3f000000 0x3f255467 0x3f64493f 0x3f795bc9 0x3f7fae58 0x3f7ffc50 0x3f7ffffe 0x7fc00000 0x00000000 0x00000000
+var 0x3f000000 0xc47a0000 0x00000000 0x00000000 | 0x00000000 0x3f7fffb2 0x3f7fffb2 0x3f800000 0x3f800000 0x3f000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x7fc00000 0x00000000 0x00000000
+var 0x3f000000 0x447a0000 0x00000000 0x00000000 | 0x00000000 0x00000000 0x00000000 0x00000000 0x0294494b 0x3f000000 0x3f800000 0x3f7fffb2 0x00000000 0x00000000 0x00000000 0x7fc00000 0x00000000 0x00000000
+var 0x3f000000 0x00000000 0x00000000 0x00000000 | 0x3f000000 0x3f000000 0x3f000000 0x3f000000 0x3f000000 0x3f000000 0x3f000000 0x3f000000 0x3f000000 0x3f000000 0x3f000000 0x7fc00000 0x7fc00000 0x7fc00000
+var 0x7fc00000 0x40800000 0x00000000 0x00000000 | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000
+var 0x3f000000 0x7f800000 0x00000000 0x00000000 | 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x7fc00000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x7fc00000 0x00000000 0x00000000
+s 0x3f000000 0xbe4ccccd 0x00000000 0x00000000 | 0x7fc00000 0x00000000 0x00000000 0x3f092fe0 0x3f2e390e 0x3f420300 0x3f677a99 0x3f800000 0x3f8acff9 0x3f892fdf 0x3f655d88 0x7fc00000 0x00000000 0x7f800000
+s 0x3f000000 0xbf4ccccd 0x00000000 0x00000000 | 0x7fc00000 0x00000000 0x00000000 0x3f1837f0 0x3f4278ef 0x3f5744fd 0x3f76f52e 0x3f800000 0x3f675276 0x3f3504f3 0x3eaaaaab 0x7fc00000 0x00000000 0x7f800000
+s 0xbf800000 0x40000000 0x00000000 0x00000000 | 0x40800000 0xff800000 0x7f800000 0x40000000 0x3f99be72 0x3f800000 0x3f5db3d7 0x3f800000 0x40100000 0x41000000 0x43730000 0x7fc00000 0x7f800000 0x00000000
+s 0x00000000 0x00000000 0x00000000 0x00000000 | 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x7fc00000 0x7fc00000 0x7fc00000
+s 0x40000000 0xc0400000 0x00000000 0x00000000 | 0xbe000000 0x00000000 0x00000000 0x3e000000 0x3eaa81c4 0x3f000000 0x3f5db3d7 0x3f800000 0x3f2aaaab 0x3e800000 0x3c4a4588 0x7fc00000 0x00000000 0x7f800000
+s 0x3f000000 0x7fc00000 0x00000000 0x00000000 | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000
+s 0x7fc00000 0xbf800000 0x00000000 0x00000000 | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000
+curve4 0x00000000 0x00000000 | 0xc0180000 0x80000000 0x00000000 0x3dd40000 0x3ea2877e 0x3f000000 0x3f658000 0x3f800000 0x40580000 0x42000000 0x44004000 0x7fc00000 0x7f800000 0xff800000
+pow 0x3f4ccccd 0xbf800000 0x40000000 | 0x3e0dd56a 0x3e95b298 0x3e95b298 0x3ec2f200 0x3ee2aa92 0x3f000000 0x3f1e8700 0x3f3526b4 0x3f5c8aa6 0x3f800000 0x3f800000 0x7fc00000 0x3f800000 0x00000000
+pow 0x40000000 0xbf800000 0x40000000 | 0x3e8e38e4 0x3ee38e39 0x3ee38e39 0x3ef8e38e 0x3efedcbb 0x3f000000 0x3f038e39 0x3f0e38e4 0x3f38e38e 0x3f800000 0x3f800000 0x7fc00000 0x3f800000 0x00000000
+pow 0x3f000000 0xbf800000 0x40000000 | 0x3dbbe854 0x3e58658d 0x3e58658d 0x3e977d0a 0x3ebde6ad 0x3f000000 0x3f34417b 0x3f49e69d 0x3f6882f5 0x3f800000 0x3f800000 0x7fc00000 0x3f800000 0x00000000
+pow 0x3f800000 0xbf800000 0x40000000 | 0x3e2aaaab 0x3eaaaaab 0x3eaaaaab 0x3ed55555 0x3eeeeeef 0x3f000000 0x3f155555 0x3f2aaaab 0x3f555555 0x3f800000 0x3f800000 0x7fc00000 0x3f800000 0x00000000
+pow 0x00000000 0xbf800000 0x40000000 | 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x00000000 0x3f800000 0x00000000
+pow 0xbf800000 0xbf800000 0x40000000 | 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x7fc00000 0x3f800000 0x333fffff
+pow 0x7fc00000 0xbf800000 0x40000000 | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000
+powc 0x3f4ccccd 0x00000000 0x00000000 | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000
+powc 0x40000000 0x00000000 0x00000000 | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000
+powc 0x3f000000 0x00000000 0x00000000 | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000
+powc 0x3f800000 0x00000000 0x00000000 | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000
+powc 0x00000000 0x00000000 0x00000000 | 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x3f800000 0x7fc00000 0x7fc00000 0x7fc00000
+powc 0xbf800000 0x00000000 0x00000000 | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000
+powc 0x7fc00000 0x00000000 0x00000000 | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000
+steps c0 0x41180000 0x3e4ccccd 0x3f4ccccd 0xbf800000 0x40000000 | 0xbef2ca9c 0x3cd79440 0x3cd79440 0x3e86bca2 0x3ecf9834 0x3f0065cd 0x3f48071c 0x3f800000 0x3fb5e50e 0x3ff9435e 0x3ff9435e 0x7fc00000 0x3ff9435e 0xbf800000
+steps c0 0x41180000 0x3f000000 0x3f000000 0xbf800000 0x40000000 | 0xbed79436 0x00000000 0x00000000 0x3e579436 0x3ea1af28 0x3ed79436 0x3f3ca1af 0x3f7286bd 0x3fbca1af 0x40000000 0x40000000 0x00000000 0x40000000 0xbf7286bd
+steps c0 0x41180000 0x3f4ccccd 0x3e4ccccd 0xbf800000 0x40000000 | 0xbed79436 0x00000000 0x00000000 0x3e579436 0x3ea1af28 0x3ed79436 0x3f3ca1af 0x3f7286bd 0x3fbca1af 0x40000000 0x40000000 0x00000000 0x40000000 0xbf7286bd
+steps c0 0x41180000 0x00000000 0x3f800000 0xbf800000 0x40000000 | 0xbef4a1b0 0x3cd79440 0x3cd79440 0x3e867288 0x3ed4f2ea 0x3f03286c 0x3f46e86c 0x3f800000 0x3fb5e50e 0x3ff9435e 0x3ff9435e 0x7fc00000 0x3ff9435e 0xbf800000
+steps c0 0x41180000 0x7fc00000 0x3f800000 0xbf800000 0x40000000 | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000
+steps c0 0x40e00000 0x3e4ccccd 0x3f4ccccd 0xbf800000 0x40000000 | 0xbeedb6dc 0x00000000 0x00000000 0x3e91ed0a 0x3edb6db6 0x3f092492 0x3f408a29 0x3f800000 0x3fb6db6e 0x40000000 0x40000000 0x7fc00000 0x40000000 0xbf800000
+steps c0 0x40e00000 0x3f000000 0x3f000000 0xbf800000 0x40000000 | 0xbedb6db7 0x00000000 0x00000000 0x3e124925 0x3e924925 0x3edb6db7 0x3f36db6e 0x3f800000 0x3fb6db6e 0x40000000 0x40000000 0x00000000 0x40000000 0xbf800000
+steps c0 0x40e00000 0x3f4ccccd 0x3e4ccccd 0xbf800000 0x40000000 | 0xbedb6db7 0x00000000 0x00000000 0x3e124925 0x3e924925 0x3edb6db7 0x3f36db6e 0x3f800000 0x3fb6db6e 0x40000000 0x40000000 0x00000000 0x40000000 0xbf800000
+steps c0 0x40e00000 0x00000000 0x3f800000 0xbf800000 0x40000000 | 0xbeedb6dc 0x00000000 0x00000000 0x3e8f6db6 0x3ed9e83e 0x3f092492 0x3f444924 0x3f800000 0x3fb6db6e 0x40000000 0x40000000 0x7fc00000 0x40000000 0xbf800000
+steps c0 0x40e00000 0x7fc00000 0x3f800000 0xbf800000 0x40000000 | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000
+steps c0 0x3f800000 0x3e4ccccd 0x3f4ccccd 0xbf800000 0x40000000 | 0xbe800000 0x00000000 0x00000000 0x3e878e38 0x3f0e38e3 0x3f400000 0x3f7ebda1 0x3f800000 0x3f800000 0x40000000 0x40000000 0x7fc00000 0x40000000 0xbf800000
+steps c0 0x3f800000 0x3f000000 0x3f000000 0xbf800000 0x40000000 | 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x3f800000 0x3f800000 0x40000000 0x40000000 0x00000000 0x40000000 0xbf800000
+steps c0 0x3f800000 0x3f4ccccd 0x3e4ccccd 0xbf800000 0x40000000 | 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x00000000 0x3f800000 0x3f800000 0x40000000 0x40000000 0x00000000 0x40000000 0xbf800000
+steps c0 0x3f800000 0x00000000 0x3f800000 0xbf800000 0x40000000 | 0xbe800000 0x00000000 0x00000000 0x3ebc0000 0x3f1c779a 0x3f400000 0x3f760000 0x3f800000 0x3f800000 0x40000000 0x40000000 0x7fc00000 0x40000000 0xbf800000
+steps c0 0x3f800000 0x7fc00000 0x3f800000 0xbf800000 0x40000000 | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000
+steps c0 0x00000000 0x3e4ccccd 0x3f4ccccd 0xbf800000 0x40000000 | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000
+steps c0 0x00000000 0x3f000000 0x3f000000 0xbf800000 0x40000000 | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000
+steps c0 0x00000000 0x3f4ccccd 0x3e4ccccd 0xbf800000 0x40000000 | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000
+steps c0 0x00000000 0x00000000 0x3f800000 0xbf800000 0x40000000 | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000
+steps c0 0x00000000 0x7fc00000 0x3f800000 0xbf800000 0x40000000 | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000
+steps c0 0xc0400000 0x3e4ccccd 0x3f4ccccd 0xbf800000 0x40000000 | 0xbeaaaaac 0x00000000 0x00000000 0x3eaaaaaa 0x3f2aaaaa 0x3f2aaaaa 0x3f800000 0x3f800000 0x3fb55555 0x40000000 0x40000000 0x7fc00000 0x40000000 0xbf800000
+steps c0 0xc0400000 0x3f000000 0x3f000000 0xbf800000 0x40000000 | 0xbeaaaaab 0x80000000 0x80000000 0x80000000 0x3eaaaaab 0x3eaaaaab 0x3f2aaaab 0x3f800000 0x3faaaaab 0x40000000 0x40000000 0x80000000 0x40000000 0xbf800000
+steps c0 0xc0400000 0x3f4ccccd 0x3e4ccccd 0xbf800000 0x40000000 | 0xbeaaaaab 0x80000000 0x80000000 0x80000000 0x3eaaaaab 0x3eaaaaab 0x3f2aaaab 0x3f800000 0x3faaaaab 0x40000000 0x40000000 0x80000000 0x40000000 0xbf800000
+steps c0 0xc0400000 0x00000000 0x3f800000 0xbf800000 0x40000000 | 0xbeaaaaac 0x00000000 0x00000000 0x3eaaaaaa 0x3f2aaaaa 0x3f2aaaaa 0x3f800000 0x3f800000 0x3fb55555 0x40000000 0x40000000 0x7fc00000 0x40000000 0xbf800000
+steps c0 0xc0400000 0x7fc00000 0x3f800000 0xbf800000 0x40000000 | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000
+steps c0 0x501502f9 0x3e4ccccd 0x3f4ccccd 0xbf800000 0x40000000 | 0xbf000000 0x00000000 0x00000000 0x3e800000 0x3ecccccc 0x3f000000 0x3f400000 0x3f800000 0x3f9b7ce0 0x3f9b7ce0 0x3f9b7ce0 0x7fc00000 0x3f9b7ce0 0xbf800000
+steps c0 0x501502f9 0x3f000000 0x3f000000 0xbf800000 0x40000000 | 0xbe5be6ff 0x00000000 0x00000000 0x3e5be6ff 0x3e5be6ff 0x3e5be6ff 0x3e5be6ff 0x3e5be6ff 0x3e5be6ff 0x3e5be6ff 0x3e5be6ff 0x00000000 0x3e5be6ff 0xbe5be6ff
+steps c0 0x501502f9 0x3f4ccccd 0x3e4ccccd 0xbf800000 0x40000000 | 0xbe5be6ff 0x00000000 0x00000000 0x3e5be6ff 0x3e5be6ff 0x3e5be6ff 0x3e5be6ff 0x3e5be6ff 0x3e5be6ff 0x3e5be6ff 0x3e5be6ff 0x00000000 0x3e5be6ff 0xbe5be6ff
+steps c0 0x501502f9 0x00000000 0x3f800000 0xbf800000 0x40000000 | 0xbf000000 0x00000000 0x00000000 0x3e800000 0x3ecccccc 0x3f000000 0x3f400000 0x3f800000 0x3f9b7ce0 0x3f9b7ce0 0x3f9b7ce0 0x7fc00000 0x3f9b7ce0 0xbf800000
+steps c0 0x501502f9 0x7fc00000 0x3f800000 0xbf800000 0x40000000 | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000
+steps c0 0x7fc00000 0x3e4ccccd 0x3f4ccccd 0xbf800000 0x40000000 | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000
+steps c0 0x7fc00000 0x3f000000 0x3f000000 0xbf800000 0x40000000 | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000
+steps c0 0x7fc00000 0x3f4ccccd 0x3e4ccccd 0xbf800000 0x40000000 | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000
+steps c0 0x7fc00000 0x00000000 0x3f800000 0xbf800000 0x40000000 | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000
+steps c0 0x7fc00000 0x7fc00000 0x3f800000 0xbf800000 0x40000000 | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000
+steps c1 0x41180000 0x3e4ccccd 0x3f4ccccd 0xbf800000 0x40000000 | 0xbef3a62c 0x3cd79440 0x3cd79440 0x3e86bca2 0x3ed31674 0x3f01af28 0x3f47286c 0x3f800000 0x3fb5e50e 0x3ff9435e 0x3ff9435e 0x7fc00000 0x3ff9435e 0xbf800000
+steps c1 0x41180000 0x3f4ccccd 0x3e4ccccd 0xbf800000 0x40000000 | 0xbed79436 0x00000000 0x00000000 0x3e579436 0x3ea1af28 0x3ed79436 0x3f3ca1af 0x3f7286bd 0x3fbca1af 0x40000000 0x40000000 0x00000000 0x40000000 0xbf7286bd
+steps c1 0x00000000 0x3e4ccccd 0x3f4ccccd 0xbf800000 0x40000000 | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000
+steps c1 0x00000000 0x3f4ccccd 0x3e4ccccd 0xbf800000 0x40000000 | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000
+steps c1 0x7fc00000 0x3e4ccccd 0x3f4ccccd 0xbf800000 0x40000000 | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000
+steps c1 0x7fc00000 0x3f4ccccd 0x3e4ccccd 0xbf800000 0x40000000 | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000
+steps c2 0x41180000 0x3e4ccccd 0x3f4ccccd 0xbf800000 0x40000000 | 0xbef30008 0x3cd79440 0x3cd79440 0x3e869ca8 0x3ecf381a 0x3f00ae7d 0x3f487e16 0x3f800000 0x3fb61504 0x3ff96358 0x3ff96358 0x7fc00000 0x3ff96358 0xbf800000
+steps c2 0x41180000 0x3f4ccccd 0x3e4ccccd 0xbf800000 0x40000000 | 0xbed79436 0x00000000 0x00000000 0x3e579436 0x3ea1af28 0x3ed79436 0x3f3ca1af 0x3f7286bd 0x3fbca1af 0x40000000 0x40000000 0x00000000 0x40000000 0xbf7286bd
+steps c2 0x00000000 0x3e4ccccd 0x3f4ccccd 0xbf800000 0x40000000 | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000
+steps c2 0x00000000 0x3f4ccccd 0x3e4ccccd 0xbf800000 0x40000000 | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000
+steps c2 0x7fc00000 0x3e4ccccd 0x3f4ccccd 0xbf800000 0x40000000 | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000
+steps c2 0x7fc00000 0x3f4ccccd 0x3e4ccccd 0xbf800000 0x40000000 | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000
+";
+        let source = |kind, seed, scale: f32, octaves, gain| {
+            Module::source(Source::new(
+                kind,
+                SourceConfig {
+                    seed,
+                    octaves,
+                    gain,
+                    frequency: 1.0 / scale,
+                    lacunarity: 2.0,
+                    interpolation: Interpolation::Curve3,
+                },
+            ))
+        };
+        let hex = |value: f32| {
+            let bits = if value.is_nan() {
+                0x7fc0_0000
+            } else {
+                value.to_bits()
+            };
+            format!("0x{bits:08x}")
+        };
+        let c = Module::new_constant;
+        let base = source(SourceKind::Perlin, 901, 96.0, 4, 0.5);
+        let midpoint = source(SourceKind::Simplex, 902, 80.0, 3, 0.5);
+        let gradient = source(SourceKind::Ridge, 903, 128.0, 2, 0.975);
+        let mut lines = Vec::new();
+        for (index, module) in [
+            base.clone().curve(CurveFunction::Midpoint {
+                midpoint: 0.4,
+                steepness: 6.0,
+            }),
+            base.clone().curve(CurveFunction::s_curve(0.5, -0.2)),
+            base.clone()
+                .variable_curve(midpoint.clone(), gradient.clone()),
+            base.clone().power_curve(0.8),
+            base.clone().steps(
+                Module::constant(9.5),
+                Module::constant(0.2),
+                Module::constant(0.8),
+                CurveFunction::Interpolation(Interpolation::Curve4),
+            ),
+            base.clone().steps(
+                Module::constant(7.0),
+                Module::constant(0.5),
+                Module::constant(0.5),
+                CurveFunction::Interpolation(Interpolation::Curve3),
+            ),
+            base.clone()
+                .scale(Module::constant(1.5))
+                .bias(Module::constant(-0.2))
+                .power_curve(2.0),
+            base.steps(
+                midpoint.clone().scale(Module::constant(12.0)),
+                gradient.scale(Module::constant(0.5)),
+                midpoint,
+                CurveFunction::Midpoint {
+                    midpoint: 0.5,
+                    steepness: 8.0,
+                },
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut line = format!(
+                "noise{index} {} {} |",
+                hex(module.min_value()),
+                hex(module.max_value())
+            );
+            for i in 0..24 {
+                let (x, y) = (-1500.0 + i as f32 * 131.37, 900.0 - i as f32 * 77.21);
+                line += &format!(" {}", hex(module.value(x, y)));
+            }
+            lines.push(line);
+        }
+        let values = [
+            -0.5,
+            -0.0,
+            0.0,
+            0.25,
+            0.4,
+            0.5,
+            0.75,
+            1.0,
+            1.5,
+            2.0,
+            3.0,
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+        ];
+        // A constant with bounds -1..2 (values outside are clamped to them).
+        let wide = |value| c(value).clamp(c(-1.0), c(2.0));
+        let mut sweep = |name: String, make: &dyn Fn(Module) -> Module, wide_bounds: bool| {
+            let input = |value| if wide_bounds { wide(value) } else { c(value) };
+            let probe = make(input(0.0));
+            let mut line = format!(
+                "{name} {} {} |",
+                hex(probe.min_value()),
+                hex(probe.max_value())
+            );
+            for value in values {
+                line += &format!(" {}", hex(make(input(value)).value(0.0, 0.0)));
+            }
+            lines.push(line);
+        };
+        let midpoints = [
+            (0.4, 6.0),
+            (0.5, -1000.0),
+            (0.5, 1000.0),
+            (0.5, 0.0),
+            (f32::NAN, 4.0),
+            (0.5, f32::INFINITY),
+        ];
+        for (midpoint, steepness) in midpoints {
+            let function = CurveFunction::Midpoint {
+                midpoint,
+                steepness,
+            };
+            sweep(
+                format!("mid {} {}", hex(midpoint), hex(steepness)),
+                &|source| source.curve(function),
+                false,
+            );
+        }
+        for (midpoint, steepness) in midpoints {
+            sweep(
+                format!("var {} {}", hex(midpoint), hex(steepness)),
+                &|source| source.variable_curve(c(midpoint), c(steepness)),
+                false,
+            );
+        }
+        for (lower, upper) in [
+            (0.5, -0.2),
+            (0.5, -0.8),
+            (-1.0, 2.0),
+            (0.0, 0.0),
+            (2.0, -3.0),
+            (0.5, f32::NAN),
+            (f32::NAN, -1.0),
+        ] {
+            let function = CurveFunction::s_curve(lower, upper);
+            sweep(
+                format!("s {} {}", hex(lower), hex(upper)),
+                &|source| source.curve(function),
+                false,
+            );
+        }
+        sweep(
+            "curve4".to_string(),
+            &|source| source.curve(CurveFunction::Interpolation(Interpolation::Curve4)),
+            false,
+        );
+        let powers = [0.8, 2.0, 0.5, 1.0, 0.0, -1.0, f32::NAN];
+        for power in powers {
+            sweep(
+                format!("pow {}", hex(power)),
+                &|source| source.power_curve(power),
+                true,
+            );
+        }
+        for power in powers {
+            sweep(
+                format!("powc {}", hex(power)),
+                &|source| source.power_curve(power),
+                false,
+            );
+        }
+        let steps =
+            |name: usize,
+             counts: &[f32],
+             slopes: &[(f32, f32)],
+             curve: CurveFunction,
+             sweep: &mut dyn FnMut(String, &dyn Fn(Module) -> Module, bool)| {
+                for &count in counts {
+                    for &(min, max) in slopes {
+                        sweep(
+                            format!("steps c{name} {} {} {}", hex(count), hex(min), hex(max)),
+                            &|source| source.steps(c(count), c(min), c(max), curve),
+                            true,
+                        );
+                    }
+                }
+            };
+        let (few_counts, few_slopes) = ([9.5, 0.0, f32::NAN], [(0.2, 0.8), (0.8, 0.2)]);
+        steps(
+            0,
+            &[9.5, 7.0, 1.0, 0.0, -3.0, 1e10, f32::NAN],
+            &[
+                (0.2, 0.8),
+                (0.5, 0.5),
+                (0.8, 0.2),
+                (0.0, 1.0),
+                (f32::NAN, 1.0),
+            ],
+            CurveFunction::Interpolation(Interpolation::Curve3),
+            &mut sweep,
+        );
+        steps(
+            1,
+            &few_counts,
+            &few_slopes,
+            CurveFunction::Interpolation(Interpolation::Linear),
+            &mut sweep,
+        );
+        steps(
+            2,
+            &few_counts,
+            &few_slopes,
+            CurveFunction::Midpoint {
+                midpoint: 0.5,
+                steepness: 8.0,
+            },
+            &mut sweep,
+        );
         assert_eq!(lines, EXPECTED.lines().collect::<Vec<_>>());
     }
 }
