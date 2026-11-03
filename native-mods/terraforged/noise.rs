@@ -365,7 +365,7 @@ impl Source {
                 signal *= signal;
                 signal *= weight;
                 weight = clamp(signal * amplitude, 0.0, 1.0);
-                value += signal * spectral_frequency.powf(-1.0);
+                value += signal * spectral_weight(spectral_frequency);
                 spectral_frequency *= self.config.lacunarity;
                 x *= self.config.lacunarity;
                 y *= self.config.lacunarity;
@@ -437,11 +437,19 @@ fn ridge_bound(config: SourceConfig) -> f32 {
         noise *= noise;
         noise *= weight;
         weight = clamp(noise * amplitude, 0.0, 1.0);
-        value += noise * spectral_frequency.powf(-1.0);
+        value += noise * spectral_weight(spectral_frequency);
         spectral_frequency *= config.lacunarity;
         amplitude *= config.gain;
     }
     value
+}
+
+/// `RidgeNoise.spectralWeights[octave]`: Java's `(float) Math.pow(frequency, -1.0)`, which is the correctly rounded
+/// `1 / frequency` (checked over 24,030 lacunarity/octave pairs). Not `powf(-1.0)`: libm's `powf` differs in the last
+/// bit for some inputs, and LLVM folds it to a division only in optimized builds. Java's table has 30 entries, so
+/// Engine throws for more than 30 octaves; this port keeps going instead.
+fn spectral_weight(frequency: f32) -> f32 {
+    1.0 / frequency
 }
 
 fn clamp(value: f32, min: f32, max: f32) -> f32 {
@@ -866,6 +874,186 @@ mod tests {
         assert_eq!(
             points.map(|(x, y)| rand.next_int_seeded(x, y, -17, 19)),
             [0; 4]
+        );
+    }
+
+    #[test]
+    fn ridged_bounds_and_edge_configs_match_engine_0_3_0() {
+        // Negative gain, zero octaves (0/0 = NaN), a negative lacunarity (negative spectral weights), Java's maximum
+        // of 30 octaves, and a negative bound (gain -2, lacunarity -0.5), where `map` needs the `Math.abs` range:
+        // without it every value would be 1. Expected values come from Engine 0.3.0.
+        let configs = [
+            (2147483646, 9, -0.6, 0.031, 1.9, Interpolation::Curve4),
+            (-7, 0, 0.5, 0.25, 2.0, Interpolation::Linear),
+            (1337, 2, 0.5, 1.0, 2.0, Interpolation::Curve3),
+            (99, 5, 0.9, 0.07, -1.7, Interpolation::Curve3),
+            (-123456, 30, 0.975, 0.013, 1.3, Interpolation::Curve4),
+            (55, 2, -2.0, 0.05, -0.5, Interpolation::Curve3),
+        ];
+        let kinds = [
+            SourceKind::Ridge,
+            SourceKind::Billow,
+            SourceKind::SimplexRidge,
+        ];
+        let points = [(0.0, 0.0), (3.5, -17.25), (-1000.125, 250.75)];
+        const NAN: u32 = 0x7fc0_0000;
+        // Per config and kind: getValue(x, y) and getValue(x, y, Integer.MAX_VALUE). minValue/maxValue are 0/1.
+        let expected: [[([u32; 3], [u32; 3]); 3]; 6] = [
+            [
+                (
+                    [0x3f800000, 0x3f4d2122, 0x3f520b5f],
+                    [0x3f800000, 0x3ecdaf4c, 0x3f37390b],
+                ),
+                ([0, 0x3e4b7b78, 0x3e37d284], [0, 0x3f19285a, 0x3e918dea]),
+                (
+                    [0x3f800000, 0x3d71889a, 0x3f800000],
+                    [0x3f800000, 0x3e001264, 0x3f32c6be],
+                ),
+            ],
+            [([NAN; 3], [NAN; 3]); 3],
+            [
+                (
+                    [0x3f800000, 0x3ecf1800, 0x3ef1416b],
+                    [0x3f800000, 0x3f7c0600, 0x3f3b1a38],
+                ),
+                ([0, 0x3f187400, 0x3f075f4a], [0, 0x3c7e8000, 0x3e89cb90]),
+                (
+                    [0x3f800000, 0x3f0ce83e, 0x3e06d15c],
+                    [0x3f800000, 0x3f43ba6f, 0x3d1403b4],
+                ),
+            ],
+            [
+                (
+                    [0x3f800000, 0x3f5c9df8, 0x3cc72c78],
+                    [0x3f800000, 0x3ef517b8, 0x3f4bcfcd],
+                ),
+                ([0, 0x3e0d8820, 0x3f79c69c], [0, 0x3f057424, 0x3e50c0cc]),
+                (
+                    [0x3e701273, 0x3e1968a2, 0x3d8e7ff2],
+                    [0x3e701273, 0x3bdaf8e8, 0x3d417929],
+                ),
+            ],
+            [
+                (
+                    [0x3f800000, 0x3f257ac0, 0x3f106165],
+                    [0x3f800000, 0x3ef0c36f, 0x3f089c10],
+                ),
+                ([0, 0x3eb50a80, 0x3edf3d36], [0, 0x3f079e48, 0x3eeec7e0]),
+                (
+                    [0x3e95b5b5, 0x3c9d537b, 0x3ce43e05],
+                    [0x3e95b5b5, 0x3a6fe6b4, 0x3bce989d],
+                ),
+            ],
+            [
+                ([0; 3], [0; 3]),
+                ([0x3f800000; 3], [0x3f800000; 3]),
+                ([0; 3], [0, 0xbf800000, 0xbf800000]),
+            ],
+        ];
+        for ((seed, octaves, gain, frequency, lacunarity, interpolation), rows) in
+            configs.into_iter().zip(expected)
+        {
+            let config = SourceConfig {
+                seed,
+                octaves,
+                gain,
+                frequency,
+                lacunarity,
+                interpolation,
+            };
+            for (kind, (plain, seeded)) in kinds.into_iter().zip(rows) {
+                let source = Source::new(kind, config);
+                assert_eq!(source.min_value(), 0.0);
+                assert_eq!(source.max_value(), 1.0);
+                assert_eq!(
+                    canonical_bits(points.map(|(x, y)| source.value(x, y))),
+                    plain
+                );
+                assert_eq!(
+                    canonical_bits(points.map(|(x, y)| source.value_seeded(x, y, i32::MAX))),
+                    seeded
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ridged_sweep_matches_engine_0_3_0() {
+        // FNV-1a style checksums of raw bits; Engine 0.3.0 runs the same loops.
+        let mut acc: u32 = 0x811c_9dc5;
+        let mut count = 0;
+        for i in -400..=400 {
+            let lacunarity = i as f32 * 0.0137 + 0.001;
+            let mut frequency = 1.0_f32;
+            for _ in 0..30 {
+                acc = (acc ^ spectral_weight(frequency).to_bits()).wrapping_mul(0x0100_0193);
+                frequency *= lacunarity;
+                count += 1;
+            }
+        }
+        assert_eq!((count, acc), (24030, 0x9153df22));
+
+        let mut acc: u32 = 0x811c_9dc5;
+        let mut mix = |v: f32| acc = (acc ^ v.to_bits()).wrapping_mul(0x0100_0193);
+        let mut count = 0;
+        for lacunarity in [1.5, 2.0, 2.25, 3.1, 0.7] {
+            for gain in [0.5, 0.83, 1.1, -0.4] {
+                let config = SourceConfig {
+                    seed: 4242,
+                    octaves: 7,
+                    gain,
+                    frequency: 0.011,
+                    lacunarity,
+                    interpolation: Interpolation::Curve3,
+                };
+                let ridge = Source::new(SourceKind::Ridge, config);
+                let billow = Source::new(SourceKind::Billow, config);
+                let simplex_ridge = Source::new(SourceKind::SimplexRidge, config);
+                for iy in -10..10 {
+                    for ix in -10..10 {
+                        let x = ix as f32 * 37.3 - 5.1;
+                        let y = iy as f32 * 29.7 + 1.3;
+                        mix(ridge.value(x, y));
+                        mix(billow.value_seeded(x, y, -5));
+                        mix(simplex_ridge.value(x, y));
+                        count += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!((count, acc), (8000, 0x7d958e37));
+    }
+
+    #[test]
+    fn rand_next_int_matches_engine_0_3_0() {
+        // `range * noise / (range + range)` rounds to 0 for small ranges; `Integer.MAX_VALUE + Integer.MAX_VALUE`
+        // wraps to -2 in Java, so the largest range gives large negative values.
+        let rand = Rand::new(5519, 0.125);
+        let points = [
+            (0.0, 0.0),
+            (12.25, -98.75),
+            (-4096.5, 8192.25),
+            (123456.75, -0.125),
+            (-3.5, 2.5),
+        ];
+        for range in [0, 1, 19, 1000, -5] {
+            assert_eq!(points.map(|(x, y)| rand.next_int(x, y, range)), [0; 5]);
+            assert_eq!(
+                points.map(|(x, y)| rand.next_int_seeded(x, y, -17, range)),
+                [0; 5]
+            );
+        }
+        assert_eq!(
+            points.map(|(x, y)| rand.next_int(x, y, i32::MAX)),
+            [-550022976, -660121408, -480428576, -282527392, -550022976]
+        );
+        assert_eq!(
+            points.map(|(x, y)| rand.next_int_seeded(x, y, -17, i32::MAX)),
+            [-203660032, -959588160, 188071072, -754291200, -894462208]
+        );
+        assert_eq!(
+            bits(points.map(|(x, y)| rand.value_seeded(x, y, i32::MAX))),
+            [0xbe1a0663, 0x3baa8000, 0xbceece10, 0x3f529ef7, 0xbf5f7d26]
         );
     }
 }
