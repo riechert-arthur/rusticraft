@@ -737,4 +737,181 @@ mod tests {
         let volcano = Terrain::volcano(14, "volcano", TerrainCategory::Highland);
         assert_eq!(property_bits(&volcano), 0x19c0);
     }
+
+    #[test]
+    fn terrain_descriptor_edges_match_engine_0_3_0() {
+        // TerrainDescriptorsOracle (.local/terraforged/oracles/terrain_descriptors/): withId on
+        // configured, volcanic and composite terrains, Math.min's zero and NaN rules in composites,
+        // nested composites and Java string hashes of empty and long names.
+        use TerrainCategory::{DeepOcean, Flatland, Highland, River};
+        let river = Terrain::new(7, "river_custom", River);
+        let child = Terrain::with_parent(8, "child", river.clone());
+        let erosion = Terrain::configured_erosion(10, "erosion", Flatland, 0.3);
+        let mountain = Terrain::configured_mountain(12, "mountain", Highland, true, true);
+        let full = Terrain::configured(13, "full", TerrainCategory::Coast, 0.625, true, false);
+        let ab = Terrain::composite(14, erosion.clone(), mountain.clone());
+        let volcano = Terrain::volcano(16, "volcano", Highland);
+        let neg = Terrain::configured_erosion(17, "neg", Flatland, -0.0);
+        let pos = Terrain::configured_erosion(18, "pos", Flatland, 0.0);
+        let nan = Terrain::configured_erosion(19, "nan", Flatland, f32::NAN);
+        let flats = Terrain::new(20, "flats", Flatland);
+        let cases = [
+            (
+                erosion.clone(),
+                10,
+                "erosion",
+                Flatland,
+                0x3ef37902,
+                0x3e99999a,
+                0x041,
+            ),
+            (
+                mountain.clone(),
+                12,
+                "mountain",
+                Highland,
+                0x3f5a91ad,
+                0x3f800000,
+                0x8c0,
+            ),
+            (
+                volcano.clone(),
+                16,
+                "volcano",
+                Highland,
+                0x3ee7697b,
+                0x3f800000,
+                0x19c0,
+            ),
+            (
+                river.with_id(98),
+                98,
+                "river_custom",
+                River,
+                0xbf7959fa,
+                0x3f800000,
+                0x022,
+            ),
+            (
+                full.with_id(97),
+                97,
+                "full",
+                TerrainCategory::Coast,
+                0xbf354c07,
+                0x3f200000,
+                0x850,
+            ),
+            (
+                volcano.with_id(96),
+                96,
+                "volcano",
+                Highland,
+                0x3ee7697b,
+                0x3f800000,
+                0x19c0,
+            ),
+            // withId keeps a composite's first terrain as its delegate and drops its own flat flag.
+            (
+                ab.with_id(95),
+                95,
+                "erosion-mountain",
+                Flatland,
+                0xbf6edf09,
+                0x3e99999a,
+                0x041,
+            ),
+            (
+                Terrain::composite(30, pos.clone(), neg.clone()),
+                30,
+                "pos-neg",
+                Flatland,
+                0xbe480657,
+                0x80000000,
+                0x041,
+            ),
+            (
+                Terrain::composite(31, neg, pos),
+                31,
+                "neg-pos",
+                Flatland,
+                0x3f00abc6,
+                0x80000000,
+                0x041,
+            ),
+            (
+                Terrain::composite(32, flats.clone(), nan),
+                32,
+                "flats-nan",
+                Flatland,
+                0x3f23d704,
+                0x7fc00000,
+                0x041,
+            ),
+            (
+                Terrain::composite(33, flats, Terrain::new(34, "flats2", Flatland)),
+                33,
+                "flats-flats2",
+                Flatland,
+                0x3e4397f0,
+                0x3f800000,
+                0x041,
+            ),
+            (
+                Terrain::composite(35, ab.clone(), volcano.clone()),
+                35,
+                "erosion-mountain-volcano",
+                Flatland,
+                0x3f601d24,
+                0x3e99999a,
+                0x040,
+            ),
+            (
+                Terrain::composite(36, Terrain::new(37, "deep", DeepOcean), volcano),
+                36,
+                "deep-volcano",
+                DeepOcean,
+                0xbf728b69,
+                0x3f800000,
+                0x0a8,
+            ),
+            (
+                Terrain::new(21, "", TerrainCategory::None),
+                21,
+                "",
+                TerrainCategory::None,
+                0x00000000,
+                0x3f800000,
+                0x000,
+            ),
+            (
+                Terrain::new(22, "mountain_chain-volcano_pipe-deep_ocean", Highland),
+                22,
+                "mountain_chain-volcano_pipe-deep_ocean",
+                Highland,
+                0xbf2c32b2,
+                0x3f800000,
+                0x040,
+            ),
+        ];
+        for (terrain, id, name, category, hue, erosion, properties) in cases {
+            assert_eq!(terrain.id(), id, "{terrain:?}");
+            assert_eq!(terrain.name(), name);
+            assert_eq!(terrain.category(), category, "{terrain:?}");
+            assert_eq!(terrain.render_hue().to_bits(), hue, "{terrain:?}");
+            assert_eq!(terrain.erosion_modifier().to_bits(), erosion, "{terrain:?}");
+            assert_eq!(property_bits(&terrain), properties, "{terrain:?}");
+        }
+
+        // Identity: withId delegates to the parent of a delegated terrain, else to itself.
+        let delegate = |terrain: &Terrain| match &terrain.0.delegate {
+            TerrainDelegate::Terrain(parent) => parent.clone(),
+            TerrainDelegate::Category(_) => panic!("{terrain:?} delegates to its category"),
+        };
+        assert!(delegate(&child.with_id(1).with_id(2)).is_same(&river));
+        assert!(delegate(&river.with_id(3)).is_same(&river));
+        assert!(delegate(&ab.with_id(4)).is_same(&erosion));
+        assert!(river.clone().is_same(&river));
+        assert!(!river.with_id(7).is_same(&river));
+        assert!(!Terrain::new(7, "river_custom", River).is_same(&river));
+    }
 }
