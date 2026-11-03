@@ -22,7 +22,7 @@
  * SOFTWARE.
  */
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 #[derive(Clone, Copy)]
 pub enum Interpolation {
@@ -551,6 +551,7 @@ enum ModuleKind {
     Power(Module, Module),
     Scale(Module, Module),
     Threshold(Module, Module),
+    Warp(Module, Domain),
     Add(Vec<Module>),
     Multiply(Vec<Module>),
     Max(Vec<Module>),
@@ -629,6 +630,7 @@ impl Module {
                     1.0
                 }
             }
+            ModuleKind::Warp(source, domain) => source.value(domain.x(x, y), domain.y(x, y)),
             ModuleKind::Add(sources) => combine(sources, x, y, |a, b| a + b),
             ModuleKind::Multiply(sources) => combine(sources, x, y, |a, b| a * b),
             ModuleKind::Max(sources) => combine(sources, x, y, java_max),
@@ -741,6 +743,12 @@ impl Module {
         Self::modifier(ModuleKind::Threshold(self, threshold), &source)
     }
 
+    /// `Module.warp(Domain)`: samples the source at the warped point; reports the source's bounds.
+    pub fn warp(self, domain: Domain) -> Self {
+        let source = self.clone();
+        Self::modifier(ModuleKind::Warp(self, domain), &source)
+    }
+
     /// `new Add(sources...)`.
     pub fn add(sources: Vec<Self>) -> Self {
         let min = fold_bounds(&sources, Self::min_value, |a, b| a + b.min_value());
@@ -760,6 +768,126 @@ impl Module {
         let min = fold_bounds(&sources, Self::min_value, |a, b| java_max(a, b.max_value()));
         let max = fold_bounds(&sources, Self::max_value, |a, b| java_max(a, b.max_value()));
         Self::node(ModuleKind::Max(sources), min, max)
+    }
+}
+
+/// Engine's `Domain`: a coordinate warp. Cloning shares the node, as Java shares domain instances.
+#[derive(Clone)]
+pub struct Domain(Arc<DomainKind>);
+
+enum DomainKind {
+    /// `Domain.DIRECT`.
+    Direct,
+    /// `DomainWarp`: both axis modules are already mapped to -0.5..0.5.
+    DomainWarp {
+        x: Module,
+        y: Module,
+        distance: Module,
+    },
+    /// `DirectionWarp`.
+    Direction { direction: Module, strength: Module },
+    /// `AddWarp`.
+    Add(Domain, Domain),
+    /// `CompoundWarp`.
+    Compound(Domain, Domain),
+    /// `CumulativeWarp`.
+    Cumulative(Domain, Domain),
+}
+
+impl Domain {
+    fn node(kind: DomainKind) -> Self {
+        Self(Arc::new(kind))
+    }
+
+    /// `Domain.DIRECT`.
+    pub fn direct() -> Self {
+        Self::node(DomainKind::Direct)
+    }
+
+    /// `Domain.warp(Module, Module, Module)` (`new DomainWarp`): each axis is mapped to -0.5..0.5 unless it already
+    /// reports exactly those bounds (`Module.map`'s own shortcut is the same test).
+    pub fn domain_warp(x: Module, y: Module, distance: Module) -> Self {
+        let map = |axis: Module| axis.map(Module::constant(-0.5), Module::constant(0.5));
+        Self::node(DomainKind::DomainWarp {
+            x: map(x),
+            y: map(y),
+            distance,
+        })
+    }
+
+    /// `Domain.direction(Module, Module)` (`new DirectionWarp`).
+    pub fn direction(direction: Module, strength: Module) -> Self {
+        Self::node(DomainKind::Direction {
+            direction,
+            strength,
+        })
+    }
+
+    /// `Domain.add(Domain)` (`AddWarp`): the two offsets summed.
+    #[allow(clippy::should_implement_trait)]
+    pub fn add(self, next: Self) -> Self {
+        Self::node(DomainKind::Add(self, next))
+    }
+
+    /// `Domain.warp(Domain)` (`CompoundWarp`): `next`'s offset at the point warped by `self`.
+    pub fn compound(self, next: Self) -> Self {
+        Self::node(DomainKind::Compound(self, next))
+    }
+
+    /// `Domain.then(Domain)` (`CumulativeWarp`): Engine returns `next`'s warped *coordinate* as the offset, so
+    /// `x()` adds the input coordinate once more.
+    pub fn then(self, next: Self) -> Self {
+        Self::node(DomainKind::Cumulative(self, next))
+    }
+
+    /// `Domain.getOffsetX`.
+    pub fn offset_x(&self, x: f32, y: f32) -> f32 {
+        match self.0.as_ref() {
+            DomainKind::Direct => 0.0,
+            DomainKind::DomainWarp {
+                x: axis, distance, ..
+            } => axis.value(x, y) * distance.value(x, y),
+            DomainKind::Direction {
+                direction,
+                strength,
+            } => {
+                let angle = direction.value(x, y) * PI2;
+                sin(angle) * strength.value(x, y)
+            }
+            DomainKind::Add(first, second) => first.offset_x(x, y) + second.offset_x(x, y),
+            DomainKind::Compound(first, second) => second.offset_x(first.x(x, y), first.y(x, y)),
+            DomainKind::Cumulative(first, second) => second.x(first.x(x, y), first.y(x, y)),
+        }
+    }
+
+    /// `Domain.getOffsetY`.
+    pub fn offset_y(&self, x: f32, y: f32) -> f32 {
+        match self.0.as_ref() {
+            DomainKind::Direct => 0.0,
+            DomainKind::DomainWarp {
+                y: axis, distance, ..
+            } => axis.value(x, y) * distance.value(x, y),
+            DomainKind::Direction {
+                direction,
+                strength,
+            } => {
+                let angle = direction.value(x, y) * PI2;
+                cos(angle) * strength.value(x, y)
+            }
+            DomainKind::Add(first, second) => first.offset_y(x, y) + second.offset_y(x, y),
+            DomainKind::Compound(first, second) => second.offset_y(first.x(x, y), first.y(x, y)),
+            DomainKind::Cumulative(first, second) => second.y(first.x(x, y), first.y(x, y)),
+        }
+    }
+
+    /// `Domain.getX`.
+    pub fn x(&self, x: f32, y: f32) -> f32 {
+        x + self.offset_x(x, y)
+    }
+
+    /// `Domain.getY`.
+    pub fn y(&self, x: f32, y: f32) -> f32 {
+        y + self.offset_y(x, y)
     }
 }
 
@@ -812,6 +940,40 @@ fn java_max(first: f32, second: f32) -> f32 {
     } else {
         second
     }
+}
+
+/// `NoiseUtil.PI2` and `radFull`: `(float) Math.PI * 2` (the cast binds first; doubling is exact either way).
+const PI2: f32 = std::f64::consts::PI as f32 * 2.0;
+const SIN_MASK: i32 = 4095;
+const SIN_COUNT: usize = 4096;
+
+/// `NoiseUtil.SIN`, built once in the order of Engine's static initializer.
+fn sin_table() -> &'static [f32; SIN_COUNT] {
+    static TABLE: OnceLock<[f32; SIN_COUNT]> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        let mut table = [0.0; SIN_COUNT];
+        for (i, entry) in table.iter_mut().enumerate() {
+            let angle = (i as f32 + 0.5) / SIN_COUNT as f32 * PI2;
+            *entry = f64::from(angle).sin() as f32;
+        }
+        let deg_to_index = SIN_COUNT as f32 / 360.0;
+        for degrees in (0..360).step_by(90) {
+            let index = ((degrees as f32 * deg_to_index) as i32 & SIN_MASK) as usize;
+            table[index] = (f64::from(degrees) * std::f64::consts::PI / 180.0).sin() as f32;
+        }
+        table
+    })
+}
+
+/// `NoiseUtil.sin`: a 4096-entry lookup (`as i32` saturates and maps NaN to 0, like Java's `(int)`).
+fn sin(radians: f32) -> f32 {
+    let rad_to_index = SIN_COUNT as f32 / PI2;
+    sin_table()[((radians * rad_to_index) as i32 & SIN_MASK) as usize]
+}
+
+/// `NoiseUtil.cos`: `sin(r + 1.5708f)`.
+fn cos(radians: f32) -> f32 {
+    sin(radians + f32::from_bits(0x3fc9_0ff9))
 }
 
 #[cfg(test)]
@@ -1570,5 +1732,193 @@ mod tests {
                 "case {index}"
             );
         }
+    }
+
+    #[test]
+    fn domain_warps_match_engine_0_3_0() {
+        let source = |kind, seed, scale: f32, octaves, gain| {
+            Module::source(Source::new(
+                kind,
+                SourceConfig {
+                    seed,
+                    octaves,
+                    gain,
+                    frequency: 1.0 / scale,
+                    lacunarity: 2.0,
+                    interpolation: Interpolation::Curve3,
+                },
+            ))
+        };
+        let warp = Domain::domain_warp(
+            source(SourceKind::Perlin, 110, 64.0, 3, 0.5),
+            source(SourceKind::Simplex, 220, 96.0, 2, 0.5),
+            Module::constant(37.5),
+        );
+        let direction = Domain::direction(
+            source(SourceKind::Simplex, 330, 72.0, 3, 0.5),
+            Module::constant(11.25),
+        );
+        let points = [
+            (0.0, 0.0),
+            (12.25, -98.75),
+            (-4096.5, 8192.25),
+            (123456.75, -0.125),
+        ];
+        let cases = [
+            (
+                Domain::direct(),
+                [
+                    [0, 0, 0, 0],
+                    [0, 0, 0x41440000, 0xc2c58000],
+                    [0, 0, 0xc5800400, 0x46000100],
+                    [0, 0, 0x47f12060, 0xbe000000],
+                ],
+            ),
+            (
+                warp.clone(),
+                [
+                    [0, 0, 0, 0],
+                    [0xc0bec34d, 0x4156e18b, 0x40c93cb3, 0xc2aaa3cf],
+                    [0x3df4d364, 0xbf334ce1, 0xc580030b, 0x45fffc66],
+                    [0xbd01b190, 0x41257e96, 0x47f1205c, 0x41237e96],
+                ],
+            ),
+            (
+                direction.clone(),
+                [
+                    [0x26c68d2e, 0xc1340000, 0x26c68d2e, 0xc1340000],
+                    [0xc12463b5, 0xc092a4cb, 0x3ffce258, 0xc2ceaa4d],
+                    [0xc04b2f4b, 0xc12caf18, 0xc5801d66, 0x45ffaba8],
+                    [0xc132b251, 0xbfacfb79, 0x47f11aca, 0xbfbcfb79],
+                ],
+            ),
+            (
+                warp.clone().add(direction.clone()),
+                [
+                    [0x26c68d2e, 0xc1340000, 0x26c68d2e, 0xc1340000],
+                    [0xc181e2ae, 0x410d8f26, 0xc07f1570, 0xc2b3ce1b],
+                    [0xc04388b0, 0xc137e3e6, 0xc5801c71, 0x45ffa60e],
+                    [0xc1333403, 0x410fdf27, 0x47f11ac6, 0x410ddf27],
+                ],
+            ),
+            (
+                warp.clone().compound(direction.clone()),
+                [
+                    [0x26c68d2e, 0xc1340000, 0x26c68d2e, 0xc1340000],
+                    [0x3f212ad7, 0xc133b7ca, 0x414e12ad, 0xc2dbf6f9],
+                    [0xc07f83a3, 0xc12848b9, 0xc58023f0, 0x45ffaddc],
+                    [0xc10cf689, 0xc0dfdeb2, 0x47f11bf8, 0xc0e3deb2],
+                ],
+            ),
+            (
+                warp.clone().then(direction.clone()),
+                [
+                    [0x26c68d2e, 0xc1340000, 0x26c68d2e, 0xc1340000],
+                    [0x40dd620e, 0xc2c11ac8, 0x41995884, 0xc3434d64],
+                    [0xc58022fb, 0x45ffa842, 0xc600137e, 0x467fd521],
+                    [0x47f11bf4, 0x404e3cf4, 0x48711e2a, 0x40463cf4],
+                ],
+            ),
+            (
+                // Axes already reporting -0.5..0.5 are not mapped again; a constant axis maps to NaN, as in Engine.
+                Domain::domain_warp(
+                    source(SourceKind::Perlin, 110, 64.0, 3, 0.5)
+                        .map(Module::constant(-0.5), Module::constant(0.5)),
+                    Module::constant(0.5).map(Module::constant(-0.5), Module::constant(0.5)),
+                    Module::constant(4.0),
+                ),
+                [
+                    [0, 0xffc00000, 0, 0xffc00000],
+                    [0xbf22c8ca, 0xffc00000, 0x4139d373, 0xffc00000],
+                    [0x3c50eb00, 0xffc00000, 0xc58003e6, 0xffc00000],
+                    [0xbb5d5800, 0xffc00000, 0x47f12060, 0xffc00000],
+                ],
+            ),
+            (
+                warp.clone()
+                    .then(direction.clone())
+                    .add(warp.clone().compound(direction.clone()))
+                    .then(warp.clone()),
+                [
+                    [0xc1037ef0, 0xc1336565, 0xc1037ef0, 0xc1336565],
+                    [0x41d1b9ba, 0xc34504d1, 0x4219dcdd, 0xc393e268],
+                    [0xc6002703, 0x467fb917, 0xc6402903, 0x46bfdd0c],
+                    [0x48711d62, 0xc149cc10, 0x48b4d6c9, 0xc14bcc10],
+                ],
+            ),
+        ];
+        for (domain, expected) in cases {
+            assert_eq!(
+                points.map(|(x, y)| [
+                    domain.offset_x(x, y).to_bits(),
+                    domain.offset_y(x, y).to_bits(),
+                    domain.x(x, y).to_bits(),
+                    domain.y(x, y).to_bits(),
+                ]),
+                expected
+            );
+        }
+        let warped = source(SourceKind::Ridge, 440, 128.0, 4, 0.975).warp(warp.add(direction));
+        assert_eq!(
+            [warped.min_value().to_bits(), warped.max_value().to_bits()],
+            [0, 0x3f800000]
+        );
+        assert_eq!(
+            bits(points.map(|(x, y)| warped.value(x, y))),
+            [0x3f4fea9c, 0x3f2d9330, 0x3f4b5329, 0x3f53bd2e]
+        );
+    }
+
+    #[test]
+    fn sin_lookup_matches_engine_0_3_0() {
+        // Java: `hash = hash * 31 + floatToRawIntBits(SIN[i])` over `NoiseUtil.SIN`.
+        let hash = sin_table().iter().fold(0_i64, |hash, value| {
+            hash.wrapping_mul(31)
+                .wrapping_add(i64::from(value.to_bits() as i32))
+        });
+        assert_eq!(hash, 4517474909631308587);
+        let angles = [
+            0.0,
+            1e-7,
+            -1e-7,
+            f32::from_bits(0x3fc9_0ff9),
+            -f32::from_bits(0x3fc9_0ff9),
+            std::f32::consts::PI,
+            -std::f32::consts::PI,
+            PI2,
+            -PI2,
+            100.25,
+            -100.25,
+            1e9,
+            -1e9,
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            std::f32::consts::FRAC_PI_4,
+            -2.3561945,
+        ];
+        assert_eq!(
+            angles.map(|angle| [sin(angle).to_bits(), cos(angle).to_bits()]),
+            [
+                [0, 0x3f800000],
+                [0, 0x3f800000],
+                [0, 0x3f800000],
+                [0x3f800000, 0x250d3132],
+                [0xbf800000, 0],
+                [0x250d3132, 0xbf800000],
+                [0x250d3132, 0xbf7fffd4],
+                [0, 0x3f800000],
+                [0, 0x3f7fffd4],
+                [0xbe8e398f, 0x3f75ecc2],
+                [0x3e8efaad, 0x3f75d0c2],
+                [0xba48f443, 0xba48f443],
+                [0, 0],
+                [0, 0],
+                [0xba48f443, 0xba48f443],
+                [0, 0],
+                [0x3f35287b, 0x3f34e165],
+                [0xbf35287d, 0xbf349a32],
+            ]
+        );
     }
 }
