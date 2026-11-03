@@ -22,6 +22,8 @@
  * SOFTWARE.
  */
 
+use std::sync::Arc;
+
 #[derive(Clone, Copy)]
 pub enum Interpolation {
     Linear,
@@ -522,6 +524,294 @@ fn hash(x: i32, y: i32) -> i32 {
         .wrapping_mul(hash)
         .wrapping_mul(60493);
     (hash >> 13) ^ hash
+}
+
+/// A node of Engine's `Module` graph. Cloning shares the node, as Java shares module instances between graphs.
+/// Each node keeps the `minValue`/`maxValue` it reports, so samples never walk the graph to read bounds.
+#[derive(Clone)]
+pub struct Module(Arc<Node>);
+
+struct Node {
+    kind: ModuleKind,
+    min: f32,
+    max: f32,
+}
+
+enum ModuleKind {
+    Constant(f32),
+    Source(Source),
+    Abs(Module),
+    Alpha(Module, Module),
+    Bias(Module, Module),
+    Boost(Module, usize),
+    Clamp(Module, Module, Module),
+    Invert(Module),
+    /// `Map` keeps `sourceRange = source.maxValue() - source.minValue()` from its constructor.
+    Map(Module, Module, Module, f32),
+    Power(Module, Module),
+    Scale(Module, Module),
+    Threshold(Module, Module),
+    Add(Vec<Module>),
+    Multiply(Vec<Module>),
+    Max(Vec<Module>),
+}
+
+impl Module {
+    fn node(kind: ModuleKind, min: f32, max: f32) -> Self {
+        Self(Arc::new(Node { kind, min, max }))
+    }
+
+    /// `Modifier`'s default bounds: those of its source.
+    fn modifier(kind: ModuleKind, source: &Self) -> Self {
+        Self::node(kind, source.min_value(), source.max_value())
+    }
+
+    pub fn constant(value: f32) -> Self {
+        Self::node(ModuleKind::Constant(value), value, value)
+    }
+
+    pub fn source(source: Source) -> Self {
+        Self::node(
+            ModuleKind::Source(source),
+            source.min_value(),
+            source.max_value(),
+        )
+    }
+
+    pub fn value(&self, x: f32, y: f32) -> f32 {
+        match &self.0.kind {
+            ModuleKind::Constant(value) => *value,
+            ModuleKind::Source(source) => source.value(x, y),
+            ModuleKind::Abs(source) => source.value(x, y).abs(),
+            ModuleKind::Alpha(source, alpha) => {
+                let value = source.value(x, y);
+                let alpha = alpha.value(x, y);
+                value * alpha + (1.0 - alpha)
+            }
+            ModuleKind::Bias(source, bias) => source.value(x, y) + bias.value(x, y),
+            ModuleKind::Boost(source, iterations) => {
+                let mut value = source.value(x, y);
+                for _ in 0..*iterations {
+                    value = java_pow(value, 1.0 - value);
+                }
+                value
+            }
+            ModuleKind::Clamp(source, min, max) => {
+                let value = source.value(x, y);
+                clamp(value, min.value(x, y), max.value(x, y))
+            }
+            ModuleKind::Invert(source) => {
+                let value = source.value(x, y);
+                if value > source.max_value() {
+                    source.min_value()
+                } else if value < source.min_value() {
+                    source.max_value()
+                } else {
+                    source.max_value() - value
+                }
+            }
+            ModuleKind::Map(source, min, max, range) => {
+                let alpha = (source.value(x, y) - source.min_value()) / range;
+                let min = min.value(x, y);
+                let max = max.value(x, y);
+                min + alpha * (max - min)
+            }
+            ModuleKind::Power(source, power) => {
+                let value = source.value(x, y);
+                java_pow(value, power.value(x, y))
+            }
+            ModuleKind::Scale(source, scale) => source.value(x, y) * scale.value(x, y),
+            ModuleKind::Threshold(source, threshold) => {
+                let value = source.value(x, y);
+                if value < threshold.value(x, y) {
+                    0.0
+                } else {
+                    1.0
+                }
+            }
+            ModuleKind::Add(sources) => combine(sources, x, y, |a, b| a + b),
+            ModuleKind::Multiply(sources) => combine(sources, x, y, |a, b| a * b),
+            ModuleKind::Max(sources) => combine(sources, x, y, java_max),
+        }
+    }
+
+    pub fn min_value(&self) -> f32 {
+        self.0.min
+    }
+
+    pub fn max_value(&self) -> f32 {
+        self.0.max
+    }
+
+    /// `Module.abs()`.
+    pub fn abs(self) -> Self {
+        if matches!(self.0.kind, ModuleKind::Abs(_)) {
+            self
+        } else {
+            let source = self.clone();
+            Self::modifier(ModuleKind::Abs(self), &source)
+        }
+    }
+
+    /// `Module.alpha(Module)`: skipped when the alpha's bounds leave 0..1.
+    pub fn alpha(self, alpha: Self) -> Self {
+        if alpha.min_value() < 0.0 || alpha.max_value() > 1.0 {
+            self
+        } else {
+            let source = self.clone();
+            Self::modifier(ModuleKind::Alpha(self, alpha), &source)
+        }
+    }
+
+    /// `Module.bias(Module)`: skipped for a zero bias.
+    pub fn bias(self, bias: Self) -> Self {
+        if bias.min_value() == 0.0 && bias.max_value() == 0.0 {
+            self
+        } else {
+            let (min, max) = (
+                self.min_value() + bias.min_value(),
+                self.max_value() + bias.max_value(),
+            );
+            Self::node(ModuleKind::Bias(self, bias), min, max)
+        }
+    }
+
+    /// `Module.boost(int)`: no-op for zero iterations; otherwise `Boost` maps its source to 0..1 first.
+    pub fn boost(self, iterations: usize) -> Self {
+        if iterations == 0 {
+            self
+        } else {
+            let mapped = self.map(Self::constant(0.0), Self::constant(1.0));
+            Self::modifier(ModuleKind::Boost(mapped.clone(), iterations), &mapped)
+        }
+    }
+
+    /// `Module.clamp(Module, Module)`: skipped when constant bounds equal the source's.
+    pub fn clamp(self, min: Self, max: Self) -> Self {
+        if constant_bounds(&self, &min, &max) {
+            self
+        } else {
+            let (low, high) = (min.min_value(), max.max_value());
+            Self::node(ModuleKind::Clamp(self, min, max), low, high)
+        }
+    }
+
+    /// `Module.invert()` (no shortcut in Engine: inverting twice nests).
+    pub fn invert(self) -> Self {
+        let source = self.clone();
+        Self::modifier(ModuleKind::Invert(self), &source)
+    }
+
+    /// `Module.map(Module, Module)`: skipped when constant bounds equal the source's.
+    pub fn map(self, min: Self, max: Self) -> Self {
+        if constant_bounds(&self, &min, &max) {
+            self
+        } else {
+            let range = self.max_value() - self.min_value();
+            let (low, high) = (min.min_value(), max.max_value());
+            Self::node(ModuleKind::Map(self, min, max, range), low, high)
+        }
+    }
+
+    /// `Module.pow(Module)`: a constant 0 power gives `Source.ONE`, a constant 1 power the source itself.
+    pub fn power(self, power: Self) -> Self {
+        if power.min_value() == 0.0 && power.max_value() == 0.0 {
+            Self::constant(1.0)
+        } else if power.min_value() == 1.0 && power.max_value() == 1.0 {
+            self
+        } else {
+            let source = self.clone();
+            Self::modifier(ModuleKind::Power(self, power), &source)
+        }
+    }
+
+    /// `Module.scale(Module)`: skipped for a scale of 1; bounds are fixed when it is built.
+    pub fn scale(self, scale: Self) -> Self {
+        if scale.min_value() == 1.0 && scale.max_value() == 1.0 {
+            return self;
+        }
+        let min = self.min_value() * scale.min_value();
+        let max = self.max_value() * scale.max_value();
+        Self::node(ModuleKind::Scale(self, scale), min, max)
+    }
+
+    /// `Module.threshold(Module)`: Engine reports the source's bounds, not 0..1.
+    pub fn threshold(self, threshold: Self) -> Self {
+        let source = self.clone();
+        Self::modifier(ModuleKind::Threshold(self, threshold), &source)
+    }
+
+    /// `new Add(sources...)`.
+    pub fn add(sources: Vec<Self>) -> Self {
+        let min = fold_bounds(&sources, Self::min_value, |a, b| a + b.min_value());
+        let max = fold_bounds(&sources, Self::max_value, |a, b| a + b.max_value());
+        Self::node(ModuleKind::Add(sources), min, max)
+    }
+
+    /// `new Multiply(sources...)`.
+    pub fn multiply(sources: Vec<Self>) -> Self {
+        let min = fold_bounds(&sources, Self::min_value, |a, b| a * b.min_value());
+        let max = fold_bounds(&sources, Self::max_value, |a, b| a * b.max_value());
+        Self::node(ModuleKind::Multiply(sources), min, max)
+    }
+
+    /// `new Max(sources...)`: Engine's `minTotal` is `maxTotal`, so the minimum folds the later maxima.
+    pub fn max(sources: Vec<Self>) -> Self {
+        let min = fold_bounds(&sources, Self::min_value, |a, b| java_max(a, b.max_value()));
+        let max = fold_bounds(&sources, Self::max_value, |a, b| java_max(a, b.max_value()));
+        Self::node(ModuleKind::Max(sources), min, max)
+    }
+}
+
+/// The shortcut test shared by `Module.clamp` and `Module.map`.
+fn constant_bounds(source: &Module, min: &Module, max: &Module) -> bool {
+    min.min_value() == min.max_value()
+        && min.min_value() == source.min_value()
+        && max.min_value() == max.max_value()
+        && max.max_value() == source.max_value()
+}
+
+fn combine(sources: &[Module], x: f32, y: f32, operation: impl Fn(f32, f32) -> f32) -> f32 {
+    let Some((first, rest)) = sources.split_first() else {
+        return 0.0;
+    };
+    rest.iter().fold(first.value(x, y), |value, source| {
+        operation(value, source.value(x, y))
+    })
+}
+
+/// `Combiner`'s constructor: the first source's bound, then `minTotal`/`maxTotal` over the rest; 0 when empty.
+fn fold_bounds(
+    sources: &[Module],
+    first: impl Fn(&Module) -> f32,
+    total: impl Fn(f32, &Module) -> f32,
+) -> f32 {
+    let Some((head, rest)) = sources.split_first() else {
+        return 0.0;
+    };
+    rest.iter().fold(first(head), total)
+}
+
+fn java_pow(value: f32, power: f32) -> f32 {
+    (f64::from(value).powf(f64::from(power))) as f32
+}
+
+fn java_max(first: f32, second: f32) -> f32 {
+    if first.is_nan() {
+        first
+    } else if second.is_nan() {
+        second
+    } else if first == 0.0 && second == 0.0 {
+        if first.is_sign_positive() || second.is_sign_positive() {
+            0.0
+        } else {
+            -0.0
+        }
+    } else if first >= second {
+        first
+    } else {
+        second
+    }
 }
 
 #[cfg(test)]
@@ -1056,5 +1346,229 @@ mod tests {
             bits(points.map(|(x, y)| rand.value_seeded(x, y, i32::MAX))),
             [0xbe1a0663, 0x3baa8000, 0xbceece10, 0x3f529ef7, 0xbf5f7d26]
         );
+    }
+
+    #[test]
+    fn module_graph_matches_engine_0_3_0() {
+        let base = Module::source(Source::new(
+            SourceKind::Simplex,
+            SourceConfig {
+                seed: 8128,
+                octaves: 4,
+                gain: 0.5,
+                frequency: 1.0 / 128.0,
+                lacunarity: 2.0,
+                interpolation: Interpolation::Curve3,
+            },
+        ));
+        let shaped = base
+            .clone()
+            .bias(Module::constant(0.125))
+            .scale(Module::constant(0.75))
+            .clamp(Module::constant(0.2), Module::constant(0.8))
+            .map(Module::constant(-1.0), Module::constant(2.0))
+            .abs()
+            .invert();
+        let boosted = base
+            .clone()
+            .alpha(Module::constant(0.4))
+            .boost(2)
+            .power(Module::constant(1.75));
+        let gated = boosted.clone().threshold(Module::constant(0.55));
+        let points = [
+            (0.0, 0.0),
+            (12.25, -98.75),
+            (-4096.5, 8192.25),
+            (123456.75, -0.125),
+        ];
+        let cases = [
+            (
+                shaped.clone(),
+                [0xbf800000, 0x40000000],
+                [0x3fd40000, 0x3fa11d66, 0x3f5b6d74, 0x3e8b2530],
+            ),
+            (
+                boosted,
+                [0, 0x3f800000],
+                [0x3f7f20fa, 0x3f7fad65, 0x3f7fe9b7, 0x3f7fff19],
+            ),
+            (gated, [0, 0x3f800000], [0x3f800000; 4]),
+            (
+                Module::add(vec![base.clone(), shaped.clone()]),
+                [0xbf800000, 0x40400000],
+                [0x400a0000, 0x3feeaf28, 0x3fc8fd77, 0x3f920b16],
+            ),
+            (
+                Module::multiply(vec![base.clone(), shaped.clone()]),
+                [0x80000000, 0x40000000],
+                [0x3f540000, 0x3f43464f, 0x3f1c7914, 0x3e71e388],
+            ),
+            (
+                Module::max(vec![base, shaped]),
+                [0x40000000, 0x40000000],
+                [0x3fd40000, 0x3fa11d66, 0x3f5b6d74, 0x3f5e8394],
+            ),
+        ];
+        for (module, expected_bounds, expected_values) in cases {
+            assert_eq!(
+                [module.min_value().to_bits(), module.max_value().to_bits()],
+                expected_bounds
+            );
+            assert_eq!(
+                bits(points.map(|(x, y)| module.value(x, y))),
+                expected_values
+            );
+        }
+        let max_bounds = Module::max(vec![
+            Module::source(Source::new(SourceKind::Simplex, SourceConfig::default())),
+            Module::constant(0.5),
+        ]);
+        assert_eq!(
+            [
+                max_bounds.min_value().to_bits(),
+                max_bounds.max_value().to_bits()
+            ],
+            [0x3f000000, 0x3f800000]
+        );
+    }
+
+    #[test]
+    fn module_graph_reads_cubic_bounds_like_engine_0_3_0() {
+        // CubicNoise is the only source whose bounds are not Noise's 0/1, so the modifiers that read their source's
+        // bounds (Map, Boost's map, Invert, Clamp's and Map's shortcuts, Scale, the combiners) see its raw octave bound.
+        // Also covers Module.map's and Module.pow's shortcuts and nested abs/invert. Expected values come from Engine 0.3.0.
+        let cubic = Source::new(
+            SourceKind::Cubic,
+            SourceConfig {
+                seed: 31,
+                octaves: 3,
+                gain: 0.5,
+                frequency: 1.0 / 64.0,
+                lacunarity: 2.0,
+                interpolation: Interpolation::Curve3,
+            },
+        );
+        let simplex = Module::source(Source::new(
+            SourceKind::Simplex,
+            SourceConfig {
+                seed: 8128,
+                octaves: 4,
+                gain: 0.5,
+                frequency: 1.0 / 128.0,
+                lacunarity: 2.0,
+                interpolation: Interpolation::Curve3,
+            },
+        ));
+        let (low, high) = (cubic.min_value(), cubic.max_value());
+        let cubic = Module::source(cubic);
+        let c = Module::constant;
+        let points = [
+            (0.0, 0.0),
+            (12.25, -98.75),
+            (-4096.5, 8192.25),
+            (123456.75, -0.125),
+            (-3.5, 2.5),
+        ];
+        const RAW: [u32; 5] = [0x3f2dacf3, 0x3eb80f89, 0x3ec8031e, 0x3eefe935, 0x3f2a2ed2];
+        const CUBIC: [u32; 2] = [0xbfa80000, 0x3fa80000];
+        let cases = [
+            (cubic.clone(), CUBIC, RAW),
+            (
+                cubic.clone().map(c(-1.0), c(2.0)),
+                [0xbf800000, 0x40000000],
+                [0x3fa33e44, 0x3f692d72, 0x3f724aee, 0x3f848bc6, 0x3fa13f54],
+            ),
+            (cubic.clone().map(c(low), c(high)), CUBIC, RAW),
+            (
+                cubic.clone().boost(2),
+                [0, 0x3f800000],
+                [0x3f7ee5d8, 0x3f79bec4, 0x3f7a93a0, 0x3f7c48eb, 0x3f7ecb49],
+            ),
+            (
+                cubic.clone().invert(),
+                CUBIC,
+                [0x3f22530d, 0x3f73f83c, 0x3f6bfe71, 0x3f580b66, 0x3f25d12e],
+            ),
+            (
+                cubic.clone().clamp(c(0.1), c(0.4)),
+                [0x3dcccccd, 0x3ecccccd],
+                [0x3ecccccd, 0x3eb80f89, 0x3ec8031e, 0x3ecccccd, 0x3ecccccd],
+            ),
+            (cubic.clone().clamp(c(low), c(high)), CUBIC, RAW),
+            (
+                cubic.clone().power(c(0.0)),
+                [0x3f800000, 0x3f800000],
+                [0x3f800000; 5],
+            ),
+            (cubic.clone().power(c(1.0)), CUBIC, RAW),
+            (
+                cubic.clone().power(c(1.5)),
+                CUBIC,
+                [0x3f0f0cd3, 0x3e5cb7a7, 0x3e7a05d8, 0x3ea439b0, 0x3f0ac1b5],
+            ),
+            (
+                cubic
+                    .clone()
+                    .scale(c(0.5))
+                    .bias(c(0.25))
+                    .abs()
+                    .threshold(c(0.3)),
+                [0xbed00000, 0x3f680000],
+                [0x3f800000; 5],
+            ),
+            (
+                cubic.clone().alpha(c(0.4)),
+                CUBIC,
+                [0x3f5f11fc, 0x3f3e6982, 0x3f419a3a, 0x3f49950b, 0x3f5dac54],
+            ),
+            // Engine's `invert()` has no shortcut, so inverting twice does not give the source back.
+            (
+                cubic.clone().invert().invert(),
+                CUBIC,
+                [0x3f2dacf3, 0x3eb80f88, 0x3ec8031e, 0x3eefe934, 0x3f2a2ed2],
+            ),
+            (
+                cubic.clone().bias(c(-1.0)).abs().abs(),
+                [0xc0140000, 0x3ea00000],
+                [0x3ea4a61a, 0x3f23f83c, 0x3f1bfe71, 0x3f080b66, 0x3eaba25c],
+            ),
+            (
+                Module::add(vec![cubic.clone(), simplex.clone()]),
+                [0xbfa80000, 0x40140000],
+                [0x3f96d67a, 0x3f772b4a, 0x3f8d4784, 0x3fab3c17, 0x3f885a72],
+            ),
+            (
+                Module::multiply(vec![cubic.clone(), simplex.clone()]),
+                [0x80000000, 0x3fa80000],
+                [0x3eadacf3, 0x3e5f15e3, 0x3e8ea0c0, 0x3ed0878b, 0x3e884f90],
+            ),
+            (
+                Module::max(vec![cubic.clone(), simplex.clone()]),
+                [0x3f800000, 0x3fa80000],
+                [0x3f2dacf3, 0x3f1b2385, 0x3f368d7a, 0x3f5e8394, 0x3f2a2ed2],
+            ),
+            (
+                Module::max(vec![simplex.clone(), cubic]),
+                [0x3fa80000, 0x3fa80000],
+                [0x3f2dacf3, 0x3f1b2385, 0x3f368d7a, 0x3f5e8394, 0x3f2a2ed2],
+            ),
+            (
+                simplex.boost(1),
+                [0, 0x3f800000],
+                [0x3f3504f3, 0x3f5227a8, 0x3f6854cd, 0x3f7b5934, 0x3f13e7a9],
+            ),
+        ];
+        for (index, (module, expected_bounds, expected_values)) in cases.into_iter().enumerate() {
+            assert_eq!(
+                [module.min_value().to_bits(), module.max_value().to_bits()],
+                expected_bounds,
+                "case {index}"
+            );
+            assert_eq!(
+                bits(points.map(|(x, y)| module.value(x, y))),
+                expected_values,
+                "case {index}"
+            );
+        }
     }
 }
