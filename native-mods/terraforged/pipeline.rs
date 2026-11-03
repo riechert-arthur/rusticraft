@@ -44,7 +44,7 @@ use super::{
     ProtoChunk, SeededPipeline, SurfaceInputs, SurfaceQueries, SurfaceSample, TerrainChunk,
     UniformSurfaceBiomes, WorkerState, WorldGenerationContext, build_surface, overrides, resource,
     stage,
-    terraforged_biome_registry::identifier_order,
+    terraforged_biome_registry::{CAVE_BIOMES, identifier_order},
     terraforged_cave_assets::current_caves,
     terraforged_cave_biome_sampler::CaveBiomeSampler,
     terraforged_cave_carver::{CarverChunk, NoiseCaveGenerator},
@@ -223,11 +223,13 @@ impl TerraForgedPipeline {
         stem: &Value,
         with_structures: bool,
     ) -> Result<Self, GeneratorError> {
+        let settings = terraforged_settings::current();
         let levels = terrain_levels(stem["generator"].get("levels")).map_err(resource)?;
         let generator = Arc::new(build_noise(levels).map_err(resource)?);
         generator.capture_seed(seed);
-        let biomes = LiveBiomeBindings::from_generator_data(data, &[])
-            .map_err(|error| resource(error.to_string()))?;
+        let biomes =
+            LiveBiomeBindings::from_generator_data_with(data, &[], settings.corrected_biomes)
+                .map_err(|error| resource(error.to_string()))?;
         let (_, block_tags) = super::super::block_feature::FeatureBlockBindings::bind_tags(
             data.registry,
             &data.block_tags,
@@ -242,14 +244,22 @@ impl TerraForgedPipeline {
         let level = overrides::LevelHeight::of_type(&stem["type"], &data.dimension_types)
             .map(|height| (height.min_y, height.height));
         // CaveBiomeSampler(800, biomeMapManager): GLOBAL caves use terraforged:cave; UNIQUE caves draw from every
-        // registered biome (6dd607eb's UNDERGROUND filter is commented out), in 26.3's registry order: path, then
-        // namespace.
+        // registered biome (6dd607eb's UNDERGROUND filter is commented out; the Nether's and the End's too), in
+        // 26.3's registry order: path, then namespace. `corrected_biomes` keeps only the overworld's cave biomes.
         let global = data
             .biome_id("terraforged:cave")
             .map(Arc::new)
             .into_iter()
             .collect();
-        let mut special: Vec<_> = (0..data.biome_names().len() as u32).map(BiomeId).collect();
+        let mut special: Vec<_> = if settings.corrected_biomes {
+            CAVE_BIOMES
+                .iter()
+                .filter(|name| **name != "terraforged:cave")
+                .filter_map(|name| data.biome_id(name))
+                .collect()
+        } else {
+            (0..data.biome_names().len() as u32).map(BiomeId).collect()
+        };
         special.sort_by(|a, b| identifier_order(data.biome_name(*a), data.biome_name(*b)));
         let special = special.into_iter().map(Arc::new).collect();
         let caves = NoiseCaveGenerator::new(
@@ -277,7 +287,7 @@ impl TerraForgedPipeline {
             carvers: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             features: TerraForgedFeatures::new(data)?,
             structures,
-            settings: terraforged_settings::current(),
+            settings,
         })
     }
 
@@ -2219,5 +2229,55 @@ mod tests {
             assert_eq!(spans.first().unwrap().1, height);
             assert_eq!(pipeline.generator.cached_regions(), 0);
         }
+    }
+
+    /// Seed 98765's chunk (-9, -128) holds a unique cave the original fills with
+    /// `the_end`; corrected biomes give it an overworld cave biome.
+    #[test]
+    fn corrected_unique_caves_stay_in_the_overworld() {
+        let Some(data) = data() else { return };
+        let biomes = |corrected| {
+            super::terraforged_settings::set_for_thread(Some(
+                super::terraforged_settings::Settings {
+                    corrected_biomes: corrected,
+                    ..super::terraforged_settings::FAITHFUL
+                },
+            ));
+            let overworld = OverworldGenerator::for_world(
+                Arc::clone(&data),
+                98765,
+                PRESET,
+                "minecraft:overworld",
+                true,
+            )
+            .unwrap();
+            super::terraforged_settings::set_for_thread(None);
+            let chunk = overworld
+                .worker()
+                .generate_proto(ChunkPos::new(-9, -128))
+                .unwrap();
+            let mut names = std::collections::BTreeSet::new();
+            for y in (-64..64).step_by(4) {
+                for x in (0..16).step_by(4) {
+                    for z in (0..16).step_by(4) {
+                        names.insert(chunk.biome_at(x, y, z).to_owned());
+                    }
+                }
+            }
+            names
+        };
+        let faithful = biomes(false);
+        assert!(faithful.contains("minecraft:the_end"), "{faithful:?}");
+        let corrected = biomes(true);
+        assert!(!corrected.contains("minecraft:the_end"), "{corrected:?}");
+        assert!(
+            corrected.iter().any(|name| [
+                "minecraft:lush_caves",
+                "minecraft:dripstone_caves",
+                "minecraft:deep_dark"
+            ]
+            .contains(&name.as_str())),
+            "{corrected:?}"
+        );
     }
 }

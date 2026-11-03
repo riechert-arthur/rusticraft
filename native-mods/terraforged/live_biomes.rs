@@ -105,6 +105,16 @@ impl LiveBiomeBindings {
         Self::bind(&registry_entries(data), configured)
     }
 
+    /// [`Self::from_generator_data`] with the `corrected_biomes` setting's pools (see
+    /// [`RegistryBiomeMap::build_with`]) when `corrected`.
+    pub fn from_generator_data_with(
+        data: &GeneratorData,
+        configured: &[ClimateWeight],
+        corrected: bool,
+    ) -> Result<Self, MissingBiome> {
+        Self::bind_with(&registry_entries(data), configured, corrected)
+    }
+
     /// `new BiomeMapManager(access)` over `entries` (see [`RegistryBiomeMap::build`]) and the lookups by key. Entry
     /// `i` must hold `BiomeId(i)` (as [`GeneratorData`]'s do; panics otherwise). Keys match by namespace and path
     /// exactly (`Identifier.equals`).
@@ -117,6 +127,15 @@ impl LiveBiomeBindings {
     pub fn bind(
         entries: &[RegistryBiome<BiomeId>],
         configured: &[ClimateWeight],
+    ) -> Result<Self, MissingBiome> {
+        Self::bind_with(entries, configured, false)
+    }
+
+    /// [`Self::bind`] with the `corrected_biomes` setting's pools when `corrected`.
+    pub fn bind_with(
+        entries: &[RegistryBiome<BiomeId>],
+        configured: &[ClimateWeight],
+        corrected: bool,
     ) -> Result<Self, MissingBiome> {
         for (index, entry) in entries.iter().enumerate() {
             assert_eq!(
@@ -136,7 +155,8 @@ impl LiveBiomeBindings {
                 .map(|entry| Arc::clone(&entry.value))
                 .ok_or_else(|| MissingBiome(Arc::from(name)))
         };
-        let map = RegistryBiomeMap::build(entries, configured).map_err(MissingBiome)?;
+        let map =
+            RegistryBiomeMap::build_with(entries, configured, corrected).map_err(MissingBiome)?;
         let fallback = required(PLAINS)?;
         let overrides = OVERRIDES
             .iter()

@@ -127,6 +127,12 @@ don't generate, so they need none.
   away from rivers, and river cells above the river bed fill to sea level instead of their base
   height (where the ground is higher anyway). Deterministic either way, with `deterministic` on or
   off.
+- `corrected_biomes`: the climate pools leave out cave biomes (`deep_dark`, `lush_caves`,
+  `dripstone_caves`, `terraforged:cave`) and oceans, rivers and beaches, which TerraForged's own
+  overrides place where they belong, so `deep_dark` no longer spreads sculk over grass and
+  `deep_ocean` no longer covers dry land. Unique caves draw from the overworld's cave biomes instead of
+  every registered biome (the End's and the Nether's included). Structures still see every overworld
+  biome as possible.
 
 ## Layers
 
