@@ -8,6 +8,10 @@ modules. It intentionally does not alter world generation yet.
 On top of them sit TerraForged's octave sources (Perlin, Perlin2, legacy simplex, improved simplex and
 cubic) with their configuration, output bounds and the original explicit-seed behavior.
 
+The ridged sources (Ridge, Billow and SimplexRidge) and the `Rand` white-noise source follow, including Engine's
+quirks: `Rand.nextInt` divides by `range + range` (so it is almost always 0, and wraps for large ranges), and Engine
+throws for ridged sources with more than 30 octaves, where this port keeps going.
+
 ## Status: development only
 
 This layer only adds the noise functions. It changes nothing in the game, so there is nothing for players to install
