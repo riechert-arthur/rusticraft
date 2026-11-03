@@ -26,6 +26,12 @@ constant axis to NaN, and `CumulativeWarp` returns the second warp's coordinate 
 shorthands that build noise warps (`Domain.warp(seed, scale, octaves, strength)`, `Module.warp(seed, ...)`...) are not
 ported yet either.
 
+The selector layer adds Engine's `Base`, `Blend`, `VariableBlend` (`blendVar`) and `Select` modules, with the bounds
+Engine reports for them: `Base` keeps its base's minimum and the larger maximum, the others the smaller minimum and
+larger maximum of their two sources. Its tests check raw bits, including Engine's quirks: with a zero falloff `Select`
+only picks its upper source above `upperBound`, and `Blend` fixes its blend window from the control's bounds when it is
+built. `MultiBlend` (`Module.blend(blend, sources...)`) is not ported yet.
+
 ## Status: development only
 
 This layer only adds the noise functions. It changes nothing in the game, so there is nothing for players to install

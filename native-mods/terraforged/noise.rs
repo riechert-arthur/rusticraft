@@ -552,6 +552,46 @@ enum ModuleKind {
     Scale(Module, Module),
     Threshold(Module, Module),
     Warp(Module, Domain),
+    /// `Base`: `min` is `base.maxValue()` and `max` is `min + falloff`, both fixed in the constructor.
+    Base {
+        base: Module,
+        source: Module,
+        min: f32,
+        max: f32,
+        falloff: f32,
+        interpolation: Interpolation,
+    },
+    /// `Blend`: the blend window is fixed from the control's bounds in the constructor.
+    Blend {
+        control: Module,
+        lower: Module,
+        upper: Module,
+        blend_lower: f32,
+        blend_upper: f32,
+        blend_range: f32,
+        interpolation: Interpolation,
+    },
+    VariableBlend {
+        control: Module,
+        variable: Module,
+        lower: Module,
+        upper: Module,
+        midpoint: f32,
+        min_blend: f32,
+        max_blend: f32,
+        interpolation: Interpolation,
+    },
+    /// `Select`: `lower_curve`/`upper_curve` hold Engine's `(curveMin, curveMax, curveRange)` per bound, fixed in the
+    /// constructor.
+    Select {
+        control: Module,
+        lower: Module,
+        upper: Module,
+        falloff: f32,
+        lower_curve: (f32, f32, f32),
+        upper_curve: (f32, f32, f32),
+        interpolation: Interpolation,
+    },
     Add(Vec<Module>),
     Multiply(Vec<Module>),
     Max(Vec<Module>),
@@ -631,6 +671,118 @@ impl Module {
                 }
             }
             ModuleKind::Warp(source, domain) => source.value(domain.x(x, y), domain.y(x, y)),
+            ModuleKind::Base {
+                base,
+                source,
+                min,
+                max,
+                falloff,
+                interpolation,
+            } => {
+                let upper = source.value(x, y);
+                if upper < *max {
+                    let lower = base.value(x, y);
+                    if *falloff > 0.0 {
+                        let alpha = (*max - java_max(*min, upper)) / *falloff;
+                        lerp(upper, lower, interpolation.apply(alpha))
+                    } else {
+                        lower
+                    }
+                } else {
+                    upper
+                }
+            }
+            ModuleKind::Blend {
+                control,
+                lower,
+                upper,
+                blend_lower,
+                blend_upper,
+                blend_range,
+                interpolation,
+            } => {
+                let select = control.value(x, y);
+                if select < *blend_lower {
+                    lower.value(x, y)
+                } else if select > *blend_upper {
+                    upper.value(x, y)
+                } else {
+                    let alpha = (select - *blend_lower) / *blend_range;
+                    lerp(
+                        lower.value(x, y),
+                        upper.value(x, y),
+                        interpolation.apply(alpha),
+                    )
+                }
+            }
+            ModuleKind::VariableBlend {
+                control,
+                variable,
+                lower,
+                upper,
+                midpoint,
+                min_blend,
+                max_blend,
+                interpolation,
+            } => {
+                let select = control.value(x, y);
+                let radius = *min_blend + variable.value(x, y) * *max_blend;
+                let min = java_max(0.0, *midpoint - radius);
+                if select < min {
+                    return lower.value(x, y);
+                }
+                let max = java_min(1.0, *midpoint + radius);
+                if select > max {
+                    return upper.value(x, y);
+                }
+                let alpha = (select - min) / (max - min);
+                lerp(
+                    lower.value(x, y),
+                    upper.value(x, y),
+                    interpolation.apply(alpha),
+                )
+            }
+            ModuleKind::Select {
+                control,
+                lower,
+                upper,
+                falloff,
+                lower_curve: (lower_min, lower_max, lower_range),
+                upper_curve: (upper_min, upper_max, upper_range),
+                interpolation,
+            } => {
+                let value = control.value(x, y);
+                if *falloff == 0.0 {
+                    // Engine's hard edge: only values above `upperBound` pick the upper source.
+                    if value < *lower_max {
+                        lower.value(x, y)
+                    } else if value > *upper_min {
+                        upper.value(x, y)
+                    } else {
+                        lower.value(x, y)
+                    }
+                } else if value < *lower_min {
+                    lower.value(x, y)
+                } else if value < *lower_max {
+                    let alpha = (value - *lower_min) / *lower_range;
+                    lerp(
+                        lower.value(x, y),
+                        upper.value(x, y),
+                        interpolation.apply(alpha),
+                    )
+                } else if value < *upper_min {
+                    upper.value(x, y)
+                } else if value < *upper_max {
+                    let alpha = (value - *upper_min) / *upper_range;
+                    lerp(
+                        upper.value(x, y),
+                        lower.value(x, y),
+                        interpolation.apply(alpha),
+                    )
+                } else {
+                    lower.value(x, y)
+                }
+            }
             ModuleKind::Add(sources) => combine(sources, x, y, |a, b| a + b),
             ModuleKind::Multiply(sources) => combine(sources, x, y, |a, b| a * b),
             ModuleKind::Max(sources) => combine(sources, x, y, java_max),
@@ -747,6 +899,105 @@ impl Module {
     pub fn warp(self, domain: Domain) -> Self {
         let source = self.clone();
         Self::modifier(ModuleKind::Warp(self, domain), &source)
+    }
+
+    /// `Module.base(Module, falloff, Interpolation)` (`new Base(this, other, ...)`; Engine's two-argument form
+    /// uses `Interpolation.CURVE3`). Reports the base's minimum and the larger of both maxima.
+    pub fn base(self, source: Self, falloff: f32, interpolation: Interpolation) -> Self {
+        let min = self.max_value();
+        let max = self.max_value() + falloff;
+        let (low, high) = (
+            self.min_value(),
+            java_max(self.max_value(), source.max_value()),
+        );
+        let kind = ModuleKind::Base {
+            base: self,
+            source,
+            min,
+            max,
+            falloff,
+            interpolation,
+        };
+        Self::node(kind, low, high)
+    }
+
+    /// `Module.blend(Module, Module, midpoint, blendRange, Interpolation)` (Engine's four-argument form uses
+    /// `Interpolation.LINEAR`). Reports the smaller minimum and larger maximum of `lower` and `upper`.
+    pub fn blend(
+        self,
+        lower: Self,
+        upper: Self,
+        midpoint: f32,
+        blend_range: f32,
+        interpolation: Interpolation,
+    ) -> Self {
+        let mid = self.min_value() + (self.max_value() - self.min_value()) * midpoint;
+        let blend_lower = java_max(self.min_value(), mid - blend_range / 2.0);
+        let blend_upper = java_min(self.max_value(), mid + blend_range / 2.0);
+        let (low, high) = selector_bounds(&lower, &upper);
+        let kind = ModuleKind::Blend {
+            control: self,
+            lower,
+            upper,
+            blend_lower,
+            blend_upper,
+            blend_range: blend_upper - blend_lower,
+            interpolation,
+        };
+        Self::node(kind, low, high)
+    }
+
+    /// `Module.blendVar(variable, Module, Module, midpoint, min, max, Interpolation)` (`VariableBlend`).
+    pub fn variable_blend(
+        self,
+        variable: Self,
+        lower: Self,
+        upper: Self,
+        midpoint: f32,
+        min_blend: f32,
+        max_blend: f32,
+        interpolation: Interpolation,
+    ) -> Self {
+        let (low, high) = selector_bounds(&lower, &upper);
+        let kind = ModuleKind::VariableBlend {
+            control: self,
+            variable,
+            lower,
+            upper,
+            midpoint,
+            min_blend,
+            max_blend,
+            interpolation,
+        };
+        Self::node(kind, low, high)
+    }
+
+    /// `Module.select(Module, Module, lowerBound, upperBound, falloff, Interpolation)` (Engine's five-argument
+    /// form uses `Interpolation.CURVE3`).
+    pub fn select(
+        self,
+        lower: Self,
+        upper: Self,
+        lower_bound: f32,
+        upper_bound: f32,
+        falloff: f32,
+        interpolation: Interpolation,
+    ) -> Self {
+        let curve = |bound: f32| {
+            let (min, max) = (bound - falloff, bound + falloff);
+            (min, max, max - min)
+        };
+        let (low, high) = selector_bounds(&lower, &upper);
+        let kind = ModuleKind::Select {
+            control: self,
+            lower,
+            upper,
+            falloff,
+            lower_curve: curve(lower_bound),
+            upper_curve: curve(upper_bound),
+            interpolation,
+        };
+        Self::node(kind, low, high)
     }
 
     /// `new Add(sources...)`.
@@ -909,6 +1160,14 @@ fn combine(sources: &[Module], x: f32, y: f32, operation: impl Fn(f32, f32) -> f
 }
 
 /// `Combiner`'s constructor: the first source's bound, then `minTotal`/`maxTotal` over the rest; 0 when empty.
+/// `Selector`'s `Combiner` bounds over `{lower, upper}`: `Math.min` of the minima, `Math.max` of the maxima.
+fn selector_bounds(lower: &Module, upper: &Module) -> (f32, f32) {
+    (
+        java_min(lower.min_value(), upper.min_value()),
+        java_max(lower.max_value(), upper.max_value()),
+    )
+}
+
 fn fold_bounds(
     sources: &[Module],
     first: impl Fn(&Module) -> f32,
@@ -936,6 +1195,24 @@ fn java_max(first: f32, second: f32) -> f32 {
             -0.0
         }
     } else if first >= second {
+        first
+    } else {
+        second
+    }
+}
+
+fn java_min(first: f32, second: f32) -> f32 {
+    if first.is_nan() {
+        first
+    } else if second.is_nan() {
+        second
+    } else if first == 0.0 && second == 0.0 {
+        if first.is_sign_negative() || second.is_sign_negative() {
+            -0.0
+        } else {
+            0.0
+        }
+    } else if first <= second {
         first
     } else {
         second
@@ -1920,5 +2197,322 @@ mod tests {
                 [0xbf35287d, 0xbf349a32],
             ]
         );
+    }
+
+    #[test]
+    fn selectors_match_engine_0_3_0() {
+        // Java `SelectorSweep` oracle (`.local/terraforged/oracles/selectors/`).
+        let source = |kind, seed, scale: f32, octaves, gain| {
+            Module::source(Source::new(
+                kind,
+                SourceConfig {
+                    seed,
+                    octaves,
+                    gain,
+                    frequency: 1.0 / scale,
+                    lacunarity: 2.0,
+                    interpolation: Interpolation::Curve3,
+                },
+            ))
+        };
+        let control = source(SourceKind::Perlin, 501, 80.0, 3, 0.5);
+        let lower = source(SourceKind::Simplex, 502, 120.0, 2, 0.5)
+            .scale(Module::constant(0.5))
+            .bias(Module::constant(-0.25));
+        let upper = source(SourceKind::Ridge, 503, 96.0, 3, 0.975)
+            .scale(Module::constant(1.5))
+            .bias(Module::constant(0.1));
+        let variable = source(SourceKind::Simplex, 504, 64.0, 2, 0.5);
+        let points = [
+            (0.0, 0.0),
+            (12.25, -98.75),
+            (-4096.5, 8192.25),
+            (123456.75, -0.125),
+            (64.0, 64.0),
+            (-128.0, 32.0),
+            (777.0, -333.0),
+            (-1024.0, -2048.0),
+        ];
+        let cases = [
+            (
+                lower
+                    .clone()
+                    .base(upper.clone(), 0.3, Interpolation::Curve3),
+                [0xbe800000, 0x3fcccccd],
+                [
+                    0x3fcccccd, 0x3fa8e9ab, 0x3f964679, 0x3fc8a719, 0x3f46bead, 0x3f773e11,
+                    0x3fafdf2f, 0x3f73d5fa,
+                ],
+            ),
+            (
+                control.clone().blend(
+                    lower.clone(),
+                    upper.clone(),
+                    0.45,
+                    0.35,
+                    Interpolation::Curve4,
+                ),
+                [0xbe800000, 0x3fcccccd],
+                [
+                    0x3f9a5848, 0x3f2114d2, 0x3f6a1af9, 0x3fc709c5, 0x3e058e80, 0x3f772288,
+                    0x3fa8c9bc, 0x3c912b30,
+                ],
+            ),
+            (
+                control.clone().variable_blend(
+                    variable,
+                    lower.clone(),
+                    upper.clone(),
+                    0.55,
+                    0.05,
+                    0.2,
+                    Interpolation::Curve3,
+                ),
+                [0xbe800000, 0x3fcccccd],
+                [
+                    0x3ed46297, 0xbdd54186, 0x3e5881e1, 0x3f876c7b, 0x3c197ec0, 0x3f464b90,
+                    0x3f4c3d46, 0xbdf59262,
+                ],
+            ),
+            (
+                control.clone().select(
+                    lower.clone(),
+                    upper.clone(),
+                    0.3,
+                    0.7,
+                    0.12,
+                    Interpolation::Curve4,
+                ),
+                [0xbe800000, 0x3fcccccd],
+                [
+                    0x3fcccccd, 0x3fa8e9ab, 0x3f964679, 0x3fc868e9, 0x3f3f186f, 0x3f728147,
+                    0x3fafdf2f, 0x3f626264,
+                ],
+            ),
+            (
+                control
+                    .clone()
+                    .select(lower, upper, 0.3, 0.7, 0.0, Interpolation::Linear),
+                [0xbe800000, 0x3fcccccd],
+                [
+                    0, 0xbe04fbbe, 0xbda942b6, 0xbe166d16, 0x3c197ec0, 0x3cf473f0, 0x3dcc8d18,
+                    0xbdf59262,
+                ],
+            ),
+        ];
+        for (module, expected_bounds, expected_values) in cases {
+            assert_eq!(
+                [module.min_value().to_bits(), module.max_value().to_bits()],
+                expected_bounds
+            );
+            assert_eq!(
+                bits(points.map(|(x, y)| module.value(x, y))),
+                expected_values
+            );
+        }
+    }
+
+    #[test]
+    fn selector_edges_match_engine_0_3_0() {
+        // Java `Selectors` oracle (`.local/terraforged/oracles/selectors/`): constant controls on and between the
+        // edges, reversed bounds, zero and negative falloffs. NaN prints as `floatToIntBits` (0x7fc00000).
+        const EXPECTED: &str = "\
+sel0 0x3dcccccd 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+sel0inv 0x3dcccccd 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+sel 0x3dcccccd 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+selinv 0x3dcccccd 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+selneg 0x3dcccccd 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+blend 0x3dcccccd 0xbe800000 0x3fcccccd | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000\n\
+var 0x3dcccccd 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+base 0x3dcccccd 0x3dcccccd 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+base0 0x3dcccccd 0x3dcccccd 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+baseneg 0x3dcccccd 0x3dcccccd 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+sel0 0x3e99999a 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+sel0inv 0x3e99999a 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+sel 0x3e99999a 0xbe800000 0x3fcccccd | 0x3f4ccccd 0x3f184a34 0x3f0bb24d 0x3ec924a8\n\
+selinv 0x3e99999a 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+selneg 0x3e99999a 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+blend 0x3e99999a 0xbe800000 0x3fcccccd | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000\n\
+var 0x3e99999a 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+base 0x3e99999a 0x3e99999a 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+base0 0x3e99999a 0x3e99999a 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+baseneg 0x3e99999a 0x3e99999a 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+sel0 0x3eb851ec 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+sel0inv 0x3eb851ec 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+sel 0x3eb851ec 0xbe800000 0x3fcccccd | 0x3faccccd 0x3f8bec3e 0x3f7a489d 0x3f2810d1\n\
+selinv 0x3eb851ec 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+selneg 0x3eb851ec 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+blend 0x3eb851ec 0xbe800000 0x3fcccccd | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000\n\
+var 0x3eb851ec 0xbe800000 0x3fcccccd | 0x3e75c292 0xbdd3fd70 0xbda942b6 0x3c197ec0\n\
+base 0x3eb851ec 0x3eb851ec 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+base0 0x3eb851ec 0x3eb851ec 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+baseneg 0x3eb851ec 0x3eb851ec 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+sel0 0x3f000000 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+sel0inv 0x3f000000 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+sel 0x3f000000 0xbe800000 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+selinv 0x3f000000 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+selneg 0x3f000000 0xbe800000 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+blend 0x3f000000 0xbe800000 0x3fcccccd | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000\n\
+var 0x3f000000 0xbe800000 0x3fcccccd | 0x3f4ccccd 0x3f184a34 0x3f0bb24d 0x3ec924a8\n\
+base 0x3f000000 0x3f000000 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f457eaf\n\
+base0 0x3f000000 0x3f000000 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+baseneg 0x3f000000 0x3f000000 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+sel0 0x3f333333 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+sel0inv 0x3f333333 0xbe800000 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+sel 0x3f333333 0xbe800000 0x3fcccccd | 0x3f4ccccd 0x3f184a33 0x3f0bb24e 0x3ec924a8\n\
+selinv 0x3f333333 0xbe800000 0x3fcccccd | 0x3f4ccccd 0x3f184a34 0x3f0bb24d 0x3ec924a8\n\
+selneg 0x3f333333 0xbe800000 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+blend 0x3f333333 0xbe800000 0x3fcccccd | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000\n\
+var 0x3f333333 0xbe800000 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+base 0x3f333333 0x3f333333 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f365a6b\n\
+base0 0x3f333333 0x3f333333 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+baseneg 0x3f333333 0x3f333333 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+sel0 0x3f51eb85 0xbe800000 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+sel0inv 0x3f51eb85 0xbe800000 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+sel 0x3f51eb85 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+selinv 0x3f51eb85 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+selneg 0x3f51eb85 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+blend 0x3f51eb85 0xbe800000 0x3fcccccd | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000\n\
+var 0x3f51eb85 0xbe800000 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+base 0x3f51eb85 0x3f51eb85 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f51eb85\n\
+base0 0x3f51eb85 0x3f51eb85 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f51eb85\n\
+baseneg 0x3f51eb85 0x3f51eb85 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+sel0 0x3f666666 0xbe800000 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+sel0inv 0x3f666666 0xbe800000 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+sel 0x3f666666 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+selinv 0x3f666666 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+selneg 0x3f666666 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+blend 0x3f666666 0xbe800000 0x3fcccccd | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000\n\
+var 0x3f666666 0xbe800000 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+base 0x3f666666 0x3f666666 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f958832 0x3f666666\n\
+base0 0x3f666666 0x3f666666 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f666666\n\
+baseneg 0x3f666666 0x3f666666 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+sel0 0x7fc00000 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+sel0inv 0x7fc00000 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+sel 0x7fc00000 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+selinv 0x7fc00000 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+selneg 0x7fc00000 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+blend 0x7fc00000 0xbe800000 0x3fcccccd | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000\n\
+var 0x7fc00000 0xbe800000 0x3fcccccd | 0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000\n\
+base 0x7fc00000 0x7fc00000 0x7fc00000 | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+base0 0x7fc00000 0x7fc00000 0x7fc00000 | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+baseneg 0x7fc00000 0x7fc00000 0x7fc00000 | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+blendwide 0xbe800000 0x3fcccccd | 0x3f4ccccd 0x3f0760c8 0x3f0ea1c7 0x3e9978a0\n\
+blendzero 0xbe800000 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3c197ec0\n\
+basectl 0xbe800000 0x3f800000 | 0x3eb98c02 0x3e32940c 0x3ebc62d2 0x3da4e1f8";
+        let source = |kind, seed, scale: f32, octaves, gain| {
+            Module::source(Source::new(
+                kind,
+                SourceConfig {
+                    seed,
+                    octaves,
+                    gain,
+                    frequency: 1.0 / scale,
+                    lacunarity: 2.0,
+                    interpolation: Interpolation::Curve3,
+                },
+            ))
+        };
+        let hex = |value: f32| {
+            let bits = if value.is_nan() {
+                0x7fc0_0000
+            } else {
+                value.to_bits()
+            };
+            format!("0x{bits:08x}")
+        };
+        let mut lines = Vec::new();
+        let mut print = |name: String, module: Module| {
+            let mut line = format!(
+                "{name} {} {} |",
+                hex(module.min_value()),
+                hex(module.max_value())
+            );
+            for (x, y) in [
+                (0.0, 0.0),
+                (12.25, -98.75),
+                (-4096.5, 8192.25),
+                (64.0, 64.0),
+            ] {
+                line += &format!(" {}", hex(module.value(x, y)));
+            }
+            lines.push(line);
+        };
+        let lower = source(SourceKind::Simplex, 502, 120.0, 2, 0.5)
+            .scale(Module::constant(0.5))
+            .bias(Module::constant(-0.25));
+        let upper = source(SourceKind::Ridge, 503, 96.0, 3, 0.975)
+            .scale(Module::constant(1.5))
+            .bias(Module::constant(0.1));
+        let variable = source(SourceKind::Simplex, 504, 64.0, 2, 0.5);
+        let (l, u) = (|| lower.clone(), || upper.clone());
+        for c in [0.1, 0.3, 0.36, 0.5, 0.7, 0.82, 0.9, f32::NAN] {
+            let k = || Module::constant(c);
+            let t = hex(c);
+            print(
+                format!("sel0 {t}"),
+                k().select(l(), u(), 0.3, 0.7, 0.0, Interpolation::Linear),
+            );
+            print(
+                format!("sel0inv {t}"),
+                k().select(l(), u(), 0.7, 0.3, 0.0, Interpolation::Linear),
+            );
+            print(
+                format!("sel {t}"),
+                k().select(l(), u(), 0.3, 0.7, 0.12, Interpolation::Curve3),
+            );
+            print(
+                format!("selinv {t}"),
+                k().select(l(), u(), 0.7, 0.3, 0.12, Interpolation::Curve4),
+            );
+            print(
+                format!("selneg {t}"),
+                k().select(l(), u(), 0.3, 0.7, -0.12, Interpolation::Linear),
+            );
+            print(
+                format!("blend {t}"),
+                k().blend(l(), u(), 0.5, 0.2, Interpolation::Curve3),
+            );
+            let var = k().variable_blend(
+                variable.clone(),
+                l(),
+                u(),
+                0.5,
+                0.05,
+                0.3,
+                Interpolation::Linear,
+            );
+            print(format!("var {t}"), var);
+            print(
+                format!("base {t}"),
+                k().base(u(), 0.3, Interpolation::Curve3),
+            );
+            print(
+                format!("base0 {t}"),
+                k().base(u(), 0.0, Interpolation::Curve3),
+            );
+            print(
+                format!("baseneg {t}"),
+                k().base(u(), -0.2, Interpolation::Linear),
+            );
+        }
+        let control = source(SourceKind::Perlin, 501, 80.0, 3, 0.5);
+        print(
+            "blendwide".into(),
+            control
+                .clone()
+                .blend(l(), u(), 0.45, 5.0, Interpolation::Linear),
+        );
+        print(
+            "blendzero".into(),
+            control
+                .clone()
+                .blend(l(), u(), 0.45, 0.0, Interpolation::Linear),
+        );
+        print(
+            "basectl".into(),
+            l().base(control, 0.4, Interpolation::Curve4),
+        );
+        assert_eq!(lines, EXPECTED.lines().collect::<Vec<_>>());
     }
 }
