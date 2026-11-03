@@ -62,6 +62,8 @@ pub struct ErodedNoiseGenerator {
     smoothing: HeightmapSmoothingSettings,
     resources: Mutex<VecDeque<NoiseResource>>,
     regions: ErosionRegionCache<Vec<f32>>,
+    /// The `deterministic` setting: reset each sample's river noise (see `generate`).
+    fresh_rivers: bool,
 }
 
 impl ErodedNoiseGenerator {
@@ -76,6 +78,7 @@ impl ErodedNoiseGenerator {
             smoothing,
             resources: Mutex::new(VecDeque::new()),
             regions: ErosionRegionCache::new(),
+            fresh_rivers: super::terraforged_settings::current().deterministic,
         }
     }
 
@@ -233,6 +236,16 @@ impl NoiseGeneratorContract for ErodedNoiseGenerator {
                         .sample_terrain(seed, noise_x, noise_z, sample, &mut blender);
                     sample.height_noise =
                         region[row.wrapping_add(offset_x).wrapping_add(delta_x) as usize];
+                    // The original reuses its samples from chunk to chunk without resetting
+                    // the river noise, which the carver only multiplies: a column keeps
+                    // the product of every chunk its worker sampled before, so after a few
+                    // chunks it is 0 inland (wet everywhere, the forests TerraForged worlds
+                    // are known for) but not on a worker's first chunks. Deterministic
+                    // worlds start at that settled 0; the carver still sets 1 seaward of
+                    // the beach.
+                    if self.fresh_rivers {
+                        sample.river_noise = 0.0;
+                    }
                     self.generator.sample_river(seed, noise_x, noise_z, sample);
                     resource.chunk.set_noise_index(index, sample);
                 }

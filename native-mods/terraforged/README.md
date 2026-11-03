@@ -46,6 +46,24 @@ Differences:
 - The built-in pack's taller overworld and clouds also change vanilla tests in a modded build (the
   cloud height and the pack lists).
 
+## Settings
+
+Horizon's own improvements on TerraForged, every one off by default (the faithful port). A new
+TerraForged world takes them from `config/terraforged/settings.json` in the game folder, written with
+every setting off the first time, and keeps them in its overworld generator
+(`generator.horizon_settings`), as TerraForged keeps its own settings, so changing the file later
+leaves existing worlds as they are.
+
+- `deterministic`: the same seed makes the same world, whatever the threads and the order chunks
+  generate in. TerraForged reuses its noise samples from chunk to chunk without resetting their river
+  noise, which the river carver only multiplies, so a column carries the product of every chunk its
+  worker sampled before: about 0 inland after a few chunks, but not on a worker's first ones (Java
+  does the same). Its vegetation also seeds each feature by how many placed before it. With the
+  setting, the river noise starts at that settled 0 (TerraForged's familiar forests, everywhere) and
+  each placement is seeded from its position and feature index, on the ground under any leaves. Two
+  worlds on one seed then match chunk for chunk; `/tf regen` restores all but the trees that collide
+  with their neighbours' (whichever decorated first wins, and the world's first order isn't recorded).
+
 ## Layers
 
 The layers were added in this order; later notes supersede earlier ones. The first ports the

@@ -48,6 +48,12 @@ const VEGETAL: usize = 9;
 const MAX_STAGE: usize = 10;
 const BORDER: f32 = 6.0;
 const X_PRIME: i32 = 1_619;
+// `deterministic`'s feature-seed slots: apart, and past the original's offsets.
+const CORNER_TREES: i32 = 0x1000;
+const CORNER_GRASS: i32 = 0x1100;
+const GRASS: i32 = 0x2000;
+const OTHER: i32 = 0x3000;
+const SAMPLED_TREES: i32 = 0x10000;
 const Y_PRIME: i32 = 31_337;
 
 /// What TerraForged adds to the vanilla decoration resources.
@@ -56,6 +62,7 @@ pub(in crate::worldgen) struct TerraForgedDecoration<'a> {
     pub vegetation: &'a [VegetationConfig],
     pub caves: &'a NoiseCaveGenerator<BiomeId>,
     pub surface: &'a SurfaceBindings<'a>,
+    pub settings: super::super::generator::terraforged_settings::Settings,
 }
 
 type Random = WorldgenRandom<LegacyRandom>;
@@ -157,6 +164,7 @@ pub(in crate::worldgen) fn decorate(
         stats: DecorateStats::default(),
         placer: FeaturePlacer::new(),
         steps: HashMap::new(),
+        deterministic: tf.settings.deterministic,
         structures,
         references,
         chunk_box: BoundingBox::new(
@@ -293,6 +301,8 @@ struct Decorator<'a> {
     placer: FeaturePlacer,
     /// Each biome's feature ids per step, from its definition.
     steps: HashMap<BiomeId, Arc<Vec<Vec<String>>>>,
+    /// `deterministic`: fixed feature-seed slots and the ground under leaves.
+    deterministic: bool,
     structures: Option<&'a super::super::generator_structures::StructureState>,
     references: Vec<Arc<super::super::structure::start::StructureStart>>,
     chunk_box: BoundingBox,
@@ -461,6 +471,55 @@ impl Decorator<'_> {
         (config, features)
     }
 
+    /// The feature-seed index of a vegetation placement: the original's running count
+    /// of placed features, or, with `deterministic`, a fixed slot for the
+    /// placement, so a blocked tree no longer reseeds the rest of its chunk.
+    fn seed_index(&self, offset: usize, slot: i32) -> i32 {
+        if self.deterministic {
+            slot
+        } else {
+            offset as i32
+        }
+    }
+
+    /// `chunk.getHeight(OCEAN_FLOOR_WG, x, z)`: the top block, one under the first free
+    /// one. With `deterministic`, below the trees, vines and mushrooms
+    /// decoration put there, so a neighbour's leaves don't move the ground.
+    fn top(&self, world: &mut World<'_>, x: i32, z: i32) -> Result<i32, GeneratorError> {
+        let mut y = world
+            .height(HeightmapType::OceanFloorWg, x, z)
+            .map(|first_free| first_free - 1)
+            .map_err(|e| resource(e.to_string()))?;
+        if self.deterministic {
+            let registry = self.data.registry();
+            for _ in 0..64 {
+                let state =
+                    super::super::placement::PlacementContext::block_state(world, [x, y, z])
+                        .map_err(|e| resource(e.to_string()))?;
+                let decoration = registry.state(state).is_some_and(|block| {
+                    let name = block.name.as_str();
+                    [
+                        "_leaves",
+                        "_log",
+                        "_wood",
+                        "vine",
+                        "mushroom_block",
+                        "_stem",
+                        "bee_nest",
+                    ]
+                    .iter()
+                    .any(|part| name.contains(part))
+                        && !name.starts_with("minecraft:stripped")
+                });
+                if !decoration {
+                    break;
+                }
+                y -= 1;
+            }
+        }
+        Ok(y)
+    }
+
     /// `PositionSampler.placeTreesAndGrass`; returns the feature-seed offset it reached.
     fn trees_and_grass(
         &mut self,
@@ -480,7 +539,7 @@ impl Decorator<'_> {
         for dz in 0..16 {
             for dx in 0..16 {
                 let (x, z) = (start_x + dx, start_z + dz);
-                let y = top(world, x, z)?;
+                let y = self.top(world, x, z)?;
                 let biome = world
                     .biome_identity([x, y, z])
                     .map_err(|e| resource(e.to_string()))?;
@@ -568,18 +627,20 @@ impl Decorator<'_> {
         sea_level: i32,
         features: &VegetationFeatures,
     ) -> Result<usize, GeneratorError> {
-        let y = top(world, x, z)?;
+        let y = self.top(world, x, z)?;
         if y <= sea_level {
             return Ok(offset);
         }
-        for (name, unwrap) in &features.trees {
-            random.set_feature_seed(seed, offset as i32, VEGETAL as i32);
+        for (slot, (name, unwrap)) in features.trees.iter().enumerate() {
+            let index = self.seed_index(offset, CORNER_TREES + slot as i32);
+            random.set_feature_seed(seed, index, VEGETAL as i32);
             if self.place(world, random, name, *unwrap, [x, y, z]) {
                 offset += 1;
             }
         }
-        for name in &features.grass {
-            random.set_feature_seed(seed, offset as i32, VEGETAL as i32);
+        for (slot, name) in features.grass.iter().enumerate() {
+            let index = self.seed_index(offset, CORNER_GRASS + slot as i32);
+            random.set_feature_seed(seed, index, VEGETAL as i32);
             if self.place(world, random, name, false, [x, y, z]) {
                 offset += 1;
             }
@@ -624,7 +685,7 @@ impl Decorator<'_> {
                 if pos_x >> 4 != chunk.x || pos_z >> 4 != chunk.z {
                     continue;
                 }
-                let y = top(world, pos_x, pos_z)?;
+                let y = self.top(world, pos_x, pos_z)?;
                 if y <= sea_level {
                     continue;
                 }
@@ -639,8 +700,10 @@ impl Decorator<'_> {
                 if fitness < noise {
                     continue;
                 }
-                for (name, unwrap) in &features.trees {
-                    random.set_feature_seed(seed, offset as i32, VEGETAL as i32);
+                let column = ((pos_z & 15) * 16 + (pos_x & 15)) * 16;
+                for (slot, (name, unwrap)) in features.trees.iter().enumerate() {
+                    let index = self.seed_index(offset, SAMPLED_TREES + column + slot as i32);
+                    random.set_feature_seed(seed, index, VEGETAL as i32);
                     if self.place(world, random, name, *unwrap, [pos_x, y, pos_z]) {
                         offset += 1;
                     }
@@ -670,8 +733,13 @@ impl Decorator<'_> {
         passes -= (5.0 * terrain.height_at(8, 8) as f32).floor() as i32;
         let passes = passes.max(2);
         for i in 0..passes {
-            for name in &features.grass {
-                random.set_feature_seed(seed, (offset as i32).wrapping_add(i), VEGETAL as i32);
+            for (slot, name) in features.grass.iter().enumerate() {
+                let index = if self.deterministic {
+                    GRASS + i * 64 + slot as i32
+                } else {
+                    (offset as i32).wrapping_add(i)
+                };
+                random.set_feature_seed(seed, index, VEGETAL as i32);
                 if self.place(world, random, name, false, [x, 0, z]) {
                     offset += 1;
                 }
@@ -693,22 +761,15 @@ impl Decorator<'_> {
         tf: &TerraForgedDecoration<'_>,
     ) -> Result<(), GeneratorError> {
         let (_, features) = self.vegetation(biome, tf);
-        for name in &features.other {
-            random.set_feature_seed(seed, offset as i32, VEGETAL as i32);
+        for (slot, name) in features.other.iter().enumerate() {
+            let index = self.seed_index(offset, OTHER + slot as i32);
+            random.set_feature_seed(seed, index, VEGETAL as i32);
             if self.place(world, random, name, false, origin) {
                 offset += 1;
             }
         }
         Ok(())
     }
-}
-
-/// `chunk.getHeight(OCEAN_FLOOR_WG, x, z)`: the top block, one under the first free one.
-fn top(world: &mut World<'_>, x: i32, z: i32) -> Result<i32, GeneratorError> {
-    world
-        .height(HeightmapType::OceanFloorWg, x, z)
-        .map(|first_free| first_free - 1)
-        .map_err(|e| resource(e.to_string()))
 }
 
 /// `ViabilityContext`: the chunk's terrain data, seed 0 and no biome edges (the original

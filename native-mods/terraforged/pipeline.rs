@@ -40,6 +40,7 @@ use super::{
     terraforged_generator_facade::{TerraForgedGenerator, TerraHeightmap},
     terraforged_generator_preset::{build as build_noise, terrain_levels},
     terraforged_live_biomes::LiveBiomeBindings,
+    terraforged_settings::{self, Settings},
     terraforged_structure_queries::TfQueries,
     terraforged_structure_terrain::StructureTerrain,
     terraforged_surface_bindings::SurfaceBindings,
@@ -69,6 +70,8 @@ pub(super) struct TerraForgedPipeline {
     /// Block states by block and by tag, for TerraForged's surface passes.
     blocks: BlockSets,
     block_tags: BlockSets,
+    /// Horizon's settings of the world (`terraforged_settings`), when it was built.
+    settings: Settings,
 }
 
 /// `OverworldGenerator::for_world` and `for_dimension`, overwritten: a TerraForged
@@ -147,6 +150,7 @@ impl TerraForgedPipeline {
             structures,
             blocks,
             block_tags,
+            settings: terraforged_settings::current(),
         })
     }
 
@@ -582,6 +586,7 @@ impl SeededPipeline for TerraForgedPipeline {
                 vegetation: &self.vegetation,
                 caves: &self.caves,
                 surface: &surface,
+                settings: self.settings,
             },
         )
     }
@@ -927,5 +932,159 @@ mod tests {
             .filter(|&(x, y, z)| region[4].block_name(x, y, z).ends_with("_log"))
             .count();
         assert!(logs > 0, "no tree logs in the decorated chunk");
+    }
+
+    /// Tree blocks per chunk of the middle 3x3 of a fresh 5x5, decorated in `order`.
+    fn decorated_trees(
+        data: &Arc<GeneratorData>,
+        order: &[(i32, i32)],
+        threads: usize,
+    ) -> std::collections::BTreeMap<(i32, i32), usize> {
+        let overworld = OverworldGenerator::for_world(
+            Arc::clone(data),
+            777,
+            PRESET,
+            "minecraft:overworld",
+            true,
+        )
+        .unwrap();
+        let mut worker = overworld.worker();
+        let mut protos: std::collections::BTreeMap<
+            (i32, i32),
+            crate::worldgen::generator::ProtoChunk,
+        > = std::collections::BTreeMap::new();
+        let all: Vec<(i32, i32)> = (-2..=2)
+            .flat_map(|x| (-2..=2).map(move |z| (x, z)))
+            .collect();
+        if threads <= 1 {
+            for &(x, z) in &all {
+                protos.insert((x, z), worker.generate_proto(ChunkPos::new(x, z)).unwrap());
+            }
+        } else {
+            let made = std::sync::Mutex::new(Vec::new());
+            std::thread::scope(|scope| {
+                for t in 0..threads {
+                    let (overworld, all, made) = (&overworld, &all, &made);
+                    scope.spawn(move || {
+                        let mut worker = overworld.worker();
+                        for &(x, z) in all.iter().skip(t).step_by(threads) {
+                            let chunk = worker.generate_proto(ChunkPos::new(x, z)).unwrap();
+                            made.lock().unwrap().push(((x, z), chunk));
+                        }
+                    });
+                }
+            });
+            protos.extend(made.into_inner().unwrap());
+        }
+        if threads == 0 {
+            worker = overworld.worker();
+        }
+        for &(cx, cz) in order {
+            let keys: Vec<(i32, i32)> = (0..9).map(|i| (cx + i % 3 - 1, cz + i / 3 - 1)).collect();
+            let region: Vec<_> = keys.iter().map(|k| protos.remove(k).unwrap()).collect();
+            let mut region: [_; 9] = region.try_into().ok().unwrap();
+            worker.decorate(&mut region).unwrap();
+            for (key, chunk) in keys.into_iter().zip(region) {
+                protos.insert(key, chunk);
+            }
+        }
+        let mut trees = std::collections::BTreeMap::new();
+        for &(cx, cz) in order {
+            let chunk = &protos[&(cx, cz)];
+            let mut n = 0;
+            for x in 0..16 {
+                for z in 0..16 {
+                    for y in 40..400 {
+                        let name = chunk.block_name(x, y, z);
+                        n += usize::from(name.ends_with("_log") || name.ends_with("_leaves"));
+                    }
+                }
+            }
+            trees.insert((cx, cz), n);
+        }
+        trees
+    }
+
+    #[test]
+    #[ignore = "decorates 9 chunks three times (about a minute)"]
+    fn deterministic_decoration_ignores_threads_and_workers() {
+        let Some(data) = data() else { return };
+        let forward: Vec<(i32, i32)> = (-1..=1)
+            .flat_map(|z| (-1..=1).map(move |x| (x, z)))
+            .collect();
+        super::terraforged_settings::set_for_thread(Some(super::terraforged_settings::Settings {
+            deterministic: true,
+        }));
+        let single = decorated_trees(&data, &forward, 1);
+        let threaded = decorated_trees(&data, &forward, 6);
+        let cold = decorated_trees(&data, &forward, 0);
+        super::terraforged_settings::set_for_thread(None);
+        assert_eq!(single, threaded);
+        assert_eq!(single, cold);
+        // The settled river noise keeps TerraForged's forests.
+        assert!(single.values().sum::<usize>() > 2000, "{single:?}");
+    }
+
+    #[test]
+    fn deterministic_terrain_data_ignores_threads() {
+        let preset: Value =
+            serde_json::from_str(super::super::terraforged_world_preset::preset_json()).unwrap();
+        let levels =
+            terrain_levels(&preset["dimensions"]["minecraft:overworld"]["generator"]["levels"])
+                .unwrap();
+        let summary = |g: &TerraForgedGenerator, x: i32, z: i32| {
+            let handle = g.chunk_data(x, z);
+            let d = handle.read();
+            let mut v = Vec::new();
+            for lx in 0..16 {
+                for lz in 0..16 {
+                    v.push((
+                        d.height_at(lx, lz),
+                        d.river().get(lx, lz).to_bits(),
+                        d.normalized_gradient(lx, lz, 1.0).to_bits(),
+                        d.base_height_at(lx, lz),
+                    ));
+                }
+            }
+            v
+        };
+        let all: Vec<(i32, i32)> = (-2..=2)
+            .flat_map(|x| (-2..=2).map(move |z| (x, z)))
+            .collect();
+        super::terraforged_settings::set_for_thread(Some(super::terraforged_settings::Settings {
+            deterministic: true,
+        }));
+        let single = build_noise(levels).unwrap();
+        single.capture_seed(777);
+        let a: Vec<_> = all.iter().map(|&(x, z)| summary(&single, x, z)).collect();
+        let threaded = build_noise(levels).unwrap();
+        threaded.capture_seed(777);
+        let made = std::sync::Mutex::new(std::collections::BTreeMap::new());
+        std::thread::scope(|scope| {
+            for t in 0..6 {
+                let (g, all, made) = (&threaded, &all, &made);
+                scope.spawn(move || {
+                    for &(x, z) in all.iter().skip(t).step_by(6) {
+                        let s = summary(g, x, z);
+                        made.lock().unwrap().insert((x, z), s);
+                    }
+                });
+            }
+        });
+        let made = made.into_inner().unwrap();
+        let mut bad = 0;
+        for (i, k) in all.iter().enumerate() {
+            let diff = a[i].iter().zip(&made[k]).filter(|(p, q)| p != q).count();
+            if diff > 0 {
+                bad += 1;
+                eprintln!(
+                    "{k:?}: {diff} columns differ, e.g. {:?} vs {:?}",
+                    a[i].iter().zip(&made[k]).find(|(p, q)| p != q).unwrap().0,
+                    a[i].iter().zip(&made[k]).find(|(p, q)| p != q).unwrap().1
+                );
+            }
+        }
+        super::terraforged_settings::set_for_thread(None);
+        assert_eq!(bad, 0, "terrain data differs between threads");
     }
 }
