@@ -120,19 +120,29 @@ static helpers (`dist2`, `sign`, `intersect`, `distance_on_line`, `distance2_lin
 tests check raw bits against a Java oracle, including those NaNs, NaN and infinite points and every collinear case of
 `intersect`.
 
+The engine type layer starts on Engine's terrain model, in a second module, `terraforged_engine` (`engine.rs`). It ports
+`Seed`, whose `next()` returns its cursor and then increments it, wrapping like Java's `int` (`split()` restarts from the
+root, `offset(n)` from root + n), the `ITerrain` property flags with their defaults (`is_submerged`, `overrides_river`
+and `overrides_coast` follow from the other flags), and the `TerrainCategory` enum: its eleven categories in Engine's
+order, each one's flags, and `get_dominant`, which keeps the later category. Engine shares one `Seed` by reference;
+this `Seed` is `Copy`, so code that draws from it takes `&mut Seed`. Its tests check every category's flags, the
+ordinals and dominance, and the seed cursor's wrapping against a Java oracle.
+
 ## Status: development only
 
-This layer only adds the noise functions. It changes nothing in the game, so there is nothing for players to install
-yet. Install instructions come with the layer that wires TerraForged into world generation.
+These layers only add the noise functions and Engine's terrain types. They change nothing in the game, so there is
+nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
 
-The noise layer is ordinary Rust and can be tested without Minecraft resources. CI runs the same commands
-(`.github/workflows/terraforged.yml`):
+`noise.rs` and `engine.rs` are ordinary Rust, each self-contained, and can be tested without Minecraft resources. CI
+runs the same commands for both files, in debug and with `-O` (`.github/workflows/terraforged.yml`):
 
 ```sh
 rustc --edition 2024 --test native-mods/terraforged/noise.rs -o /tmp/terraforged-tests
 /tmp/terraforged-tests
+rustc --edition 2024 --test native-mods/terraforged/engine.rs -o /tmp/terraforged-engine-tests
+/tmp/terraforged-engine-tests
 ```
 
 The mixin pins Rusticraft commit `1b6e55d4f3bd14079551bcad173d0fac8f8225bb`, a `main` commit rather than a Nightly:
