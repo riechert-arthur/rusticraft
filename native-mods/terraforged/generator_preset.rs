@@ -56,7 +56,7 @@ pub fn terrain_levels(levels: &Value) -> Result<TerrainLevels, String> {
             .and_then(|value| i32::try_from(value).ok())
             .ok_or_else(|| format!("levels.{name} must be an int"))
     };
-    Ok(TerrainLevels::new(
+    let original = TerrainLevels::new(
         levels["auto_scale"].as_bool().unwrap_or(true),
         levels["horizontal_scale"]
             .as_f64()
@@ -66,7 +66,34 @@ pub fn terrain_levels(levels: &Value) -> Result<TerrainLevels, String> {
         int("base_height")?,
         int("sea_level")?,
         int("sea_floor")?,
+    );
+    Ok(scale_heights(
+        original,
+        super::terraforged_settings::current().height_scale,
     ))
+}
+
+/// The `height_scale` setting: the land's reach above sea level (`max_y`, `base_height`)
+/// and the oceans' depth below it (`sea_floor`, down to y 0) times `scale`, at the original's
+/// horizontal frequency, which `auto_scale` would otherwise widen with the range.
+pub fn scale_heights(levels: TerrainLevels, scale: f32) -> TerrainLevels {
+    if scale == 1.0 {
+        return levels;
+    }
+    let sea = levels.sea_level;
+    let stretch = |level: i32| sea + ((level - sea) as f32 * scale).round() as i32;
+    let mut scaled = TerrainLevels::new(
+        levels.noise_levels.auto,
+        levels.noise_levels.scale,
+        levels.min_y,
+        stretch(levels.max_y),
+        stretch(levels.base_height),
+        sea,
+        // Base columns start at y 0, as `TerrainLevels::MIN_SEA_FLOOR` holds the floor.
+        stretch(levels.sea_floor).max(TerrainLevels::MIN_SEA_FLOOR),
+    );
+    scaled.noise_levels.frequency = levels.noise_levels.frequency;
+    scaled
 }
 
 /// `GeneratorPreset.build`'s noise: terrain noises in registry order (sorted by
@@ -143,5 +170,45 @@ mod tests {
         let column = generator.base_column(100, -200);
         let _ = column;
         assert!(terrain_levels(&serde_json::json!({"min_y": 0})).is_err());
+    }
+
+    #[test]
+    fn height_scale_stretches_levels_around_sea_level() {
+        let original = TerrainLevels::new(true, 1.0, -64, 480, 128, 62, 22);
+        let doubled = scale_heights(original, 2.0);
+        assert_eq!(
+            (
+                doubled.max_y,
+                doubled.base_height,
+                doubled.sea_level,
+                doubled.sea_floor
+            ),
+            (898, 194, 62, 0)
+        );
+        assert_eq!(
+            doubled.noise_levels.frequency,
+            original.noise_levels.frequency
+        );
+        assert_eq!(scale_heights(original, 1.0), original);
+        // Generated land reaches about twice as far above the sea.
+        let peak = |levels| {
+            let generator = build(levels).unwrap();
+            generator.capture_seed(98765);
+            (0..400)
+                .map(|i| {
+                    generator.base_height(
+                        (i % 20) * 160,
+                        (i / 20) * 160,
+                        super::super::terraforged_generator_facade::TerraHeightmap::OceanFloorWorldgen,
+                    )
+                })
+                .max()
+                .unwrap()
+        };
+        let (one, two) = (peak(original) - 62, peak(doubled) - 62);
+        assert!(
+            one > 40 && two > one * 3 / 2 && two < one * 5 / 2,
+            "{one} {two}"
+        );
     }
 }
