@@ -103,6 +103,14 @@ oracle. Where Engine throws (`NOISE_LOOKUP` when no cell's distance is below `Fl
 coordinates, or, with the Euclidean and Natural metrics, scaled coordinates beyond about 1.8e19, whose squares overflow),
 this port panics.
 
+The sine source layer adds `Sin` (`Builder.sin()`, `Source.sin(scale, alpha)`, `Module::sine_source`): it samples its
+`alpha` module, scales the coordinates by its frequency and reads `NoiseUtil`'s 4096-entry sine table at x when alpha is
+exactly 0, at y when it is exactly 1, and blends the two by alpha otherwise (so an alpha outside 0..1 extrapolates),
+then maps the result from -1..1 to 0..1. It reports the `Noise` defaults 0..1. A NaN alpha samples NaN, but the table
+itself never returns one: as in Engine, a NaN coordinate reads entry 0 and an infinite one saturates before it is masked
+to an index. Its tests check raw bits against a Java oracle for all three branches, including NaN, infinite and
+extrapolating alphas and NaN, infinite and huge coordinates.
+
 ## Status: development only
 
 This layer only adds the noise functions. It changes nothing in the game, so there is nothing for players to install
