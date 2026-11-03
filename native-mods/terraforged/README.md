@@ -32,6 +32,11 @@ In TerraForged worlds, a player's boat rises to a river's stepped water surface 
 operators get `/locateterrain <terrain> [radius]`, `/tf export structures`, `/tf regen <radius>` and
 `/tf preview [size] [zoom]` (see the differences below).
 
+`/locate biome` in a TerraForged world also finds the biomes only caves hold (`terraforged:cave`, and
+with `corrected_biomes` the cave biomes unique caves draw), at a block of the cave, where TerraForged's
+search asks only the noise biome and never finds them. `terraforged:oak_forest` is registered but no
+climate places it, so it is never found, as in TerraForged.
+
 The Nether and the End stay vanilla, as in TerraForged. Deliberate fidelity to the pinned source,
 including its quirks: JSON `Bias` nodes decode as 0 (Engine's spec reads a module as a float), cave
 and other non-surface overworld biomes stay in the climate pools (so `deep_dark` can reach the

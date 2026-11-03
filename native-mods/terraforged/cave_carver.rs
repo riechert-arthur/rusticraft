@@ -169,6 +169,68 @@ impl<T: Clone + PartialEq> NoiseCaveGenerator<T> {
         Ok(carver)
     }
 
+    /// Whether a cave may hold `biome`.
+    pub fn may_hold(&self, biome: &T) -> bool
+    where
+        T: PartialEq,
+    {
+        self.biomes.may_hold(biome)
+    }
+
+    /// The cave biome `carve` would write in the column at `x, z` and a height it
+    /// writes it at, for `/locate biome`: `first_free` is the column's first free
+    /// block over the terrain; the river breach is taken as fully open (the river
+    /// noise inland). The last cave to carve there wins, as its writes do.
+    pub fn underground_biome_at(
+        &self,
+        seed: i32,
+        x: i32,
+        z: i32,
+        first_free: i32,
+        sea_level: i32,
+        min_y: i32,
+    ) -> Option<(T, i32)>
+    where
+        T: Clone,
+    {
+        let mut surface = first_free.wrapping_sub(2);
+        if surface > sea_level || surface < sea_level - 16 {
+            surface = surface.wrapping_add(9);
+        }
+        let surface = surface.wrapping_sub(16);
+        let deepest_quart = surface.wrapping_sub(16) >> 2;
+        let mut found = None;
+        for config in &self.caves {
+            let value = match config.cave_type() {
+                CaveType::Global => 1.0,
+                CaveType::Unique => self
+                    .unique
+                    .try_value_seed_first(seed, x as f32, z as f32)
+                    .ok()?,
+            };
+            let y = config.height(seed, x, z).ok()?;
+            let cavern = config.cavern_size(seed, x, z, value).ok()?;
+            if cavern == 0 {
+                continue;
+            }
+            let floor = config.floor_depth(seed, x, z, cavern).ok()?;
+            let top = y.wrapping_add(cavern).clamp(min_y, surface.max(min_y));
+            let bottom = y.wrapping_sub(floor).clamp(min_y, surface.max(min_y));
+            if top - bottom < 2 || (bottom >> 2) >= deepest_quart {
+                continue;
+            }
+            if let Some(biome) = self.biomes.get_underground_biome(
+                self.source_seed.wrapping_add(config.seed()),
+                x,
+                z,
+                config.cave_type(),
+            ) {
+                found = Some((T::clone(biome), bottom.wrapping_add(1)));
+            }
+        }
+        found
+    }
+
     /// `NoiseCaveCarver.getSurface`.
     #[allow(clippy::too_many_arguments)]
     fn surface<B: TerrainBlockStates>(
