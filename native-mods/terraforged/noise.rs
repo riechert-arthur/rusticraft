@@ -719,6 +719,25 @@ enum ModuleKind {
         slope_max: Module,
         curve: CurveFunction,
     },
+    /// `Freq`: scales the coordinates by `x` and `y` before sampling its source.
+    Frequency {
+        source: Module,
+        x: Module,
+        y: Module,
+    },
+    /// `Grad`: raises samples at or below `upper` to a power that falls towards `1 - strength` at `lower`.
+    Gradient {
+        source: Module,
+        lower: Module,
+        upper: Module,
+        strength: Module,
+    },
+    /// `Modulate`: offsets the coordinates by `strength` along `direction` (in turns), through `NoiseUtil`'s sine table.
+    Modulate {
+        source: Module,
+        direction: Module,
+        strength: Module,
+    },
     /// `Select`: `lower_curve`/`upper_curve` hold Engine's `(curveMin, curveMax, curveRange)` per bound, fixed in the
     /// constructor.
     Select {
@@ -733,6 +752,8 @@ enum ModuleKind {
     Add(Vec<Module>),
     Multiply(Vec<Module>),
     Max(Vec<Module>),
+    Min(Vec<Module>),
+    Subtract(Vec<Module>),
 }
 
 impl Module {
@@ -1082,6 +1103,45 @@ impl Module {
                 let alpha = map(delta * step_count, min, max, range);
                 1.0 - lerp(value, inverted, curve.apply(alpha))
             }
+            ModuleKind::Frequency {
+                source,
+                x: x_frequency,
+                y: y_frequency,
+            } => {
+                let x_frequency = x_frequency.value(x, y);
+                let y_frequency = y_frequency.value(x, y);
+                source.value(x * x_frequency, y * y_frequency)
+            }
+            ModuleKind::Gradient {
+                source,
+                lower,
+                upper,
+                strength,
+            } => {
+                let noise_value = source.value(x, y);
+                let upper_bound = upper.value(x, y);
+                if noise_value > upper_bound {
+                    return noise_value;
+                }
+                let amount = strength.value(x, y);
+                let lower_bound = lower.value(x, y);
+                if noise_value < lower_bound {
+                    return java_pow(noise_value, 1.0 - amount);
+                }
+                let alpha = 1.0 - (noise_value - lower_bound) / (upper_bound - lower_bound);
+                java_pow(noise_value, 1.0 - amount * alpha)
+            }
+            ModuleKind::Modulate {
+                source,
+                direction,
+                strength,
+            } => {
+                let angle = direction.value(x, y) * PI2;
+                let strength = strength.value(x, y);
+                let dx = sin(angle) * strength;
+                let dy = cos(angle) * strength;
+                source.value(x + dx, y + dy)
+            }
             ModuleKind::Select {
                 control,
                 lower,
@@ -1126,6 +1186,8 @@ impl Module {
             ModuleKind::Add(sources) => combine(sources, x, y, |a, b| a + b),
             ModuleKind::Multiply(sources) => combine(sources, x, y, |a, b| a * b),
             ModuleKind::Max(sources) => combine(sources, x, y, java_max),
+            ModuleKind::Min(sources) => combine(sources, x, y, java_min),
+            ModuleKind::Subtract(sources) => combine(sources, x, y, |a, b| a - b),
         }
     }
 
@@ -1500,6 +1562,35 @@ impl Module {
         Self::modifier(kind, &source)
     }
 
+    /// `Module.freq(Module, Module)`.
+    pub fn frequency(self, x: Self, y: Self) -> Self {
+        let source = self.clone();
+        Self::modifier(ModuleKind::Frequency { source: self, x, y }, &source)
+    }
+
+    /// `Module.grad(Module, Module, Module)`.
+    pub fn gradient(self, lower: Self, upper: Self, strength: Self) -> Self {
+        let source = self.clone();
+        let kind = ModuleKind::Gradient {
+            source: self,
+            lower,
+            upper,
+            strength,
+        };
+        Self::modifier(kind, &source)
+    }
+
+    /// `Module.mod(Module, Module)`.
+    pub fn modulate(self, direction: Self, strength: Self) -> Self {
+        let source = self.clone();
+        let kind = ModuleKind::Modulate {
+            source: self,
+            direction,
+            strength,
+        };
+        Self::modifier(kind, &source)
+    }
+
     /// `Module.select(Module, Module, lowerBound, upperBound, falloff, Interpolation)` (Engine's five-argument
     /// form uses `Interpolation.CURVE3`).
     pub fn select(
@@ -1547,6 +1638,20 @@ impl Module {
         let min = fold_bounds(&sources, Self::min_value, |a, b| java_max(a, b.max_value()));
         let max = fold_bounds(&sources, Self::max_value, |a, b| java_max(a, b.max_value()));
         Self::node(ModuleKind::Max(sources), min, max)
+    }
+
+    /// `new Min(sources...)`: Engine's `maxTotal` is `minTotal`, so the maximum folds the later minima.
+    pub fn min(sources: Vec<Self>) -> Self {
+        let min = fold_bounds(&sources, Self::min_value, |a, b| java_min(a, b.min_value()));
+        let max = fold_bounds(&sources, Self::max_value, |a, b| java_min(a, b.min_value()));
+        Self::node(ModuleKind::Min(sources), min, max)
+    }
+
+    /// `new Sub(sources...)`: the minimum subtracts the later maxima and the maximum the later minima.
+    pub fn subtract(sources: Vec<Self>) -> Self {
+        let min = fold_bounds(&sources, Self::min_value, |a, b| a - b.max_value());
+        let max = fold_bounds(&sources, Self::max_value, |a, b| a - b.min_value());
+        Self::node(ModuleKind::Subtract(sources), min, max)
     }
 }
 
@@ -1739,12 +1844,23 @@ fn fold_bounds(
 
 /// `NoiseUtil.pow(float, float)`: `(float) Math.pow(value, power)`. Java returns NaN for a NaN power and for a base of
 /// ±1 with an infinite power, where C's `pow` (Rust's `powf`) returns 1 for a base of 1 (or -1 and an infinite power).
+/// A NaN result keeps Java's bits: `Math.pow` returns its NaN operand (the base's first, quieted), except that a zero
+/// power gives 1 and a base of 1 with a NaN power gives the canonical NaN.
 fn java_pow(value: f32, power: f32) -> f32 {
-    let (value, power) = (f64::from(value), f64::from(power));
-    if power.is_nan() || (value.abs() == 1.0 && power.is_infinite()) {
+    let quiet = |nan: f32| f32::from_bits(nan.to_bits() | 0x0040_0000);
+    if power == 0.0 {
+        return 1.0;
+    }
+    if value.is_nan() {
+        return quiet(value);
+    }
+    if power.is_nan() {
+        return if value == 1.0 { f32::NAN } else { quiet(power) };
+    }
+    if value.abs() == 1.0 && power.is_infinite() {
         return f32::NAN;
     }
-    value.powf(power) as f32
+    (f64::from(value).powf(f64::from(power))) as f32
 }
 
 fn java_max(first: f32, second: f32) -> f32 {
@@ -4384,5 +4500,293 @@ steps c2 0x7fc00000 0x3f4ccccd 0x3e4ccccd 0xbf800000 0x40000000 | 0x7fc00000 0x7
             &mut sweep,
         );
         assert_eq!(lines, EXPECTED.lines().collect::<Vec<_>>());
+    }
+
+    /// `Freq`, `Grad`, `Modulate`, `Min` and `Sub` over noise sources, from Engine 0.3.0 (`Scalar.java` oracle).
+    #[test]
+    fn scalar_nodes_match_engine_0_3_0() {
+        let source = |kind, seed, scale: f32, octaves, gain| {
+            Module::source(Source::new(
+                kind,
+                SourceConfig {
+                    seed,
+                    octaves,
+                    gain,
+                    frequency: 1.0 / scale,
+                    lacunarity: 2.0,
+                    interpolation: Interpolation::Curve3,
+                },
+            ))
+        };
+        let base = source(SourceKind::Perlin, 1001, 96.0, 4, 0.5);
+        let a = source(SourceKind::Simplex, 1002, 80.0, 3, 0.5)
+            .scale(Module::constant(1.5))
+            .bias(Module::constant(-0.25));
+        let b = source(SourceKind::Ridge, 1003, 128.0, 2, 0.975)
+            .scale(Module::constant(0.75))
+            .bias(Module::constant(0.1));
+        let points = [
+            (0.0, 0.0),
+            (12.25, -98.75),
+            (-4096.5, 8192.25),
+            (123456.75, -0.125),
+            (64.0, 64.0),
+            (-128.0, 32.0),
+            (777.0, -333.0),
+            (-1024.0, -2048.0),
+        ];
+        let cases = [
+            (
+                base.clone().frequency(
+                    source(SourceKind::Simplex, 1004, 256.0, 2, 0.5)
+                        .map(Module::constant(0.5), Module::constant(2.0)),
+                    source(SourceKind::Ridge, 1005, 192.0, 2, 0.975)
+                        .map(Module::constant(0.25), Module::constant(1.5)),
+                ),
+                [0x00000000, 0x3f800000],
+                [
+                    0x3f000000, 0x3f1f4fc3, 0x3efe6792, 0x3f27efc3, 0x3ea1a4da, 0x3ec0bfaa,
+                    0x3f3665b9, 0x3f11cfe3,
+                ],
+            ),
+            (
+                base.clone().gradient(
+                    Module::constant(0.25),
+                    Module::constant(0.75),
+                    source(SourceKind::Simplex, 1006, 64.0, 2, 0.5),
+                ),
+                [0x00000000, 0x3f800000],
+                [
+                    0x3f1837f0, 0x3f1c2d3b, 0x3f28280d, 0x3f2101f4, 0x3ea5e9fb, 0x3f216958,
+                    0x3f2220ae, 0x3f2daaf5,
+                ],
+            ),
+            (
+                base.clone().modulate(
+                    source(SourceKind::Simplex, 1007, 128.0, 2, 0.5),
+                    source(SourceKind::Ridge, 1008, 96.0, 2, 0.975).scale(Module::constant(12.0)),
+                ),
+                [0x00000000, 0x3f800000],
+                [
+                    0x3efbd555, 0x3f385619, 0x3f17ef60, 0x3ef02b87, 0x3eaf69cd, 0x3f03a960,
+                    0x3f11eaba, 0x3f2fcdb9,
+                ],
+            ),
+            (
+                Module::min(vec![base.clone(), a.clone(), b.clone()]),
+                [0xbe800000, 0xbe800000],
+                [
+                    0x3f000000, 0x3f0a6fd8, 0x3f1c821a, 0x3eb15314, 0x3e913646, 0x3f010131,
+                    0x3f0d912a, 0x3e773ddc,
+                ],
+            ),
+            (
+                Module::subtract(vec![base, a, b]),
+                [0xc0066666, 0x3f933333],
+                [
+                    0xbf59999a, 0xbf1f148d, 0xbf850877, 0xbf0c0260, 0xbf68f8d3, 0xbf0c63aa,
+                    0xbf813c31, 0xbed93fa0,
+                ],
+            ),
+        ];
+        for (module, expected_bounds, expected_values) in cases {
+            assert_eq!(
+                [module.min_value().to_bits(), module.max_value().to_bits()],
+                expected_bounds
+            );
+            assert_eq!(
+                bits(points.map(|(x, y)| module.value(x, y))),
+                expected_values
+            );
+        }
+    }
+
+    /// Edge cases of the scalar nodes, from the same oracle: negative samples raised to a fractional power (Java's
+    /// -NaN), `lower == upper` in `Grad` (0/0 makes a -NaN power that `Math.pow` returns),
+    /// inverted gradient bounds, NaN frequencies, large and infinite modulation angles, `Min`'s signed zeros and NaN,
+    /// and empty combiners.
+    #[test]
+    fn scalar_node_edge_cases_match_engine_0_3_0() {
+        let source = |kind, seed, scale: f32, octaves, gain| {
+            Module::source(Source::new(
+                kind,
+                SourceConfig {
+                    seed,
+                    octaves,
+                    gain,
+                    frequency: 1.0 / scale,
+                    lacunarity: 2.0,
+                    interpolation: Interpolation::Curve3,
+                },
+            ))
+        };
+        let c = Module::constant;
+        let base = source(SourceKind::Perlin, 1001, 96.0, 4, 0.5);
+        let a = source(SourceKind::Simplex, 1002, 80.0, 3, 0.5)
+            .scale(c(1.5))
+            .bias(c(-0.25));
+        let signed = base.clone().scale(c(2.0)).bias(c(-1.0));
+        let points = [
+            (0.0, 0.0),
+            (12.25, -98.75),
+            (-4096.5, 8192.25),
+            (123456.75, -0.125),
+            (64.0, 64.0),
+            (-128.0, 32.0),
+            (777.0, -333.0),
+            (-1024.0, -2048.0),
+        ];
+        let cases: [(Module, [u32; 2], [u32; 8]); 11] = [
+            // grad_neg
+            (
+                signed.gradient(c(-0.5), c(0.5), c(0.3)),
+                [0xbf800000, 0x3f800000],
+                [
+                    0x00000000, 0x3e290784, 0x3e8134f9, 0xffc00000, 0xffc00000, 0x3dabac4a,
+                    0x3e0d82cb, 0x3eb4ba59,
+                ],
+            ),
+            // grad_eq
+            (
+                base.clone().gradient(c(0.5), c(0.5), c(0.7)),
+                [0x00000000, 0x3f800000],
+                [
+                    0xffc00000, 0x3f10e55f, 0x3f1c821a, 0x3f4fb88c, 0x3f2f6984, 0x3f075721,
+                    0x3f0d912a, 0x3f2ac941,
+                ],
+            ),
+            // grad_inv
+            (
+                base.clone().gradient(c(0.75), c(0.25), c(0.5)),
+                [0x00000000, 0x3f800000],
+                [
+                    0x3f000000, 0x3f10e55f, 0x3f1c821a, 0x3eff1da5, 0x3e913646, 0x3f075721,
+                    0x3f0d912a, 0x3f2ac941,
+                ],
+            ),
+            // freq_nan
+            (
+                base.clone().frequency(c(f32::NAN), c(2.0)),
+                [0x00000000, 0x3f800000],
+                [
+                    0x7fc00000, 0x7fc00000, 0x7fc00000, 0x7fc00000, 0x7fc00000, 0x7fc00000,
+                    0x7fc00000, 0x7fc00000,
+                ],
+            ),
+            // mod_big
+            (
+                base.clone().modulate(c(12345.678), c(-50.0)),
+                [0x00000000, 0x3f800000],
+                [
+                    0x3f14fb78, 0x3f0e30bb, 0x3f0e8849, 0x3ee92425, 0x3efa97df, 0x3ed76f3e,
+                    0x3eb0ca7c, 0x3f231817,
+                ],
+            ),
+            // mod_inf
+            (
+                base.clone().modulate(c(f32::INFINITY), c(3.0)),
+                [0x00000000, 0x3f800000],
+                [
+                    0x3f0000a7, 0x3f10e64a, 0x3f1c81c6, 0x3eff1b07, 0x3e913645, 0x3f075899,
+                    0x3f0d9271, 0x3f2ac90e,
+                ],
+            ),
+            // min_zero
+            (
+                Module::min(vec![Module::new_constant(-0.0), c(0.0)]),
+                [0x80000000, 0x80000000],
+                [
+                    0x80000000, 0x80000000, 0x80000000, 0x80000000, 0x80000000, 0x80000000,
+                    0x80000000, 0x80000000,
+                ],
+            ),
+            // min_nan
+            (
+                Module::min(vec![base.clone(), c(f32::NAN), a]),
+                [0x7fc00000, 0x7fc00000],
+                [
+                    0x7fc00000, 0x7fc00000, 0x7fc00000, 0x7fc00000, 0x7fc00000, 0x7fc00000,
+                    0x7fc00000, 0x7fc00000,
+                ],
+            ),
+            // min_empty
+            (
+                Module::min(vec![]),
+                [0x00000000, 0x00000000],
+                [
+                    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+                    0x00000000, 0x00000000,
+                ],
+            ),
+            // sub_empty
+            (
+                Module::subtract(vec![]),
+                [0x00000000, 0x00000000],
+                [
+                    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+                    0x00000000, 0x00000000,
+                ],
+            ),
+            // sub_nan
+            (
+                Module::subtract(vec![base.clone(), c(f32::NAN)]),
+                [0x7fc00000, 0x7fc00000],
+                [
+                    0x7fc00000, 0x7fc00000, 0x7fc00000, 0x7fc00000, 0x7fc00000, 0x7fc00000,
+                    0x7fc00000, 0x7fc00000,
+                ],
+            ),
+        ];
+        for (module, expected_bounds, expected_values) in cases {
+            assert_eq!(
+                [module.min_value().to_bits(), module.max_value().to_bits()],
+                expected_bounds
+            );
+            assert_eq!(
+                bits(points.map(|(x, y)| module.value(x, y))),
+                expected_values
+            );
+        }
+    }
+
+    /// `(float) Math.pow(x, y)` for every pair of bases and powers, from JDK 26 (`NanPow2.java` oracle; interpreted and
+    /// compiled code agree). Covers the NaN bits Java returns.
+    #[test]
+    fn java_pow_matches_math_pow_nan_bits() {
+        const BASES: [u32; 12] = [
+            0x3f800000, 0xbf800000, 0x3f000000, 0xbf000000, 0x00000000, 0x80000000, 0x40000000,
+            0x7f800000, 0xff800000, 0x7fc00000, 0xffc00000, 0x7fc05678,
+        ];
+        const POWERS: [u32; 11] = [
+            0x7fc00000, 0xffc00000, 0xffc01234, 0x00000000, 0x80000000, 0x3f800000, 0x40000000,
+            0x3f000000, 0xbf800000, 0x7f800000, 0xff800000,
+        ];
+        const EXPECTED: [u32; 132] = [
+            0x7fc00000, 0x7fc00000, 0x7fc00000, 0x3f800000, 0x3f800000, 0x3f800000, 0x3f800000,
+            0x3f800000, 0x3f800000, 0x7fc00000, 0x7fc00000, 0x7fc00000, 0xffc00000, 0xffc01234,
+            0x3f800000, 0x3f800000, 0xbf800000, 0x3f800000, 0xffc00000, 0xbf800000, 0x7fc00000,
+            0x7fc00000, 0x7fc00000, 0xffc00000, 0xffc01234, 0x3f800000, 0x3f800000, 0x3f000000,
+            0x3e800000, 0x3f3504f3, 0x40000000, 0x00000000, 0x7f800000, 0x7fc00000, 0xffc00000,
+            0xffc01234, 0x3f800000, 0x3f800000, 0xbf000000, 0x3e800000, 0xffc00000, 0xc0000000,
+            0x00000000, 0x7f800000, 0x7fc00000, 0xffc00000, 0xffc01234, 0x3f800000, 0x3f800000,
+            0x00000000, 0x00000000, 0x00000000, 0x7f800000, 0x00000000, 0x7f800000, 0x7fc00000,
+            0xffc00000, 0xffc01234, 0x3f800000, 0x3f800000, 0x80000000, 0x00000000, 0x00000000,
+            0xff800000, 0x00000000, 0x7f800000, 0x7fc00000, 0xffc00000, 0xffc01234, 0x3f800000,
+            0x3f800000, 0x40000000, 0x40800000, 0x3fb504f3, 0x3f000000, 0x7f800000, 0x00000000,
+            0x7fc00000, 0xffc00000, 0xffc01234, 0x3f800000, 0x3f800000, 0x7f800000, 0x7f800000,
+            0x7f800000, 0x00000000, 0x7f800000, 0x00000000, 0x7fc00000, 0xffc00000, 0xffc01234,
+            0x3f800000, 0x3f800000, 0xff800000, 0x7f800000, 0x7f800000, 0x80000000, 0x7f800000,
+            0x00000000, 0x7fc00000, 0x7fc00000, 0x7fc00000, 0x3f800000, 0x3f800000, 0x7fc00000,
+            0x7fc00000, 0x7fc00000, 0x7fc00000, 0x7fc00000, 0x7fc00000, 0xffc00000, 0xffc00000,
+            0xffc00000, 0x3f800000, 0x3f800000, 0xffc00000, 0xffc00000, 0xffc00000, 0xffc00000,
+            0xffc00000, 0xffc00000, 0x7fc05678, 0x7fc05678, 0x7fc05678, 0x3f800000, 0x3f800000,
+            0x7fc05678, 0x7fc05678, 0x7fc05678, 0x7fc05678, 0x7fc05678, 0x7fc05678,
+        ];
+        let actual: Vec<u32> = BASES
+            .iter()
+            .flat_map(|&x| POWERS.iter().map(move |&y| (x, y)))
+            .map(|(x, y)| java_pow(f32::from_bits(x), f32::from_bits(y)).to_bits())
+            .collect();
+        assert_eq!(actual, EXPECTED);
     }
 }

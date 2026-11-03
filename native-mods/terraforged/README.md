@@ -71,6 +71,15 @@ it is built, so a constant source samples NaN (or 1 for a zero power); `Steps` t
 a slope window (`slopeMax <= slopeMin`) it rounds samples towards zero onto its steps. `NoiseUtil.pow` keeps
 `Math.pow`'s NaN for a NaN power and for a base of ±1 with an infinite power.
 
+The scalar layer adds `Freq` (`Module.freq(x, y)`), which scales the coordinates before sampling its source, `Grad`
+(`Module.grad(lower, upper, strength)`), which raises samples at or below `upper` to a power falling to `1 - strength`
+at `lower`, `Modulate` (`Module.mod(direction, strength)`), which offsets the coordinates along a direction read through
+`NoiseUtil`'s sine table, and the `Min` and `Sub` combiners (`new Min(...)`, `new Sub(...)`). The three modifiers report
+their source's bounds. As in Engine, `Min`'s maximum is the smallest of the first source's maximum and the other
+sources' minima, and `Sub` subtracts the other sources' maxima from the first source's minimum (and their minima from
+its maximum). Their tests check raw bits against a Java oracle, including NaN results: `NoiseUtil.pow` returns the NaN
+`Math.pow` returns (its NaN operand, so `Grad` with `lower == upper` gives Java's -NaN from 0/0).
+
 ## Status: development only
 
 This layer only adds the noise functions. It changes nothing in the game, so there is nothing for players to install
