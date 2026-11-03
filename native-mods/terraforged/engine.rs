@@ -250,6 +250,12 @@ struct TerrainData {
     volcano: Option<bool>,
 }
 
+/// Engine's `Terrain` and its `ConfiguredTerrain`, `CompositeTerrain` and volcano subclasses: an
+/// id, a name and a category, with every `ITerrain` flag delegated to the category or to a parent
+/// terrain unless the subclass overrides it.
+///
+/// Engine compares terrains by object identity (`==`, no `equals`); clones of a `Terrain` share
+/// one object, and [`Terrain::is_same`] is that identity. There is deliberately no `PartialEq`.
 #[derive(Clone)]
 pub struct Terrain(Arc<TerrainData>);
 
@@ -386,6 +392,10 @@ impl Terrain {
         Self(Arc::new(data))
     }
 
+    /// Engine's `CompositeTerrain`: named `first-second`, flat only when both are, with the smaller
+    /// erosion modifier (`Math.min`). Engine's `getDominant` compares `first`'s category with
+    /// itself, so `first` always wins: the composite takes its category and delegates every other
+    /// flag to it, whatever `second`'s category is.
     pub fn composite(id: i32, first: Self, second: Self) -> Self {
         let name: Arc<str> = format!("{}-{}", first.name(), second.name()).into();
         let flat = first.is_flat() && second.is_flat();
@@ -408,6 +418,7 @@ impl Terrain {
         self.0.category
     }
 
+    /// `NoiseUtil.valCoord2D(name.hashCode(), 0, 0)`, with Java's UTF-16 string hash.
     pub fn render_hue(&self) -> f32 {
         let hash = self.name().encode_utf16().fold(0_i32, |hash, unit| {
             hash.wrapping_mul(31).wrapping_add(i32::from(unit))
@@ -418,6 +429,9 @@ impl Terrain {
             / 2_147_483_648.0_f32
     }
 
+    /// Engine's `withId`: a plain terrain with the new id, the same name and category, delegating
+    /// to this terrain's parent if it has one, else to this terrain. A composite's own flat flag and
+    /// erosion are therefore not carried over (its first terrain's are), as in Engine.
     pub fn with_id(&self, id: i32) -> Self {
         let delegate = match &self.0.delegate {
             TerrainDelegate::Terrain(terrain) => TerrainDelegate::Terrain(terrain.clone()),
@@ -426,6 +440,7 @@ impl Terrain {
         Self::build(id, self.0.name.clone(), self.category(), delegate)
     }
 
+    /// Java's `==` on terrains: true only for the same object (this terrain or a clone of it).
     pub fn is_same(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
     }
