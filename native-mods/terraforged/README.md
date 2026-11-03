@@ -162,8 +162,13 @@ terrain starts at y = -64. Its tests check every field and conversion against a 
 320 and 384 block heights, `int` overflow of the sea level and of `y - waterY`, and heights beyond 2^24. Engine's
 static `Levels.scale(steps, settings)` is not ported: neither Engine nor TerraForged calls it.
 
-The world-settings layer completes TerraForged's root settings object with continent generator mode,
-shape, scale, jitter, skipping, size variance and octave-distortion defaults.
+The world-settings layer adds Engine's `WorldSettings` (`engine.rs`): the seed (0 by default; `transient`, so never
+serialized in Engine), the properties and control points above, and `Continent` with Engine's defaults: the
+`MULTI_IMPROVED` generator (`ContinentType`, with Engine's indices 0 to 3), the Euclidean shape, a scale of 3000, a
+jitter of 0.7, skipping and size variance of 0.25, and 5 distortion octaves with a gain of 0.26 and a lacunarity of
+4.33. Its test checks every default's bits against Engine 0.3.0. Engine's serializer and its `@Range` limits are not
+ported. These are Engine's defaults, not the values TerraForged generates with: its `NoiseGenerator` sets the seed,
+sea level and world height from its own levels and replaces the continent scale and control points.
 
 ## Status: development only
 

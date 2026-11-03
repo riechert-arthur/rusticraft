@@ -2000,6 +2000,7 @@ mod tests {
             ContinentShape::Euclidean
         );
         assert_eq!(settings.continent.continent_scale, 3_000);
+        assert_eq!(ContinentSettings::DEFAULT_SCALE, 3_000);
         assert_eq!(settings.continent.continent_jitter.to_bits(), 0x3f333333);
         assert_eq!(settings.continent.continent_skipping.to_bits(), 0x3e800000);
         assert_eq!(
