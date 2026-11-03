@@ -12,6 +12,12 @@ The ridged sources (Ridge, Billow and SimplexRidge) and the `Rand` white-noise s
 quirks: `Rand.nextInt` divides by `range + range` (so it is almost always 0, and wraps for large ranges), and Engine
 throws for ridged sources with more than 30 octaves, where this port keeps going.
 
+The graph layer adds Engine's `Module` graph: constants, source nodes, the Abs, Alpha, Bias, Boost, Clamp, Invert, Map,
+Power, Scale and Threshold modifiers and the Add, Multiply and Max combiners, with the shortcuts of Engine's builder
+methods (`map`, `clamp`, `pow`, `bias`...). Its tests check the bounds each node reports as well as raw sample bits,
+including Engine's quirks: Threshold reports its source's bounds rather than 0..1, and Max's minimum is the larger of
+the first source's minimum and the other sources' maxima.
+
 ## Status: development only
 
 This layer only adds the noise functions. It changes nothing in the game, so there is nothing for players to install
