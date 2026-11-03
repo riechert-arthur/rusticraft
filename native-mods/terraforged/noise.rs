@@ -1670,7 +1670,6 @@ impl Domain {
     }
 }
 
-/// The shortcut test shared by `Module.clamp` and `Module.map`.
 /// The steps and `maxIndex` that Engine's `Terrace` and `LegacyTerrace` constructors build: `count` steps from 0,
 /// spaced by the source's range over `count - 1`. Java's `int maxIndex = steps - 1` is -1 without steps.
 fn terrace_steps(source: &Module, count: usize, blend_range: f32) -> (Vec<TerraceStep>, i32) {
@@ -1692,6 +1691,7 @@ fn terrace_steps(source: &Module, count: usize, blend_range: f32) -> (Vec<Terrac
     (steps, max_index)
 }
 
+/// The shortcut test shared by `Module.clamp` and `Module.map`.
 fn constant_bounds(source: &Module, min: &Module, max: &Module) -> bool {
     min.min_value() == min.max_value()
         && min.min_value() == source.min_value()
