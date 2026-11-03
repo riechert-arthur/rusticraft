@@ -27,8 +27,9 @@ use super::{
     terraforged_engine::{Seed, TerrainSettings},
 };
 
-/// Engine's `LandForms`: builds each landform's noise graph from the terrain settings. Only `steppe` and `plains`
-/// are ported so far, so Engine's `levels` and `ground` constructor arguments are not taken yet.
+/// Engine's `LandForms`: builds each landform's noise graph from the terrain settings. Only `steppe`, `plains`,
+/// `hills1`, `hills2` and `dales` are ported so far, so Engine's `levels` and `ground` constructor arguments are not
+/// taken yet.
 pub struct LandForms {
     settings: TerrainSettings,
 }
@@ -76,6 +77,7 @@ impl LandForms {
             .bias(Module::constant(-0.02))
     }
 
+    /// `LandForms.hills1(Seed)`: draws four seeds in Engine's order; scales by `0.6 * globalVerticalScale`.
     pub fn hills1(&self, seed: &mut Seed) -> Module {
         let hills = Module::multiply(vec![
             perlin(seed.next(), 200, 3, 2.0),
@@ -89,6 +91,7 @@ impl LandForms {
             ))
     }
 
+    /// `LandForms.hills2(Seed)`: draws five seeds in Engine's order; scales by `0.55 * globalVerticalScale`.
     pub fn hills2(&self, seed: &mut Seed) -> Module {
         let hills = Module::multiply(vec![
             source(SourceKind::Cubic, seed.next(), 128, 2, 0.5, 2.0),
@@ -98,13 +101,15 @@ impl LandForms {
         .warp(noise_warp(seed.next(), 400, 3, 200.0));
         Module::multiply(vec![
             hills,
-            source(SourceKind::Ridge, seed.next(), 512, 2, 0.5, 2.0).alpha(Module::constant(0.8)),
+            // `Builder.ridge()` defaults the gain to 0.975 rather than 0.5.
+            source(SourceKind::Ridge, seed.next(), 512, 2, 0.975, 2.0).alpha(Module::constant(0.8)),
         ])
         .scale(Module::constant(
             0.55 * self.settings.general.global_vertical_scale,
         ))
     }
 
+    /// `LandForms.dales(Seed)`: draws four seeds in Engine's order; ignores the landform settings.
     pub fn dales(&self, seed: &mut Seed) -> Module {
         let hills1 = source(SourceKind::Billow, seed.next(), 300, 4, 0.8, 4.0)
             .power_curve(0.5)
@@ -127,6 +132,7 @@ fn perlin(seed: i32, scale: i32, octaves: usize, lacunarity: f32) -> Module {
     source(SourceKind::Perlin, seed, scale, octaves, 0.5, lacunarity)
 }
 
+/// `Source.build(seed, scale, octaves).gain(gain).lacunarity(lacunarity)` built as `kind`.
 fn source(
     kind: SourceKind,
     seed: i32,
@@ -230,39 +236,86 @@ mod tests {
             [0x3ba3a2a0, 0x3b056338, 0xbbfff534, 0x3bcfdf6c]
         );
     }
-    /// Engine 0.3.0's `LandForms.steppe`/`plains` (`LandFormsOracle`, kept outside Git): per settings and start seed,
-    /// the seed after building, the bounds and an FNV-1a hash of the raw bits of every sample on `GRID` x `GRID`.
+    /// Engine 0.3.0's `LandForms.steppe`/`plains`/`hills1`/`hills2`/`dales` (`LandFormsOracle`, kept outside Git):
+    /// per settings and start seed, the seed after building, the bounds and an FNV-1a hash of the raw bits of every
+    /// sample on `GRID` x `GRID`.
     const GRID: [f32; 10] = [
         0.0, 12.25, -98.75, -4096.5, 8192.25, 123456.75, -0.125, -77777.5, 1e6, -3.0e5,
     ];
 
     #[allow(clippy::type_complexity)]
     #[rustfmt::skip]
-    const ORACLE: [(&str, &str, i32, i32, u32, u32, u64); 24] = [
+    const ORACLE: [(&str, &str, i32, i32, u32, u32, u64); 70] = [
         ("default", "steppe", 12345, 12350, 0xbca3d70a, 0x3d75c28f, 0x639d1d83e3e0f2eb),
         ("default", "plains", 12345, 12350, 0xbca3d70a, 0x3e020c4b, 0x6e4af950d6b9b37f),
+        ("default", "hills1", 12345, 12349, 0x00000000, 0x3f16872c, 0x6d5563d0ee663df0),
+        ("default", "hills2", 12345, 12350, 0x80000000, 0x3f1b3b65, 0x346e5dcff0a3c6a2),
+        ("default", "dales", 12345, 12349, 0x00000000, 0x3ecccccd, 0xcc6308d1c64458e5),
         ("default", "steppe", -998877, -998872, 0xbca3d70a, 0x3d75c28f, 0x7a376023496a4361),
         ("default", "plains", -998877, -998872, 0xbca3d70a, 0x3e020c4b, 0x70dc912c2a72e694),
+        ("default", "hills1", -998877, -998873, 0x00000000, 0x3f16872c, 0x511560374f860dea),
+        ("default", "hills2", -998877, -998872, 0x80000000, 0x3f1b3b65, 0xc8d97f6e98f49a97),
+        ("default", "dales", -998877, -998873, 0x00000000, 0x3ecccccd, 0xb3f6238244af33fb),
         ("default", "steppe", 2147483643, -2147483648, 0xbca3d70a, 0x3d75c28f, 0xffdf4562b5fae442),
         ("default", "plains", 2147483643, -2147483648, 0xbca3d70a, 0x3e020c4b, 0x5b03f6d91ab51dc4),
+        ("default", "hills1", 2147483643, 2147483647, 0x00000000, 0x3f16872c, 0x5d9f3174bb93dab8),
+        ("default", "hills2", 2147483643, -2147483648, 0x80000000, 0x3f1b3b65, 0x52177bc2f339df26),
+        ("default", "dales", 2147483643, 2147483647, 0x00000000, 0x3ecccccd, 0x1bf3b706a93f5f84),
         ("modterrains", "steppe", 9712416, 9712421, 0xbca3d70a, 0x3d75c28f, 0x8f72e0ca682b02ca),
         ("modterrains", "plains", 9712416, 9712421, 0xbca3d70a, 0x3e051eb9, 0x8a73fd5503b12098),
+        ("modterrains", "hills1", 9712416, 9712420, 0x00000000, 0x3f19999a, 0xe86ad3cd86529607),
+        ("modterrains", "hills2", 9712416, 9712421, 0x80000000, 0x3f1e6667, 0x895f048c9154db49),
+        ("modterrains", "dales", 9712416, 9712420, 0x00000000, 0x3ecccccd, 0x7f19c2df0ce3dbe4),
         ("scaled", "steppe", 2147483645, -2147483646, 0xbca3d70a, 0x3d75c28f, 0xb918d2033648e902),
         ("scaled", "plains", 2147483645, -2147483646, 0xbca3d70a, 0x3d3645a3, 0xc38b849bb3dd7d69),
+        ("scaled", "hills1", 2147483645, -2147483647, 0x00000000, 0x3e841894, 0xdde8b6352082ee67),
+        ("scaled", "hills2", 2147483645, -2147483646, 0x80000000, 0x3e883958, 0xf830272ce50e01f5),
+        ("scaled", "dales", 2147483645, -2147483647, 0x00000000, 0x3ecccccd, 0xf3734c7bd6de92ce),
         ("scaled", "steppe", -2147483646, -2147483641, 0xbca3d70a, 0x3d75c28f, 0xd66522f75e6e4e3c),
         ("scaled", "plains", -2147483646, -2147483641, 0xbca3d70a, 0x3d3645a3, 0xf74f6abddcc0f328),
+        ("scaled", "hills1", -2147483646, -2147483642, 0x00000000, 0x3e841894, 0xca4971d84c32856b),
+        ("scaled", "hills2", -2147483646, -2147483641, 0x80000000, 0x3e883958, 0x1606af56f55e9e04),
+        ("scaled", "dales", -2147483646, -2147483642, 0x00000000, 0x3ecccccd, 0x604e1091230c1932),
         ("halfdown", "steppe", 7, 12, 0xbca3d70a, 0x3d75c28f, 0xff17844fedc4a4c5),
         ("halfdown", "plains", 7, 12, 0xbca3d70a, 0x3e051eb9, 0xff17844fedc4a4c5),
+        ("halfdown", "hills1", 7, 11, 0x00000000, 0x3f19999a, 0xab8b7ca55088abf3),
+        ("halfdown", "hills2", 7, 12, 0x80000000, 0x3f1e6667, 0x98426f20663ea361),
+        ("halfdown", "dales", 7, 11, 0x00000000, 0x3ecccccd, 0x19776d644d6ce475),
         ("oddbig", "steppe", -7, -2, 0xbca3d70a, 0x3d75c28f, 0xba1362b74aa359d2),
         ("oddbig", "plains", -7, -2, 0xbca3d70a, 0x3e8f5c29, 0x3e41276435ef31ee),
+        ("oddbig", "hills1", -7, -3, 0x00000000, 0x3f99999a, 0x37bfd8f3ba6756dc),
+        ("oddbig", "hills2", -7, -2, 0x80000000, 0x3f9e6667, 0xfb010b70b002ab58),
+        ("oddbig", "dales", -7, -3, 0x00000000, 0x3ecccccd, 0xe2a185f95f689a06),
         ("tiny", "steppe", 0, 5, 0xbca3d70a, 0x3d75c28f, 0xff17844fedc4a4c5),
         ("tiny", "plains", 0, 5, 0xbca3d70a, 0xbca3d70a, 0xff17844fedc4a4c5),
+        ("tiny", "hills1", 0, 4, 0x00000000, 0x00000000, 0x2c1b93daafb34265),
+        ("tiny", "hills2", 0, 5, 0x80000000, 0x00000000, 0x2c1b93daafb34265),
+        ("tiny", "dales", 0, 4, 0x00000000, 0x3ecccccd, 0xfc2055251cba1c7d),
         ("negative", "steppe", 99, 104, 0xbca3d70a, 0x3d75c28f, 0x40e88a51c53467e4),
         ("negative", "plains", 99, 104, 0xbca3d70a, 0xbe2e147b, 0x91a54a45a82a6b97),
+        ("negative", "hills1", 99, 103, 0x80000000, 0xbf19999a, 0xe7b11483b620da4d),
+        ("negative", "hills2", 99, 104, 0x00000000, 0xbf1e6667, 0x8022d3283697befa),
+        ("negative", "dales", 99, 103, 0x00000000, 0x3ecccccd, 0x6de28f6cec456865),
         ("nan", "steppe", 5, 10, 0xbca3d70a, 0x3d75c28f, 0xff17844fedc4a4c5),
         ("nan", "plains", 5, 10, 0x7fc00000, 0x7fc00000, 0x12956ce69e90b3c5),
+        ("nan", "hills1", 5, 9, 0x7fc00000, 0x7fc00000, 0x12956ce69e90b3c5),
+        ("nan", "hills2", 5, 10, 0x7fc00000, 0x7fc00000, 0x12956ce69e90b3c5),
+        ("nan", "dales", 5, 9, 0x00000000, 0x3ecccccd, 0x2fec3b0ba97bf943),
         ("huge", "steppe", 3, 8, 0xbca3d70a, 0x3d75c28f, 0x0a645dffde6efa79),
         ("huge", "plains", 3, 8, 0xbca3d70a, 0x6ff2568d, 0xdada775cdb02f309),
+        ("huge", "hills1", 3, 7, 0x00000000, 0x70f2568d, 0x8dc617ef4529563f),
+        ("huge", "hills2", 3, 8, 0x80000000, 0x70f9e940, 0xc0ec623bf089d277),
+        ("huge", "dales", 3, 7, 0x00000000, 0x3ecccccd, 0xb9e0aa41aac5ed80),
+        ("unit60", "steppe", -2147483648, -2147483643, 0xbca3d70a, 0x3d75c28f, 0xb7887cb514dad7de),
+        ("unit60", "plains", -2147483648, -2147483643, 0xbca3d70a, 0x3e6b851f, 0x38b71332a48a77ea),
+        ("unit60", "hills1", -2147483648, -2147483644, 0x00000000, 0x3f800000, 0xd03b8139d46beb97),
+        ("unit60", "hills2", -2147483648, -2147483643, 0x80000000, 0x3f840000, 0x1878f64e1a713a2a),
+        ("unit60", "dales", -2147483648, -2147483644, 0x00000000, 0x3ecccccd, 0xfc2055251cba1c7d),
+        ("unit55", "steppe", 2147483644, -2147483647, 0xbca3d70a, 0x3d75c28f, 0xcc009386f623d713),
+        ("unit55", "plains", 2147483644, -2147483647, 0xbca3d70a, 0x3e816578, 0x1705d1ee820fa929),
+        ("unit55", "hills1", 2147483644, -2147483648, 0x00000000, 0x3f8ba2e9, 0xb4dd50a98533c91a),
+        ("unit55", "hills2", 2147483644, -2147483647, 0x80000000, 0x3f900000, 0x2b6ebb23f4895006),
+        ("unit55", "dales", 2147483644, -2147483648, 0x00000000, 0x3ecccccd, 0x6b93cdd6668b400a),
     ];
 
     fn oracle_settings(name: &str) -> TerrainSettings {
@@ -278,6 +331,9 @@ mod tests {
             "negative" => (-1.3, -0.5, -1.0),
             "nan" => (f32::NAN, f32::NAN, f32::NAN),
             "huge" => (1e30, 1e30, 1e30),
+            // 0.6 * v == 1 and 0.55 * v == 1: hills1's and hills2's `scale(1)` returns the module unscaled.
+            "unit60" => (1.0, 1.0, f32::from_bits(0x3fd55555)),
+            "unit55" => (1.0, 1.0, f32::from_bits(0x3fe8ba2e)),
             _ => unreachable!("{name}"),
         };
         let mut settings = TerrainSettings::default();
@@ -294,11 +350,14 @@ mod tests {
             let mut seed = Seed::new(start);
             let module = match kind {
                 "steppe" => forms.steppe(&mut seed),
-                _ => forms.plains(&mut seed),
+                "plains" => forms.plains(&mut seed),
+                "hills1" => forms.hills1(&mut seed),
+                "hills2" => forms.hills2(&mut seed),
+                _ => forms.dales(&mut seed),
             };
             // NaN settings make Scale multiply two NaNs; which NaN's bits come out is up to the compiler (HotSpot
             // returns the scale's +NaN, a debug Rust build the source's -NaN), so only NaN-ness is checked there.
-            let nan_times_nan = name == "nan" && kind == "plains";
+            let nan_times_nan = name == "nan" && matches!(kind, "plains" | "hills1" | "hills2");
             let mut fnv = 0xcbf2_9ce4_8422_2325_u64;
             for x in GRID {
                 for y in GRID {
@@ -320,67 +379,5 @@ mod tests {
             );
             assert_eq!(got, (after, min, max, hash), "{name} {kind} {start}");
         }
-    }
-
-    #[test]
-    fn hills_match_engine_0_3_0() {
-        let forms = LandForms::new(TerrainSettings::default());
-        let mut hills1_seed = Seed::new(321);
-        let hills1 = forms.hills1(&mut hills1_seed);
-        assert_eq!(hills1_seed.get(), 325);
-        assert_eq!(hills1.min_value().to_bits(), 0x00000000);
-        assert_eq!(hills1.max_value().to_bits(), 0x3f16872c);
-        assert_eq!(
-            bits(&hills1),
-            [0x3e16872c, 0x3e2a41f1, 0x3e4e8c02, 0x3e68e25a]
-        );
-
-        let mut hills2_seed = Seed::new(-45);
-        let hills2 = forms.hills2(&mut hills2_seed);
-        assert_eq!(hills2_seed.get(), -40);
-        assert_eq!(hills2.min_value().to_bits(), 0x80000000);
-        assert_eq!(hills2.max_value().to_bits(), 0x3f1b3b65);
-        assert_eq!(
-            bits(&hills2),
-            [0x3e3929fe, 0x3e4b287b, 0x3e5b0922, 0x3e61f05e]
-        );
-    }
-
-    #[test]
-    fn dales_matches_engine_0_3_0() {
-        let forms = LandForms::new(TerrainSettings::default());
-        let mut seed = Seed::new(987_654);
-        let dales = forms.dales(&mut seed);
-        assert_eq!(seed.get(), 987_658);
-        assert_eq!(dales.min_value().to_bits(), 0x00000000);
-        assert_eq!(dales.max_value().to_bits(), 0x3ecccccd);
-        assert_eq!(
-            bits(&dales),
-            [0x00000000, 0x3de86058, 0x3c1e05a0, 0x3ccd7073]
-        );
-    }
-
-    #[test]
-    fn scaled_hills_match_engine_0_3_0() {
-        let mut settings = TerrainSettings::default();
-        settings.general.global_vertical_scale = 0.37;
-        let forms = LandForms::new(settings);
-        let mut hills1_seed = Seed::new(i32::MAX - 3);
-        let hills1 = forms.hills1(&mut hills1_seed);
-        assert_eq!(hills1_seed.get(), i32::MIN);
-        assert_eq!(hills1.max_value().to_bits(), 0x3e6353f9);
-        assert_eq!(
-            bits(&hills1),
-            [0x3d6353f9, 0x3db9159e, 0x3d882819, 0x3dd855d4]
-        );
-
-        let mut hills2_seed = Seed::new(i32::MIN + 3);
-        let hills2 = forms.hills2(&mut hills2_seed);
-        assert_eq!(hills2_seed.get(), i32::MIN + 8);
-        assert_eq!(hills2.max_value().to_bits(), 0x3e6a6e98);
-        assert_eq!(
-            bits(&hills2),
-            [0x3d72ed88, 0x3d4b6714, 0x3dafad6e, 0x3dd98c72]
-        );
     }
 }
