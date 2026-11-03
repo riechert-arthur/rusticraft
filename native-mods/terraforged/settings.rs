@@ -20,6 +20,11 @@ pub struct Settings {
     /// of what the chunk before left (`deterministic`'s settled 0 when that is on):
     /// trees then thin out away from rivers (`SaturationViability`).
     pub sparse_forests: bool,
+    /// Keep cave, ocean, river and beach biomes out of the climate pools (the
+    /// original lets `deep_dark` and `deep_ocean` grow on dry land; oceans, rivers
+    /// and beaches still come from its own overrides), and draw unique caves from
+    /// the overworld's cave biomes, not from every registered biome.
+    pub corrected_biomes: bool,
 }
 
 impl Default for Settings {
@@ -32,6 +37,7 @@ impl Default for Settings {
 pub const FAITHFUL: Settings = Settings {
     deterministic: false,
     sparse_forests: false,
+    corrected_biomes: false,
 };
 
 static CURRENT: RwLock<Settings> = RwLock::new(FAITHFUL);
@@ -67,6 +73,7 @@ impl Settings {
         Self {
             deterministic: flag("deterministic", FAITHFUL.deterministic),
             sparse_forests: flag("sparse_forests", FAITHFUL.sparse_forests),
+            corrected_biomes: flag("corrected_biomes", FAITHFUL.corrected_biomes),
         }
     }
 
@@ -74,6 +81,7 @@ impl Settings {
         let mut map = Map::new();
         map.insert("deterministic".into(), self.deterministic.into());
         map.insert("sparse_forests".into(), self.sparse_forests.into());
+        map.insert("corrected_biomes".into(), self.corrected_biomes.into());
         Value::Object(map)
     }
 }
@@ -87,6 +95,7 @@ mod tests {
         let on = Settings {
             deterministic: true,
             sparse_forests: true,
+            corrected_biomes: true,
         };
         assert_eq!(Settings::from_json(&on.to_json()), on);
         assert_eq!(Settings::from_json(&serde_json::json!({})), FAITHFUL);

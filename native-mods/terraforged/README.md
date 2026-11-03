@@ -67,6 +67,12 @@ leaves existing worlds as they are.
   chunk before left (or `deterministic`'s settled 0). Saturation (`1 - river noise`) then falls away
   from rivers and lakes, and trees with it: forests gather along the water and thin out elsewhere,
   about a quarter of the usual trees. Deterministic either way.
+- `corrected_biomes`: the climate pools leave out cave biomes (`deep_dark`, `lush_caves`,
+  `dripstone_caves`, `terraforged:cave`) and oceans, rivers and beaches, which TerraForged's own
+  overrides place where they belong, so `deep_dark` no longer spreads sculk over grass and
+  `deep_ocean` no longer covers dry land. Unique caves draw from the overworld's cave biomes instead of
+  every registered biome (the End's and the Nether's included). Structures still see every overworld
+  biome as possible.
 
 ## Layers
 

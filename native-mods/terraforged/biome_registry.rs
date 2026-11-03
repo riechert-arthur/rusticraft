@@ -130,6 +130,17 @@ impl<T> RegistryBiomeMap<T> {
         entries: &[RegistryBiome<T>],
         configured: &[ClimateWeight],
     ) -> Result<Self, String> {
+        Self::build_with(entries, configured, false)
+    }
+
+    /// `build`; with `corrected` (the `corrected_biomes` setting) the unconfigured cave,
+    /// ocean, river and beach biomes stay out of the pools. They stay in `overworld`,
+    /// the biomes structures may find.
+    pub fn build_with(
+        entries: &[RegistryBiome<T>],
+        configured: &[ClimateWeight],
+        corrected: bool,
+    ) -> Result<Self, String> {
         let mut overworld: Vec<_> = entries
             .iter()
             .filter(|entry| entry.is(IS_OVERWORLD))
@@ -162,7 +173,7 @@ impl<T> RegistryBiomeMap<T> {
 
         overworld.sort_by(|left, right| left.location_key().cmp(&right.location_key()));
         for entry in &overworld {
-            if registered.contains(&entry.name) {
+            if registered.contains(&entry.name) || (corrected && !belongs_on_land(entry)) {
                 continue;
             }
             weighted[entry.climate_type() as usize].push((Arc::clone(&entry.value), 1.0));
@@ -213,8 +224,34 @@ impl RegistryBiomeMap<BiomeId> {
                 )
             })
             .collect();
-        Self::build(&entries, configured)
+        Self::build_with(
+            &entries,
+            configured,
+            super::terraforged_settings::current().corrected_biomes,
+        )
     }
+}
+
+/// Underground biomes, which grow in caves (`terraforged:cave` included).
+pub const CAVE_BIOMES: [&str; 4] = [
+    "minecraft:lush_caves",
+    "minecraft:dripstone_caves",
+    "minecraft:deep_dark",
+    "terraforged:cave",
+];
+
+/// Whether a climate pool may place the biome on land: not a cave biome, and not an
+/// ocean, river or beach (TerraForged's own overrides place those where they belong).
+fn belongs_on_land<T>(entry: &RegistryBiome<T>) -> bool {
+    !CAVE_BIOMES.contains(&entry.name.as_ref())
+        && ![
+            "minecraft:is_ocean",
+            "minecraft:is_deep_ocean",
+            "minecraft:is_river",
+            "minecraft:is_beach",
+        ]
+        .iter()
+        .any(|tag| entry.is(tag))
 }
 
 #[cfg(test)]
@@ -340,5 +377,47 @@ mod tests {
             weight: 1.0,
         }];
         assert!(RegistryBiomeMap::build(&entries, &missing).is_err());
+    }
+
+    #[test]
+    fn corrected_pools_keep_caves_and_water_off_land() {
+        let entries = [
+            biome("minecraft:plains", 0.8, 0.4, &[IS_OVERWORLD]),
+            biome("minecraft:deep_dark", 0.8, 0.4, &[IS_OVERWORLD]),
+            biome(
+                "minecraft:deep_ocean",
+                0.5,
+                0.5,
+                &[
+                    IS_OVERWORLD,
+                    "minecraft:is_ocean",
+                    "minecraft:is_deep_ocean",
+                ],
+            ),
+            biome(
+                "minecraft:river",
+                0.5,
+                0.5,
+                &[IS_OVERWORLD, "minecraft:is_river"],
+            ),
+            biome(
+                "minecraft:beach",
+                0.8,
+                0.4,
+                &[IS_OVERWORLD, "minecraft:is_beach"],
+            ),
+        ];
+        let pooled = |corrected| {
+            let map = RegistryBiomeMap::build_with(&entries, &[], corrected).unwrap();
+            let mut names: Vec<&str> = BiomeType::VALUES
+                .iter()
+                .flat_map(|climate| map.pools.get(*climate).unwrap().values().to_vec())
+                .map(|value| *value)
+                .collect();
+            names.sort_unstable();
+            (names, map.overworld.len())
+        };
+        assert_eq!(pooled(false).0.len(), 5);
+        assert_eq!(pooled(true), (vec!["minecraft:plains"], 5));
     }
 }
