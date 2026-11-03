@@ -738,9 +738,17 @@ impl SeededPipeline for TerraForgedPipeline {
             .map(|id| **id)
             .filter(|id| (search.allowed)(data.biome_name(*id)))
             .collect();
-        if candidates.is_empty() {
+        // Biomes only caves hold (terraforged:cave, the unique caves' ones): found where
+        // a cave carves them, not in the noise biome.
+        let underground: BTreeSet<BiomeId> = (0..data.biome_names().len())
+            .map(|id| BiomeId(id as u32))
+            .filter(|id| (search.allowed)(data.biome_name(*id)) && self.caves.may_hold(id))
+            .collect();
+        if candidates.is_empty() && underground.is_empty() {
             return None;
         }
+        let seed = self.generator.seed();
+        let min_y = search.min_y;
         let y = *super::out_from_origin(
             search.origin[1],
             search.min_y + 1,
@@ -752,9 +760,28 @@ impl SeededPipeline for TerraForgedPipeline {
         for [sx, sz] in super::spiral_around(radius) {
             let x = search.origin[0].wrapping_add(sx.wrapping_mul(search.horizontal));
             let z = search.origin[2].wrapping_add(sz.wrapping_mul(search.horizontal));
-            let biome = self.biome_at(x & !3, z & !3);
-            if candidates.contains(&biome) {
-                return Some((data.biome_name(biome).to_owned(), [x, y, z]));
+            if !candidates.is_empty() {
+                let biome = self.biome_at(x & !3, z & !3);
+                if candidates.contains(&biome) {
+                    return Some((data.biome_name(biome).to_owned(), [x, y, z]));
+                }
+            }
+            if !underground.is_empty() {
+                let first_free = self
+                    .generator
+                    .base_height(x, z, TerraHeightmap::OceanFloorWorldgen)
+                    .wrapping_add(1);
+                if let Some((biome, cave_y)) = self.caves.underground_biome_at(
+                    seed,
+                    x,
+                    z,
+                    first_free,
+                    self.generator.sea_level(),
+                    min_y,
+                ) && underground.contains(&biome)
+                {
+                    return Some((data.biome_name(biome).to_owned(), [x, cave_y, z]));
+                }
             }
         }
         None
@@ -1148,5 +1175,41 @@ mod tests {
             .contains(&name.as_str())),
             "{corrected:?}"
         );
+    }
+
+    /// `/locate biome` finds a biome only caves hold (seed 98765's unique caves hold
+    /// `the_end`; `terraforged:cave` comes with the mod's pack, not this bundle), and
+    /// the chunk generated there holds it near the answer.
+    #[test]
+    fn locate_finds_cave_biomes() {
+        let Some(data) = data() else { return };
+        let overworld = OverworldGenerator::for_world(
+            Arc::clone(&data),
+            98765,
+            PRESET,
+            "minecraft:overworld",
+            true,
+        )
+        .unwrap();
+        let mut worker = overworld.worker();
+        let allowed = |name: &str| name == "minecraft:the_end";
+        let (name, [x, y, z]) = worker
+            .find_closest_biome(&BiomeSearch {
+                allowed: &allowed,
+                origin: [0, 64, 0],
+                radius: 6400,
+                horizontal: 32,
+                vertical: 64,
+                min_y: -64,
+                max_y: 959,
+            })
+            .expect("a cave biome nearby");
+        assert_eq!(name, "minecraft:the_end");
+        let chunk = worker
+            .generate_proto(ChunkPos::new(x >> 4, z >> 4))
+            .unwrap();
+        let near =
+            (-8..=8).any(|dy| chunk.biome_at(x & 15, y + dy * 4, z & 15) == "minecraft:the_end");
+        assert!(near, "no cave biome near {x} {y} {z}");
     }
 }

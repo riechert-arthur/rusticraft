@@ -23,6 +23,11 @@ saves TerraForged's overworld stem and generates its overworld with TerraForged:
 - decoration: `FeatureDecorator` with TerraForged's vegetation (jittered, fitness-gated trees),
   cave decoration, water smoothing and snow.
 
+`/locate biome` also finds the biomes only caves hold (`terraforged:cave`, and whatever unique caves
+draw): it runs TerraForged's cave noise over the search's columns, where the original only asks the
+noise biome and finds none. `terraforged:oak_forest` is registered but no climate places it, so it is
+never found, as in the original.
+
 As with TerraForged's own data pack, every world (TerraForged or not) gets the 1024-block
 overworld and clouds at y=300, from a built-in pack in the game's `config/terraforged`. Boats a
 player rides rise to a river's stepped water surface (`BoatHook`). Operators get
