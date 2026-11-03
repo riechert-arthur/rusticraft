@@ -16,6 +16,10 @@ pub struct Settings {
     /// position and feature index, on the ground under leaves, instead of from how
     /// many placed before it.
     pub deterministic: bool,
+    /// Start each sample's river noise at 1, as TerraForged's code intends, instead
+    /// of what the chunk before left (`deterministic`'s settled 0 when that is on):
+    /// trees then thin out away from rivers (`SaturationViability`).
+    pub sparse_forests: bool,
 }
 
 impl Default for Settings {
@@ -27,6 +31,7 @@ impl Default for Settings {
 /// The original's behaviour: every setting off.
 pub const FAITHFUL: Settings = Settings {
     deterministic: false,
+    sparse_forests: false,
 };
 
 static CURRENT: RwLock<Settings> = RwLock::new(FAITHFUL);
@@ -61,12 +66,14 @@ impl Settings {
         let flag = |key: &str, default: bool| value[key].as_bool().unwrap_or(default);
         Self {
             deterministic: flag("deterministic", FAITHFUL.deterministic),
+            sparse_forests: flag("sparse_forests", FAITHFUL.sparse_forests),
         }
     }
 
     pub fn to_json(self) -> Value {
         let mut map = Map::new();
         map.insert("deterministic".into(), self.deterministic.into());
+        map.insert("sparse_forests".into(), self.sparse_forests.into());
         Value::Object(map)
     }
 }
@@ -79,6 +86,7 @@ mod tests {
     fn json_round_trips_and_defaults_missing_keys() {
         let on = Settings {
             deterministic: true,
+            sparse_forests: true,
         };
         assert_eq!(Settings::from_json(&on.to_json()), on);
         assert_eq!(Settings::from_json(&serde_json::json!({})), FAITHFUL);
