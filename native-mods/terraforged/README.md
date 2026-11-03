@@ -18,8 +18,13 @@ methods (`map`, `clamp`, `pow`, `bias`...). Its tests check the bounds each node
 including Engine's quirks: Threshold reports its source's bounds rather than 0..1, and Max's minimum is the larger of
 the first source's minimum and the other sources' maxima.
 
-The domain layer adds direct, axis-noise, directional, additive, compound and cumulative warps,
-plus warped module sampling. Directional warps reproduce Engine 0.3.0's 4096-entry sine lookup.
+The domain layer adds Engine's coordinate warps (`Domain.DIRECT`, `DomainWarp`, `DirectionWarp`, `AddWarp`,
+`CompoundWarp` and `CumulativeWarp`) and the `Warp` module that samples its source at the warped point. Its tests check
+raw bits, including Engine's quirks: `DirectionWarp` reads `NoiseUtil`'s 4096-entry sine table, `DomainWarp` maps a
+constant axis to NaN, and `CumulativeWarp` returns the second warp's coordinate rather than its offset. `CacheWarp`
+(`Domain.cache()`) is not ported: Engine never sets its `cached` flag, so it only passes samples through. The seed/scale
+shorthands that build noise warps (`Domain.warp(seed, scale, octaves, strength)`, `Module.warp(seed, ...)`...) are not
+ported yet either.
 
 ## Status: development only
 
