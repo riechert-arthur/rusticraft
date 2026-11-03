@@ -867,7 +867,7 @@ impl Levels {
         if y <= self.water_y {
             0.0
         } else {
-            self.scale_level(y - self.water_y) / self.elevation_range
+            self.scale_level(y.wrapping_sub(self.water_y)) / self.elevation_range
         }
     }
 
@@ -1620,6 +1620,31 @@ mod tests {
         invalid.beach = f32::NAN;
         assert!(!ControlPoints::validate(&invalid));
         assert_eq!(ControlPoints::new(invalid), defaults);
+        // -0.0 passes `deepOcean >= 0` and is kept.
+        let negative_zero = WorldControlPoints {
+            deep_ocean: -0.0,
+            ..valid
+        };
+        assert_eq!(
+            bits_of_control_points(ControlPoints::new(negative_zero)),
+            [
+                0x80000000, 0x3e4ccccd, 0x3e99999a, 0x3f19999a, 0x3f4ccccd, 0x3f800000,
+            ]
+        );
+        // The points TerraForged's continent noise sets.
+        let continent = WorldControlPoints {
+            deep_ocean: 0.05,
+            shallow_ocean: 0.3,
+            beach: 0.45,
+            coast: 0.75,
+            inland: 0.8,
+        };
+        assert_eq!(
+            bits_of_control_points(ControlPoints::new(continent)),
+            [
+                0x3d4ccccd, 0x3e99999a, 0x3ee66666, 0x3f400000, 0x3f466666, 0x3f4ccccd,
+            ]
+        );
     }
 
     fn bits_of_control_points(points: ControlPoints) -> [u32; 6] {
@@ -1692,5 +1717,393 @@ mod tests {
         assert_eq!(high_sea.water_y, 100);
         assert_eq!(high_sea.water.to_bits(), 0x3f800000);
         assert_eq!(high_sea.elevation_y(101).to_bits(), 0x7f800000);
+    }
+
+    struct LevelsCase {
+        input: (i32, i32),
+        /// `worldHeight`, `unit`, `waterY`, `groundLevel`, `ground`, `water`.
+        fields: (i32, u32, i32, i32, u32, u32),
+        scale_value: [i32; 12],
+        elevation_value: [u32; 12],
+        elevation_y: [u32; 8],
+        scale_level: [u32; 8],
+        water: [u32; 8],
+        ground: [u32; 8],
+    }
+
+    #[test]
+    fn levels_match_java_oracle() {
+        // Printed by `new Levels(height, seaLevel)` of Engine 0.3.0, including 26.3's 320 and 384
+        // block heights, `int` overflow of the sea level and `y - waterY`, and heights past 2^24.
+        let cases = [
+            LevelsCase {
+                input: (256, 63),
+                fields: (256, 0x3b800000, 62, 64, 0x3e7c0000, 0x3e780000),
+                scale_value: [-256, 0, 64, 62, 192, 255, 0, 255, i32::MIN, 255, 0, 255],
+                elevation_value: [
+                    0x00000000, 0x00000000, 0x3c28e83f, 0x00000000, 0x3f2b8be0, 0x3f800000,
+                    0x7fc00000, 0x7f800000, 0x00000000, 0x3f7ffffd, 0x00000000, 0x71853e8b,
+                ],
+                elevation_y: [
+                    0x00000000, 0x00000000, 0x3ba8e83f, 0x3f800000, 0x3f9d07eb, 0x4b28e83f,
+                    0x00000000, 0x00000000,
+                ],
+                scale_level: [
+                    0xbd200000, 0x3e780000, 0x3e7c0000, 0x3f800000, 0x3f960000, 0x4b000000,
+                    0xcb000000, 0x00000000,
+                ],
+                water: [
+                    0x3e500000, 0x3ef80000, 0x3efa0000, 0x3f9f0000, 0x3fb50000, 0xcb000000,
+                    0xcb000000, 0x3e780000,
+                ],
+                ground: [
+                    0x3e540000, 0x3efa0000, 0x3efc0000, 0x3f9f8000, 0x3fb58000, 0xcb000000,
+                    0xcb000000, 0x3e7c0000,
+                ],
+            },
+            LevelsCase {
+                input: (0, 63),
+                fields: (1, 0x3f800000, 1, 64, 0x3f800000, 0x3f800000),
+                scale_value: [-1, 0, 0, 0, 0, 0, 0, 0, i32::MIN, 0, 0, 0],
+                elevation_value: [
+                    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+                    0x7fc00000, 0x7f800000, 0x00000000, 0x00000000, 0x00000000, 0x7f800000,
+                ],
+                elevation_y: [
+                    0x00000000, 0x7f800000, 0x7f800000, 0x7f800000, 0x7f800000, 0x7f800000,
+                    0x00000000, 0x00000000,
+                ],
+                scale_level: [
+                    0xc1200000, 0x42780000, 0x427c0000, 0x43800000, 0x43960000, 0x4f000000,
+                    0xcf000000, 0x00000000,
+                ],
+                water: [
+                    0xc1100000, 0x427c0000, 0x42800000, 0x43808000, 0x43968000, 0xcf000000,
+                    0xcf000000, 0x3f800000,
+                ],
+                ground: [
+                    0xc1100000, 0x427c0000, 0x42800000, 0x43808000, 0x43968000, 0xcf000000,
+                    0xcf000000, 0x3f800000,
+                ],
+            },
+            LevelsCase {
+                input: (-10, -5),
+                fields: (1, 0x3f800000, -6, -4, 0xc0a00000, 0xc0c00000),
+                scale_value: [-1, 0, 0, -6, 0, 0, 0, 0, i32::MIN, 0, 0, 0],
+                elevation_value: [
+                    0x3f36db6e, 0x3f5b6db7, 0x3f649249, 0x00000000, 0x3f76db6e, 0x3f800000,
+                    0x7fc00000, 0x7f800000, 0x00000000, 0x3f800000, 0x3f5b6db7, 0x6fe6cc55,
+                ],
+                elevation_y: [
+                    0x00000000, 0x411b6db7, 0x411db6db, 0x4215b6db, 0x422edb6e, 0xcd924925,
+                    0x00000000, 0x3f5b6db7,
+                ],
+                scale_level: [
+                    0xc1200000, 0x42780000, 0x427c0000, 0x43800000, 0x43960000, 0x4f000000,
+                    0xcf000000, 0x00000000,
+                ],
+                water: [
+                    0xc1800000, 0x42600000, 0x42640000, 0x437a0000, 0x43930000, 0x4f000000,
+                    0x4f000000, 0xc0c00000,
+                ],
+                ground: [
+                    0xc1700000, 0x42640000, 0x42680000, 0x437b0000, 0x43938000, 0x4f000000,
+                    0x4f000000, 0xc0a00000,
+                ],
+            },
+            LevelsCase {
+                input: (100, 200),
+                fields: (100, 0x3c23d70a, 100, 201, 0x3f800000, 0x3f800000),
+                scale_value: [-100, 0, 25, 99, 75, 99, 0, 99, i32::MIN, 99, 0, 99],
+                elevation_value: [
+                    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+                    0x7fc00000, 0x7f800000, 0x00000000, 0x00000000, 0x00000000, 0x7f800000,
+                ],
+                elevation_y: [
+                    0x00000000, 0x00000000, 0x00000000, 0x7f800000, 0x7f800000, 0x7f800000,
+                    0x00000000, 0x00000000,
+                ],
+                scale_level: [
+                    0xbdcccccd, 0x3f1eb852, 0x3f2147ae, 0x4023d70a, 0x40400000, 0x4ba3d70a,
+                    0xcba3d70a, 0x00000000,
+                ],
+                water: [
+                    0x3f666666, 0x3fcf5c29, 0x3fd0a3d7, 0x4063d70a, 0x40800000, 0xcba3d70a,
+                    0xcba3d70a, 0x3f800000,
+                ],
+                ground: [
+                    0x3f666666, 0x3fcf5c29, 0x3fd0a3d7, 0x4063d70a, 0x40800000, 0xcba3d70a,
+                    0xcba3d70a, 0x3f800000,
+                ],
+            },
+            LevelsCase {
+                input: (320, 63),
+                fields: (320, 0x3b4ccccd, 62, 64, 0x3e49999a, 0x3e466666),
+                scale_value: [-320, 0, 80, 62, 240, 319, 0, 319, i32::MIN, 319, 0, 319],
+                elevation_value: [
+                    0x00000000, 0x00000000, 0x3d8ee23d, 0x00000000, 0x3f309ec2, 0x3f800000,
+                    0x7fc00000, 0x7f800000, 0x00000000, 0x3f7ffffe, 0x00000000, 0x717a7a88,
+                ],
+                elevation_y: [
+                    0x00000000, 0x00000000, 0x3b7e03f9, 0x3f407f02, 0x3f6c27b1, 0x4afe03f9,
+                    0x00000000, 0x00000000,
+                ],
+                scale_level: [
+                    0xbd000000, 0x3e466666, 0x3e49999a, 0x3f4ccccd, 0x3f700000, 0x4acccccd,
+                    0xcacccccd, 0x00000000,
+                ],
+                water: [
+                    0x3e266666, 0x3ec66666, 0x3ec80000, 0x3f7e6666, 0x3f90cccd, 0xcacccccd,
+                    0xcacccccd, 0x3e466666,
+                ],
+                ground: [
+                    0x3e29999a, 0x3ec80000, 0x3ec9999a, 0x3f7f3333, 0x3f913333, 0xcacccccd,
+                    0xcacccccd, 0x3e49999a,
+                ],
+            },
+            LevelsCase {
+                input: (384, 63),
+                fields: (384, 0x3b2aaaab, 62, 64, 0x3e280000, 0x3e255555),
+                scale_value: [-384, 0, 96, 62, 288, 383, 0, 383, i32::MIN, 383, 0, 383],
+                elevation_value: [
+                    0x00000000, 0x00000000, 0x3dd83f9b, 0x00000000, 0x3f33ad51, 0x3f800000,
+                    0x7fc00000, 0x7f800000, 0x00000000, 0x3f7ffffe, 0x00000000, 0x7170d536,
+                ],
+                elevation_y: [
+                    0x00000000, 0x00000000, 0x3b4b8728, 0x3f1a3c6b, 0x3f3d37a7, 0x4acb8728,
+                    0x00000000, 0x00000000,
+                ],
+                scale_level: [
+                    0xbcd55555, 0x3e255555, 0x3e280000, 0x3f2aaaab, 0x3f480000, 0x4aaaaaab,
+                    0xcaaaaaab, 0x00000000,
+                ],
+                water: [
+                    0x3e0aaaab, 0x3ea55555, 0x3ea6aaab, 0x3f540000, 0x3f715555, 0xcaaaaaab,
+                    0xcaaaaaab, 0x3e255555,
+                ],
+                ground: [
+                    0x3e0d5555, 0x3ea6aaab, 0x3ea80000, 0x3f54aaab, 0x3f720000, 0xcaaaaaab,
+                    0xcaaaaaab, 0x3e280000,
+                ],
+            },
+            LevelsCase {
+                input: (256, i32::MAX),
+                fields: (256, 0x3b800000, 256, i32::MIN, 0x3f800000, 0x3f800000),
+                scale_value: [-256, 0, 64, 255, 192, 255, 0, 255, i32::MIN, 255, 0, 255],
+                elevation_value: [
+                    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+                    0x7fc00000, 0x7f800000, 0x00000000, 0x00000000, 0x00000000, 0x7f800000,
+                ],
+                elevation_y: [
+                    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x7f800000, 0x7f800000,
+                    0x00000000, 0x00000000,
+                ],
+                scale_level: [
+                    0xbd200000, 0x3e780000, 0x3e7c0000, 0x3f800000, 0x3f960000, 0x4b000000,
+                    0xcb000000, 0x00000000,
+                ],
+                water: [
+                    0x3f760000, 0x3f9f0000, 0x3f9f8000, 0x40000000, 0x400b0000, 0xcafffffe,
+                    0xcafffffe, 0x3f800000,
+                ],
+                ground: [
+                    0x3f760000, 0x3f9f0000, 0x3f9f8000, 0x40000000, 0x400b0000, 0xcafffffe,
+                    0xcafffffe, 0x3f800000,
+                ],
+            },
+            LevelsCase {
+                input: (256, i32::MIN),
+                fields: (256, 0x3b800000, 256, -2147483647, 0xcb000000, 0x3f800000),
+                scale_value: [-256, 0, 64, 255, 192, 255, 0, 255, i32::MIN, 255, 0, 255],
+                elevation_value: [
+                    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+                    0x7fc00000, 0x7f800000, 0x00000000, 0x00000000, 0x00000000, 0x7f800000,
+                ],
+                elevation_y: [
+                    0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x7f800000, 0x7f800000,
+                    0x00000000, 0x00000000,
+                ],
+                scale_level: [
+                    0xbd200000, 0x3e780000, 0x3e7c0000, 0x3f800000, 0x3f960000, 0x4b000000,
+                    0xcb000000, 0x00000000,
+                ],
+                water: [
+                    0x3f760000, 0x3f9f0000, 0x3f9f8000, 0x40000000, 0x400b0000, 0xcafffffe,
+                    0xcafffffe, 0x3f800000,
+                ],
+                ground: [
+                    0x4b000000, 0xcb000000, 0xcb000000, 0xcafffffe, 0xcafffffe, 0xbb800000,
+                    0x00000000, 0xcb000000,
+                ],
+            },
+            LevelsCase {
+                input: (i32::MAX, 63),
+                fields: (i32::MAX, 0x30000000, 62, 64, 0x32fc0000, 0x32f80000),
+                scale_value: [
+                    i32::MIN,
+                    0,
+                    536870912,
+                    62,
+                    1610612736,
+                    2147483646,
+                    0,
+                    2147483646,
+                    i32::MIN,
+                    2147483392,
+                    0,
+                    2147483646,
+                ],
+                elevation_value: [
+                    0x00000000, 0x00000000, 0x3e7ffffe, 0x00000000, 0x3f400000, 0x3f800000,
+                    0x7fc00000, 0x7f800000, 0x00000000, 0x3f7ffffe, 0x00000000, 0x7149f2ca,
+                ],
+                elevation_y: [
+                    0x00000000, 0x00000000, 0x30000000, 0x33c20000, 0x33ee0000, 0x3f800000,
+                    0x00000000, 0x00000000,
+                ],
+                scale_level: [
+                    0xb1a00000, 0x32f80000, 0x32fc0000, 0x34000000, 0x34160000, 0x3f800000,
+                    0xbf800000, 0x00000000,
+                ],
+                water: [
+                    0x32d00000, 0x33780000, 0x337a0000, 0x341f0000, 0x34350000, 0xbf800000,
+                    0xbf800000, 0x32f80000,
+                ],
+                ground: [
+                    0x32d40000, 0x337a0000, 0x337c0000, 0x341f8000, 0x34358000, 0xbf800000,
+                    0xbf800000, 0x32fc0000,
+                ],
+            },
+            LevelsCase {
+                input: (16777217, 63),
+                fields: (16777217, 0x33800000, 62, 64, 0x367c0000, 0x36780000),
+                scale_value: [
+                    -16777216,
+                    0,
+                    4194304,
+                    62,
+                    12582912,
+                    16777216,
+                    0,
+                    16777216,
+                    i32::MIN,
+                    16777214,
+                    0,
+                    16777216,
+                ],
+                elevation_value: [
+                    0x00000000, 0x00000000, 0x3e7fff46, 0x00000000, 0x3f3ffff0, 0x3f800000,
+                    0x7fc00000, 0x7f800000, 0x00000000, 0x3f7ffffe, 0x00000000, 0x7149f2fb,
+                ],
+                elevation_y: [
+                    0x00000000, 0x00000000, 0x3380001f, 0x3742002f, 0x376e003a, 0x4300001f,
+                    0x00000000, 0x00000000,
+                ],
+                scale_level: [
+                    0xb5200000, 0x36780000, 0x367c0000, 0x37800000, 0x37960000, 0x43000000,
+                    0xc3000000, 0x00000000,
+                ],
+                water: [
+                    0x36500000, 0x36f80000, 0x36fa0000, 0x379f0000, 0x37b50000, 0xc3000000,
+                    0xc3000000, 0x36780000,
+                ],
+                ground: [
+                    0x36540000, 0x36fa0000, 0x36fc0000, 0x379f8000, 0x37b58000, 0xc3000000,
+                    0xc3000000, 0x367c0000,
+                ],
+            },
+            LevelsCase {
+                input: (256, -2000000000),
+                fields: (
+                    256,
+                    0x3b800000,
+                    -2000000001,
+                    -1999999999,
+                    0xcaee6b28,
+                    0xcaee6b28,
+                ),
+                scale_value: [
+                    -256,
+                    0,
+                    64,
+                    -2000000000,
+                    192,
+                    255,
+                    0,
+                    255,
+                    i32::MIN,
+                    255,
+                    0,
+                    255,
+                ],
+                elevation_value: [
+                    0x3f7ffffc, 0x3f7ffffe, 0x3f7ffffe, 0x00000000, 0x3f800000, 0x3f800000,
+                    0x7fc00000, 0x7f800000, 0x00000000, 0x3f800000, 0x3f7ffffe, 0x65d8d725,
+                ],
+                elevation_y: [
+                    0x3f7ffffe, 0x3f7ffffe, 0x3f7ffffe, 0x3f800000, 0x3f800000, 0xbd9705f3,
+                    0x00000000, 0x3f7ffffe,
+                ],
+                scale_level: [
+                    0xbd200000, 0x3e780000, 0x3e7c0000, 0x3f800000, 0x3f960000, 0x4b000000,
+                    0xcb000000, 0x00000000,
+                ],
+                water: [
+                    0xcaee6b28, 0xcaee6b28, 0xcaee6b28, 0xcaee6b26, 0xcaee6b26, 0x490ca6c0,
+                    0x490ca6c0, 0xcaee6b28,
+                ],
+                ground: [
+                    0xcaee6b28, 0xcaee6b28, 0xcaee6b28, 0xcaee6b26, 0xcaee6b26, 0x490ca6c0,
+                    0x490ca6c0, 0xcaee6b28,
+                ],
+            },
+        ];
+        for case in cases {
+            let levels = Levels::new(case.input.0, case.input.1);
+            assert_eq!(
+                (
+                    levels.world_height,
+                    levels.unit.to_bits(),
+                    levels.water_y,
+                    levels.ground_level,
+                    levels.ground.to_bits(),
+                    levels.water.to_bits(),
+                ),
+                case.fields,
+                "{:?}",
+                case.input
+            );
+            assert_eq!(levels.water_level, case.input.1);
+            let values = [
+                -1.0,
+                0.0,
+                0.25,
+                levels.water,
+                0.75,
+                1.0,
+                f32::NAN,
+                f32::INFINITY,
+                f32::NEG_INFINITY,
+                0.999_999_9,
+                -0.0,
+                1e30,
+            ];
+            let ys = [-10, 62, 63, 256, 300, i32::MAX, i32::MIN, 0];
+            assert_eq!(values.map(|v| levels.scale_value(v)), case.scale_value);
+            assert_eq!(
+                values.map(|v| levels.elevation_value(v).to_bits()),
+                case.elevation_value
+            );
+            assert_eq!(
+                ys.map(|y| levels.elevation_y(y).to_bits()),
+                case.elevation_y
+            );
+            assert_eq!(
+                ys.map(|y| levels.scale_level(y).to_bits()),
+                case.scale_level
+            );
+            assert_eq!(ys.map(|y| levels.water(y).to_bits()), case.water);
+            assert_eq!(ys.map(|y| levels.ground(y).to_bits()), case.ground);
+        }
     }
 }
