@@ -45,7 +45,13 @@ As in Engine, the steps are fixed when it is built and start at 0, not at the so
 range over `steps - 1`; it reports the source's bounds. Where Engine throws (sampling a NaN, or a terrace with no
 steps), this port panics.
 
-The legacy terrace layer adds `LegacyTerrace` (`Module.legacyTerrace(lowerCurve, upperCurve, steps, blendRange)`).
+The legacy terrace layer adds `LegacyTerrace` (`Module.legacyTerrace(lowerCurve, upperCurve, steps, blendRange)`): it
+clamps its source to 0..1 and snaps it to the nearest of the same evenly spaced steps as `Terrace`, easing into the
+neighbouring steps with Curve3 transitions whose height is scaled by `lowerCurve` (towards the next step) and
+`upperCurve` (from the previous one); it reports the source's bounds. Its tests check raw bits against a Java oracle,
+including Engine's quirks: a NaN sample rounds to the first step, and below the first step's window it returns that
+step even when a blend range above 1 inverts the windows. Where Engine throws (sampling a legacy terrace with no steps),
+this port panics.
 
 ## Status: development only
 
