@@ -1628,7 +1628,12 @@ impl Module {
         Self::modifier(kind, &source)
     }
 
+    /// `Module.cache()`: wraps the module in a `Cache`, or returns it unchanged when it already is one (as Engine
+    /// does, so the existing cache, shared with its other users, is kept).
     pub fn cache(self) -> Self {
+        if matches!(self.0.kind, ModuleKind::Cache { .. }) {
+            return self;
+        }
         let source = self.clone();
         Self::modifier(
             ModuleKind::Cache {
@@ -4861,6 +4866,8 @@ steps c2 0x7fc00000 0x3f4ccccd 0x3e4ccccd 0xbf800000 0x40000000 | 0x7fc00000 0x7
             (-0.0, 0.0),
             (777.0, -333.0),
             (777.0, -333.0),
+            (f32::NAN, 1.0),
+            (f32::NAN, 1.0),
         ];
         assert_eq!(
             [module.min_value().to_bits(), module.max_value().to_bits()],
@@ -4870,17 +4877,22 @@ steps c2 0x7fc00000 0x3f4ccccd 0x3e4ccccd 0xbf800000 0x40000000 | 0x7fc00000 0x7
             bits(points.map(|(x, y)| module.value(x, y))),
             [
                 0x3f000000, 0x3edc7fe7, 0x3edc7fe7, 0x3f000000, 0x3f000000, 0x3eea770a, 0x3eea770a,
+                0x7fc00000, 0x7fc00000,
             ]
         );
         assert!(Arc::ptr_eq(&module.0, &clone.0));
+        assert!(Arc::ptr_eq(&module.0, &module.clone().cache().0));
         let ModuleKind::Cache { value, .. } = &module.0.kind else {
             unreachable!()
         };
         let cached = value.lock().unwrap();
         assert_eq!(
-            [cached.x.to_bits(), cached.y.to_bits()],
-            [0x44424000, 0xc3a68000]
+            [
+                cached.x.to_bits(),
+                cached.y.to_bits(),
+                cached.value.to_bits()
+            ],
+            [0x7fc00000, 0x3f800000, 0x7fc00000]
         );
-        assert_eq!(cached.value.to_bits(), 0x3eea770a);
     }
 }
