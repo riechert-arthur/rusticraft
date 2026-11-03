@@ -31,6 +31,7 @@
 use super::{Result, WorldGen, WorldPreset, read_saved_data, world_gen_settings, write_saved_data};
 use horizon_world::nbt::Tag;
 use horizon_world::worldgen::generator::terraforged_mod_biomes::mod_biome_files;
+use horizon_world::worldgen::generator::terraforged_settings::{self, Settings};
 use horizon_world::worldgen::generator::terraforged_world_preset::{
     GENERATOR_TYPE, PRESET, overworld_type_json, preset_json,
 };
@@ -110,25 +111,79 @@ fn cycle(chosen: &mut bool, world_type: &mut WorldPreset, id: u8) -> ControlFlow
     ControlFlow::Break(())
 }
 
-/// Whether a saved world's overworld is TerraForged's.
-pub fn is_terraforged(world: &Path) -> bool {
-    world_gen_settings(world)
-        .as_ref()
-        .and_then(|settings| settings.get("dimensions"))
-        .and_then(|dimensions| dimensions.get("minecraft:overworld"))
-        .and_then(|overworld| overworld.get("generator"))
-        .and_then(|generator| generator.get("type"))
-        .is_some_and(
-            |kind| matches!(kind, Tag::String(text) if text.to_string_lossy() == GENERATOR_TYPE),
-        )
+/// A saved world's overworld generator, when it is TerraForged's.
+fn terraforged_generator(world: &Path) -> Option<Tag> {
+    let generator = world_gen_settings(world)?
+        .get("dimensions")?
+        .get("minecraft:overworld")?
+        .get("generator")?
+        .clone();
+    let kind = generator.get("type")?;
+    matches!(kind, Tag::String(text) if text.to_string_lossy() == GENERATOR_TYPE)
+        .then_some(generator)
 }
 
-/// `WorldGen::preset`: TerraForged worlds generate with TerraForged's preset.
+/// Whether a saved world's overworld is TerraForged's.
+pub fn is_terraforged(world: &Path) -> bool {
+    terraforged_generator(world).is_some()
+}
+
+/// The Horizon settings a saved TerraForged world was created with (its generator's
+/// `horizon_settings`; a world without them, made before they existed, is faithful).
+fn saved_settings(generator: &Tag) -> Settings {
+    generator
+        .get("horizon_settings")
+        .map_or_else(Settings::default, |saved| {
+            Settings::from_json(&to_json(saved))
+        })
+}
+
+/// `WorldGen::preset`: TerraForged worlds generate with TerraForged's preset, and with
+/// the Horizon settings the world was created with, set for the generators the world
+/// builds from now on (the game reads the preset as it opens the world, before it
+/// builds them). Other worlds put the settings back to the faithful port's.
 pub fn preset(world: &Path) -> ControlFlow<&'static str> {
-    if is_terraforged(world) {
-        ControlFlow::Break(PRESET)
-    } else {
-        ControlFlow::Continue(())
+    match terraforged_generator(world) {
+        Some(generator) => {
+            terraforged_settings::set(saved_settings(&generator));
+            ControlFlow::Break(PRESET)
+        }
+        None => {
+            terraforged_settings::set(Settings::default());
+            ControlFlow::Continue(())
+        }
+    }
+}
+
+/// The settings a new TerraForged world starts with: `config/terraforged/settings.json` in
+/// the game folder, written with every setting off the first time (a file that isn't JSON
+/// gives every setting its default).
+pub fn new_world_settings() -> Settings {
+    settings_file(
+        &crate::logging::game_home()
+            .join("config")
+            .join("terraforged")
+            .join("settings.json"),
+    )
+}
+
+/// The settings in the file `path`, which is written with every setting off when it is
+/// missing.
+fn settings_file(path: &Path) -> Settings {
+    match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map(|json| Settings::from_json(&json))
+            .unwrap_or_default(),
+        Err(_) => {
+            let defaults = Settings::default();
+            if let Some(dir) = path.parent()
+                && std::fs::create_dir_all(dir).is_ok()
+            {
+                let text = serde_json::to_string_pretty(&defaults.to_json()).unwrap_or_default();
+                let _ = std::fs::write(path, text + "\n");
+            }
+            defaults
+        }
     }
 }
 
@@ -145,17 +200,34 @@ pub fn write(
     if !CREATING.take() || options.preset != WorldPreset::Normal {
         return ControlFlow::Continue(());
     }
-    ControlFlow::Break(write_terraforged(dir, seed, options, flat.clone()))
+    // Tests never read or write the game folder's settings file.
+    let horizon = if cfg!(test) {
+        Settings::default()
+    } else {
+        new_world_settings()
+    };
+    ControlFlow::Break(write_terraforged(dir, seed, options, flat.clone(), horizon))
 }
 
-/// Vanilla's settings for `options`, with TerraForged's overworld stem. The inner write
-/// finds nothing armed, so it is Horizon's own.
-fn write_terraforged(dir: &Path, seed: i64, options: WorldGen, flat: Option<Tag>) -> Result<()> {
+/// Vanilla's settings for `options`, with TerraForged's overworld stem, whose generator
+/// keeps Horizon's `horizon_settings` (`TerraForged`'s own settings live in the generator
+/// too). The inner write finds nothing armed, so it is Horizon's own.
+fn write_terraforged(
+    dir: &Path,
+    seed: i64,
+    options: WorldGen,
+    flat: Option<Tag>,
+    horizon: Settings,
+) -> Result<()> {
     super::write_world_gen_settings_with(dir, seed, options, flat)?;
     let mut settings = read_saved_data(dir, "world_gen_settings")
         .ok_or_else(|| std::io::Error::other("world_gen_settings was not written"))?;
+    let mut stem = overworld_stem();
+    if let Some(Tag::Compound(generator)) = stem.get_mut("generator") {
+        generator.insert("horizon_settings".into(), to_tag(&horizon.to_json()));
+    }
     if let Some(Tag::Compound(dimensions)) = settings.get_mut("dimensions") {
-        dimensions.insert("minecraft:overworld".into(), overworld_stem());
+        dimensions.insert("minecraft:overworld".into(), stem);
     }
     write_saved_data(dir, "world_gen_settings", settings)?;
     write_pack(dir)
@@ -283,8 +355,9 @@ pub fn overworld_stem() -> Tag {
 }
 
 /// The stem's JSON as NBT: booleans are bytes, whole numbers ints, other numbers floats.
-/// Only the generator's `type` is read back ([`is_terraforged`]): the world generates from
-/// the bundled preset's stem, as Horizon's vanilla worlds do from theirs.
+/// Only the generator's `type` ([`is_terraforged`]) and `horizon_settings` ([`preset`]) are
+/// read back: the world generates from the bundled preset's stem, as Horizon's vanilla
+/// worlds do from theirs.
 fn to_tag(value: &serde_json::Value) -> Tag {
     match value {
         serde_json::Value::Bool(value) => Tag::Byte(i8::from(*value)),
@@ -302,6 +375,23 @@ fn to_tag(value: &serde_json::Value) -> Tag {
                 .map(|(key, value)| (key.as_str(), to_tag(value))),
         ),
         serde_json::Value::Null => Tag::End,
+    }
+}
+
+/// NBT to JSON as `NbtOps` to `JsonOps` converts, for the settings: bytes are booleans.
+fn to_json(tag: &Tag) -> serde_json::Value {
+    match tag {
+        Tag::Byte(value) => serde_json::Value::Bool(*value != 0),
+        Tag::Int(value) => (*value).into(),
+        Tag::Float(bits) => f64::from(f32::from_bits(*bits)).into(),
+        Tag::String(text) => text.to_string_lossy().into(),
+        Tag::List(values) => values.iter().map(to_json).collect(),
+        Tag::Compound(entries) => entries
+            .iter()
+            .map(|(key, value)| (key.to_string_lossy().to_string(), to_json(value)))
+            .collect::<serde_json::Map<_, _>>()
+            .into(),
+        _ => serde_json::Value::Null,
     }
 }
 
@@ -365,9 +455,10 @@ mod tests {
             structures: false,
             bonus_chest: true,
         };
-        write_terraforged(&dir, 9, options, None).unwrap();
+        write_terraforged(&dir, 9, options, None, Settings::default()).unwrap();
         assert!(is_terraforged(&dir));
         assert_eq!(WorldGen::preset(&dir), PRESET);
+        assert_eq!(terraforged_settings::current(), Settings::default());
         // Re-Create picks TerraForged again, with the world's other choices.
         recreate(&dir);
         assert_eq!(RECREATING.take(), Some(true));
@@ -376,7 +467,14 @@ mod tests {
         assert_eq!(settings.get("seed"), Some(&Tag::Long(9)));
         // Only the overworld is TerraForged's, with its preset's levels.
         let overworld = stem_of(&dir, "minecraft:overworld");
-        assert_eq!(overworld, overworld_stem());
+        let mut expected = overworld_stem();
+        if let Some(Tag::Compound(generator)) = expected.get_mut("generator") {
+            generator.insert(
+                "horizon_settings".into(),
+                Tag::compound([("deterministic", Tag::Byte(0))]),
+            );
+        }
+        assert_eq!(overworld, expected);
         let levels = overworld.get("generator").and_then(|g| g.get("levels"));
         assert_eq!(levels.and_then(|l| l.get("max_y")), Some(&Tag::Int(480)));
         assert_eq!(
@@ -470,6 +568,41 @@ mod tests {
 
     /// The `native_biome_files` hook: a TerraForged world takes TerraForged's biomes, a vanilla world none (its table
     /// and registry stay 26.3's), and a client of another server keeps those the server's registry names.
+    /// A world keeps the settings it was made with in its generator, whatever the settings
+    /// file says later; the file is written with every setting off when it is missing.
+    #[test]
+    fn a_world_keeps_its_horizon_settings() {
+        vanilla_biomes();
+        let on = Settings {
+            deterministic: true,
+        };
+        let dir = scratch("settings");
+        write_terraforged(&dir, 3, WorldGen::default(), None, on).unwrap();
+        let generator = terraforged_generator(&dir).unwrap();
+        assert_eq!(
+            generator.get("horizon_settings"),
+            Some(&Tag::compound([("deterministic", Tag::Byte(1))]))
+        );
+        assert_eq!(saved_settings(&generator), on);
+        // A world from before the settings existed is faithful.
+        let mut old = generator.clone();
+        if let Tag::Compound(entries) = &mut old {
+            entries.retain(|key, _| key.to_string_lossy() != "horizon_settings");
+        }
+        assert_eq!(saved_settings(&old), Settings::default());
+        let file = dir.join("config").join("settings.json");
+        assert_eq!(settings_file(&file), Settings::default());
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "{\n  \"deterministic\": false\n}\n"
+        );
+        std::fs::write(&file, "{\"deterministic\": true}").unwrap();
+        assert_eq!(settings_file(&file), on);
+        std::fs::write(&file, "not json").unwrap();
+        assert_eq!(settings_file(&file), Settings::default());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn only_terraforged_worlds_take_terraforged_biomes() {
         use crate::world_biomes::{native_biomes, native_biomes_for_registry};
@@ -482,7 +615,14 @@ mod tests {
             &[]
         };
         let terraforged = scratch("biomes-terraforged");
-        write_terraforged(&terraforged, 5, WorldGen::default(), None).unwrap();
+        write_terraforged(
+            &terraforged,
+            5,
+            WorldGen::default(),
+            None,
+            Settings::default(),
+        )
+        .unwrap();
         let vanilla = scratch("biomes-vanilla");
         super::super::write_world_gen_settings(&vanilla, 5, WorldGen::default()).unwrap();
         assert_eq!(ids(native_biomes(Some(&terraforged))), both);
