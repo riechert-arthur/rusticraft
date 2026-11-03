@@ -30,7 +30,7 @@ pub enum Interpolation {
 }
 
 impl Interpolation {
-    fn apply(self, value: f32) -> f32 {
+    pub fn apply(self, value: f32) -> f32 {
         match self {
             Self::Linear => value,
             Self::Curve3 => value * value * (3.0 - 2.0 * value),
@@ -85,11 +85,12 @@ const GRAD_2D_24: [[f32; 2]; 32] = [
     [-0.13052619, 0.9914449],
 ];
 
+/// Java's `NoiseUtil.floor`. The `int` cast saturates and the `- 1` wraps, exactly as in Java.
 pub fn floor(value: f32) -> i32 {
     if value >= 0.0 {
         value as i32
     } else {
-        value as i32 - 1
+        (value as i32).wrapping_sub(1)
     }
 }
 
@@ -134,35 +135,21 @@ fn lerp(a: f32, b: f32, alpha: f32) -> f32 {
     a + alpha * (b - a)
 }
 
+/// Classic Perlin noise over the 8 directions of `GRAD_2D` (Java `Noise.singlePerlin`).
 pub fn perlin(x: f32, y: f32, seed: i32, interpolation: Interpolation) -> f32 {
-    let x0 = floor(x);
-    let y0 = floor(y);
-    let x1 = x0 + 1;
-    let y1 = y0 + 1;
-    let xs = interpolation.apply(x - x0 as f32);
-    let ys = interpolation.apply(y - y0 as f32);
-    let xd0 = x - x0 as f32;
-    let yd0 = y - y0 as f32;
-    let xd1 = xd0 - 1.0;
-    let yd1 = yd0 - 1.0;
-    let lower = lerp(
-        grad(seed, x0, y0, xd0, yd0, false),
-        grad(seed, x1, y0, xd1, yd0, false),
-        xs,
-    );
-    let upper = lerp(
-        grad(seed, x0, y1, xd0, yd1, false),
-        grad(seed, x1, y1, xd1, yd1, false),
-        xs,
-    );
-    lerp(lower, upper, ys)
+    perlin_with(x, y, seed, interpolation, false)
 }
 
+/// Perlin noise over the 24 directions of `GRAD_2D_24` (Java `Noise.singlePerlin2`).
 pub fn perlin2(x: f32, y: f32, seed: i32, interpolation: Interpolation) -> f32 {
+    perlin_with(x, y, seed, interpolation, true)
+}
+
+fn perlin_with(x: f32, y: f32, seed: i32, interpolation: Interpolation, better: bool) -> f32 {
     let x0 = floor(x);
     let y0 = floor(y);
-    let x1 = x0 + 1;
-    let y1 = y0 + 1;
+    let x1 = x0.wrapping_add(1);
+    let y1 = y0.wrapping_add(1);
     let xs = interpolation.apply(x - x0 as f32);
     let ys = interpolation.apply(y - y0 as f32);
     let xd0 = x - x0 as f32;
@@ -170,13 +157,13 @@ pub fn perlin2(x: f32, y: f32, seed: i32, interpolation: Interpolation) -> f32 {
     let xd1 = xd0 - 1.0;
     let yd1 = yd0 - 1.0;
     let lower = lerp(
-        grad(seed, x0, y0, xd0, yd0, true),
-        grad(seed, x1, y0, xd1, yd0, true),
+        grad(seed, x0, y0, xd0, yd0, better),
+        grad(seed, x1, y0, xd1, yd0, better),
         xs,
     );
     let upper = lerp(
-        grad(seed, x0, y1, xd0, yd1, true),
-        grad(seed, x1, y1, xd1, yd1, true),
+        grad(seed, x0, y1, xd0, yd1, better),
+        grad(seed, x1, y1, xd1, yd1, better),
         xs,
     );
     lerp(lower, upper, ys)
@@ -212,8 +199,8 @@ fn simplex_scaled(x: f32, y: f32, seed: i32, scale: f32) -> f32 {
     }
     scale
         * (corner(seed, i, j, x0, y0)
-            + corner(seed, i + i1, j + j1, x1, y1)
-            + corner(seed, i + 1, j + 1, x2, y2))
+            + corner(seed, i.wrapping_add(i1), j.wrapping_add(j1), x1, y1)
+            + corner(seed, i.wrapping_add(1), j.wrapping_add(1), x2, y2))
 }
 
 fn cubic_lerp(a: f32, b: f32, c: f32, d: f32, t: f32) -> f32 {
@@ -225,7 +212,8 @@ pub fn cubic(x: f32, y: f32, seed: i32) -> f32 {
     let x1 = floor(x);
     let y1 = floor(y);
     let rows = [-1, 0, 1, 2].map(|dy| {
-        let values = [-1, 0, 1, 2].map(|dx| value_coord_2d(seed, x1 + dx, y1 + dy));
+        let values =
+            [-1, 0, 1, 2].map(|dx| value_coord_2d(seed, x1.wrapping_add(dx), y1.wrapping_add(dy)));
         cubic_lerp(values[0], values[1], values[2], values[3], x - x1 as f32)
     });
     cubic_lerp(rows[0], rows[1], rows[2], rows[3], y - y1 as f32) * 0.44444445
@@ -237,6 +225,51 @@ mod tests {
 
     fn bits(values: impl IntoIterator<Item = f32>) -> Vec<u32> {
         values.into_iter().map(f32::to_bits).collect()
+    }
+
+    /// Like `bits`, but every NaN becomes 0x7fc00000: the sign and payload of a NaN depend on the CPU.
+    fn canonical_bits(values: impl IntoIterator<Item = f32>) -> Vec<u32> {
+        values
+            .into_iter()
+            .map(|v| if v.is_nan() { 0x7fc0_0000 } else { v.to_bits() })
+            .collect()
+    }
+
+    #[test]
+    fn extreme_coordinates_wrap_like_engine_0_3_0() {
+        // Java ints wrap where Rust's debug builds would panic. Expected values come from Engine 0.3.0.
+        let points = [
+            (-3.0e9, 3.0e9),
+            (3.0e9, -3.0e9),
+            (f32::MIN, f32::MAX),
+            (f32::MAX, f32::MIN),
+            (-2.0, -2.0),
+        ];
+        assert_eq!(
+            points.map(|(x, _)| floor(x)),
+            [i32::MAX, i32::MAX, i32::MAX, i32::MAX, -3]
+        );
+        const NAN: u32 = 0x7fc0_0000;
+        assert_eq!(
+            canonical_bits(points.map(|(x, y)| perlin(x, y, 918273, Interpolation::Curve3))),
+            [0xff800000, 0x7f800000, 0xff800000, NAN, 0]
+        );
+        assert_eq!(
+            canonical_bits(points.map(|(x, y)| perlin2(x, y, 918273, Interpolation::Curve4))),
+            [NAN, 0xff800000, NAN, NAN, 0]
+        );
+        assert_eq!(
+            canonical_bits(points.map(|(x, y)| simplex(x, y, 918273))),
+            [0, 0, 0, 0, 0xbe92101e]
+        );
+        assert_eq!(
+            canonical_bits(points.map(|(x, y)| legacy_simplex(x, y, 918273))),
+            [0, 0, 0, 0, 0xbe69b364]
+        );
+        assert_eq!(
+            canonical_bits(points.map(|(x, y)| cubic(x, y, 918273))),
+            [NAN, 0x7f800000, NAN, NAN, 0xbeb9b92b]
+        );
     }
 
     #[test]
