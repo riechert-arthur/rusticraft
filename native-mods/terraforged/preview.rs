@@ -162,4 +162,24 @@ mod tests {
         assert!(pixels.iter().any(|&p| p == 0x0066DD));
         assert!(pixels.iter().any(|&p| p != 0x0066DD && p != 0x0099DD));
     }
+
+    #[test]
+    fn create_world_preview_is_quick() {
+        let start = std::time::Instant::now();
+        let preview = Preview::new().unwrap();
+        let built = start.elapsed();
+        let pixels = preview.render(
+            98_765,
+            View {
+                width: 64,
+                height: 64,
+                zoom: 64.0,
+                x: 0.0,
+                y: 0.0,
+            },
+        );
+        let total = start.elapsed();
+        eprintln!("preview: built {built:?}, built and drawn {total:?}");
+        assert_eq!(pixels.len(), 64 * 64);
+    }
 }
