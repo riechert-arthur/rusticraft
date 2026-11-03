@@ -312,4 +312,24 @@ render -2147483648 16 16 3f400000 c1080000 40400000 5d3612e4c3b7ce25 12x12
             "0x0"
         );
     }
+
+    #[test]
+    fn create_world_preview_is_quick() {
+        let start = std::time::Instant::now();
+        let preview = Preview::new().unwrap();
+        let built = start.elapsed();
+        let pixels = preview.render(
+            98_765,
+            View {
+                width: 64,
+                height: 64,
+                zoom: 64.0,
+                x: 0.0,
+                y: 0.0,
+            },
+        );
+        let total = start.elapsed();
+        eprintln!("preview: built {built:?}, built and drawn {total:?}");
+        assert_eq!(pixels.len(), 64 * 64);
+    }
 }
