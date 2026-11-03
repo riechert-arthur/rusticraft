@@ -53,8 +53,13 @@ including Engine's quirks: a NaN sample rounds to the first step, and below the 
 step even when a blend range above 1 inverts the windows. Where Engine throws (sampling a legacy terrace with no steps),
 this port panics.
 
-The advanced terrace layer adds masked, sloped, modulated and multi-octave stepping with the
-original blend thresholds and normalization range.
+The advanced terrace layer adds `AdvancedTerrace` (`Module.terrace(modulation, mask, slope, blendMin, blendMax, steps,
+octaves)`): above `blendMin` it snaps its source to `steps * i` steps for each octave `i`, pulls each result back
+towards the source by `slope`, adds `modulation` and divides by `modRange` (the source's maximum plus the modulation's,
+fixed when it is built), then blends that in, fully above `blendMax` and scaled by `mask`; a zero mask or a sample at
+or below `blendMin` returns the source sample unchanged. It reports the source's bounds. Its tests check raw bits
+against a Java oracle, including Engine's quirks: zero steps turn every terraced sample into NaN, `steps * i` wraps
+like Java's `int`, and a zero `modRange` divides by zero. Where Engine loops forever (`octaves` = `Integer.MAX_VALUE`), this port stops.
 
 ## Status: development only
 
