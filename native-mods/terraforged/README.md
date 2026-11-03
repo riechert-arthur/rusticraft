@@ -28,6 +28,11 @@ draw): it runs TerraForged's cave noise over the search's columns, where the ori
 noise biome and finds none. `terraforged:oak_forest` is registered but no climate places it, so it is
 never found, as in the original.
 
+Distant tiles sample TerraForged's noise once per column for both their heights, and with Reduced
+far detail paint only the top two blocks with the surface rule (eight otherwise), which halves their
+cost; the trees in distant tiles come from far decoration, which generates whole chunks and still
+takes a minute or so to fill in after a teleport.
+
 As with TerraForged's own data pack, every world (TerraForged or not) gets the 1024-block
 overworld and clouds at y=300, from a built-in pack in the game's `config/terraforged`. Boats a
 player rides rise to a river's stepped water surface (`BoatHook`). Operators get
