@@ -91,10 +91,17 @@ The cellular primitive layer adds `NoiseUtil`'s 256-point cell table, the `Dista
 Manhattan, Natural), the five `EdgeFunc` functions with their bounds, and the 3×3 searches of `Noise.cell` (for the
 `CELL_VALUE` cell function only) and `Noise.cellEdge`. As in Engine, neighbour cell coordinates wrap like Java `int`s
 and, among tied cells, the first one found (row by row from the lower corner) wins. Their tests check raw bits against a
-Java oracle, including NaN and infinite coordinates. The graph sources built on them come in a later layer.
+Java oracle, including NaN and infinite coordinates.
 
-The cellular source layer adds cell value, lookup, distance and edge modules, preserving the
-Engine's single-frequency sampling, feature-point lookup coordinates and reported `0..1` bounds.
+The cellular source layer adds the graph sources built on them: `CellNoise` (`Builder.cell()`, `Module::cell_source`)
+and `CellEdgeNoise` (`Builder.cellEdge()`, `Module::cell_edge_source`). Both sample a single octave at the builder's
+frequency and displacement. `CELL_VALUE` maps the nearest cell's value from -1..1 to 0..1, `NOISE_LOOKUP` samples its
+lookup module, unmapped, at the nearest cell's feature point (not scaled by the displacement), and `DISTANCE` always
+returns 0, as in Engine; `CellEdgeNoise` maps its edge function's value to 0..1 from that function's bounds. Both report
+the `Noise` defaults 0..1, whatever the cell function or the lookup's bounds. Their tests check raw bits against a Java
+oracle. Where Engine throws (`NOISE_LOOKUP` when no cell's distance is below `Float.MAX_VALUE`: at NaN or infinite
+coordinates, or, with the Euclidean and Natural metrics, scaled coordinates beyond about 1.8e19, whose squares overflow),
+this port panics.
 
 ## Status: development only
 

@@ -480,7 +480,7 @@ struct CellResult {
     x: i32,
     y: i32,
     /// The nearest cell's feature vector; `None` (Java's null `vec2f`) when no distance beat `Float.MAX_VALUE`,
-    /// as for NaN or infinite coordinates.
+    /// as for NaN or infinite coordinates or squared distances that overflow.
     vector: Option<[f32; 2]>,
 }
 
@@ -1219,8 +1219,8 @@ impl Module {
     /// unused), `displacement` is the builder's `displacement`. `CellValue` maps the nearest cell's value from -1..1
     /// to 0..1, `NoiseLookup` samples `lookup` unmapped at the nearest cell's feature point (unscaled by
     /// `displacement`), and `Distance` always returns 0. As in Engine it reports the `Noise` defaults 0..1 whatever
-    /// the function or `lookup`'s bounds. Where Engine throws (`NoiseLookup` at NaN or infinite coordinates, where
-    /// no cell is found), this panics.
+    /// the function or `lookup`'s bounds. Where Engine throws (`NoiseLookup` when no cell's distance is below
+    /// `Float.MAX_VALUE`: NaN or infinite coordinates, or squared distances that overflow), this panics.
     pub fn cell_source(
         config: SourceConfig,
         displacement: f32,
@@ -3258,6 +3258,36 @@ mod tests {
             Module::constant(0.0),
         )
         .value(f32::NAN, 5.5);
+    }
+
+    #[test]
+    #[should_panic(expected = "Engine throws")]
+    fn cell_lookup_panics_where_squared_distances_overflow() {
+        // Engine: at 1e20 every squared Euclidean distance is infinite, so `NOISE_LOOKUP` throws; Manhattan
+        // distances stay finite there and sample the lookup.
+        let lookup = |metric| {
+            Module::cell_source(
+                SourceConfig {
+                    seed: 1337,
+                    octaves: 1,
+                    gain: 0.5,
+                    frequency: 1.0,
+                    lacunarity: 2.0,
+                    interpolation: Interpolation::Curve3,
+                },
+                1.0,
+                CellFunction::NoiseLookup,
+                metric,
+                Module::constant(0.0),
+            )
+        };
+        assert_eq!(
+            lookup(DistanceFunction::Manhattan)
+                .value(1e20, 0.0)
+                .to_bits(),
+            0
+        );
+        lookup(DistanceFunction::Euclidean).value(1e20, 0.0);
     }
 
     #[test]
