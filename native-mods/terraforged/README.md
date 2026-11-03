@@ -80,6 +80,13 @@ sources' minima, and `Sub` subtracts the other sources' maxima from the first so
 its maximum). Their tests check raw bits against a Java oracle, including NaN results: `NoiseUtil.pow` returns the NaN
 `Math.pow` returns (its NaN operand, so `Grad` with `lower == upper` gives Java's -NaN from 0/0).
 
+The cache layer adds `Cache` (`Module.cache()`, which returns a module that already is a cache unchanged): it remembers
+its last coordinate and sample, shared by every graph that uses it, and reports its source's bounds. Engine's entry is
+not synchronised; here it sits behind a lock that is only tried while the entry is copied in or out, so world-generation
+threads never wait on one another and a busy cache simply samples its source. Unlike Engine, which compares coordinates
+with `==`, the cache compares their bits: -0.0 does not hit +0.0's entry (and a NaN coordinate can hit), so a cached
+sample is always the sample of the same input, whichever coordinate another thread sampled last.
+
 ## Status: development only
 
 This layer only adds the noise functions. It changes nothing in the game, so there is nothing for players to install

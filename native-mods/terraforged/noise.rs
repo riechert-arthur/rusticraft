@@ -608,6 +608,14 @@ struct TerraceStep {
     upper_bound: f32,
 }
 
+/// The coordinate and sample a `Cache` holds (Engine's `Cache.Value`; `None` is its `empty` state).
+#[derive(Clone, Copy)]
+struct CacheValue {
+    x: f32,
+    y: f32,
+    value: f32,
+}
+
 enum ModuleKind {
     Constant(f32),
     Source(Source),
@@ -737,6 +745,11 @@ enum ModuleKind {
         source: Module,
         direction: Module,
         strength: Module,
+    },
+    /// `Cache`: Engine's single shared entry, behind a lock that is only ever tried, never waited for.
+    Cache {
+        source: Module,
+        value: std::sync::Mutex<Option<CacheValue>>,
     },
     /// `Select`: `lower_curve`/`upper_curve` hold Engine's `(curveMin, curveMax, curveRange)` per bound, fixed in the
     /// constructor.
@@ -1141,6 +1154,29 @@ impl Module {
                 let dx = sin(angle) * strength;
                 let dy = cos(angle) * strength;
                 source.value(x + dx, y + dy)
+            }
+            // Engine keeps one unsynchronised entry per `Cache`. Horizon samples one graph from many threads, so the
+            // entry sits behind a lock that is only held to copy it in or out, never while the source is sampled, and
+            // a busy lock just skips the cache: threads never wait on each other here and a panicking source cannot
+            // poison it. The key compares bits rather than Java's `==`, so a hit only ever returns the sample of the
+            // very same input; with `==`, -0.0 would hit +0.0's entry (and NaN never hits), which could make a sample
+            // depend on which coordinate another thread sampled last.
+            ModuleKind::Cache { source, value } => {
+                let key = (x.to_bits(), y.to_bits());
+                if let Ok(Some(cached)) = value.try_lock().as_deref()
+                    && (cached.x.to_bits(), cached.y.to_bits()) == key
+                {
+                    return cached.value;
+                }
+                let result = source.value(x, y);
+                if let Ok(mut cached) = value.try_lock() {
+                    *cached = Some(CacheValue {
+                        x,
+                        y,
+                        value: result,
+                    });
+                }
+                result
             }
             ModuleKind::Select {
                 control,
@@ -1589,6 +1625,22 @@ impl Module {
             strength,
         };
         Self::modifier(kind, &source)
+    }
+
+    /// `Module.cache()`: wraps the module in a `Cache`, or returns it unchanged when it already is one (as Engine
+    /// does, so the existing cache, shared with its other users, is kept).
+    pub fn cache(self) -> Self {
+        if matches!(self.0.kind, ModuleKind::Cache { .. }) {
+            return self;
+        }
+        let source = self.clone();
+        Self::modifier(
+            ModuleKind::Cache {
+                source: self,
+                value: std::sync::Mutex::new(None),
+            },
+            &source,
+        )
     }
 
     /// `Module.select(Module, Module, lowerBound, upperBound, falloff, Interpolation)` (Engine's five-argument
@@ -4788,5 +4840,100 @@ steps c2 0x7fc00000 0x3f4ccccd 0x3e4ccccd 0xbf800000 0x40000000 | 0x7fc00000 0x7
             .map(|(x, y)| java_pow(f32::from_bits(x), f32::from_bits(y)).to_bits())
             .collect();
         assert_eq!(actual, EXPECTED);
+    }
+
+    /// Samples through `Cache`, checked against Engine 0.3.0 (repeats, ±0 and NaN coordinates), its bounds, its
+    /// sharing between clones and `cache()` of a cache, and the entry it keeps.
+    #[test]
+    fn cache_matches_engine_0_3_0() {
+        let module = Module::source(Source::new(
+            SourceKind::Perlin,
+            SourceConfig {
+                seed: 1101,
+                octaves: 4,
+                gain: 0.5,
+                frequency: 1.0 / 96.0,
+                lacunarity: 2.0,
+                interpolation: Interpolation::Curve3,
+            },
+        ))
+        .cache();
+        let clone = module.clone();
+        let points = [
+            (0.0, 0.0),
+            (12.25, -98.75),
+            (12.25, -98.75),
+            (0.0, 0.0),
+            (-0.0, 0.0),
+            (777.0, -333.0),
+            (777.0, -333.0),
+            (f32::NAN, 1.0),
+            (f32::NAN, 1.0),
+        ];
+        assert_eq!(
+            [module.min_value().to_bits(), module.max_value().to_bits()],
+            [0x00000000, 0x3f800000]
+        );
+        assert_eq!(
+            bits(points.map(|(x, y)| module.value(x, y))),
+            [
+                0x3f000000, 0x3edc7fe7, 0x3edc7fe7, 0x3f000000, 0x3f000000, 0x3eea770a, 0x3eea770a,
+                0x7fc00000, 0x7fc00000,
+            ]
+        );
+        assert!(Arc::ptr_eq(&module.0, &clone.0));
+        assert!(Arc::ptr_eq(&module.0, &module.clone().cache().0));
+        let ModuleKind::Cache { value, .. } = &module.0.kind else {
+            unreachable!()
+        };
+        let cached = value.lock().unwrap().expect("cache entry");
+        assert_eq!(
+            [
+                cached.x.to_bits(),
+                cached.y.to_bits(),
+                cached.value.to_bits()
+            ],
+            [0x7fc00000, 0x3f800000, 0x7fc00000]
+        );
+        // Unlike Java's `==`, -0.0 does not hit +0.0's entry: it is sampled and replaces it.
+        module.value(0.0, 0.0);
+        module.value(-0.0, 0.0);
+        let cached = value.lock().unwrap().expect("cache entry");
+        assert_eq!([cached.x.to_bits(), cached.y.to_bits()], [0x80000000, 0]);
+    }
+
+    /// Many threads sampling one cache, each walking its own coordinates, see exactly the uncached samples.
+    #[test]
+    fn shared_cache_matches_uncached_samples_across_threads() {
+        let uncached = Module::source(Source::new(
+            SourceKind::Simplex,
+            SourceConfig {
+                seed: 1102,
+                octaves: 3,
+                gain: 0.5,
+                frequency: 1.0 / 64.0,
+                lacunarity: 2.0,
+                interpolation: Interpolation::Curve3,
+            },
+        ));
+        let cached = uncached
+            .clone()
+            .cache()
+            .scale(Module::constant(2.0))
+            .cache();
+        let expected = uncached.scale(Module::constant(2.0));
+        std::thread::scope(|scope| {
+            for thread in 0..8 {
+                let (cached, expected) = (&cached, &expected);
+                scope.spawn(move || {
+                    for i in 0..4000 {
+                        // Repeat each coordinate so threads both hit and overwrite the shared entries.
+                        let x = ((i / 2) % 37) as f32 * 3.5 - thread as f32;
+                        let y = ((i / 2) % 11) as f32 * -7.25;
+                        assert_eq!(cached.value(x, y).to_bits(), expected.value(x, y).to_bits());
+                    }
+                });
+            }
+        });
     }
 }
