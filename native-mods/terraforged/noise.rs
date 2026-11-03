@@ -22,7 +22,7 @@
  * SOFTWARE.
  */
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 #[derive(Clone, Copy)]
 pub enum Interpolation {
@@ -840,8 +840,8 @@ impl Domain {
                 direction,
                 strength,
             } => {
-                let angle = direction.value(x, y) * java_pi2();
-                sin_lookup(angle) * strength.value(x, y)
+                let angle = direction.value(x, y) * PI2;
+                sin(angle) * strength.value(x, y)
             }
             DomainKind::Add(first, second) => first.offset_x(x, y) + second.offset_x(x, y),
             DomainKind::Compound(first, second) => second.offset_x(first.x(x, y), first.y(x, y)),
@@ -859,9 +859,8 @@ impl Domain {
                 direction,
                 strength,
             } => {
-                const COS_OFFSET: f32 = f32::from_bits(0x3fc9_0ff9);
-                let angle = direction.value(x, y) * java_pi2();
-                sin_lookup(angle + COS_OFFSET) * strength.value(x, y)
+                let angle = direction.value(x, y) * PI2;
+                cos(angle) * strength.value(x, y)
             }
             DomainKind::Add(first, second) => first.offset_y(x, y) + second.offset_y(x, y),
             DomainKind::Compound(first, second) => second.offset_y(first.x(x, y), first.y(x, y)),
@@ -929,22 +928,38 @@ fn java_max(first: f32, second: f32) -> f32 {
     }
 }
 
-fn java_pi2() -> f32 {
-    (std::f64::consts::PI * 2.0) as f32
+/// `NoiseUtil.PI2` and `radFull`: `(float) Math.PI * 2` (the cast binds first; doubling is exact either way).
+const PI2: f32 = std::f64::consts::PI as f32 * 2.0;
+const SIN_MASK: i32 = 4095;
+const SIN_COUNT: usize = 4096;
+
+/// `NoiseUtil.SIN`, built once in the order of Engine's static initializer.
+fn sin_table() -> &'static [f32; SIN_COUNT] {
+    static TABLE: OnceLock<[f32; SIN_COUNT]> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        let mut table = [0.0; SIN_COUNT];
+        for (i, entry) in table.iter_mut().enumerate() {
+            let angle = (i as f32 + 0.5) / SIN_COUNT as f32 * PI2;
+            *entry = f64::from(angle).sin() as f32;
+        }
+        let deg_to_index = SIN_COUNT as f32 / 360.0;
+        for degrees in (0..360).step_by(90) {
+            let index = ((degrees as f32 * deg_to_index) as i32 & SIN_MASK) as usize;
+            table[index] = (f64::from(degrees) * std::f64::consts::PI / 180.0).sin() as f32;
+        }
+        table
+    })
 }
 
-fn sin_lookup(radians: f32) -> f32 {
-    const SIN_COUNT: f32 = 4096.0;
-    const SIN_MASK: i32 = 4095;
-    let radians_full = java_pi2();
-    let index = ((radians * (SIN_COUNT / radians_full)) as i32 & SIN_MASK) as usize;
-    if index & 1023 == 0 {
-        let degrees = (index / 1024 * 90) as f64;
-        (degrees.to_radians().sin()) as f32
-    } else {
-        let angle = (index as f32 + 0.5) / SIN_COUNT * radians_full;
-        f64::from(angle).sin() as f32
-    }
+/// `NoiseUtil.sin`: a 4096-entry lookup (`as i32` saturates and maps NaN to 0, like Java's `(int)`).
+fn sin(radians: f32) -> f32 {
+    let rad_to_index = SIN_COUNT as f32 / PI2;
+    sin_table()[((radians * rad_to_index) as i32 & SIN_MASK) as usize]
+}
+
+/// `NoiseUtil.cos`: `sin(r + 1.5708f)`.
+fn cos(radians: f32) -> f32 {
+    sin(radians + f32::from_bits(0x3fc9_0ff9))
 }
 
 #[cfg(test)]
@@ -1790,6 +1805,33 @@ mod tests {
                     [0x47f11bf4, 0x404e3cf4, 0x48711e2a, 0x40463cf4],
                 ],
             ),
+            (
+                // Axes already reporting -0.5..0.5 are not mapped again; a constant axis maps to NaN, as in Engine.
+                Domain::domain_warp(
+                    source(SourceKind::Perlin, 110, 64.0, 3, 0.5)
+                        .map(Module::constant(-0.5), Module::constant(0.5)),
+                    Module::constant(0.5).map(Module::constant(-0.5), Module::constant(0.5)),
+                    Module::constant(4.0),
+                ),
+                [
+                    [0, 0xffc00000, 0, 0xffc00000],
+                    [0xbf22c8ca, 0xffc00000, 0x4139d373, 0xffc00000],
+                    [0x3c50eb00, 0xffc00000, 0xc58003e6, 0xffc00000],
+                    [0xbb5d5800, 0xffc00000, 0x47f12060, 0xffc00000],
+                ],
+            ),
+            (
+                warp.clone()
+                    .then(direction.clone())
+                    .add(warp.clone().compound(direction.clone()))
+                    .then(warp.clone()),
+                [
+                    [0xc1037ef0, 0xc1336565, 0xc1037ef0, 0xc1336565],
+                    [0x41d1b9ba, 0xc34504d1, 0x4219dcdd, 0xc393e268],
+                    [0xc6002703, 0x467fb917, 0xc6402903, 0x46bfdd0c],
+                    [0x48711d62, 0xc149cc10, 0x48b4d6c9, 0xc14bcc10],
+                ],
+            ),
         ];
         for (domain, expected) in cases {
             assert_eq!(
@@ -1804,8 +1846,65 @@ mod tests {
         }
         let warped = source(SourceKind::Ridge, 440, 128.0, 4, 0.975).warp(warp.add(direction));
         assert_eq!(
+            [warped.min_value().to_bits(), warped.max_value().to_bits()],
+            [0, 0x3f800000]
+        );
+        assert_eq!(
             bits(points.map(|(x, y)| warped.value(x, y))),
             [0x3f4fea9c, 0x3f2d9330, 0x3f4b5329, 0x3f53bd2e]
+        );
+    }
+
+    #[test]
+    fn sin_lookup_matches_engine_0_3_0() {
+        // Java: `hash = hash * 31 + floatToRawIntBits(SIN[i])` over `NoiseUtil.SIN`.
+        let hash = sin_table().iter().fold(0_i64, |hash, value| {
+            hash.wrapping_mul(31)
+                .wrapping_add(i64::from(value.to_bits() as i32))
+        });
+        assert_eq!(hash, 4517474909631308587);
+        let angles = [
+            0.0,
+            1e-7,
+            -1e-7,
+            f32::from_bits(0x3fc9_0ff9),
+            -f32::from_bits(0x3fc9_0ff9),
+            std::f32::consts::PI,
+            -std::f32::consts::PI,
+            PI2,
+            -PI2,
+            100.25,
+            -100.25,
+            1e9,
+            -1e9,
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            std::f32::consts::FRAC_PI_4,
+            -2.3561945,
+        ];
+        assert_eq!(
+            angles.map(|angle| [sin(angle).to_bits(), cos(angle).to_bits()]),
+            [
+                [0, 0x3f800000],
+                [0, 0x3f800000],
+                [0, 0x3f800000],
+                [0x3f800000, 0x250d3132],
+                [0xbf800000, 0],
+                [0x250d3132, 0xbf800000],
+                [0x250d3132, 0xbf7fffd4],
+                [0, 0x3f800000],
+                [0, 0x3f7fffd4],
+                [0xbe8e398f, 0x3f75ecc2],
+                [0x3e8efaad, 0x3f75d0c2],
+                [0xba48f443, 0xba48f443],
+                [0, 0],
+                [0, 0],
+                [0xba48f443, 0xba48f443],
+                [0, 0],
+                [0x3f35287b, 0x3f34e165],
+                [0xbf35287d, 0xbf349a32],
+            ]
         );
     }
 }
