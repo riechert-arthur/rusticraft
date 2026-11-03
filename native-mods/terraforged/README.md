@@ -149,12 +149,22 @@ static list per Java process, so there the ids of composites and custom terrains
 registered; here each world owns a registry, and its built-in terrains are its own objects. Its tests check every
 registered terrain's id, name, category, hue, erosion and flags against a Java oracle.
 
-The world-level layer adds spawn and height properties, validated ocean-to-inland control points and
-the exact normalized block-level conversions used by TerraForged's heightmap pipeline.
+The world-level layer adds Engine's world settings and `Levels` (`engine.rs`): `WorldProperties` (spawn type, world
+height 256 and sea level 63 by default), `WorldControlPoints` (the deep ocean, shallow ocean, beach, coast and inland
+thresholds) and `ControlPoints`, which falls back to the defaults unless the points rise strictly from a deep ocean of
+at least 0 to an inland of at most 1 (a NaN point fails) and adds `coastMarker`, halfway from coast to inland. `Levels`
+converts between block heights and Engine's 0..1 heightmap values: the world height is at least 1, `waterY` is the sea
+level minus one and `groundLevel` the sea level plus one (wrapping like Java's `int`), `water` is `waterY` and `ground`
+the sea level over the world height (each block height capped at the world height), and `scale`, `elevation`,
+`water(n)` and `ground(n)` keep Engine's float math and `(int)` truncation. Heights count from block 0, not from the
+world's minimum Y: TerraForged's continent noise passes its `maxY` and sea level (480 and 62 by default) although its
+terrain starts at y = -64. Its tests check every field and conversion against a Java oracle, including those levels,
+320 and 384 block heights, `int` overflow of the sea level and of `y - waterY`, and heights beyond 2^24. Engine's
+static `Levels.scale(steps, settings)` is not ported: neither Engine nor TerraForged calls it.
 
 ## Status: development only
 
-These layers only add the noise functions and Engine's terrain types. They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types and its world levels. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
