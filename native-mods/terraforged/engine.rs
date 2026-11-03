@@ -729,7 +729,7 @@ pub enum SpawnType {
     WorldOrigin,
 }
 
-/// Engine's `WorldSettings.Properties`.
+/// Engine's `ContinentType`: the continent generator; `index` is Engine's `index` field (equal to the ordinal).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum ContinentType {
@@ -745,6 +745,8 @@ impl ContinentType {
     }
 }
 
+/// Engine's `WorldSettings.Continent.continentShape`, a `DistanceFunc` (the noise layer's
+/// `DistanceFunction`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ContinentShape {
     Euclidean,
@@ -752,6 +754,8 @@ pub enum ContinentShape {
     Natural,
 }
 
+/// Engine's `WorldSettings.Continent`, with Engine's defaults. The serializer's `@Range` limits are not
+/// enforced here.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ContinentSettings {
     pub continent_type: ContinentType,
@@ -766,6 +770,7 @@ pub struct ContinentSettings {
 }
 
 impl ContinentSettings {
+    /// Engine's `WorldSettings.DEFAULT_CONTINENT_SCALE`.
     pub const DEFAULT_SCALE: i32 = 3_000;
 }
 
@@ -785,6 +790,7 @@ impl Default for ContinentSettings {
     }
 }
 
+/// Engine's `WorldSettings.Properties`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WorldProperties {
     pub spawn_type: SpawnType,
@@ -824,6 +830,7 @@ impl Default for WorldControlPoints {
     }
 }
 
+/// Engine's `WorldSettings` with its defaults (`seed` is `transient` in Engine: never serialized).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct WorldSettings {
     pub seed: i64,
