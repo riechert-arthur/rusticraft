@@ -1,5 +1,13 @@
 # Third-party notices
 
+## TerraForged
+
+`native-mods/terraforged` translates
+[TerraForged](https://github.com/TerraForged/TerraForged/tree/6dd607ebfd41a3b7274e090b1f2cf565d53d1d44)
+and its Engine 0.3.0/Noise2D dependencies by TerraForged. The unavailable dependency source was
+recovered from bytecode shipped in TerraForged's official 0.3.1 alpha 2 jar. The code is licensed
+under MIT; its notice is preserved in `native-mods/terraforged/LICENSE-TERRAFORGED`.
+
 ## wgpu-hal
 
 `third_party/wgpu-hal` is [wgpu-hal](https://github.com/gfx-rs/wgpu) 30.0.1 by the gfx-rs

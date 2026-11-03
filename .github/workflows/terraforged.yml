@@ -1,0 +1,37 @@
+name: terraforged
+# Runs the TerraForged native mod's bit-exact tests (native-mods/terraforged/README.md). The mod lives outside the
+# Cargo workspace, so ci.yml never builds it. Needs no Minecraft files: expected values are written into the tests.
+
+on:
+  pull_request:
+    paths: ['native-mods/terraforged/**', '.github/workflows/terraforged.yml']
+  push:
+    branches: [main]
+    paths: ['native-mods/terraforged/**', '.github/workflows/terraforged.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: terraforged-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  noise:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal --component rustfmt && rustup default stable
+      - name: Check formatting
+        run: rustfmt --edition 2024 --check native-mods/terraforged/noise.rs
+      - name: Run the bit-exact tests (debug, so integer overflow panics)
+        run: |
+          rustc --edition 2024 --test native-mods/terraforged/noise.rs -o "$RUNNER_TEMP/terraforged-tests"
+          "$RUNNER_TEMP/terraforged-tests"
+      - name: Run the bit-exact tests (optimized)
+        run: |
+          rustc --edition 2024 -O --test native-mods/terraforged/noise.rs -o "$RUNNER_TEMP/terraforged-tests-opt"
+          "$RUNNER_TEMP/terraforged-tests-opt"

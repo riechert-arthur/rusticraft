@@ -1,0 +1,14 @@
+[mod]
+id = "terraforged"
+version = "0.1.0"
+priority = 100
+
+[compatibility]
+horizon_revision = "1b6e55d4f3bd14079551bcad173d0fac8f8225bb"
+
+[[module]]
+id = "noise"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged"
+source = "noise.rs"
+visibility = "pub"
