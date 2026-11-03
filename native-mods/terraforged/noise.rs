@@ -273,6 +273,39 @@ mod tests {
     }
 
     #[test]
+    fn grid_sweep_matches_engine_0_3_0() {
+        // Every source and interpolation over a 48x48 grid of negative and positive points for four seeds, folded
+        // into one FNV-1a style checksum of the raw bits. Engine 0.3.0 runs the same loop and prints 0x79cb944a.
+        let mut acc: u32 = 0x811c_9dc5;
+        let mut mix = |v: u32| acc = (acc ^ v).wrapping_mul(0x0100_0193);
+        let mut count = 0;
+        for seed in [0, -1, 918273, i32::MIN] {
+            for iy in -24..24 {
+                for ix in -24..24 {
+                    let x = ix as f32 * 0.37 - 0.05;
+                    let y = iy as f32 * 0.29 + 0.11;
+                    for i in [
+                        Interpolation::Linear,
+                        Interpolation::Curve3,
+                        Interpolation::Curve4,
+                    ] {
+                        mix(perlin(x, y, seed, i).to_bits());
+                        mix(perlin2(x, y, seed, i).to_bits());
+                    }
+                    mix(simplex(x, y, seed).to_bits());
+                    mix(legacy_simplex(x, y, seed).to_bits());
+                    mix(cubic(x, y, seed).to_bits());
+                    mix(hash_2d(seed, ix, iy) as u32);
+                    mix(value_coord_2d(seed, ix, iy).to_bits());
+                    mix(floor(x) as u32);
+                    count += 1;
+                }
+            }
+        }
+        assert_eq!((count, acc), (9216, 0x79cb_944a));
+    }
+
+    #[test]
     fn hashing_matches_engine_0_3_0() {
         let inputs = [(0, 0, 0), (42, -17, 91), (i32::MIN, 1_234_567, -7_654_321)];
         assert_eq!(
