@@ -3368,6 +3368,176 @@ mod tests {
     }
 
     #[test]
+    fn sine_source_extremes_match_engine_0_3_0() {
+        // Constant alphas off 0 and 1 (extrapolating, -0.0, tiny, NaN, infinite), NaN, infinite, huge, negative and
+        // -0.0 coordinates, `Source.sin(scale, alpha)` and the builder's default (alpha `Source.ZERO`, frequency 1).
+        let points = [
+            (0.0, 0.0),
+            (12.25, -98.75),
+            (-4096.5, 8192.25),
+            (123456.75, -0.125),
+            (64.0, 64.0),
+            (-128.0, 32.0),
+            (777.0, -333.0),
+            (-1024.0, -2048.0),
+        ];
+        let extreme = [
+            (3.0e9, -3.0e9),
+            (f32::NAN, 5.5),
+            (5.5, f32::NAN),
+            (f32::INFINITY, 1.0),
+            (1.0, f32::NEG_INFINITY),
+            (-0.0, -0.0),
+            (-1.0e30, 1.0e30),
+            (-3.0, -7.25),
+        ];
+        let alpha = || {
+            Module::source(Source::new(
+                SourceKind::Simplex,
+                SourceConfig {
+                    seed: 1401,
+                    octaves: 3,
+                    gain: 0.5,
+                    frequency: 1.0 / 96.0,
+                    lacunarity: 2.0,
+                    interpolation: Interpolation::Curve3,
+                },
+            ))
+        };
+        let cases: [(f32, f32, [u32; 8], [u32; 8]); 7] = [
+            (
+                0.5,
+                0.37,
+                [
+                    0x3f000000, 0x3ef79a93, 0x3ebea3f5, 0x3f0c8340, 0x3b615d00, 0x3ec8a94d,
+                    0x3ed133e1, 0x3ed23916,
+                ],
+                [
+                    0x3effe6e1, 0x3f393b80, 0x3f393b80, 0x3f171f1e, 0x3f172bae, 0x3f000000,
+                    0x3effe6e1, 0x3e29060e,
+                ],
+            ),
+            (
+                2.0,
+                0.37,
+                [
+                    0x3f000000, 0x3f800000, 0x3f800000, 0x3eab351b, 0x3b615d00, 0x00000000,
+                    0x3f800000, 0x3f800000,
+                ],
+                [
+                    0x3f00191f, 0x3f800000, 0x3d589010, 0x3f5cc7d4, 0x3ea3514a, 0x3f000000,
+                    0x3eff9b86, 0x3f00ae6e,
+                ],
+            ),
+            (
+                -1.0,
+                0.37,
+                [
+                    0x3f000000, 0x00000000, 0x00000000, 0x3f436bf2, 0x3b615d00, 0x3f800000,
+                    0x00000000, 0x00000000,
+                ],
+                [
+                    0x3eff9b86, 0x3d589010, 0x3f800000, 0x3ea2ecd0, 0x3f5caeb6, 0x3f000000,
+                    0x3f00191f, 0x00000000,
+                ],
+            ),
+            (
+                -0.0,
+                0.37,
+                [
+                    0x3f000000, 0x3c04b560, 0x3b55bf80, 0x3f1ed0d1, 0x3b615d00, 0x3f1dabc2,
+                    0x399c2000, 0x3ccbc940,
+                ],
+                [
+                    0x3effcdc3, 0x3f000000, 0x3f7276ff, 0x3effcdc3, 0x3f2e575b, 0x3f000000,
+                    0x3f000000, 0x3d5728b0,
+                ],
+            ),
+            (
+                1e-30,
+                0.37,
+                [
+                    0x3f000000, 0x3c04b560, 0x3b55bf80, 0x3f1ed0d1, 0x3b615d00, 0x3f1dabc2,
+                    0x399c2000, 0x3ccbc940,
+                ],
+                [
+                    0x3effcdc3, 0x3f000000, 0x3f7276ff, 0x3effcdc3, 0x3f2e575b, 0x3f000000,
+                    0x3f000000, 0x3d5728b0,
+                ],
+            ),
+            (
+                f32::NAN,
+                0.37,
+                [
+                    0x7fc00000, 0x7fc00000, 0x7fc00000, 0x7fc00000, 0x7fc00000, 0x7fc00000,
+                    0x7fc00000, 0x7fc00000,
+                ],
+                [
+                    0x7fc00000, 0x7fc00000, 0x7fc00000, 0x7fc00000, 0x7fc00000, 0x7fc00000,
+                    0x7fc00000, 0x7fc00000,
+                ],
+            ),
+            (
+                f32::INFINITY,
+                0.37,
+                [
+                    0xffc00000, 0x3f800000, 0x3f800000, 0x00000000, 0xffc00000, 0x00000000,
+                    0x3f800000, 0x3f800000,
+                ],
+                [
+                    0x3f800000, 0x3f800000, 0x00000000, 0x3f800000, 0x00000000, 0xffc00000,
+                    0x00000000, 0x3f800000,
+                ],
+            ),
+        ];
+        for (value, frequency, at_points, at_extremes) in cases {
+            let module = Module::sine_source(frequency, Module::constant(value));
+            assert_eq!(
+                bits(points.map(|(x, y)| module.value(x, y))),
+                at_points,
+                "alpha {value}"
+            );
+            assert_eq!(
+                bits(extreme.map(|(x, y)| module.value(x, y))),
+                at_extremes,
+                "alpha {value}"
+            );
+        }
+        let blend = Module::sine_source(3.5, alpha());
+        assert_eq!(
+            bits(extreme.map(|(x, y)| blend.value(x, y))),
+            [
+                0x3effe6e1, 0x7fc00000, 0x7fc00000, 0x3ed30740, 0x3ed3205e, 0x3f000000, 0x3effe6e1,
+                0x3f151d76
+            ]
+        );
+        // `Source.sin(100, alpha)`: `Builder.scale(100)` sets the frequency to `1f / 100`.
+        let scaled = Module::sine_source(1.0 / 100.0, alpha());
+        assert_eq!(
+            bits(points.map(|(x, y)| scaled.value(x, y))),
+            [
+                0x3f000000, 0x3f05fcfe, 0x3f14dcc2, 0x3f062561, 0x3f4c7c62, 0x3e67cac2, 0x3f5fc70c,
+                0x3f40a824
+            ]
+        );
+        let default = Module::sine_source(1.0, Module::constant(0.0));
+        assert_eq!(
+            bits(points.map(|(x, y)| default.value(x, y))),
+            [
+                0x3f000000, 0x3eb041cb, 0x3f11b66e, 0x38324000, 0x3f75c326, 0x3e0e8ac4, 0x3d93b610,
+                0x3f146e47
+            ]
+        );
+        assert_eq!(
+            bits(extreme.map(|(x, y)| default.value(x, y))),
+            [
+                0x3effcdc3, 0x3f000000, 0x3e16cb9c, 0x3effcdc3, 0x3f6baa7e, 0x3f000000, 0x3f000000,
+                0x3edb688c
+            ]
+        );
+    }
+
+    #[test]
     fn ridged_and_random_sources_match_engine_0_3_0() {
         let config = SourceConfig {
             seed: -7391,
