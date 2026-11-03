@@ -1387,8 +1387,9 @@ mod tests {
 
     #[test]
     fn java_equals_ignore_case_matches_java_26() {
-        // Java 26's String.equalsIgnoreCase; an offline check also compared every pair of code
-        // points that share a case mapping (6,134 pairs) and every code point's simple mappings.
+        // Java 26's String.equalsIgnoreCase. The oracle folder's CasePairs/CaseDump check (with
+        // jcase.rs) also compares every code point's simple case mappings and every pair of code
+        // points that share one (6,134 pairs).
         let cases = [
             ("OcEaN", "ocean", true),
             ("\u{212a}", "k", true),

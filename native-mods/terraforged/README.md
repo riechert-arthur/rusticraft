@@ -139,8 +139,15 @@ terrain's category and flags: Engine's `getDominant` compares the first terrain'
 ids, names, categories, hue and erosion bits and every flag against a Java oracle. The `TerrainType` registry, which
 assigns the ids, is not part of this layer.
 
-The terrain registry layer adds the 16 built-in terrain descriptors, case-insensitive registration,
-composite caching, ID fallback and parent-based custom terrain creation.
+The terrain registry layer adds Engine's `TerrainType` registry (`TerrainRegistry`): the 16 built-in terrains with
+ids 0 to 15 in Engine's order, `register` (which returns the terrain already registered under the name, else re-ids
+the new one with `with_id`), `register_composite` (the same object returns itself; otherwise the lower-id terrain comes
+first, and each `lower-higher` composite is registered once), lookups by id (unknown ids give `none`) and by name, and
+`TerrainHelper.getOrCreate` (`get_or_create`). Names compare like Java's `equalsIgnoreCase`, with Unicode simple case
+mappings one code point at a time (`K` matches the Kelvin sign, `ß` does not match `SS`). Engine's registry is one
+static list per Java process, so there the ids of composites and custom terrains depend on what earlier worlds
+registered; here each world owns a registry, and its built-in terrains are its own objects. Its tests check every
+registered terrain's id, name, category, hue, erosion and flags against a Java oracle.
 
 ## Status: development only
 
