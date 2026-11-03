@@ -3975,6 +3975,7 @@ raw 0x40400000 0x40400000 0x40400000 0x3f800000";
 
     #[test]
     fn curve_modifiers_match_engine_0_3_0() {
+        // The `points` lines of the Java `Curves` oracle (`.local/terraforged/oracles/curves/`).
         let source = |kind, seed, scale: f32, octaves, gain| {
             Module::source(Source::new(
                 kind,

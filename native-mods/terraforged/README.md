@@ -61,8 +61,15 @@ or below `blendMin` returns the source sample unchanged. It reports the source's
 against a Java oracle, including Engine's quirks: zero steps turn every terraced sample into NaN, `steps * i` wraps
 like Java's `int`, and a zero `modRange` divides by zero. Where Engine loops forever (`octaves` = `Integer.MAX_VALUE`), this port stops.
 
-The curve layer adds midpoint and S-curves, variable curves, symmetric power curves and configurable
-step smoothing with TerraForged's original approximate exponential and mapping behavior.
+The curve layer adds Engine's curve modifiers: `Curve` (`Module.curve(CurveFunc)`, with an `Interpolation`, a
+`MidPointCurve` or an `SCurve`), `VariableCurve` (`Module.curve(mid, steepness)` with noise controls), `PowerCurve`
+(`Module.powCurve(n)`) and `Steps` (`Module.steps(steps, slopeMin, slopeMax, curve)`). All of them report their source's
+bounds, as Engine's modifiers do, even where the output is 0..1. Their tests check raw bits against a Java oracle,
+including Engine's quirks: midpoint and variable curves use `NoiseUtil.exp`, `(1 + x / 256)^256`, rather than
+`Math.exp`; `SCurve` raises a negative `upper` to `-lower`; `PowerCurve` fixes its curve from the source's bounds when
+it is built, so a constant source samples NaN (or 1 for a zero power); `Steps` truncates like Java's `(int)`, so without
+a slope window (`slopeMax <= slopeMin`) it rounds samples towards zero onto its steps. `NoiseUtil.pow` keeps
+`Math.pow`'s NaN for a NaN power and for a base of ±1 with an infinite power.
 
 ## Status: development only
 
