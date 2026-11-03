@@ -26,4 +26,5 @@ no Nightly is close enough (the nearest earlier one, `nightly-source/2026-10-31-
 
 Translation inputs are TerraForged commit `6dd607ebfd41a3b7274e090b1f2cf565d53d1d44` and Engine 0.3.0 bytecode
 shaded into the official `TerraForged-1.18.2-0.3.1-alpha-2.jar`. Tests compare raw `f32` bits with
-values produced by those Java classes.
+values produced by those Java classes. The small Java programs that printed them run against that jar, so they stay
+out of Git, in the maintainer's `.local/terraforged/oracles/` folder.
