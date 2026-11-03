@@ -42,8 +42,8 @@ sources), this port panics.
 The terrace layer adds `Terrace` (`Module.terrace(ramp, cliff, rampHeight, steps, blendRange)`): it clamps its source
 to 0..0.999999 and snaps it to flat steps, rising to the next step through a ramp (scaled by `rampHeight`) and a cliff.
 As in Engine, the steps are fixed when it is built and start at 0, not at the source's minimum, spaced by the source's
-range over `steps - 1`; it reports the source's bounds. Where
-Engine throws (sampling a NaN or a terrace with no steps), this port panics.
+range over `steps - 1`; it reports the source's bounds. Where Engine throws (sampling a NaN, or a terrace with no
+steps), this port panics.
 
 ## Status: development only
 
