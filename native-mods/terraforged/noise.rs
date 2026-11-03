@@ -472,6 +472,7 @@ fn map(value: f32, min: f32, max: f32, range: f32) -> f32 {
     }
 }
 
+/// Engine's `Rand` source: white noise at `frequency`, with `nextInt` kept exactly as Java computes it.
 #[derive(Clone, Copy)]
 pub struct Rand {
     seed: i32,
