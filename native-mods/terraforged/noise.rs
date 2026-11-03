@@ -2681,4 +2681,190 @@ basectl 0xbe800000 0x3f800000 | 0x3eb98c02 0x3e32940c 0x3ebc62d2 0x3da4e1f8";
             [0x3e800000; 3]
         );
     }
+
+    #[test]
+    fn multi_blend_edges_match_engine_0_3_0() {
+        // Java `MultiBlends` oracle (`.local/terraforged/oracles/multiblend/`): constant controls across 0..1, -0.0
+        // and NaN, a blend above 1, a negative blend, a -0.0 source and noise controls. NaN prints as
+        // `floatToIntBits` (0x7fc00000).
+        const EXPECTED: &str = "\
+n2 b0x3fc00000 0x00000000 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+n2 b0x3fc00000 0x3d4ccccd 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+n2 b0x3fc00000 0x3dcccccd 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+n2 b0x3fc00000 0x3e4ccccd 0xbe800000 0x3fcccccd | 0x3d5a7412 0xbda703ac 0xbd26f187 0x3d0f1788\n\
+n2 b0x3fc00000 0x3e800000 0xbe800000 0x3fcccccd | 0x3e888889 0x3de4cb8c 0x3e01d780 0x3e0c7db8\n\
+n2 b0x3fc00000 0x3e99999a 0xbe800000 0x3fcccccd | 0x3ef5c292 0x3e9c26b3 0x3e96b5b2 0x3e753591\n\
+n2 b0x3fc00000 0x3eb33333 0xbe800000 0x3fcccccd | 0x3f317e4b 0x3eff1a7f 0x3eec7fa0 0x3eaef6b2\n\
+n2 b0x3fc00000 0x3ecccccd 0xbe800000 0x3fcccccd | 0x3f681b4f 0x3f310728 0x3f2124c9 0x3ee3529d\n\
+n2 b0x3fc00000 0x3ee66666 0xbe800000 0x3fcccccd | 0x3f8f5c29 0x3f62810e 0x3f4c09c2 0x3f0bd744\n\
+n2 b0x3fc00000 0x3f000000 0xbe800000 0x3fcccccd | 0x3faaaaab 0x3f89fd7a 0x3f76eeb9 0x3f26053a\n\
+n2 b0x3fc00000 0x3f0ccccd 0xbe800000 0x3fcccccd | 0x3fc5f92d 0x3fa2ba6e 0x3f90e9da 0x3f403330\n\
+n2 b0x3fc00000 0x3f19999a 0xbe800000 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+n2 b0x3fc00000 0x3f266666 0xbe800000 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+n2 b0x3fc00000 0x3f333333 0xbe800000 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+n2 b0x3fc00000 0x3f400000 0xbe800000 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+n2 b0x3fc00000 0x3f4ccccd 0xbe800000 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+n2 b0x3fc00000 0x3f666666 0xbe800000 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+n2 b0x3fc00000 0x3f733333 0xbe800000 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+n2 b0x3fc00000 0x3f800000 0xbe800000 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+n2 b0x3fc00000 0x80000000 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+n2 b0x3fc00000 0x7fc00000 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+n3 b0x3ecccccd 0x00000000 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+n3 b0x3ecccccd 0x3d4ccccd 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+n3 b0x3ecccccd 0x3dcccccd 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+n3 b0x3ecccccd 0x3e4ccccd 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+n3 b0x3ecccccd 0x3e800000 0xbe800000 0x3fcccccd | 0x3f4cccca 0x3f184a30 0x3f0bb24a 0x3ec924a5\n\
+n3 b0x3ecccccd 0x3e99999a 0xbe800000 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+n3 b0x3ecccccd 0x3eb33333 0xbe800000 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+n3 b0x3ecccccd 0x3ecccccd 0xbe800000 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+n3 b0x3ecccccd 0x3ee66666 0xbe800000 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+n3 b0x3ecccccd 0x3f000000 0xbe800000 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+n3 b0x3ecccccd 0x3f0ccccd 0xbe800000 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+n3 b0x3ecccccd 0x3f19999a 0xbe800000 0x3fcccccd | 0x3f2bfffe 0x3f2db6f1 0x3f1bef33 0x3f0b0dca\n\
+n3 b0x3ecccccd 0x3f266666 0xbe800000 0x3fcccccd | 0x3f000000 0x3f0f52e0 0x3f012753 0x3f000000\n\
+n3 b0x3ecccccd 0x3f333333 0xbe800000 0x3fcccccd | 0x3f000000 0x3f0f52e0 0x3f012753 0x3f000000\n\
+n3 b0x3ecccccd 0x3f400000 0xbe800000 0x3fcccccd | 0x3f000000 0x3f0f52e0 0x3f012753 0x3f000000\n\
+n3 b0x3ecccccd 0x3f4ccccd 0xbe800000 0x3fcccccd | 0x3f000000 0x3f0f52e0 0x3f012753 0x3f000000\n\
+n3 b0x3ecccccd 0x3f666666 0xbe800000 0x3fcccccd | 0x3f000000 0x3f0f52e0 0x3f012753 0x3f000000\n\
+n3 b0x3ecccccd 0x3f733333 0xbe800000 0x3fcccccd | 0x3f000000 0x3f0f52e0 0x3f012753 0x3f000000\n\
+n3 b0x3ecccccd 0x3f800000 0xbe800000 0x3fcccccd | 0x3f000000 0x3f0f52e0 0x3f012753 0x3f000000\n\
+n3 b0x3ecccccd 0x80000000 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+n3 b0x3ecccccd 0x7fc00000 0xbe800000 0x3fcccccd | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+n5 b0xbe99999a 0x00000000 0xbe800000 0x40600000 | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+n5 b0xbe99999a 0x3d4ccccd 0xbe800000 0x40600000 | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+n5 b0xbe99999a 0x3dcccccd 0xbe800000 0x40600000 | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+n5 b0xbe99999a 0x3e4ccccd 0xbe800000 0x40600000 | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+n5 b0xbe99999a 0x3e800000 0xbe800000 0x40600000 | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+n5 b0xbe99999a 0x3e99999a 0xbe800000 0x40600000 | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+n5 b0xbe99999a 0x3eb33333 0xbe800000 0x40600000 | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+n5 b0xbe99999a 0x3ecccccd 0xbe800000 0x40600000 | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+n5 b0xbe99999a 0x3ee66666 0xbe800000 0x40600000 | 0x3f000000 0x3f0f52e0 0x3f012753 0x3f000000\n\
+n5 b0xbe99999a 0x3f000000 0xbe800000 0x40600000 | 0x3f000000 0x3f0f52e0 0x3f012753 0x3f000000\n\
+n5 b0xbe99999a 0x3f0ccccd 0xbe800000 0x40600000 | 0x3f000000 0x3f0f52e0 0x3f012753 0x3f000000\n\
+n5 b0xbe99999a 0x3f19999a 0xbe800000 0x40600000 | 0x3f000000 0x3f0f52e0 0x3f012753 0x3f000000\n\
+n5 b0xbe99999a 0x3f266666 0xbe800000 0x40600000 | 0x80000000 0x80000000 0x80000000 0x80000000\n\
+n5 b0xbe99999a 0x3f333333 0xbe800000 0x40600000 | 0x80000000 0x80000000 0x80000000 0x80000000\n\
+n5 b0xbe99999a 0x3f400000 0xbe800000 0x40600000 | 0x80000000 0x80000000 0x80000000 0x80000000\n\
+n5 b0xbe99999a 0x3f4ccccd 0xbe800000 0x40600000 | 0x00000000 0x00000000 0x00000000 0x00000000\n\
+n5 b0xbe99999a 0x3f666666 0xbe800000 0x40600000 | 0x40600000 0x40600000 0x40600000 0x40600000\n\
+n5 b0xbe99999a 0x3f733333 0xbe800000 0x40600000 | 0x40600000 0x40600000 0x40600000 0x40600000\n\
+n5 b0xbe99999a 0x3f800000 0xbe800000 0x40600000 | 0x40600000 0x40600000 0x40600000 0x40600000\n\
+n5 b0xbe99999a 0x80000000 0xbe800000 0x40600000 | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+n5 b0xbe99999a 0x7fc00000 0xbe800000 0x40600000 | 0x00000000 0xbe04fbbe 0xbda942b6 0x3c197ec0\n\
+ctl3 0xbe800000 0x3fcccccd | 0x3fcccccd 0x3fa8e9ab 0x3f964679 0x3f46bead\n\
+ctl5 0xbe800000 0x40600000 | 0x3f000000 0x3f0f52e0 0x3f012753 0x3f0a143e";
+        let source = |kind, seed, scale: f32, octaves, gain| {
+            Module::source(Source::new(
+                kind,
+                SourceConfig {
+                    seed,
+                    octaves,
+                    gain,
+                    frequency: 1.0 / scale,
+                    lacunarity: 2.0,
+                    interpolation: Interpolation::Curve3,
+                },
+            ))
+        };
+        let hex = |value: f32| {
+            let bits = if value.is_nan() {
+                0x7fc0_0000
+            } else {
+                value.to_bits()
+            };
+            format!("0x{bits:08x}")
+        };
+        let mut lines = Vec::new();
+        let mut print = |name: String, module: Module| {
+            let mut line = format!(
+                "{name} {} {} |",
+                hex(module.min_value()),
+                hex(module.max_value())
+            );
+            for (x, y) in [
+                (0.0, 0.0),
+                (12.25, -98.75),
+                (-4096.5, 8192.25),
+                (64.0, 64.0),
+            ] {
+                line += &format!(" {}", hex(module.value(x, y)));
+            }
+            lines.push(line);
+        };
+        let sources = [
+            source(SourceKind::Simplex, 502, 120.0, 2, 0.5)
+                .scale(Module::constant(0.5))
+                .bias(Module::constant(-0.25)),
+            source(SourceKind::Ridge, 503, 96.0, 3, 0.975)
+                .scale(Module::constant(1.5))
+                .bias(Module::constant(0.1)),
+            source(SourceKind::Perlin, 504, 64.0, 2, 0.5),
+            Module::constant(-0.0),
+            Module::constant(3.5),
+        ];
+        let controls = [
+            0.0,
+            0.05,
+            0.1,
+            0.2,
+            0.25,
+            0.3,
+            0.35,
+            0.4,
+            0.45,
+            0.5,
+            0.55,
+            0.6,
+            0.65,
+            0.7,
+            0.75,
+            0.8,
+            0.9,
+            0.95,
+            1.0,
+            -0.0,
+            f32::NAN,
+        ];
+        for (count, blend, interpolation) in [
+            (2, 1.5, Interpolation::Linear),
+            (3, 0.4, Interpolation::Curve3),
+            (5, -0.3, Interpolation::Curve3),
+        ] {
+            for control in controls {
+                print(
+                    format!("n{count} b{} {}", hex(blend), hex(control)),
+                    Module::constant(control).multi_blend(
+                        blend,
+                        interpolation,
+                        sources[..count].to_vec(),
+                    ),
+                );
+            }
+        }
+        let control = source(SourceKind::Perlin, 501, 80.0, 3, 0.5);
+        print(
+            "ctl3".into(),
+            control
+                .clone()
+                .multi_blend(0.4, Interpolation::Curve3, sources[..3].to_vec()),
+        );
+        print(
+            "ctl5".into(),
+            control.multi_blend(0.8, Interpolation::Linear, sources.to_vec()),
+        );
+        assert_eq!(lines, EXPECTED.lines().collect::<Vec<_>>());
+
+        // Engine's `Combiner` bounds without sources.
+        let empty = Module::constant(0.5).multi_blend(0.4, Interpolation::Linear, Vec::new());
+        assert_eq!([empty.min_value(), empty.max_value()], [0.0, 0.0]);
+    }
+
+    #[test]
+    #[should_panic(expected = "Engine throws")]
+    fn multi_blend_panics_where_engine_throws() {
+        // Engine: `nodes[index - 1]` with index 0 throws `ArrayIndexOutOfBoundsException`.
+        Module::constant(-0.05)
+            .multi_blend(0.4, Interpolation::Linear, vec![Module::constant(1.0); 3])
+            .value(0.0, 0.0);
+    }
 }
