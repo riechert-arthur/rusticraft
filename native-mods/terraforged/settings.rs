@@ -27,6 +27,10 @@ pub struct Settings {
     /// `deep_ocean` grow on dry land; its own overrides still place the water ones),
     /// and draw unique caves from the cave biomes, not from every registered biome.
     pub corrected_biomes: bool,
+    /// How far TerraForged's land reaches above sea level (and its oceans below), as a
+    /// multiple of the original's: up to 2 fills most of the 1024-block overworld.
+    /// Landforms keep their width, so they get steeper as well as taller.
+    pub height_scale: f32,
 }
 
 impl Default for Settings {
@@ -40,7 +44,11 @@ pub const FAITHFUL: Settings = Settings {
     deterministic: false,
     sparse_forests: false,
     corrected_biomes: false,
+    height_scale: 1.0,
 };
+
+/// The range `height_scale` is held to: the world's top is 959.
+pub const HEIGHT_SCALES: std::ops::RangeInclusive<f32> = 0.5..=2.0;
 
 static CURRENT: RwLock<Settings> = RwLock::new(FAITHFUL);
 
@@ -76,6 +84,11 @@ impl Settings {
             deterministic: flag("deterministic", FAITHFUL.deterministic),
             sparse_forests: flag("sparse_forests", FAITHFUL.sparse_forests),
             corrected_biomes: flag("corrected_biomes", FAITHFUL.corrected_biomes),
+            height_scale: value["height_scale"]
+                .as_f64()
+                .map_or(FAITHFUL.height_scale, |scale| {
+                    (scale as f32).clamp(*HEIGHT_SCALES.start(), *HEIGHT_SCALES.end())
+                }),
         }
     }
 
@@ -84,6 +97,7 @@ impl Settings {
         map.insert("deterministic".into(), self.deterministic.into());
         map.insert("sparse_forests".into(), self.sparse_forests.into());
         map.insert("corrected_biomes".into(), self.corrected_biomes.into());
+        map.insert("height_scale".into(), f64::from(self.height_scale).into());
         Value::Object(map)
     }
 }
@@ -98,9 +112,14 @@ mod tests {
             deterministic: true,
             sparse_forests: true,
             corrected_biomes: true,
+            height_scale: 1.5,
         };
         assert_eq!(Settings::from_json(&on.to_json()), on);
         assert_eq!(Settings::from_json(&serde_json::json!({})), FAITHFUL);
+        assert_eq!(
+            Settings::from_json(&serde_json::json!({"height_scale": 9})).height_scale,
+            2.0
+        );
         assert_eq!(
             Settings::from_json(&serde_json::json!({"deterministic": 3})),
             FAITHFUL

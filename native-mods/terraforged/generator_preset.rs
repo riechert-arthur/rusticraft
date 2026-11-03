@@ -142,6 +142,29 @@ fn json_int(value: &Value) -> Option<i32> {
     }
 }
 
+/// The `height_scale` setting: the land's reach above sea level (`max_y`, `base_height`)
+/// and the oceans' depth below it (`sea_floor`, down to y 0) times `scale`, at the original's
+/// horizontal frequency, which `auto_scale` would otherwise widen with the range.
+pub fn scale_heights(levels: TerrainLevels, scale: f32) -> TerrainLevels {
+    if scale == 1.0 {
+        return levels;
+    }
+    let sea = levels.sea_level;
+    let stretch = |level: i32| sea + ((level - sea) as f32 * scale).round() as i32;
+    let mut scaled = TerrainLevels::new(
+        levels.noise_levels.auto,
+        levels.noise_levels.scale,
+        levels.min_y,
+        stretch(levels.max_y),
+        stretch(levels.base_height),
+        sea,
+        // Base columns start at y 0, as `TerrainLevels::MIN_SEA_FLOOR` holds the floor.
+        stretch(levels.sea_floor).max(TerrainLevels::MIN_SEA_FLOOR),
+    );
+    scaled.noise_levels.frequency = levels.noise_levels.frequency;
+    scaled
+}
+
 /// `GeneratorPreset.build`'s noise: `new NoiseGenerator(levels, terrain).withErosion()` over the bundled terrain
 /// noises in registry order (`TERRAINS.entries`, sorted by location), with `createLandTerrain`'s blender
 /// (`TerrainBlender(TERRAIN_OFFSET, 800, 0.8F, 0.4F, terrain)`) and `createContinentNoise`'s continent. The terrain
@@ -326,5 +349,47 @@ mod tests {
         assert!(height > 0 && height < 320);
         assert_eq!(column.block(height - 1), Some(ColumnBlock::Stone));
         assert_ne!(column.block(height), Some(ColumnBlock::Stone));
+    }
+
+    #[test]
+    fn height_scale_stretches_levels_around_sea_level() {
+        let original = TerrainLevels::new(true, 1.0, -64, 480, 128, 62, 22);
+        let doubled = scale_heights(original, 2.0);
+        assert_eq!(
+            (
+                doubled.max_y,
+                doubled.base_height,
+                doubled.sea_level,
+                doubled.sea_floor
+            ),
+            (898, 194, 62, 0)
+        );
+        assert_eq!(
+            doubled.noise_levels.frequency,
+            original.noise_levels.frequency
+        );
+        assert_eq!(scale_heights(original, 1.0), original);
+        // Generated land reaches about twice as far above the sea.
+        let peak = |levels| {
+            let generator = build(levels).unwrap();
+            generator.capture_seed(98765);
+            (0..400)
+                .map(|i| {
+                    generator
+                        .base_height(
+                            (i % 20) * 160,
+                            (i / 20) * 160,
+                            TerraHeightmap::OceanFloorWorldgen,
+                        )
+                        .unwrap()
+                })
+                .max()
+                .unwrap()
+        };
+        let (one, two) = (peak(original) - 62, peak(doubled) - 62);
+        assert!(
+            one > 40 && two > one * 3 / 2 && two < one * 5 / 2,
+            "{one} {two}"
+        );
     }
 }

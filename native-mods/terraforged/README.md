@@ -150,6 +150,12 @@ don't generate, so they need none.
   the cave biomes either way: off as noise biomes (at the search's first height), on where the
   unique caves carve them (at a block of the cave); `/tf preview` colours by climate and is the same
   either way. Off, generation is unchanged.
+- `height_scale` (a number, 1 by default, held to 0.5–2): how far land reaches above sea level, and
+  oceans below it, as a multiple of the original's (`max_y`, `base_height` and `sea_floor` stretched
+  around the sea level, the floor no lower than y 0). Landforms keep their width (the original's
+  `auto_scale` would widen them with the range), so they grow steeper as well as taller: at 1.8, land
+  stands about 1.8 times as high above the sea, rivers cut deep canyons, and the highest summits rise
+  less (the terrain noise rarely reaches them).
 
 ## Layers
 
