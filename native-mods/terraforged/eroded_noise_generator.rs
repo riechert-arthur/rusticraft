@@ -62,8 +62,9 @@ pub struct ErodedNoiseGenerator {
     smoothing: HeightmapSmoothingSettings,
     resources: Mutex<VecDeque<NoiseResource>>,
     regions: ErosionRegionCache<Vec<f32>>,
-    /// The `deterministic` setting: reset each sample's river noise (see `generate`).
-    fresh_rivers: bool,
+    /// What each sample's river noise starts at (see `generate`): `None` keeps the
+    /// original's carry-over.
+    river_start: Option<f32>,
 }
 
 impl ErodedNoiseGenerator {
@@ -78,7 +79,16 @@ impl ErodedNoiseGenerator {
             smoothing,
             resources: Mutex::new(VecDeque::new()),
             regions: ErosionRegionCache::new(),
-            fresh_rivers: super::terraforged_settings::current().deterministic,
+            river_start: {
+                let settings = super::terraforged_settings::current();
+                if settings.sparse_forests {
+                    Some(1.0)
+                } else if settings.deterministic {
+                    Some(0.0)
+                } else {
+                    None
+                }
+            },
         }
     }
 
@@ -241,10 +251,10 @@ impl NoiseGeneratorContract for ErodedNoiseGenerator {
                     // the product of every chunk its worker sampled before, so after a few
                     // chunks it is 0 inland (wet everywhere, the forests TerraForged worlds
                     // are known for) but not on a worker's first chunks. Deterministic
-                    // worlds start at that settled 0; the carver still sets 1 seaward of
-                    // the beach.
-                    if self.fresh_rivers {
-                        sample.river_noise = 0.0;
+                    // worlds start at that settled 0, `sparse_forests` at the 1 a fresh
+                    // sample holds; the carver still sets 1 seaward of the beach.
+                    if let Some(start) = self.river_start {
+                        sample.river_noise = start;
                     }
                     self.generator.sample_river(seed, noise_x, noise_z, sample);
                     resource.chunk.set_noise_index(index, sample);

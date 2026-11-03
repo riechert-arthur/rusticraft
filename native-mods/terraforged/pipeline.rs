@@ -1014,6 +1014,7 @@ mod tests {
             .collect();
         super::terraforged_settings::set_for_thread(Some(super::terraforged_settings::Settings {
             deterministic: true,
+            ..super::terraforged_settings::FAITHFUL
         }));
         let single = decorated_trees(&data, &forward, 1);
         let threaded = decorated_trees(&data, &forward, 6);
@@ -1053,6 +1054,7 @@ mod tests {
             .collect();
         super::terraforged_settings::set_for_thread(Some(super::terraforged_settings::Settings {
             deterministic: true,
+            ..super::terraforged_settings::FAITHFUL
         }));
         let single = build_noise(levels).unwrap();
         single.capture_seed(777);

@@ -63,6 +63,10 @@ leaves existing worlds as they are.
   each placement is seeded from its position and feature index, on the ground under any leaves. Two
   worlds on one seed then match chunk for chunk; `/tf regen` restores all but the trees that collide
   with their neighbours' (whichever decorated first wins, and the world's first order isn't recorded).
+- `sparse_forests`: the river noise starts at 1, as TerraForged's code intends, instead of what the
+  chunk before left (or `deterministic`'s settled 0). Saturation (`1 - river noise`) then falls away
+  from rivers and lakes, and trees with it: forests gather along the water and thin out elsewhere,
+  about a quarter of the usual trees. Deterministic either way.
 
 ## Layers
 
