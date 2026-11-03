@@ -675,8 +675,9 @@ impl Default for TerrainRegistry {
 /// Java's `String.equalsIgnoreCase`: the same UTF-16 length and, code point by code point, equal,
 /// equal after `Character.toUpperCase`, or equal after `Character.toLowerCase` of those.
 fn java_equals_ignore_case(first: &str, second: &str) -> bool {
-    if first.len() == second.len() && first.eq_ignore_ascii_case(second) {
-        return true;
+    if first.is_ascii() && second.is_ascii() {
+        // ASCII letters only case-map to ASCII letters.
+        return first.eq_ignore_ascii_case(second);
     }
     if first.encode_utf16().count() != second.encode_utf16().count() {
         return false;
