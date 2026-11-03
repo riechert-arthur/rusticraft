@@ -509,11 +509,13 @@ fn nearest_cell(
     result
 }
 
+/// Java's `Noise.cell` with `CellFunc.CELL_VALUE`: the value of the nearest of the 3×3 cells around `(x, y)`.
 pub fn cell_value(x: f32, y: f32, seed: i32, displacement: f32, distance: DistanceFunction) -> f32 {
     let cell = nearest_cell(x, y, seed, displacement, distance);
     value_coord_2d(seed, cell.x, cell.y)
 }
 
+/// Java's `Noise.cellEdge`: `edge` applied to the nearest and second-nearest of the 3×3 cells around `(x, y)`.
 pub fn cell_edge(
     x: f32,
     y: f32,
