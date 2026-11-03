@@ -58,6 +58,11 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+/// Blocks from the top down distant terrain paints with the surface rule: all eight the
+/// vanilla tile does, or two with Reduced far detail.
+const FULL_PAINT: i32 = 8;
+const REDUCED_PAINT: i32 = 2;
+
 type BlockSets = Arc<BTreeMap<String, Arc<BTreeSet<BlockStateId>>>>;
 
 pub(super) struct TerraForgedPipeline {
@@ -191,7 +196,14 @@ impl TerraForgedPipeline {
     /// Distant columns from TerraForged's base columns (stone to the terrain height,
     /// water to the base level, as `getBaseColumn` builds them), their top blocks painted by
     /// the vanilla surface rule over TerraForged's biome.
-    fn far_columns(&self, worker: &mut WorkerState, columns: &[(i32, i32)]) -> Vec<LodColumn> {
+    /// `paint_depth`: how many blocks from the top down the surface rule paints (8, or
+    /// fewer for Reduced far detail, which shows little more than the top).
+    fn far_columns(
+        &self,
+        worker: &mut WorkerState,
+        columns: &[(i32, i32)],
+        paint_depth: i32,
+    ) -> Vec<LodColumn> {
         let vanilla = &self.vanilla;
         let data = &vanilla.data;
         let settings = &vanilla.settings;
@@ -206,16 +218,16 @@ impl TerraForgedPipeline {
         let mut geometry = Vec::with_capacity(columns.len());
         let mut chunks: BTreeMap<(i32, i32), BiomeId> = BTreeMap::new();
         for &(x, z) in columns {
-            let solid = (self
-                .generator
-                .base_height(x, z, TerraHeightmap::OceanFloorWorldgen)
-                - 1)
-            .clamp(min_y - 1, top_y - 1);
-            let surface = (self
-                .generator
-                .base_height(x, z, TerraHeightmap::WorldSurfaceWorldgen)
-                - 1)
-            .clamp(solid, top_y - 1);
+            let [floor, water_level] = self.generator.base_heights(
+                x,
+                z,
+                [
+                    TerraHeightmap::OceanFloorWorldgen,
+                    TerraHeightmap::WorldSurfaceWorldgen,
+                ],
+            );
+            let solid = (floor - 1).clamp(min_y - 1, top_y - 1);
+            let surface = (water_level - 1).clamp(solid, top_y - 1);
             let biome = self.biome_at(x & !3, z & !3);
             chunks.entry((x >> 4, z >> 4)).or_insert(biome);
             let mut spans = Vec::new();
@@ -289,7 +301,7 @@ impl TerraForgedPipeline {
                 continue;
             };
             material.update_xz(wx, wz, 0, 0);
-            for depth in 1..=below.min(8) {
+            for depth in 1..=below.min(paint_depth) {
                 let y = height - depth;
                 material.update_y(
                     depth,
@@ -619,7 +631,7 @@ impl SeededPipeline for TerraForgedPipeline {
         z: i32,
         spans: Option<&mut Vec<(i32, i32, BlockStateId)>>,
     ) -> Option<SurfaceSample> {
-        let (sample, column) = self.far_columns(worker, &[(x, z)]).pop()?;
+        let (sample, column) = self.far_columns(worker, &[(x, z)], FULL_PAINT).pop()?;
         if let Some(spans) = spans {
             *spans = column;
         }
@@ -632,7 +644,7 @@ impl SeededPipeline for TerraForgedPipeline {
         z: i32,
         width: i32,
         side: usize,
-        _approximate: bool,
+        approximate: bool,
     ) -> Result<Vec<LodColumn>, GeneratorError> {
         if width <= 0 || side == 0 || side > 64 {
             return Err(resource("far sample dimensions"));
@@ -645,7 +657,15 @@ impl SeededPipeline for TerraForgedPipeline {
                 )
             })
             .collect();
-        Ok(self.far_columns(worker, &columns))
+        Ok(self.far_columns(
+            worker,
+            &columns,
+            if approximate {
+                REDUCED_PAINT
+            } else {
+                FULL_PAINT
+            },
+        ))
     }
     fn structure_starts(
         &self,
@@ -1211,5 +1231,55 @@ mod tests {
         let near =
             (-8..=8).any(|dy| chunk.biome_at(x & 15, y + dy * 4, z & 15) == "minecraft:the_end");
         assert!(near, "no cave biome near {x} {y} {z}");
+    }
+
+    #[test]
+    #[ignore = "benchmark; run by hand with --nocapture"]
+    fn far_terrain_benchmark() {
+        let Some(data) = data() else { return };
+        let pipeline = TerraForgedPipeline::new(&data, 98765, false).unwrap();
+        let overworld = OverworldGenerator::for_world(
+            Arc::clone(&data),
+            98765,
+            PRESET,
+            "minecraft:overworld",
+            false,
+        )
+        .unwrap();
+        let mut worker = overworld.worker();
+        let columns: Vec<(i32, i32)> = (0..16 * 32 * 32)
+            .map(|i| (5000 + (i % 128) * 16, 5000 + (i / 128) * 16))
+            .collect();
+        let start = std::time::Instant::now();
+        for &(x, z) in &columns {
+            std::hint::black_box(pipeline.generator.base_height(
+                x,
+                z,
+                TerraHeightmap::OceanFloorWorldgen,
+            ));
+        }
+        let height = start.elapsed();
+        let start = std::time::Instant::now();
+        for &(x, z) in &columns {
+            std::hint::black_box(pipeline.biome_at(x & !3, z & !3));
+        }
+        let biome = start.elapsed();
+        let start = std::time::Instant::now();
+        for tile in 0..16 {
+            let (x, z) = (5000 + (tile % 4) * 512, 5000 + (tile / 4) * 512);
+            std::hint::black_box(worker.lod_grid(x, z, 16, 32, false).unwrap());
+        }
+        let grid = start.elapsed();
+        let start = std::time::Instant::now();
+        for tile in 0..16 {
+            let (x, z) = (5000 + (tile % 4) * 512, 5000 + (tile / 4) * 512);
+            std::hint::black_box(worker.lod_grid(x, z, 16, 32, true).unwrap());
+        }
+        let reduced = start.elapsed();
+        eprintln!("reduced far detail: {reduced:?}");
+        eprintln!(
+            "{} columns: one height {height:?}, biome {biome:?}, lod_grid {grid:?}",
+            columns.len()
+        );
     }
 }

@@ -218,6 +218,14 @@ impl TerraForgedGenerator {
         )
     }
 
+    /// `base_height` for two heightmaps from one noise sample.
+    pub fn base_heights(&self, x: i32, z: i32, kinds: [TerraHeightmap; 2]) -> [i32; 2] {
+        let sample = self.terrain.noise_sample(self.seed(), x, z);
+        kinds.map(|kind| {
+            base_height_from_noise(self.levels, sample.base_noise, sample.height_noise, kind)
+        })
+    }
+
     pub fn base_column(&self, x: i32, z: i32) -> BaseColumn {
         let sample = self.terrain.noise_sample(self.seed(), x, z);
         base_column_from_noise(self.levels, sample.base_noise, sample.height_noise)
