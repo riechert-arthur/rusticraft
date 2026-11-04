@@ -311,23 +311,23 @@ fn noise_warp(kind: SourceKind, seed: i32, scale: i32, octaves: usize, strength:
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::super::terraforged_engine::{BiomeType, ContinentSettings, WorldControlPoints};
     use super::*;
 
     /// The fold the Java oracle (`.local/terraforged/oracles/continent/`) uses: `h = h * 1_000_003 ^ v` with
     /// Java `long` wrap, `v` widened from `int` with sign extension.
-    fn mix(h: &mut i64, v: i64) {
+    pub(crate) fn mix(h: &mut i64, v: i64) {
         *h = h.wrapping_mul(1_000_003) ^ v;
     }
 
     /// Raw float bits, every NaN as Java's canonical `0x7fc00000` (the oracle's `fb`).
-    fn mix_f(h: &mut i64, v: f32) {
+    pub(crate) fn mix_f(h: &mut i64, v: f32) {
         let bits = if v.is_nan() { 0x7fc0_0000 } else { v.to_bits() };
         mix(h, i64::from(bits as i32));
     }
 
-    fn mix_cell(h: &mut i64, cell: &Cell) {
+    pub(crate) fn mix_cell(h: &mut i64, cell: &Cell) {
         for value in [
             cell.value,
             cell.erosion,
@@ -360,7 +360,7 @@ mod tests {
     }
 
     /// Every field set, so the fold shows which fields `apply` leaves untouched (the oracle's `filled`).
-    fn filled(registry: &TerrainRegistry) -> Cell {
+    pub(crate) fn filled(registry: &TerrainRegistry) -> Cell {
         let mut cell = Cell::new(registry);
         cell.value = 0.75;
         cell.erosion = 0.25;
@@ -387,12 +387,12 @@ mod tests {
 
     // Zeros, grid points, huge values, ±inf, NaN, the `(int)` saturation edges and the smallest subnormal.
     #[rustfmt::skip]
-    const XS: [f32; 19] = [
+    pub(crate) const XS: [f32; 19] = [
         0.0, -0.0, 12.25, -98.75, -4096.5, 8192.25, 123_456.75, -1500.5, 2400.75, 1e9, -1e9, 3e38, -f32::MAX,
         f32::INFINITY, f32::NEG_INFINITY, f32::NAN, 2_147_483_648.0, -2_147_483_904.0, 1e-45,
     ];
     #[rustfmt::skip]
-    const DIRECTIONS: [(f32, f32); 7] = [
+    pub(crate) const DIRECTIONS: [(f32, f32); 7] = [
         (0.6, 0.8), (-1.0, 0.0), (0.0, -1.0), (0.707_106_77, -0.707_106_77), (0.0, 0.0), (f32::NAN, 0.0),
         (1e30, 1e30),
     ];
