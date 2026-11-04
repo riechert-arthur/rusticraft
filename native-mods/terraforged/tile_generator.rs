@@ -23,21 +23,32 @@
  */
 
 use super::{
-    terraforged_engine::Cell, terraforged_filters::WorldFilters, terraforged_river::Rivermap,
+    terraforged_engine::{Cell, TerrainRegistry},
+    terraforged_filters::WorldFilters,
+    terraforged_river::Rivermap,
     terraforged_tile::Tile,
 };
 use std::sync::Arc;
 
+/// The stages of Engine's `Heightmap` that `Tile.generate(Heightmap ...)` calls, in the order the
+/// tile fills run them: `applyBase`, `getContinent().getRivermap(x, z)` (when the cell's continent
+/// cell has no river map yet), `applyRivers` and `applyClimate`. `Heightmap` itself is not ported
+/// yet, so the generator takes any implementation.
 pub trait HeightmapSource {
+    /// `applyBase(cell, x, z)`.
     fn apply_base(&self, cell: &mut Cell, x: f32, z: f32);
 
+    /// `getContinent().getRivermap(x, z)`: the river map of a continent cell.
     fn rivermap(&self, x: i32, z: i32) -> Arc<Rivermap>;
 
+    /// `applyRivers(cell, x, z, rivermap)`.
     fn apply_rivers(&self, cell: &mut Cell, x: f32, z: f32, rivermap: &Rivermap);
 
+    /// `applyClimate(cell, x, z)`.
     fn apply_climate(&self, cell: &mut Cell, x: f32, z: f32);
 }
 
+/// What `postProcess` runs on a filled tile: Engine's `WorldFilters.apply(tile, optionalFilters)`.
 pub trait TileFilters {
     fn apply(&self, tile: &mut Tile, optional: bool);
 }
@@ -48,6 +59,8 @@ impl TileFilters for WorldFilters {
     }
 }
 
+/// Engine's `WorldGenerator`: the world's heightmap and filters, which `WorldGeneratorFactory`
+/// builds from the generator context.
 pub struct WorldGenerator<H, F> {
     heightmap: H,
     filters: F,
@@ -58,19 +71,28 @@ impl<H, F> WorldGenerator<H, F> {
         Self { heightmap, filters }
     }
 
+    /// `getHeightmap()`.
     pub const fn heightmap(&self) -> &H {
         &self.heightmap
     }
 
+    /// `getFilters()`.
     pub const fn filters(&self) -> &F {
         &self.filters
     }
 }
 
+/// Engine 0.3.0's plain, synchronous `TileGenerator` (`com.terraforged.engine.tile.gen`, what
+/// `TileGenerator.builder().build()` returns without a batch size): the size factor and border
+/// (in chunks) of its tiles, the batch size (kept for the batched generators), the world's
+/// registry the tiles' cells start from (in place of Engine's `TileResources` pools) and the
+/// world generator. Lazy tiles (`getTile`), the batched and striped generators, the async
+/// wrapper, the tile cache, the builder and tile disposal are not ported.
 pub struct TileGenerator<H, F> {
     factor: i32,
     border: i32,
     batch_size: i32,
+    terrains: Arc<TerrainRegistry>,
     generator: WorldGenerator<H, F>,
 }
 
@@ -79,39 +101,61 @@ where
     H: HeightmapSource,
     F: TileFilters,
 {
+    /// `TileGenerator.builder().size(factor, border).batch(batch_size)` with a factory supplying
+    /// `generator`; `terrains` is the world's registry.
     pub const fn new(
         factor: i32,
         border: i32,
         batch_size: i32,
+        terrains: Arc<TerrainRegistry>,
         generator: WorldGenerator<H, F>,
     ) -> Self {
         Self {
             factor,
             border,
             batch_size,
+            terrains,
             generator,
         }
     }
 
+    /// `getGenerator()`.
     pub const fn generator(&self) -> &WorldGenerator<H, F> {
         &self.generator
     }
 
+    /// The builder's `batchSize`, which the plain generator ignores.
     pub const fn batch_size(&self) -> i32 {
         self.batch_size
     }
 
+    /// `chunkToRegion(i)`: `i >> factor`, the shift count taken modulo 32 as in Java.
     pub const fn chunk_to_region(&self, chunk: i32) -> i32 {
-        chunk >> self.factor
+        chunk.wrapping_shr(self.factor as u32)
     }
 
+    /// `generateRegion(regionX, regionZ)`: an empty region ([`Self::create_empty_region`]), filled
+    /// whole by [`Tile::generate_heightmap`] with the heightmap's stages, then `postProcess(tile)`:
+    /// the filters with the optional ones (`apply(tile, true)`), which see every cell of the tile,
+    /// border included, only after the fill.
     pub fn generate_region(&self, region_x: i32, region_z: i32) -> Tile {
         let mut tile = self.create_empty_region(region_x, region_z);
-        self.generate_heightmap(&mut tile);
-        self.post_process(&mut tile, true);
+        let heightmap = self.generator.heightmap();
+        tile.generate_heightmap(
+            |cell, x, z| heightmap.apply_base(cell, x, z),
+            |x, z| heightmap.rivermap(x, z),
+            |cell, x, z, map| heightmap.apply_rivers(cell, x, z, map),
+            |cell, x, z| heightmap.apply_climate(cell, x, z),
+        );
+        self.generator.filters().apply(&mut tile, true);
         tile
     }
 
+    /// `generateRegion(centerX, centerZ, zoom, filter)`: region (0, 0), filled by
+    /// [`Tile::generate_zoomed_heightmap`] with the center as its offset (uncached, as Engine's
+    /// `tile.generate(heightmap, centerX, centerZ, zoom)`), then `postProcess(tile, filter)`: the
+    /// filters, the optional ones only when `filter` is set. The filters are seeded with region
+    /// (0, 0) whatever the center.
     pub fn generate_zoomed_region(
         &self,
         center_x: f32,
@@ -120,26 +164,6 @@ where
         filter: bool,
     ) -> Tile {
         let mut tile = self.create_empty_region(0, 0);
-        self.generate_zoomed_heightmap(&mut tile, center_x, center_z, zoom);
-        self.post_process(&mut tile, filter);
-        tile
-    }
-
-    pub fn create_empty_region(&self, region_x: i32, region_z: i32) -> Tile {
-        Tile::new(region_x, region_z, self.factor, self.border)
-    }
-
-    fn generate_heightmap(&self, tile: &mut Tile) {
-        let heightmap = self.generator.heightmap();
-        tile.generate_heightmap(
-            |cell, x, z| heightmap.apply_base(cell, x, z),
-            |x, z| heightmap.rivermap(x, z),
-            |cell, x, z, map| heightmap.apply_rivers(cell, x, z, map),
-            |cell, x, z| heightmap.apply_climate(cell, x, z),
-        );
-    }
-
-    fn generate_zoomed_heightmap(&self, tile: &mut Tile, center_x: f32, center_z: f32, zoom: f32) {
         let heightmap = self.generator.heightmap();
         tile.generate_zoomed_heightmap(
             center_x,
@@ -150,89 +174,300 @@ where
             |cell, x, z, map| heightmap.apply_rivers(cell, x, z, map),
             |cell, x, z| heightmap.apply_climate(cell, x, z),
         );
+        self.generator.filters().apply(&mut tile, filter);
+        tile
     }
 
-    fn post_process(&self, tile: &mut Tile, filter: bool) {
-        self.generator.filters().apply(tile, filter);
+    /// `createEmptyRegion(regionX, regionZ)`: a fresh tile of the generator's size factor and
+    /// border, its cells from the world's registry.
+    pub fn create_empty_region(&self, region_x: i32, region_z: i32) -> Tile {
+        Tile::new(region_x, region_z, self.factor, self.border, &self.terrains)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::{terraforged_engine::TerrainRegistry, terraforged_river::GenWarp};
+    use super::super::{
+        terraforged_engine::{Levels, Terrain, WorldControlPoints},
+        terraforged_filters::{FilterSettings, Filterable},
+        terraforged_river::GenWarp,
+    };
     use super::*;
-    use std::sync::Mutex;
+    use std::cell::Cell as Counter;
 
-    struct TestHeightmap {
-        map: Arc<Rivermap>,
-        events: Arc<Mutex<Vec<&'static str>>>,
+    fn fold(fold: i64, value: i32) -> i64 {
+        fold.wrapping_mul(31).wrapping_add(i64::from(value))
     }
 
-    impl HeightmapSource for TestHeightmap {
+    fn hash(x: i32, z: i32) -> u32 {
+        let mut h = x.wrapping_mul(7919).wrapping_add(z.wrapping_mul(104_729));
+        h ^= ((h as u32) >> 13) as i32;
+        h = h.wrapping_mul(0x5bd1_e995);
+        (h ^ ((h as u32) >> 15) as i32) as u32
+    }
+
+    /// `TileGeneratorOracle.java`'s `FillHeightmap`: stages that hash heights, continent edges,
+    /// terrains and erosion and river masks from the block position, and fold every call.
+    struct FillHeightmap {
+        kinds: [Terrain; 4],
+        trace: Counter<i64>,
+        lookups: Counter<i32>,
+    }
+
+    impl FillHeightmap {
+        fn mix(&self, value: i32) {
+            self.trace.set(fold(self.trace.get(), value));
+        }
+
+        fn mix_point(&self, stage: i32, x: f32, z: f32) {
+            self.mix(stage);
+            self.mix(x.to_bits() as i32);
+            self.mix(z.to_bits() as i32);
+        }
+
+        /// The stage trace and lookup count since the last call.
+        fn take(&self) -> (i32, i64) {
+            (self.lookups.replace(0), self.trace.replace(17))
+        }
+    }
+
+    impl HeightmapSource for FillHeightmap {
         fn apply_base(&self, cell: &mut Cell, x: f32, z: f32) {
-            self.events.lock().unwrap().push("base");
-            cell.value = x * 1_000.0 + z;
-            cell.continent_x = 7;
-            cell.continent_z = -9;
-            cell.terrain = TerrainRegistry::new().get_by_id(8);
+            self.mix_point(1, x, z);
+            let (x, z) = (x as i32, z as i32);
+            let h = hash(x, z);
+            cell.value = 3_i32
+                .wrapping_mul(x)
+                .wrapping_add(2_i32.wrapping_mul(z))
+                .rem_euclid(97) as f32
+                / 2000.0
+                + 0.2
+                + ((h >> 8) & 0xFFFF) as f32 / 40_000_000.0;
+            cell.continent_edge = ((h >> 12) & 0x3FF) as f32 / 1600.0;
+            cell.terrain = self.kinds[((h >> 1) & 3) as usize].clone();
+            cell.erosion_mask = h & 63 == 17;
+            cell.continent_x = x.div_euclid(24);
+            cell.continent_z = z.div_euclid(40);
         }
 
         fn rivermap(&self, x: i32, z: i32) -> Arc<Rivermap> {
-            self.events.lock().unwrap().push("rivermap");
-            assert_eq!((x, z), (7, -9));
-            Arc::clone(&self.map)
+            self.lookups.set(self.lookups.get() + 1);
+            self.mix(1000);
+            self.mix(x);
+            self.mix(z);
+            Arc::new(Rivermap::new(x, z, Vec::new(), GenWarp::direct()))
         }
 
-        fn apply_rivers(&self, cell: &mut Cell, _: f32, _: f32, _: &Rivermap) {
-            self.events.lock().unwrap().push("rivers");
-            cell.river_mask = 0.25;
+        fn apply_rivers(&self, cell: &mut Cell, x: f32, z: f32, map: &Rivermap) {
+            self.mix_point(2, x, z);
+            self.mix(map.x());
+            self.mix(map.z());
+            let h = hash(x as i32, z as i32);
+            let mask = if (h >> 4) & 3 == 0 { 0.05 } else { 1.0 };
+            cell.river_mask = mask - (map.x() + map.z()).rem_euclid(3) as f32 * 0.01;
         }
 
-        fn apply_climate(&self, cell: &mut Cell, _: f32, _: f32) {
-            self.events.lock().unwrap().push("climate");
-            cell.temperature = 0.75;
-        }
-    }
-
-    struct TestFilters(Arc<Mutex<Vec<bool>>>);
-
-    impl TileFilters for TestFilters {
-        fn apply(&self, tile: &mut Tile, optional: bool) {
-            self.0.lock().unwrap().push(optional);
-            tile.cell_mut(0, 0).moisture = 0.5;
+        fn apply_climate(&self, cell: &mut Cell, x: f32, z: f32) {
+            self.mix_point(3, x, z);
+            cell.temperature = z * 0.001 - cell.river_mask;
+            cell.moisture += x * 0.001;
         }
     }
 
-    #[test]
-    fn synchronous_tile_generator_matches_engine_0_3_0() {
-        let events = Arc::new(Mutex::new(Vec::new()));
-        let filters = Arc::new(Mutex::new(Vec::new()));
-        let heightmap = TestHeightmap {
-            map: Arc::new(Rivermap::new(7, -9, Vec::new(), GenWarp::direct())),
-            events: Arc::clone(&events),
+    /// Every backing cell's fields, NaNs folded as Java's `floatToIntBits`.
+    fn fold_tile(tile: &mut Tile) -> i64 {
+        let bits = |value: f32| {
+            if value.is_nan() {
+                0x7fc0_0000
+            } else {
+                value.to_bits() as i32
+            }
         };
-        let generator = TileGenerator::new(
-            0,
-            0,
-            0,
-            WorldGenerator::new(heightmap, TestFilters(Arc::clone(&filters))),
-        );
-
-        assert_eq!(generator.batch_size(), 0);
-        assert_eq!(generator.chunk_to_region(-3), -3);
-        let tile = generator.generate_region(-2, 3);
-        assert_eq!((tile.region_x(), tile.region_z()), (-2, 3));
-        assert_eq!(tile.cell(0, 0).value, -31_952.0);
-        assert_eq!(tile.cell(0, 0).moisture, 0.5);
-        assert_eq!(*filters.lock().unwrap(), [true]);
-        assert_eq!(
-            &events.lock().unwrap()[..4],
-            ["base", "rivermap", "rivers", "climate"]
-        );
-
-        let zoomed = generator.generate_zoomed_region(100.0, -50.0, 0.5, false);
-        assert_eq!((zoomed.region_x(), zoomed.region_z()), (0, 0));
-        assert_eq!(zoomed.cell(0, 0).value, 95_946.0);
-        assert_eq!(*filters.lock().unwrap(), [true, false]);
+        let mut f = 17_i64;
+        for cell in tile.filterable().backing() {
+            for value in [
+                cell.value,
+                cell.erosion,
+                cell.sediment,
+                cell.gradient,
+                cell.moisture,
+                cell.temperature,
+                cell.continent_edge,
+                cell.river_mask,
+            ] {
+                f = fold(f, bits(value));
+            }
+            for value in [
+                cell.continent_x,
+                cell.continent_z,
+                i32::from(cell.erosion_mask),
+                cell.terrain.id(),
+            ] {
+                f = fold(f, value);
+            }
+        }
+        f
     }
+
+    /// Replays `TileGeneratorOracle.java` (`.local/terraforged/oracles/tile_generator/`): Engine
+    /// 0.3.0's plain `TileGenerator` built with `size(factor, border)` and a
+    /// `WorldGeneratorFactory(ctx, heightmap)`, over the stub heightmap, for two filter settings
+    /// groups and six sizes and regions (borderless, wide-border, negative and wrapping ones).
+    /// `g` lines are `generateRegion(regionX, regionZ)` (fill, then the filters with the optional
+    /// ones); `z` lines the zoomed `generateRegion(centerX, centerZ, zoom, filter)` on the same
+    /// generator (fractional, unit, negative, NaN and huge centers and zooms, filters on and off);
+    /// `s` lines `chunkToRegion` for shift factors Java masks to five bits.
+    #[test]
+    fn tile_generator_matches_engine_oracle() {
+        let terrains = Arc::new(TerrainRegistry::new());
+        let kinds = ["none", "coast", "beach", "hills"]
+            .map(|name| terrains.get_by_name(name).expect("built-in terrain"));
+        let groups = [(12345, 20, 1, 0.327), (-9, 5, 2, 0.4)];
+        let zooms = [
+            (100.0, -50.0, 0.5, false),
+            (-37.25, 12.5, 2.0, true),
+            (0.0, 0.0, 1.0, true),
+            (f32::NAN, 3.5, 0.75, true),
+            (1e9, -1e9, -3.0, false),
+        ];
+        let mut out = String::new();
+        for (run, (group, factor, border, region_x, region_z)) in [
+            (0, 1, 1, -1, 2),
+            (0, 2, 1, 3, -5),
+            (1, 1, 0, 0, 0),
+            (1, 0, 2, -7, 9),
+            (0, 3, 2, 1, -1),
+            (1, 1, 1, 0x1000_0000, -0x1000_0001),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (seed, droplets, passes, beach) = groups[group];
+            let mut settings = FilterSettings::default();
+            settings.erosion.droplets_per_chunk = droplets;
+            settings.smoothing.iterations = passes;
+            let points = WorldControlPoints {
+                beach,
+                ..WorldControlPoints::default()
+            };
+            let filters =
+                WorldFilters::new(seed, settings, Levels::new(256, 63), points, &terrains);
+            let heightmap = FillHeightmap {
+                kinds: kinds.clone(),
+                trace: Counter::new(17),
+                lookups: Counter::new(0),
+            };
+            let generator = TileGenerator::new(
+                factor,
+                border,
+                0,
+                Arc::clone(&terrains),
+                WorldGenerator::new(heightmap, filters),
+            );
+            let heightmap = generator.generator().heightmap();
+            let mut tile = generator.generate_region(region_x, region_z);
+            let (lookups, trace) = heightmap.take();
+            let cells = fold_tile(&mut tile);
+            out += &format!("g {run} {lookups} {trace:x} {cells:x}\n");
+            for (pair, (center_x, center_z, zoom, filter)) in zooms.into_iter().enumerate() {
+                let mut tile = generator.generate_zoomed_region(center_x, center_z, zoom, filter);
+                let (lookups, trace) = heightmap.take();
+                let (rx, rz, cells) = (tile.region_x(), tile.region_z(), fold_tile(&mut tile));
+                out += &format!("z {run} {pair} {rx} {rz} {lookups} {trace:x} {cells:x}\n");
+            }
+        }
+        let chunks = [0, 1, -1, 7, -8, 1000, -1000, i32::MAX, i32::MIN];
+        for factor in [0, 1, 3, 31, 32, 33, -1, -31] {
+            let generator = TileGenerator::new(
+                factor,
+                0,
+                0,
+                Arc::clone(&terrains),
+                WorldGenerator::new(
+                    FillHeightmap {
+                        kinds: kinds.clone(),
+                        trace: Counter::new(17),
+                        lookups: Counter::new(0),
+                    },
+                    NoFilters,
+                ),
+            );
+            out += &format!("s {factor}");
+            for chunk in chunks {
+                out += &format!(" {}", generator.chunk_to_region(chunk));
+            }
+            out += "\n";
+        }
+        assert_eq!(out, ORACLE);
+    }
+
+    struct NoFilters;
+
+    impl TileFilters for NoFilters {
+        fn apply(&self, _: &mut Tile, _: bool) {}
+    }
+
+    /// Engine shares one tile generator between its generation threads.
+    #[test]
+    fn tile_generators_are_shared_between_threads() {
+        fn shareable<T: Send + Sync>() {}
+        struct SharedHeightmap;
+        impl HeightmapSource for SharedHeightmap {
+            fn apply_base(&self, _: &mut Cell, _: f32, _: f32) {}
+            fn rivermap(&self, x: i32, z: i32) -> Arc<Rivermap> {
+                Arc::new(Rivermap::new(x, z, Vec::new(), GenWarp::direct()))
+            }
+            fn apply_rivers(&self, _: &mut Cell, _: f32, _: f32, _: &Rivermap) {}
+            fn apply_climate(&self, _: &mut Cell, _: f32, _: f32) {}
+        }
+        shareable::<TileGenerator<SharedHeightmap, WorldFilters>>();
+    }
+
+    /// `TileGeneratorOracle.java`'s output (`./run.sh` writes it to `out.txt`).
+    const ORACLE: &str = "\
+g 0 132 933dedba501bf8f1 2afe9d3c12774c0d
+z 0 0 0 0 134 8ea15ead27a7ffee 4166d8e307e01385
+z 0 1 0 0 637 4ecaf1596e70d26 29ad7e3985d0e0bc
+z 0 2 0 0 256 6727ea6ac494b891 d25a67c809fc7d0
+z 0 3 0 0 8 8f7006778fc0c8d c94e0748cd32a3cd
+z 0 4 0 0 388 b8f70426f6f55903 ff2a52d36fd50b5d
+g 1 397 7245952d37687c55 e76a63e92f8379dd
+z 1 0 0 0 387 d49fcfd0bb2413f2 835d8bb2fa3b2820
+z 1 1 0 0 1339 11b697d16848b786 567dacf67f971c65
+z 1 2 0 0 400 cd67b6f5d8dbd049 245b91724bc38581
+z 1 3 0 0 12 375f578adf39af4b c24985dd40cbb39
+z 1 4 0 0 780 67386badb7371713 ff26c135e2959741
+g 2 64 1dec756bf463a431 40bc3ec1ab771b58
+z 2 0 0 0 64 83a19de368360031 bd0ab1842c50e7af
+z 2 1 0 0 128 3822735c75797611 cb3b77fd7a9dc52
+z 2 2 0 0 4 7984c67e49e48d73 4756c143b5e81e07
+z 2 3 0 0 4 ae3ae2c61568fccf a6e0dce0067b12e9
+z 2 4 0 0 66 d5ffa2bb28613a2a 51601f1cf26142c
+g 3 326 e3c4cdf7c5eefaee 6f363908c2b37e18
+z 3 0 0 0 18 3b45073f941ef450 6ca6c7d6745fb36a
+z 3 1 0 0 876 c2eea373f1f90a33 339683019cd47a84
+z 3 2 0 0 176 c1be527b1c6e9de9 ee52c23ae4267780
+z 3 3 0 0 10 e5baee091137038c c7d462f17993a8db
+z 3 4 0 0 490 10079d51f1cdcca3 b4a4cebe6cb0976c
+g 4 1568 b599986399fb3e01 9a47ad4f7c38f0ee
+z 4 0 0 0 1538 5fa0efaac8bcc9e1 c7ce55c3d1993304
+z 4 1 0 0 5354 49faaa1e08c16c6d 57f2964297284da4
+z 4 2 0 0 1568 cdf03463f768fa01 46ee6896e1099572
+z 4 3 0 0 70 ec220899b350f0e4 28f7541d10beeeef
+z 4 4 0 0 2733 fb4116edd58af70f 970936609b0cd3ac
+g 5 137 d84abfe0adb754b 4c8e54bd50b0358b
+z 5 0 0 0 134 8ea15ead27a7ffee f7d66956f95d7b09
+z 5 1 0 0 637 4ecaf1596e70d26 19eab031c83bcbf7
+z 5 2 0 0 256 6727ea6ac494b891 26501176026dc54e
+z 5 3 0 0 8 8f7006778fc0c8d c0702424e84aeb1e
+z 5 4 0 0 388 b8f70426f6f55903 2b01bed53f599881
+s 0 0 1 -1 7 -8 1000 -1000 2147483647 -2147483648
+s 1 0 0 -1 3 -4 500 -500 1073741823 -1073741824
+s 3 0 0 -1 0 -1 125 -125 268435455 -268435456
+s 31 0 0 -1 0 -1 0 -1 0 -1
+s 32 0 1 -1 7 -8 1000 -1000 2147483647 -2147483648
+s 33 0 0 -1 3 -4 500 -500 1073741823 -1073741824
+s -1 0 0 -1 0 -1 0 -1 0 -1
+s -31 0 0 -1 3 -4 500 -500 1073741823 -1073741824
+";
 }
