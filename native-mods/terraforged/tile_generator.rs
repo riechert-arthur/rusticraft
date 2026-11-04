@@ -372,15 +372,14 @@ where
     }
 
     /// `TileGeneratorBatched.generateRegion(regionX, regionZ)` with `batch(batch_count)`: an empty
-    /// region filled by [`Tile::generate_area`] (`batch_count` squared batches of chunks on
-    /// the builder's pool threads, else [`batch_workers`], each chunk as [`drive_chunk`]), then the
+    /// region filled by [`Tile::generate_area`] (`batch_count` squared batches of chunks on the
+    /// builder's pool threads, else [`batch_workers`], each chunk as [`drive_chunk`]), then the
     /// filters with the optional ones. The cells equal the plain generator's for any batch count
-    /// and thread count; only the river-map
-    /// lookups differ, as each chunk starts without one. Engine's builder never makes a batched
-    /// generator for a count below 1; called with one, it throws, and so does this:
-    /// `ArithmeticException` for 0 (`getBatchSize`), and for a negative count, which fills no cell,
-    /// a `NullPointerException` once the filters read the cells it never created. A stage's panic
-    /// is re-raised.
+    /// and thread count; only the river-map lookups differ, as each chunk starts without one.
+    /// Engine's builder never makes a batched generator for a count below 1; called with one, it
+    /// throws, and so does this: `ArithmeticException` for 0 (`getBatchSize`), and for a negative
+    /// count, which fills no cell, a `NullPointerException` once the filters read the cells it
+    /// never created. A stage's panic is re-raised.
     pub fn generate_batched_region(&self, region_x: i32, region_z: i32, batch_count: i32) -> Tile
     where
         H: Sync,

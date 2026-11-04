@@ -842,7 +842,7 @@ count Engine's builder passes (`batch(n)`). `Tile::generate_area` is `Tile.gener
 `n * n` squares of `Tile::batch_size` chunks a side (`d * size` in Java `int` math, clipped to the chunk count), and
 `Tile::generate_area_striped` is `generateAreaStriped`: each chunk row cut into `n` stripes. Each batch is an Engine
 `ChunkBatchTask` (or `ChunkStripeBatchTask`): its chunks are taken on the calling thread with copies of their cells, up to
-`max(2, processors)` scoped threads (Engine's default pool) take the batches in order and run `driveOne` on each chunk
+`max(2, processors)` scoped threads (Engine's default pool; a generator from the builder below uses its pool) take the batches in order and run `driveOne` on each chunk
 without holding a lock, and the cells go back to the tile once all are done; then the filters run on the whole tile as in
 `generateRegion`. Like Engine's tasks, each chunk starts without a river map, so batched runs look river maps up more
 often than the plain fill, but every cell is the same for any batch count and thread schedule. A stage's panic is
