@@ -27,10 +27,14 @@ use super::{
         Domain, Interpolation, Line, Module, Source, SourceConfig, SourceKind, cell_vector, floor,
         lerp, map, round, value_coord_2d,
     },
-    terraforged_engine::{Cell, ControlPoints, Seed, WorldSettings},
+    terraforged_engine::{
+        Cell, ControlPoints, Levels, RiverSettings, Seed, TerrainRegistry, WorldSettings,
+    },
     terraforged_populator::Populator,
+    terraforged_river::{RiverCache, Rivermap, SimpleRiverGenerator},
     terraforged_util::{pack, unpack_left, unpack_right},
 };
+use std::sync::Arc;
 
 /// `AdvancedContinentGenerator.CENTER_CORRECTION`.
 const CENTER_CORRECTION: f32 = 0.35;
@@ -46,7 +50,7 @@ struct Continent {
 /// Engine's `AdvancedContinentGenerator` (with its base class `AbstractContinent`), the generator of Engine's
 /// default continent type `MULTI_IMPROVED`: warped Voronoi continents whose edge is the distance to the nearest
 /// cell bisector, with optional skipping, per-continent size variance and cliff and bay shaping near the coast.
-/// Its river map (`getRivermap`, built from `SimpleRiverGenerator`) is not ported yet; building it draws no
+/// Its [`RiverCache`] holds the river maps of its [`SimpleRiverGenerator`] (`getRivermap`); building it draws no
 /// seeds.
 pub struct AdvancedContinentGenerator {
     seed: i32,
@@ -62,11 +66,29 @@ pub struct AdvancedContinentGenerator {
     warp: Domain,
     cliff_noise: Module,
     bay_noise: Module,
+    river_cache: RiverCache,
+    /// What `AbstractContinent` builds its `SimpleRiverGenerator` from: the `GeneratorContext`'s seed root, world
+    /// and river settings and levels, and the world's terrain registry.
+    river_root_seed: i32,
+    world: WorldSettings,
+    rivers: RiverSettings,
+    levels: Levels,
+    registry: Arc<TerrainRegistry>,
 }
 
 impl AdvancedContinentGenerator {
-    /// Draws seven seeds from `seed`: generator, skipping, variance, the two warp axes, cliff, bay.
-    pub fn new(seed: &mut Seed, settings: WorldSettings) -> Self {
+    /// `new AdvancedContinentGenerator(seed, context)`. Draws seven seeds from `seed`: generator, skipping,
+    /// variance, the two warp axes, cliff, bay. The rest is what Engine reads from the `GeneratorContext` for the
+    /// river generator: `root_seed` is `context.seed.root()`, `levels` is `context.levels`, and `registry` is the
+    /// world's terrain registry.
+    pub fn new(
+        seed: &mut Seed,
+        root_seed: i32,
+        settings: WorldSettings,
+        rivers: RiverSettings,
+        levels: Levels,
+        registry: Arc<TerrainRegistry>,
+    ) -> Self {
         let continent = settings.continent;
         let generator_seed = seed.next();
         let skipping_seed = seed.next();
@@ -120,7 +142,34 @@ impl AdvancedContinentGenerator {
             warp,
             cliff_noise,
             bay_noise,
+            river_cache: RiverCache::new(),
+            river_root_seed: root_seed,
+            world: settings,
+            rivers,
+            levels,
+            registry,
         }
+    }
+
+    /// The `SimpleRiverGenerator` `AbstractContinent` holds. It is stateless, so building one per call is the same
+    /// as Engine's single instance.
+    pub fn river_generator(&self) -> SimpleRiverGenerator<&Self> {
+        SimpleRiverGenerator::new(
+            self,
+            self.river_root_seed,
+            &self.world,
+            &self.rivers,
+            self.levels,
+            Arc::clone(&self.registry),
+        )
+    }
+
+    /// `getRivermap(x, z)`: the river map of continent cell (`x`, `z`) from the river cache, generated with id
+    /// `PosUtil.pack(x, z)` on a miss.
+    pub fn rivermap(&self, x: i32, z: i32) -> Arc<Rivermap> {
+        self.river_cache.get_rivers(x, z, |x, z, id| {
+            self.river_generator().generate_rivers(x, z, id)
+        })
     }
 
     /// `getEdgeValue`: `apply` on a fresh cell, then its `continentEdge` (0 for a skipped continent).
@@ -366,6 +415,18 @@ mod tests {
     };
     use super::*;
 
+    /// A generator for continent-only tests: default rivers, a throwaway registry.
+    fn continent_only(seed: &mut Seed, settings: WorldSettings) -> AdvancedContinentGenerator {
+        AdvancedContinentGenerator::new(
+            seed,
+            seed.root(),
+            settings,
+            RiverSettings::default(),
+            Levels::from_properties(settings.properties),
+            Arc::new(TerrainRegistry::new()),
+        )
+    }
+
     /// The configs of the Java oracle (`.local/terraforged/oracles/continent/AdvancedContinentOracle.java`):
     /// (seed, settings).
     fn config(index: usize) -> (i32, WorldSettings) {
@@ -426,7 +487,7 @@ mod tests {
         let registry = TerrainRegistry::new();
         let (seed_value, settings) = config(index);
         let mut seed = Seed::new(seed_value);
-        let generator = AdvancedContinentGenerator::new(&mut seed, settings);
+        let generator = continent_only(&mut seed, settings);
         mix(h, i64::from(seed.get()));
         for x in XS {
             for z in XS {
@@ -502,7 +563,7 @@ mod tests {
     #[test]
     fn advanced_continents_match_engine_0_3_0() {
         let mut seed = Seed::new(12_345);
-        let generator = AdvancedContinentGenerator::new(&mut seed, WorldSettings::default());
+        let generator = continent_only(&mut seed, WorldSettings::default());
         assert_eq!(seed.get(), 12_352);
         assert_eq!(
             samples(&generator),
@@ -560,7 +621,7 @@ mod tests {
             ..WorldSettings::default()
         };
         let mut seed = Seed::new(i32::MAX - 3);
-        let generator = AdvancedContinentGenerator::new(&mut seed, settings);
+        let generator = continent_only(&mut seed, settings);
         assert_eq!(seed.get(), i32::MIN + 3);
         assert_eq!(
             samples(&generator),
