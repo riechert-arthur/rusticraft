@@ -24,6 +24,9 @@
 
 use std::sync::{Arc, RwLock};
 
+/// Engine's `WorldErosion<T>`: a lazily built value shared between threads, rebuilt by `factory`
+/// whenever `validator` rejects it for the requested context. Engine's `StampedLock` (optimistic
+/// read, then a read lock) is a `RwLock` here; the value is shared as an `Arc`.
 pub struct WorldErosion<T, F, V> {
     value: RwLock<Option<Arc<T>>>,
     factory: F,
@@ -78,7 +81,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
-    fn world_erosion_matches_engine_0_3_0() {
+    fn world_erosion_reuses_until_the_size_changes() {
         let builds = AtomicUsize::new(0);
         let cache = WorldErosion::new(
             |size| {
