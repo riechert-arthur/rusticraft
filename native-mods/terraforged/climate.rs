@@ -1582,6 +1582,44 @@ x 7 0
         shareable::<Climate>();
     }
 
+    /// The stage plugs into the heightmap cache's climate closure (the tile fills take the same
+    /// `FnMut(&mut Cell, f32, f32)`) as is, and a cache miss runs it like a direct call.
+    #[test]
+    fn climate_stage_plugs_into_the_heightmap_cache() {
+        let registry = Arc::new(TerrainRegistry::new());
+        let (world_seed, settings, points, levels) = stage_settings(1);
+        let last = Arc::new(std::sync::Mutex::new((0.0, 0.0)));
+        let climate = Climate::new(
+            module_continent(&last),
+            &mut Seed::from_long(world_seed),
+            &settings,
+            points,
+            levels,
+            &registry,
+        );
+        let cache =
+            super::super::terraforged_heightmap::HeightmapCache::new(levels, Arc::clone(&registry));
+        // A stand-in base stage, then the climate stage, as `Heightmap.apply` runs them.
+        let stage = |cell: &mut Cell, x: f32, z: f32| {
+            cell.value = 0.6;
+            climate.apply(cell, x, z);
+        };
+        for (x, z) in [(0, 0), (12, -98), (-4096, 8192), (100_000, -100_000)] {
+            let cached = cache.get(x, z, stage);
+            let mut direct = Cell::new(&registry);
+            stage(&mut direct, x as f32, z as f32);
+            for (cached, direct) in [
+                (cached.temperature, direct.temperature),
+                (cached.moisture, direct.moisture),
+                (cached.biome_region_edge, direct.biome_region_edge),
+            ] {
+                assert_eq!(cached.to_bits(), direct.to_bits());
+            }
+            assert_eq!(cached.biome.id(), direct.biome.id());
+            assert!(cached.terrain.is_same(&direct.terrain));
+        }
+    }
+
     #[test]
     fn climate_stage_matches_engine_oracle() {
         let registry = TerrainRegistry::new();
