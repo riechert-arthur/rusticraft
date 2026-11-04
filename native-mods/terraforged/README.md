@@ -381,8 +381,8 @@ configured shape as distance function, `continentJitter` as jitter) sampled thro
 their `DISTANCE_2_DIV` edge is remapped from 0.2..1 to 0..1 and faded by a simplex shape mask below the `inland` control point.
 `apply` writes only `continentId`, `continentEdge`, `continentX` and `continentZ`; the single-continent generator
 zeroes those four outside the continent nearest to (0, 0), so its `getValue` reads 0 there while `getEdgeValue`
-does not. It also ports the nearest-centre lookup and the edge and ocean distance searches rivers use; the river
-map itself is not ported yet. Its tests fold every cell field and every lookup over a grid with -0, huge, infinite
+does not. It also ports the nearest-centre lookup and the edge and ocean distance searches rivers use; its river
+generator comes with the simple-river layer below, its river cache (`getRivermap`) is not ported yet. Its tests fold every cell field and every lookup over a grid with -0, huge, infinite
 and NaN coordinates for six configs (all three shapes, jitter 0, 1 and NaN, scale 1 and `Integer.MAX_VALUE`, custom
 control points), against a Java oracle running Engine's classes on Engine cells; the oracle lives outside Git, in
 `.local/terraforged/oracles/continent/`.
@@ -395,7 +395,8 @@ by cliff and bay noise near the coast. `apply` writes only `continentId`, `conti
 `continentZ` (the centre pulled 35% towards its neighbours' mean), and nothing at all for a continent that
 `continentSkipping` skips (never the one at cell 0, 0), so `getEdgeValue` and `getNearestCenter` read 0 there. Engine
 does not override `getValue`, so it reads the scratch cell's untouched `value`: always 0. The edge and ocean distance
-searches rivers use are ported; the river map is not. One difference: Engine throws for a negative
+searches rivers use are ported, and the simple-river layer below adds its river generator; its river cache
+(`getRivermap`) is not ported yet. One difference: Engine throws for a negative
 `continentNoiseOctaves` (an octave table lookup out of bounds); the port uses 0 octaves. Its tests fold every cell
 field and every lookup over the simple-continent grid for six configs (skipping and size variance off, 1 and NaN,
 scale 0, 1, 2 and `Integer.MAX_VALUE`, jitter 0 and NaN, zero octaves with a negative gain, custom control
@@ -528,7 +529,7 @@ The rivermap layer adds Engine's `Rivermap` (`river.rs`): one continent's river 
 continent cell (`x`, `z`) it belongs to. `apply` warps a point with the river warp, takes the lake warp's offset at the
 warped point and carves, in order, every network whose bounds contain the warped point. The timestamp is
 `System.currentTimeMillis()` at creation, as Engine's river cache (below) reads it; Engine's static `Rivermap.get`
-(reuse a map or ask the heightmap's continent) is not ported. Only the base and fancy river
+(reuse a map or ask the heightmap's continent) is not ported. Only the base, fancy and simple river
 generators below build river maps, and nothing calls them yet. Its tests fold every cell field over 304380 applies of fresh and filled cells at a grid of
 points (plus -0, NaN, infinite and huge ones) for `NetworkOracle`'s networks, four `GenWarp`s (one whose seeds wrap,
 and `GenWarp.EMPTY`) and three `Levels`, plus direct samples, against a Java oracle running Engine's class,
@@ -571,14 +572,28 @@ so each map is made once. Maps expire once they are more than five minutes old; 
 thread every minute, the port sweeps on a miss at most once a minute (a regenerated map is the same, so this changes
 nothing but memory). `FancyContinentGenerator` now takes what Engine's `FancyContinent` builds its river generator
 from: the context's seed root, river settings, levels and the world's terrain registry. The simple and advanced
-continents' river generator is not ported yet, and nothing calls the caches yet. Its tests check the ids, the single
+continents' caches (`getRivermap`) are not wired yet, and nothing calls the caches yet. Its tests check the ids, the single
 generation and the cached instance for negative and extreme cells, and fold the fancy continent's river maps for five
 settings variants and six cells, against a Java oracle running Engine's classes, `RiverCacheOracle.java` in
 `.local/terraforged/oracles/river/`, plus the expiry.
 
+The simple-river layer adds Engine's `SimpleRiverGenerator` (`river.rs`), the river generator of the simple
+(multi and single) and advanced continents, which now implement the edge and ocean-distance lookups it reads. It
+spreads the world's river count of main rivers around the continent centre at evenly spaced angles (from one
+random start, each with a random offset of up to 3/8 of the spacing either way), each from a random 5% to 50% of
+the distance to the ocean (at least 400 blocks) out to the ocean, with both ends truncated to whole blocks, gives
+each a valley, warp and lake in Engine's draw order, then hands them to the base generator's shuffle, forks and
+wetlands. As in Engine, the start distance is `Math.max(400, ...)` (a NaN distance to the ocean stays NaN). One
+difference: Engine throws for a negative river count (`new ArrayList(count)`); the port builds no roots. Nothing
+calls it yet: the continents' river caches come with a later layer. Its tests fold every built network and 345960
+applies of the resulting river maps on a grid for the multi, single and advanced continents, five settings variants
+(a wrapping seed offset with chance-1 lakes and wetlands, a 384/62 world, continent scale 1000, one to eight rivers),
+two continent seeds and four cells each, plus the networks of extreme and negative cells and direct samples, against
+a Java oracle running Engine's classes, `SimpleRiverGeneratorOracle.java` in `.local/terraforged/oracles/river/`.
+
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator and its river caches. They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches and the simple river generator. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development

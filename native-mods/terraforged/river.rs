@@ -1514,6 +1514,46 @@ impl ContinentSampler for super::terraforged_fancy::FancyContinentGenerator {
     }
 }
 
+/// The part of Engine's `SimpleContinent` the simple river generator reads besides `getEdgeValue`:
+/// `getDistanceToOcean(cx, cz, dx, dz)`.
+pub trait SimpleContinentSampler: ContinentSampler {
+    fn distance_to_ocean(&self, center_x: i32, center_z: i32, dx: f32, dz: f32) -> f32;
+}
+
+impl<T: SimpleContinentSampler + ?Sized> SimpleContinentSampler for &T {
+    fn distance_to_ocean(&self, center_x: i32, center_z: i32, dx: f32, dz: f32) -> f32 {
+        T::distance_to_ocean(*self, center_x, center_z, dx, dz)
+    }
+}
+
+impl ContinentSampler for super::terraforged_continent::SimpleContinentGenerator {
+    fn edge_value(&self, x: f32, z: f32) -> f32 {
+        super::terraforged_continent::SimpleContinentGenerator::edge_value(self, x, z)
+    }
+}
+
+impl SimpleContinentSampler for super::terraforged_continent::SimpleContinentGenerator {
+    fn distance_to_ocean(&self, center_x: i32, center_z: i32, dx: f32, dz: f32) -> f32 {
+        super::terraforged_continent::SimpleContinentGenerator::distance_to_ocean(
+            self, center_x, center_z, dx, dz,
+        )
+    }
+}
+
+impl ContinentSampler for super::terraforged_advanced_continent::AdvancedContinentGenerator {
+    fn edge_value(&self, x: f32, z: f32) -> f32 {
+        super::terraforged_advanced_continent::AdvancedContinentGenerator::edge_value(self, x, z)
+    }
+}
+
+impl SimpleContinentSampler for super::terraforged_advanced_continent::AdvancedContinentGenerator {
+    fn distance_to_ocean(&self, center_x: i32, center_z: i32, dx: f32, dz: f32) -> f32 {
+        super::terraforged_advanced_continent::AdvancedContinentGenerator::distance_to_ocean(
+            self, center_x, center_z, dx, dz,
+        )
+    }
+}
+
 /// Engine's `rivermap.river.BaseRiverGenerator`: the river, fork, lake and wetland configs of a world and the
 /// fork, lake and wetland placement its subclasses share. Engine reads everything from a `GeneratorContext`:
 /// here the caller passes `context.seed.root()`, `context.settings.world`, `context.settings.rivers`,
@@ -1855,6 +1895,92 @@ impl<C: ContinentSampler> BaseRiverGenerator<C> {
             valley_curve: RiverCarver::valley_type(random),
         };
         RiverCarver::new(river, warp, config, settings, self.levels, &self.registry)
+    }
+}
+
+/// Engine's `continent.simple.SimpleRiverGenerator`, the river generator of the simple (multi and single) and
+/// advanced continents: `count` main rivers spread around the continent centre, each from at least 400 blocks out
+/// to the ocean, with integer endpoints, then the base class's forks, lakes and wetlands.
+pub struct SimpleRiverGenerator<C> {
+    pub base: BaseRiverGenerator<C>,
+}
+
+impl<C: SimpleContinentSampler> SimpleRiverGenerator<C> {
+    /// `new SimpleRiverGenerator(continent, context)`: see [`BaseRiverGenerator::new`].
+    pub fn new(
+        continent: C,
+        root_seed: i32,
+        world: &WorldSettings,
+        rivers: &RiverSettings,
+        levels: Levels,
+        registry: Arc<TerrainRegistry>,
+    ) -> Self {
+        Self {
+            base: BaseRiverGenerator::new(continent, root_seed, world, rivers, levels, registry),
+        }
+    }
+
+    /// `generateRivers(x, z, id)` with this class's roots.
+    pub fn generate_rivers(&self, x: i32, z: i32, id: i64) -> Rivermap {
+        self.base.generate_rivers(x, z, id, Self::generate_roots)
+    }
+
+    /// `generateRoots(x, z, random, warp)`: one `nextFloat` for the start angle, then per root its angle
+    /// variance and start distance, the valley width, the valley curve and the warp, and the base class's
+    /// `addLake`, in Engine's draw order.
+    pub fn generate_roots(
+        base: &BaseRiverGenerator<C>,
+        x: i32,
+        z: i32,
+        random: &mut LegacyRandom,
+        warp: &GenWarp,
+    ) -> Vec<RiverNetworkBuilder> {
+        let start = random.next_float();
+        let spacing = PI2 / base.count as f32;
+        let space_var = spacing * 0.75;
+        let space_bias = -space_var / 2.0;
+        // Engine's `new ArrayList(count)` throws for a negative count; the port returns no roots instead.
+        let mut roots = Vec::with_capacity(base.count.max(0) as usize);
+        for index in 0..base.count {
+            let variance = random.next_float() * space_var + space_bias;
+            let angle = start + spacing * index as f32 + variance;
+            let dx = sin(angle);
+            let dz = cos(angle);
+            let start_mod = 0.05 + random.next_float() * 0.45;
+            let length = base.continent.distance_to_ocean(x, z, dx, dz);
+            let start_dist = java_max(400.0, start_mod * length);
+            let x1 = x as f32 + dx * start_dist;
+            let z1 = z as f32 + dz * start_dist;
+            let x2 = x as f32 + dx * length;
+            let z2 = z as f32 + dz * length;
+            let valley_size = River::VALLEY_WIDTH as f32 * River::MAIN_VALLEY.next(random);
+            // `new River((int) x1, (int) z1, (int) x2, (int) z2)`: `as i32` saturates and maps NaN to 0, as Java.
+            let river = River::new(
+                x1 as i32 as f32,
+                z1 as i32 as f32,
+                x2 as i32 as f32,
+                z2 as i32 as f32,
+            );
+            let settings = RiverCarverSettings {
+                valley_curve: RiverCarver::valley_type(random),
+                fade_in: base.main.fade,
+                valley_size,
+                connecting: false,
+            };
+            let river_warp = RiverWarp::create_range(0.1, 0.85, random);
+            let carver = RiverCarver::new(
+                river,
+                river_warp,
+                base.main,
+                settings,
+                base.levels,
+                &base.registry,
+            );
+            let mut branch = RiverNetwork::builder(carver);
+            base.add_lake(&mut branch, random, warp);
+            roots.push(branch);
+        }
+        roots
     }
 }
 
@@ -4481,6 +4607,298 @@ mod tests {
                     (0x3e83_43f4, 0x39b8_5000, false, 0), (0x3e88_01d2, 0x3b42_0500, false, 0),
                     (0x3e83_8b92, 0x3b23_2000, false, 0), (0x3e87_a222, 0x3946_1000, false, 0),
                     (0x3e83_3f35, 0x39d4_f800, false, 0), (0x3e87_8c95, 0x39a9_e000, false, 0),
+                ]
+            );
+        }
+    }
+
+    /// Engine 0.3.0's `SimpleRiverGenerator` against `SimpleRiverGeneratorOracle.java` (in the maintainer's
+    /// `.local/terraforged/oracles/river/`), which runs Engine's class over its multi, single and advanced
+    /// continent generators.
+    mod simple_river_generator_oracle {
+        use super::super::super::terraforged_advanced_continent::AdvancedContinentGenerator;
+        use super::super::super::terraforged_continent::SimpleContinentGenerator;
+        use super::super::super::terraforged_engine::Seed;
+        use super::super::super::terraforged_util::{pack, unpack_left, unpack_right};
+        use super::base_river_generator_oracle::mix_network;
+        use super::lake_oracle::{Fold, fill_from};
+        use super::network_oracle::FILLS;
+        use super::*;
+        use std::sync::Arc;
+
+        fn settings(variant: i32) -> (WorldSettings, RiverSettings) {
+            let mut world = WorldSettings {
+                seed: 12_345,
+                ..WorldSettings::default()
+            };
+            let mut rivers = RiverSettings::default();
+            match variant {
+                1 => {
+                    world.seed = -987_654_321;
+                    rivers.seed_offset = i32::MAX;
+                    rivers.lakes.chance = 1.0;
+                    rivers.wetlands.chance = 1.0;
+                    rivers.river_count = 3;
+                }
+                2 => {
+                    world.properties.world_height = 384;
+                    world.properties.sea_level = 62;
+                    world.control_points.inland = 0.75;
+                    rivers.lakes.chance = 0.0;
+                }
+                3 => {
+                    world.continent.continent_scale = 1000;
+                    rivers.river_count = 5;
+                    rivers.lakes.chance = 0.5;
+                }
+                4 => {
+                    rivers.river_count = 1;
+                    world.seed = 7;
+                }
+                _ => {}
+            }
+            (world, rivers)
+        }
+
+        /// `new SimpleRiverGenerator(continent, context)`, with `GeneratorContext`'s seed root `(int) world.seed`
+        /// and `Levels(world)`.
+        fn generator<C: SimpleContinentSampler>(
+            continent: C,
+            variant: i32,
+            registry: &Arc<TerrainRegistry>,
+        ) -> SimpleRiverGenerator<C> {
+            let (world, rivers) = settings(variant);
+            let levels = Levels::new(world.properties.world_height, world.properties.sea_level);
+            SimpleRiverGenerator::new(
+                continent,
+                world.seed as i32,
+                &world,
+                &rivers,
+                levels,
+                Arc::clone(registry),
+            )
+        }
+
+        const POINTS: [(f32, f32); 3] = [(1000.0, -2000.0), (-7000.0, 3000.0), (25000.0, 18000.0)];
+
+        /// Folds the maps of the centres nearest `POINTS` (with the continent's river cache id) and of (0, 0) with
+        /// id -1, and their applies on a grid, like the oracle.
+        fn fold_continent<C: SimpleContinentSampler>(
+            generator: &SimpleRiverGenerator<C>,
+            nearest_center: impl Fn(f32, f32) -> i64,
+            legacy_id: bool,
+            scale: i32,
+            registry: &TerrainRegistry,
+            fold: &mut Fold,
+            counts: &mut (i32, usize, i32),
+        ) {
+            let cells = POINTS
+                .iter()
+                .map(|&(px, pz)| {
+                    let center = nearest_center(px, pz);
+                    let (x, z) = (unpack_left(center), unpack_right(center));
+                    let id = if legacy_id {
+                        (i64::from(z) << 32) | (i64::from(x) & 0xffff_ffff)
+                    } else {
+                        pack(x, z)
+                    };
+                    (x, z, id)
+                })
+                .chain([(0, 0, -1)]);
+            for (x, z, id) in cells {
+                let map = generator.generate_rivers(x, z, id);
+                fold.mix(map.x());
+                fold.mix(map.z());
+                fold.mix(map.networks.len() as i32);
+                counts.1 += map.networks.len();
+                for network in &map.networks {
+                    counts.2 += mix_network(fold, network);
+                }
+                let step = 8.0 * scale as f32 / 30.0;
+                for gx in 0..=30 {
+                    for gz in 0..=30 {
+                        let px = x as f32 - 4.0 * scale as f32 + step * gx as f32;
+                        let pz = z as f32 - 4.0 * scale as f32 + step * gz as f32;
+                        for fill in [None, Some(0), Some(1)] {
+                            let mut cell = fill_from(&FILLS, fill, registry);
+                            map.apply(&mut cell, px, pz);
+                            fold.cell(&cell, registry);
+                            counts.0 += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn generates_networks_like_engine() {
+            let registry = Arc::new(TerrainRegistry::new());
+            let mut fold = Fold(17);
+            let mut counts = (0, 0, 0);
+            for kind in 0..3 {
+                for variant in 0..5 {
+                    let (world, _) = settings(variant);
+                    let scale = world.continent.continent_scale;
+                    for continent_seed in [12_345, -98_765] {
+                        let mut seed = Seed::new(continent_seed);
+                        if kind == 2 {
+                            let continent = AdvancedContinentGenerator::new(&mut seed, world);
+                            fold_continent(
+                                &generator(&continent, variant, &registry),
+                                |x, z| continent.nearest_center(x, z),
+                                false,
+                                scale,
+                                &registry,
+                                &mut fold,
+                                &mut counts,
+                            );
+                        } else {
+                            let continent = if kind == 0 {
+                                SimpleContinentGenerator::multi(&mut seed, world)
+                            } else {
+                                SimpleContinentGenerator::single(&mut seed, world)
+                            };
+                            fold_continent(
+                                &generator(&continent, variant, &registry),
+                                |x, z| continent.nearest_center(x, z),
+                                true,
+                                scale,
+                                &registry,
+                                &mut fold,
+                                &mut counts,
+                            );
+                        }
+                    }
+                }
+            }
+            assert_eq!(
+                (counts.0, counts.1, counts.2, fold.0),
+                (345_960, 600, 2748, -737_916_107)
+            );
+        }
+
+        /// Extreme and negative continent cells, with the ids the continents' caches build.
+        #[test]
+        fn extreme_cells_match_engine() {
+            const CELLS: [(i32, i32); 4] = [
+                (i32::MIN, i32::MAX),
+                (i32::MAX, i32::MIN),
+                (-1, -1),
+                (-3001, 77),
+            ];
+            let registry = Arc::new(TerrainRegistry::new());
+            let (world, _) = settings(0);
+            let mut fold = Fold(17);
+            let (mut networks, mut nodes) = (0, 0);
+            let mut fold_maps = |generate: &dyn Fn(i32, i32, i64) -> Rivermap, legacy_id: bool| {
+                for (x, z) in CELLS {
+                    let id = if legacy_id {
+                        (i64::from(z) << 32) | (i64::from(x) & 0xffff_ffff)
+                    } else {
+                        pack(x, z)
+                    };
+                    let map = generate(x, z, id);
+                    fold.mix(map.x());
+                    fold.mix(map.z());
+                    fold.mix(map.networks.len() as i32);
+                    networks += map.networks.len();
+                    for network in &map.networks {
+                        nodes += mix_network(&mut fold, network);
+                    }
+                }
+            };
+            for kind in 0..2 {
+                let mut seed = Seed::new(-98_765);
+                let continent = if kind == 0 {
+                    SimpleContinentGenerator::multi(&mut seed, world)
+                } else {
+                    SimpleContinentGenerator::single(&mut seed, world)
+                };
+                let generator = generator(&continent, 0, &registry);
+                fold_maps(&|x, z, id| generator.generate_rivers(x, z, id), true);
+            }
+            let continent = AdvancedContinentGenerator::new(&mut Seed::new(-98_765), world);
+            let generator = generator(&continent, 0, &registry);
+            fold_maps(&|x, z, id| generator.generate_rivers(x, z, id), false);
+            assert_eq!((networks, nodes, fold.0), (96, 96, 1_391_867_816));
+        }
+
+        #[test]
+        fn samples_match_engine() {
+            let registry = Arc::new(TerrainRegistry::new());
+            let (world, _) = settings(0);
+            let continent = SimpleContinentGenerator::multi(&mut Seed::new(12_345), world);
+            let center = continent.nearest_center(1000.0, -2000.0);
+            let (x, z) = (unpack_left(center), unpack_right(center));
+            let map = generator(&continent, 0, &registry).generate_rivers(
+                x,
+                z,
+                (i64::from(z) << 32) | (i64::from(x) & 0xffff_ffff),
+            );
+            assert_eq!((x, z), (538, -8737));
+            let roots: Vec<_> = map
+                .networks
+                .iter()
+                .map(|network| {
+                    let river = network.river_carver.river;
+                    (
+                        [river.x1, river.z1, river.x2, river.z2].map(f32::to_bits),
+                        network.children.len(),
+                    )
+                })
+                .collect();
+            #[rustfmt::skip]
+            assert_eq!(
+                roots,
+                [
+                    ([0x444f_0000, 0xc611_6400, 0x454c_4000, 0xc65b_d800], 2),
+                    ([0x4461_0000, 0xc601_7c00, 0x4598_8800, 0xc551_8000], 2),
+                    ([0x4040_0000, 0xc61e_3800, 0xc459_c000, 0xc641_c000], 1),
+                    ([0xc495_4000, 0xc5ff_4000, 0xc538_e000, 0xc5ed_3000], 1),
+                    ([0x4435_8000, 0xc5e1_8800, 0x44ab_c000, 0xc4f9_c000], 2),
+                    ([0x4350_0000, 0xc60c_9c00, 0xc4d9_e000, 0xc624_e800], 0),
+                    ([0x4567_4000, 0xc610_e400, 0x45d7_5800, 0xc619_5800], 3),
+                    ([0xc423_8000, 0xc5f5_c800, 0xc547_4000, 0xc5bb_e000], 1),
+                ]
+            );
+            let applied: Vec<_> = (0..16)
+                .map(|i| {
+                    let river = map.networks[i / 2].river_carver.river;
+                    let t = if i % 2 == 0 { 0.3 } else { 0.7 };
+                    let x = river.x1 + (river.x2 - river.x1) * t;
+                    let z = river.z1 + (river.z2 - river.z1) * t;
+                    let mut cell = Cell::new(&registry);
+                    cell.value = 0.6;
+                    cell.river_mask = 1.0;
+                    cell.continent_edge = 0.4;
+                    map.apply(&mut cell, x, z);
+                    (
+                        [x, z, cell.value, cell.river_mask].map(f32::to_bits),
+                        cell.erosion_mask,
+                        cell.terrain.id(),
+                    )
+                })
+                .collect();
+            #[rustfmt::skip]
+            assert_eq!(
+                applied,
+                [
+                    ([0x44c3_0000, 0xc627_ba00, 0x3e83_3736, 0x382f_4000], false, 0),
+                    ([0x451e_8000, 0xc645_8200, 0x3e65_7671, 0x3801_0000], true, 5),
+                    ([0x4502_e4cd, 0xc5d4_b400, 0x3e75_a90a, 0x3adb_7a00], true, 5),
+                    ([0x4566_6b33, 0xc597_0400, 0x3e87_6ee3, 0x36f0_0000], false, 0),
+                    ([0xc381_999a, 0xc628_e0cd, 0x3e83_3ffa, 0x39ed_a000], false, 0),
+                    ([0xc418_3333, 0xc637_1733, 0x3e87_6a13, 0x36f6_0000], false, 0),
+                    ([0xc4d7_6666, 0xc5f9_d4cd, 0x3e83_39d8, 0x39cf_8800], false, 0),
+                    ([0xc517_cccc, 0xc5f2_9b33, 0x3e6f_93e2, 0x3b27_dd00], true, 5),
+                    ([0x4466_199a, 0xc5b0_9a66, 0x3e83_358f, 0x368a_0000], false, 0),
+                    ([0x4493_7333, 0xc55e_bb33, 0x3e87_7b2e, 0x3783_8000], false, 0),
+                    ([0xc3bc_a668, 0xc613_e600, 0x3e83_2088, 0x361c_0000], false, 0),
+                    ([0xc490_b666, 0xc61d_9e00, 0x3e87_7e65, 0x384d_4000], false, 0),
+                    ([0x4591_8a66, 0xc613_6d33, 0x3e83_de0a, 0x3b81_5c80], false, 0),
+                    ([0x45b9_6d9a, 0xc616_cecd, 0x3e83_7d89, 0x3982_c000], true, 0),
+                    ([0xc4b0_c666, 0xc5e4_68cd, 0x3e76_811b, 0x34c0_0000], true, 5),
+                    ([0xc517_bccc, 0xc5cd_3f33, 0x3e87_9f88, 0x3a39_3c00], false, 0),
                 ]
             );
         }
