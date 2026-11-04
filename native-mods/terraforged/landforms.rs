@@ -442,7 +442,7 @@ fn cell_edge(seed: i32, scale: i32) -> Module {
 /// Java's `Math.round(float)`: the floor of `value + 0.5` computed exactly (in `f64`, where adding 0.5 to an `f32`
 /// never rounds), so 0.49999997 rounds to 0 and odd integers above 2^23 stay odd; NaN gives 0 and out-of-range
 /// values saturate, as `as i32` does.
-fn java_round(value: f32) -> i32 {
+pub fn java_round(value: f32) -> i32 {
     (f64::from(value) + 0.5).floor() as i32
 }
 

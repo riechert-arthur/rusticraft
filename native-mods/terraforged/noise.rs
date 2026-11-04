@@ -775,7 +775,7 @@ fn grad(seed: i32, x: i32, y: i32, xd: f32, yd: f32, better: bool) -> f32 {
     xd * gradient[0] + yd * gradient[1]
 }
 
-fn lerp(a: f32, b: f32, alpha: f32) -> f32 {
+pub fn lerp(a: f32, b: f32, alpha: f32) -> f32 {
     a + alpha * (b - a)
 }
 
@@ -1166,7 +1166,7 @@ fn white(x: f32, y: f32, seed: i32) -> f32 {
     value_coord_2d(seed, round(x), round(y))
 }
 
-fn round(value: f32) -> i32 {
+pub fn round(value: f32) -> i32 {
     if value >= 0.0 {
         (value + 0.5) as i32
     } else {
@@ -2908,7 +2908,7 @@ fn java_max(first: f32, second: f32) -> f32 {
     }
 }
 
-fn java_min(first: f32, second: f32) -> f32 {
+pub fn java_min(first: f32, second: f32) -> f32 {
     if first.is_nan() {
         first
     } else if second.is_nan() {

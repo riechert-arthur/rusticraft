@@ -35,6 +35,10 @@ use super::{
 pub trait Populator: Send + Sync {
     fn apply(&self, cell: &mut Cell, x: f32, z: f32);
 
+    /// The weight when this is one of Engine's `TerrainPopulator`s (or a subclass:
+    /// `ScaledPopulator`, later `VolcanoPopulator`), else `None`. `RegionSelector` weights a
+    /// populator by it where Engine checks `instanceof TerrainPopulator`, so every
+    /// [`TerrainPopulatorLike`] must return `Some(weight())`.
     fn terrain_weight(&self) -> Option<f32> {
         None
     }

@@ -24,10 +24,11 @@
 
 use super::{
     terraforged::{
-        DistanceFunction, Domain, EdgeFunction, Module, cell_vector, floor, java_pow,
-        map as noise_map, value_coord_2d,
+        DistanceFunction, Domain, EdgeFunction, Module, cell_vector, floor, java_min, java_pow,
+        lerp, map as noise_map, round as noise_round, value_coord_2d,
     },
     terraforged_engine::Cell,
+    terraforged_landforms::java_round,
     terraforged_populator::Populator,
 };
 use std::sync::Arc;
@@ -151,6 +152,15 @@ impl Populator for RegionModule {
     }
 }
 
+/// Engine's `RegionSelector`: picks one of its populators by the cell's `terrain_region_id` and
+/// applies it.
+///
+/// The nodes are the populators in list order, each repeated by its weight: the smallest non-zero
+/// weight (a populator that is not a `TerrainPopulator` counts as 1, through `Math.min`, so a NaN
+/// weight makes every count 0) divides each weight, rounded like `Math.round`, and zero-weight
+/// populators are left out. Without any non-zero weight, or when every count rounds to 0 or less,
+/// the nodes are the populators unweighted. As in Engine, a weight far above the smallest one
+/// (an infinite weight: `Integer.MAX_VALUE` copies) runs out of memory.
 pub struct RegionSelector {
     max_index: i32,
     nodes: Vec<Arc<dyn Populator>>,
@@ -165,21 +175,23 @@ impl RegionSelector {
         }
     }
 
+    /// `get(identity)`: the node at `NoiseUtil.round(identity * maxIndex)`. Where Engine throws
+    /// (an identity that rounds outside the nodes, or a selector without populators), this panics.
     pub fn get(&self, identity: f32) -> &dyn Populator {
-        let index = noise_round(identity * self.max_index as f32);
-        self.nodes[index as usize].as_ref()
+        self.nodes[self.index(identity) as usize].as_ref()
+    }
+
+    fn index(&self, identity: f32) -> i32 {
+        noise_round(identity * self.max_index as f32)
     }
 
     fn weighted_array(populators: &[Arc<dyn Populator>]) -> Vec<Arc<dyn Populator>> {
         let mut smallest = f32::MAX;
         for populator in populators {
-            if let Some(weight) = populator.terrain_weight() {
-                if weight == 0.0 {
-                    continue;
-                }
-                smallest = smallest.min(weight);
-            } else {
-                smallest = smallest.min(1.0);
+            match populator.terrain_weight() {
+                Some(0.0) => continue, // also -0.0, as Java's `== 0.0f`
+                Some(weight) => smallest = java_min(smallest, weight),
+                None => smallest = java_min(smallest, 1.0),
             }
         }
         if smallest == f32::MAX {
@@ -188,11 +200,11 @@ impl RegionSelector {
         let mut result = Vec::new();
         for populator in populators {
             let count = match populator.terrain_weight() {
-                Some(0.0) => continue,
+                Some(0.0) => continue, // also -0.0, as Java's `== 0.0f`
                 Some(weight) => java_round(weight / smallest),
                 None => java_round(1.0 / smallest),
             };
-            for _ in 0..count.max(0) {
+            for _ in 0..count {
                 result.push(Arc::clone(populator));
             }
         }
@@ -210,6 +222,12 @@ impl Populator for RegionSelector {
     }
 }
 
+/// Engine's `RegionLerper`: blends two populators by the cell's `terrain_region_edge`. At exactly 0
+/// it applies only `lower`, at exactly 1 only `upper`; otherwise it applies `lower`, then `upper`
+/// on the same cell, and sets `value` to `NoiseUtil.lerp` of the two values (so a NaN or
+/// out-of-range edge blends or extrapolates). Every other field keeps what `upper` left, its
+/// terrain included. Heightmap passes a FLATS plains populator as `lower` (the region borders) and
+/// the [`RegionSelector`] as `upper`.
 pub struct RegionLerper {
     lower: Arc<dyn Populator>,
     upper: Arc<dyn Populator>,
@@ -236,7 +254,7 @@ impl Populator for RegionLerper {
         let lower_value = cell.value;
         self.upper.apply(cell, x, y);
         let upper_value = cell.value;
-        cell.value = lower_value + alpha * (upper_value - lower_value);
+        cell.value = lerp(lower_value, upper_value, alpha);
     }
 }
 
@@ -247,24 +265,15 @@ fn pack(left: f32, right: f32) -> i64 {
     (i64::from(left) << 32) | (i64::from(right) & 0xffff_ffff)
 }
 
-fn java_round(value: f32) -> i32 {
-    (value + 0.5).floor() as i32
-}
-
-fn noise_round(value: f32) -> i32 {
-    if value >= 0.0 {
-        (value + 0.5) as i32
-    } else {
-        (value - 0.5) as i32
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::{
         terraforged::{Interpolation, Source, SourceConfig, SourceKind},
-        terraforged_engine::{BiomeType, Seed, TerrainRegistry},
-        terraforged_populator::TerrainPopulator,
+        terraforged_engine::{
+            BiomeType, Levels, Seed, TerrainFormSettings, TerrainRegistry, TerrainSettings,
+        },
+        terraforged_landforms::LandForms,
+        terraforged_populator::{TerrainPopulator, TerrainPopulatorLike},
     };
     use super::*;
     use std::fmt::Write as _;
@@ -486,71 +495,291 @@ mod tests {
         assert_eq!(fnv1a(&text), 0x7433_b0e4_7a4c_3c02);
     }
 
-    fn populator(
+    /// A populator that is not a `TerrainPopulator` (weighted like 1): writes only `value`.
+    struct Plain(f32);
+
+    impl Populator for Plain {
+        fn apply(&self, cell: &mut Cell, _x: f32, _z: f32) {
+            cell.value = self.0;
+        }
+    }
+
+    /// The oracle's `st(weight, base, vertical)`.
+    fn form(weight: f32, base_scale: f32, vertical_scale: f32) -> TerrainFormSettings {
+        TerrainFormSettings {
+            base_scale,
+            ..TerrainFormSettings::new(weight, vertical_scale, 1.0)
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum W {
+        Plain,
+        Regular(f32),
+        Scaled(f32),
+    }
+
+    /// The oracle's `list(...)`: entry `i` samples `0.01 + 0.05 * i` on terrain `8 + i % 7`.
+    fn list(registry: &TerrainRegistry, weights: &[W]) -> Vec<Arc<dyn Populator>> {
+        weights
+            .iter()
+            .enumerate()
+            .map(|(i, weight)| {
+                let value = 0.01_f32 + 0.05_f32 * i as f32;
+                let terrain = registry.get_by_id(8 + (i as i32 % 7));
+                let variance = Module::constant(value);
+                let base = Module::constant(0.0);
+                let populator: Arc<dyn Populator> = match *weight {
+                    W::Plain => Arc::new(Plain(value)),
+                    W::Regular(weight) => {
+                        Arc::new(TerrainPopulator::new(terrain, base, variance, weight))
+                    }
+                    W::Scaled(weight) => {
+                        Arc::<dyn TerrainPopulatorLike>::from(TerrainPopulator::of_with_settings(
+                            terrain,
+                            base,
+                            variance,
+                            form(weight, 1.5, 0.8),
+                        ))
+                    }
+                };
+                populator
+            })
+            .collect()
+    }
+
+    fn nodes_line(name: &str, selector: &RegionSelector, inputs: &[Arc<dyn Populator>]) -> String {
+        let mut line = format!("{name} nodes={}", selector.nodes.len());
+        for node in &selector.nodes {
+            let index = inputs.iter().position(|input| Arc::ptr_eq(input, node));
+            write!(line, " {}", index.map_or(-1, |index| index as i32)).unwrap();
+        }
+        line
+    }
+
+    fn selector_case(
+        out: &mut String,
         registry: &TerrainRegistry,
-        terrain: i32,
-        value: f32,
-        weight: f32,
-    ) -> Arc<dyn Populator> {
-        Arc::new(TerrainPopulator::new(
-            registry.get_by_id(terrain),
-            Module::constant(0.0),
-            Module::constant(value),
-            weight,
-        ))
+        name: &str,
+        populators: Vec<Arc<dyn Populator>>,
+    ) {
+        let selector = RegionSelector::new(populators.clone());
+        writeln!(out, "{}", nodes_line(name, &selector, &populators)).unwrap();
+        let ids = [
+            0.0,
+            -0.0,
+            1.4e-45,
+            0.1,
+            0.25,
+            0.333_333_34,
+            0.5,
+            0.7,
+            0.99,
+            1.0,
+            1.04,
+            -0.04,
+            f32::NAN,
+            1.5,
+            -0.6,
+            f32::INFINITY,
+        ];
+        for id in ids {
+            let prefix = format!("{name} {}", bits(id));
+            // Engine throws ArrayIndexOutOfBounds here; `get` panics.
+            if !(0..selector.nodes.len() as i32).contains(&selector.index(id)) {
+                writeln!(out, "{prefix} throws").unwrap();
+                continue;
+            }
+            let mut fresh = Cell::new(registry);
+            fresh.terrain_region_id = id;
+            selector.apply(&mut fresh, 12.25, -98.75);
+            let mut full = filled(registry);
+            full.terrain_region_id = id;
+            selector.apply(&mut full, 12.25, -98.75);
+            writeln!(out, "{prefix} fresh {}", dump(&fresh)).unwrap();
+            writeln!(out, "{prefix} filled {}", dump(&full)).unwrap();
+        }
+    }
+
+    /// Rebuilds the text `RegionSelectionOracle` prints from Engine 0.3.0 (TerraForged's
+    /// `.local/terraforged/oracles/region_selection/`): the weighted node array and every cell
+    /// field after `apply` for weight lists with zero, -0.0, negative, NaN, `Math.round`-edge and
+    /// non-`TerrainPopulator` entries; `RegionLerper` at edge alphas; and Heightmap's chain
+    /// (`RegionModule`, then `RegionLerper` of FLATS plains borders and a `RegionSelector` of real
+    /// landforms with ModTerrains' weights) over a grid of coordinates.
+    fn selection_oracle_text() -> String {
+        use W::{Plain as P, Regular as R, Scaled as S};
+        let registry = TerrainRegistry::new();
+        let mut out = String::new();
+        let cases: [(&str, &[W]); 15] = [
+            (
+                "modterrains",
+                &[
+                    R(1.5),
+                    R(2.5),
+                    R(2.0),
+                    R(2.0),
+                    R(1.5),
+                    R(2.0),
+                    R(1.75),
+                    R(2.5),
+                    R(1.25),
+                    R(1.25),
+                    R(1.25),
+                ],
+            ),
+            (
+                "defaults",
+                &[
+                    R(1.0),
+                    R(2.0),
+                    R(2.0),
+                    R(1.5),
+                    R(1.5),
+                    R(1.0),
+                    R(2.0),
+                    R(2.5),
+                    R(5.0),
+                ],
+            ),
+            ("mixedZero", &[R(0.0), R(1.0), R(0.0), R(3.0)]),
+            ("allZero", &[R(0.0), R(0.0)]),
+            ("plainOnly", &[P, P]),
+            ("plainSmall", &[P, R(0.25), R(0.5)]),
+            ("plainBig", &[P, R(2.5), R(0.0)]),
+            ("negZero", &[R(-0.0), R(1.0)]),
+            ("negative", &[R(-1.0), R(-0.499_999_97), R(1.0), R(-0.5)]),
+            ("nan", &[R(f32::NAN), R(1.0), R(2.0)]),
+            ("nanLast", &[R(1.0), R(2.0), R(f32::NAN)]),
+            ("half", &[R(0.4), R(0.6), R(1.0), R(0.199_999_99)]),
+            ("scaled", &[S(1.25), R(2.5), S(0.5)]),
+            ("single", &[R(3.0)]),
+            ("empty", &[]),
+        ];
+        for (name, weights) in cases {
+            selector_case(&mut out, &registry, name, list(&registry, weights));
+        }
+
+        // Real landforms, registered like StandardTerrainProvider with ModTerrains' weights.
+        let settings = TerrainSettings::default();
+        let forms = LandForms::new(settings, Levels::new(256, 63), Module::constant(0.0));
+        let mut seed = Seed::new(12_345);
+        let base = forms.land_base();
+        let t = |id| registry.get_by_id(id);
+        let of = |id, variance, settings| -> Arc<dyn Populator> {
+            Arc::<dyn TerrainPopulatorLike>::from(TerrainPopulator::of_with_settings(
+                t(id),
+                base.clone(),
+                variance,
+                settings,
+            ))
+        };
+        let real = vec![
+            of(8, forms.steppe(&mut seed), form(1.5, 1.0, 1.0)),
+            of(8, forms.plains(&mut seed), form(2.5, 1.0, 1.0)),
+            of(11, forms.hills1(&mut seed), form(2.0, 1.0, 1.0)),
+            of(11, forms.hills2(&mut seed), form(2.0, 1.0, 1.0)),
+            of(11, forms.dales(&mut seed), form(1.5, 1.0, 1.0)),
+            of(10, forms.plateau(&mut seed), form(2.0, 1.0, 1.0)),
+            of(9, forms.badlands(&mut seed), form(1.75, 1.0, 1.0)),
+            of(10, forms.torridonian(&mut seed), form(2.5, 1.0, 1.0)),
+            of(12, forms.mountains(&mut seed), form(1.25, 1.5, 0.8)),
+        ];
+        let regions = Arc::new(RegionSelector::new(real.clone()));
+        writeln!(out, "{}", nodes_line("real", &regions, &real)).unwrap();
+        let borders = of(8, forms.plains(&mut seed), settings.steppe);
+        let lerper = RegionLerper::new(borders, regions);
+        writeln!(out, "seed after={}", seed.get()).unwrap();
+
+        let alphas = [
+            0.0,
+            -0.0,
+            1.0,
+            0.5,
+            0.25,
+            1.4e-45,
+            0.999_999_94,
+            f32::NAN,
+            -0.25,
+            1.5,
+            f32::INFINITY,
+        ];
+        for alpha in alphas {
+            for id in [0.0, 0.37, 0.81, 1.0] {
+                let prefix = format!("lerp {} {}", bits(alpha), bits(id));
+                let mut fresh = Cell::new(&registry);
+                fresh.terrain_region_edge = alpha;
+                fresh.terrain_region_id = id;
+                lerper.apply(&mut fresh, 1234.5, -678.25);
+                let mut full = filled(&registry);
+                full.terrain_region_edge = alpha;
+                full.terrain_region_id = id;
+                lerper.apply(&mut full, 1234.5, -678.25);
+                writeln!(out, "{prefix} fresh {}", dump(&fresh)).unwrap();
+                writeln!(out, "{prefix} filled {}", dump(&full)).unwrap();
+            }
+        }
+
+        // Heightmap: `regionModule.apply`, then the RegionLerper.
+        let world = Seed::new(12345);
+        let mut region_warp = world.offset(8934);
+        let warp_x = source(SourceKind::Simplex, region_warp.next(), 400, 1);
+        let warp_z = source(SourceKind::Simplex, region_warp.next(), 400, 1);
+        let config = RegionConfig::new(world.offset(789_124).get(), 1200, warp_x, warp_z, 200.0);
+        let module = RegionModule::new(config);
+        let xs = [
+            0.0, 12.25, -98.75, -4096.5, 8192.25, 123_456.75, -3.0e7, 1.0e9, -777.5, 2400.125,
+        ];
+        for x in xs {
+            for z in xs {
+                let prefix = format!("chain {} {}", bits(x), bits(z));
+                let mut fresh = Cell::new(&registry);
+                module.apply(&mut fresh, x, z);
+                lerper.apply(&mut fresh, x, z);
+                let mut full = filled(&registry);
+                module.apply(&mut full, x, z);
+                lerper.apply(&mut full, x, z);
+                let value = lerper.value(&registry, x, z);
+                writeln!(out, "{prefix} getValue={}", bits(value)).unwrap();
+                writeln!(out, "{prefix} fresh {}", dump(&fresh)).unwrap();
+                writeln!(out, "{prefix} filled {}", dump(&full)).unwrap();
+            }
+        }
+        out
     }
 
     #[test]
     fn region_selection_matches_engine_0_3_0() {
-        let registry = TerrainRegistry::new();
-        let selector = RegionSelector::new(vec![
-            populator(&registry, 8, 0.1, 0.5),
-            populator(&registry, 11, 0.2, 1.0),
-            populator(&registry, 12, 0.3, 2.0),
-        ]);
-        let cases = [
-            (0.0, 0x3dcccccd, 8),
-            (0.1, 0x3e4ccccd, 11),
-            (0.2, 0x3e4ccccd, 11),
-            (0.4, 0x3e4ccccd, 11),
-            (0.6, 0x3e99999a, 12),
-            (0.8, 0x3e99999a, 12),
-            (1.0, 0x3e99999a, 12),
-        ];
-        for (identity, value, terrain) in cases {
-            let mut cell = Cell::new(&registry);
-            cell.terrain_region_id = identity;
-            selector.apply(&mut cell, 0.0, 0.0);
-            assert_eq!(cell.value.to_bits(), value);
-            assert_eq!(cell.terrain.id(), terrain);
-        }
-
-        let lerper = RegionLerper::new(
-            populator(&registry, 11, 0.2, 1.0),
-            populator(&registry, 12, 0.8, 1.0),
+        let text = selection_oracle_text();
+        let lines: Vec<&str> = text
+            .lines()
+            .filter(|line| line.contains("nodes="))
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                "modterrains nodes=16 0 1 1 2 2 3 3 4 5 5 6 7 7 8 9 10",
+                "defaults nodes=20 0 1 1 2 2 3 3 4 4 5 6 6 7 7 7 8 8 8 8 8",
+                "mixedZero nodes=4 1 3 3 3",
+                "allZero nodes=2 0 1",
+                "plainOnly nodes=2 0 1",
+                "plainSmall nodes=7 0 0 0 0 1 2 2",
+                "plainBig nodes=4 0 1 1 1",
+                "negZero nodes=1 1",
+                "negative nodes=2 0 3",
+                "nan nodes=3 0 1 2",
+                "nanLast nodes=3 0 1 2",
+                "half nodes=11 0 0 1 1 1 2 2 2 2 2 3",
+                "scaled nodes=9 0 0 0 1 1 1 1 1 2",
+                "single nodes=1 0",
+                "empty nodes=0",
+                "real nodes=14 0 1 1 2 2 3 3 4 5 5 6 7 7 8",
+            ]
         );
-        for (edge, value, terrain) in [
-            (0.0, 0x3e4ccccd, 11),
-            (0.25, 0x3eb33334, 12),
-            (1.0, 0x3f4ccccd, 12),
-        ] {
-            let mut cell = Cell::new(&registry);
-            cell.terrain_region_edge = edge;
-            lerper.apply(&mut cell, 0.0, 0.0);
-            assert_eq!(cell.value.to_bits(), value);
-            assert_eq!(cell.terrain.id(), terrain);
-        }
-
-        let zeros = RegionSelector::new(vec![
-            populator(&registry, 8, 0.4, 0.0),
-            populator(&registry, 11, 0.6, 0.0),
-        ]);
-        for (identity, value, terrain) in [(0.0, 0x3ecccccd, 8), (1.0, 0x3f19999a, 11)] {
-            let mut cell = Cell::new(&registry);
-            cell.terrain_region_id = identity;
-            zeros.apply(&mut cell, 0.0, 0.0);
-            assert_eq!(cell.value.to_bits(), value);
-            assert_eq!(cell.terrain.id(), terrain);
-        }
+        assert!(text.contains("\nseed after=12402\n"));
+        assert!(text.contains("\nchain 00000000 00000000 getValue=3d1765ff\n"));
+        assert_eq!(text.lines().count(), 829);
+        assert_eq!(text.len(), 234_010);
+        assert_eq!(fnv1a(&text), 0x8d6b_5762_ba57_0385);
     }
 }
