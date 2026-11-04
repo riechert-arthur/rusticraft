@@ -681,14 +681,15 @@ mod tests {
     }
 
     /// Batches give the same cells on one thread or many (each chunk's cells belong to one batch),
-    /// odd and uneven counts included, and a stage's panic reaches the caller with its payload.
+    /// odd, uneven and huge counts included (batches past the last chunk are skipped, not built),
+    /// and a stage's panic reaches the caller with its payload.
     #[test]
     fn batches_match_any_thread_count_and_propagate_panics() {
         let terrains = Arc::new(TerrainRegistry::new());
         let kinds = ["none", "coast", "beach", "hills"]
             .map(|name| terrains.get_by_name(name).expect("built-in terrain"));
         let heightmap = FillHeightmap::new(kinds);
-        for (count, workers) in [(1, 8), (3, 1), (3, 8), (5, 3), (2, 64)] {
+        for (count, workers) in [(1, 8), (3, 1), (3, 8), (5, 3), (2, 64), (i32::MAX, 4)] {
             let fill = |workers, striped| {
                 let mut tile = Tile::new(-3, 4, 2, 1, &terrains);
                 let drive = |chunk: &mut BatchChunk| drive_chunk(chunk, &heightmap, None);

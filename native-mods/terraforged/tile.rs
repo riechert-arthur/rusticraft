@@ -538,9 +538,10 @@ impl Tile {
     }
 
     /// Engine's batcher: each batch's chunks are taken from the tile on this thread (`computeChunk`,
-    /// as [`Self::chunk_writer`]), with copies of their cells; up to `workers` scoped threads take
-    /// the batches in order and run `drive` on each chunk, holding no lock; the cells go back once
-    /// every batch is done. Chunks of different batches never share cells, so the result is the
+    /// as [`Self::chunk_writer`]), with copies of their cells; up to `workers` scoped threads,
+    /// started for this call (Engine keeps a pool), take the batches in order from a queue whose
+    /// lock is held only to take one, and run `drive` on each chunk; the cells go back once every
+    /// batch is done. Chunks of different batches never share cells, so the result is the
     /// same for any thread count or schedule. A `drive` that panics re-raises its panic here, once
     /// the other threads finish (Engine's synchronous batcher rethrows too; its thread-pool batcher
     /// logs the error and returns the tile without that batch). Panics where the heightmap fills
@@ -592,10 +593,10 @@ impl Tile {
                 std::panic::resume_unwind(panic);
             }
         }
-        for chunk in batches.into_iter().flatten() {
-            let indices: Vec<usize> = BatchChunk::indices(self, chunk.chunk).collect();
-            for (index, cell) in indices.into_iter().zip(chunk.cells) {
-                self.blocks[index] = cell;
+        for BatchChunk { chunk, cells } in batches.into_iter().flatten() {
+            for (i, cell) in (0..).zip(cells) {
+                let index = chunk.index(self, i & 15, i >> 4);
+                self.blocks[index.expect("checked when the chunk was taken")] = cell;
             }
         }
     }
