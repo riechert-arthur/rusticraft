@@ -95,6 +95,8 @@ pub struct TileGenerator<H, F> {
     border: i32,
     batch_size: i32,
     kind: Kind,
+    /// The batch threads; `None` for Engine's default pool, resolved when a batched fill runs.
+    batch_threads: Option<usize>,
     terrains: Arc<TerrainRegistry>,
     generator: WorldGenerator<H, F>,
 }
@@ -112,7 +114,7 @@ enum Kind {
 }
 
 /// Engine's `TileGenerator.Builder` (from [`TileGenerator::builder`]): size factor 0, border 0,
-/// batch size 0 and not striped until set. Like Engine's builder it checks no
+/// batch size 0, not striped and no thread pool until set. Like Engine's builder it checks no
 /// argument; [`Self::build`] panics without a [`Self::factory`], where Engine throws
 /// `NullPointerException`.
 pub struct TileGeneratorBuilder<H, F> {
@@ -120,6 +122,7 @@ pub struct TileGeneratorBuilder<H, F> {
     border: i32,
     batch_size: i32,
     striped: bool,
+    pool: Option<i32>,
     factory: Option<(Arc<TerrainRegistry>, WorldGenerator<H, F>)>,
 }
 
@@ -145,6 +148,15 @@ where
     #[must_use]
     pub const fn border(mut self, border: i32) -> Self {
         self.border = border;
+        self
+    }
+
+    /// `pool(ThreadPools.create(size))`: the batches run on `max(2, size)` threads, the batch
+    /// threads of Engine's `BatchingThreadPool.of(size)`. Without a pool (Engine's
+    /// `ThreadPools.NONE`, a synchronous batcher) every batch runs on the calling thread, in order.
+    #[must_use]
+    pub const fn pool(mut self, size: i32) -> Self {
+        self.pool = Some(size);
         self
     }
 
@@ -176,13 +188,14 @@ where
 
     /// `build()`: `TileGeneratorStriped` for a positive batch size with `striped()`,
     /// `TileGeneratorBatched` for a positive batch size without it, the plain `TileGenerator`
-    /// otherwise (whatever `striped()` says). Panics without a factory.
+    /// otherwise (whatever `striped()` and the pool say). Panics without a factory.
     pub fn build(self) -> TileGenerator<H, F> {
         let kind = match (self.batch_size > 0, self.striped) {
             (false, _) => Kind::Plain,
             (true, false) => Kind::Batched,
             (true, true) => Kind::Striped,
         };
+        let batch_threads = Some(self.pool.map_or(1, |size| size.max(2) as usize));
         let (terrains, generator) = self.factory.expect(
             "TileGenerator.Builder.build() without a factory: Engine throws NullPointerException",
         );
@@ -191,6 +204,7 @@ where
             border: self.border,
             batch_size: self.batch_size,
             kind,
+            batch_threads,
             terrains,
             generator,
         }
@@ -219,6 +233,7 @@ where
             border,
             batch_size,
             kind: Kind::Plain,
+            batch_threads: None,
             terrains,
             generator,
         }
@@ -231,6 +246,7 @@ where
             border: 0,
             batch_size: 0,
             striped: false,
+            pool: None,
             factory: None,
         }
     }
@@ -357,8 +373,9 @@ where
 
     /// `TileGeneratorBatched.generateRegion(regionX, regionZ)` with `batch(batch_count)`: an empty
     /// region filled by [`Tile::generate_area`] (`batch_count` squared batches of chunks on
-    /// [`batch_workers`] threads, each chunk as [`drive_chunk`]), then the filters with the optional
-    /// ones. The cells equal the plain generator's for any batch count; only the river-map
+    /// the builder's pool threads, else [`batch_workers`], each chunk as [`drive_chunk`]), then the
+    /// filters with the optional ones. The cells equal the plain generator's for any batch count
+    /// and thread count; only the river-map
     /// lookups differ, as each chunk starts without one. Engine's builder never makes a batched
     /// generator for a count below 1; called with one, it throws, and so does this:
     /// `ArithmeticException` for 0 (`getBatchSize`), and for a negative count, which fills no cell,
@@ -371,7 +388,7 @@ where
         check_batch_count(batch_count);
         let heightmap = self.generator.heightmap();
         let mut tile = self.create_empty_region(region_x, region_z);
-        tile.generate_area(batch_count, batch_workers(), |chunk| {
+        tile.generate_area(batch_count, self.threads(), |chunk| {
             drive_chunk(chunk, heightmap, None);
         });
         self.generator.filters().apply(&mut tile, true);
@@ -397,7 +414,7 @@ where
         let heightmap = self.generator.heightmap();
         let mut tile = self.create_empty_region(0, 0);
         let zoom = Some(Zoom::new(&tile, center_x, center_z, zoom));
-        tile.generate_area(batch_count, batch_workers(), |chunk| {
+        tile.generate_area(batch_count, self.threads(), |chunk| {
             drive_chunk(chunk, heightmap, zoom);
         });
         self.generator.filters().apply(&mut tile, filter);
@@ -414,7 +431,7 @@ where
         check_batch_count(sections);
         let heightmap = self.generator.heightmap();
         let mut tile = self.create_empty_region(region_x, region_z);
-        tile.generate_area_striped(sections, batch_workers(), |chunk| {
+        tile.generate_area_striped(sections, self.threads(), |chunk| {
             drive_chunk(chunk, heightmap, None);
         });
         self.generator.filters().apply(&mut tile, true);
@@ -438,7 +455,7 @@ where
         let heightmap = self.generator.heightmap();
         let mut tile = self.create_empty_region(0, 0);
         let zoom = Some(Zoom::new(&tile, center_x, center_z, zoom));
-        tile.generate_area_striped(sections, batch_workers(), |chunk| {
+        tile.generate_area_striped(sections, self.threads(), |chunk| {
             drive_chunk(chunk, heightmap, zoom);
         });
         self.generator.filters().apply(&mut tile, filter);
@@ -449,6 +466,11 @@ where
     /// border, its cells from the world's registry.
     pub fn create_empty_region(&self, region_x: i32, region_z: i32) -> Tile {
         Tile::new(region_x, region_z, self.factor, self.border, &self.terrains)
+    }
+
+    /// The batch threads: the builder's pool, else Engine's default pool ([`batch_workers`]).
+    fn threads(&self) -> usize {
+        self.batch_threads.unwrap_or_else(batch_workers)
     }
 }
 
@@ -669,7 +691,13 @@ mod tests {
     /// `TileGeneratorStriped` (`batch(n)`, on a four-thread pool) for batch counts 1, 3, 2, 7 and
     /// 100 (zoomed: 3 and 100), with the lookup count and an order-free sum of the stage calls
     /// (their cells equal the `g`/`z` lines'); `e` lines (first run) counts 0 and -2, where Engine
-    /// throws; `s` lines `chunkToRegion` for shift factors Java masks to five bits.
+    /// throws; `u` and `w` lines (runs 0, 2 and 3) generators from Engine's real builder,
+    /// `batch(n)` unset, 0, -3, 1 or 4, with and without `striped()` and a pool: the class `build()`
+    /// picks, its `generateRegion`, its lazy `getTile` and its zoomed `generateRegion` (batched
+    /// for any positive count, 1 included; without a pool the batches run on the calling thread,
+    /// so the stage trace is Engine's too); `s` lines `chunkToRegion` for shift factors Java masks
+    /// to five bits; `d` lines the builder's defaults and overrides, and `n` `build()` without a
+    /// factory, which throws.
     #[test]
     fn tile_generator_matches_engine_oracle() {
         let terrains = Arc::new(TerrainRegistry::new());
@@ -774,6 +802,77 @@ mod tests {
             tile.generate_area(-2, 4, |chunk| drive_chunk(chunk, heightmap, None));
             tile.generate_area_striped(-2, 4, |chunk| drive_chunk(chunk, heightmap, None));
             assert_eq!(heightmap.take_sum(), (0, 0));
+            // The builder: each batch count (unset, 0, -3, 1, 4), striped or not, with or without
+            // a pool; the trace is Engine's only on the calling thread (no pool).
+            let mut combo = 0;
+            let batches: &[Option<i32>] = if matches!(run, 0 | 2 | 3) {
+                &[None, Some(0), Some(-3), Some(1), Some(4)]
+            } else {
+                &[]
+            };
+            for &batch in batches {
+                for striped in [false, true] {
+                    for pool in [false, true] {
+                        let filters = WorldFilters::new(
+                            seed,
+                            settings,
+                            Levels::new(256, 63),
+                            points,
+                            &terrains,
+                        );
+                        let mut builder = TileGenerator::builder().size(factor, border).factory(
+                            Arc::clone(&terrains),
+                            WorldGenerator::new(FillHeightmap::new(kinds.clone()), filters),
+                        );
+                        if let Some(batch) = batch {
+                            builder = builder.batch(batch);
+                        }
+                        if striped {
+                            builder = builder.striped();
+                        }
+                        if pool {
+                            builder = builder.pool(4);
+                        }
+                        let built = builder.build();
+                        let heightmap = built.generator().heightmap();
+                        let head = format!(
+                            "{run} {} {} {}",
+                            batch.map_or("-".into(), |batch| batch.to_string()),
+                            u8::from(striped),
+                            u8::from(pool)
+                        );
+                        let trace = |(lookups, trace): (i32, i64), sum: i64| {
+                            let trace = if pool {
+                                "-".into()
+                            } else {
+                                format!("{trace:x}")
+                            };
+                            format!("{lookups} {trace} {sum:x}")
+                        };
+                        let take = || {
+                            let sum = heightmap.sum.load(Ordering::SeqCst);
+                            trace(heightmap.take(), sum)
+                        };
+                        let tile = built.generate_region(region_x, region_z);
+                        let stages = take();
+                        let class = match built.kind {
+                            Kind::Plain => "TileGenerator",
+                            Kind::Batched => "TileGeneratorBatched",
+                            Kind::Striped => "TileGeneratorStriped",
+                        };
+                        let lazy = fold_tile(built.get_tile(region_x, region_z).get());
+                        heightmap.take();
+                        let cells = fold_tile(&tile);
+                        out += &format!("u {head} {class} {stages} {cells:x} {lazy:x}\n");
+                        let set = (run + combo) % zooms.len();
+                        let (center_x, center_z, zoom, filter) = zooms[set];
+                        let tile = built.generate_zoomed_region(center_x, center_z, zoom, filter);
+                        let stages = take();
+                        out += &format!("w {head} {set} {stages} {:x}\n", fold_tile(&tile));
+                        combo += 1;
+                    }
+                }
+            }
             let (center_x, center_z, zoom, filter) = zooms[run % zooms.len()];
             let regular = generator.get_tile(region_x, region_z);
             let zoomed = generator.get_zoomed_tile(center_x, center_z, zoom, filter);
@@ -809,6 +908,55 @@ mod tests {
             }
             out += "\n";
         }
+        // The builder's defaults (factor 0, border 0, plain), the last call winning, `striped()` and
+        // a pool alone keeping the plain generator, and `build()` without a factory.
+        for case in 0..3 {
+            let filters = WorldFilters::new(
+                77,
+                FilterSettings::default(),
+                Levels::new(256, 63),
+                WorldControlPoints::default(),
+                &terrains,
+            );
+            let heightmap = FillHeightmap::new(kinds.clone());
+            let mut builder = TileGenerator::builder().factory(
+                Arc::clone(&terrains),
+                WorldGenerator::new(heightmap, filters),
+            );
+            if case == 1 {
+                builder = builder
+                    .size(3, 2)
+                    .factor(1)
+                    .border(0)
+                    .batch(5)
+                    .batch(0)
+                    .striped();
+            } else if case == 2 {
+                builder = builder.batch(-1).striped().pool(4);
+            }
+            let built = builder.build();
+            assert_eq!(built.kind, Kind::Plain);
+            let tile = built.generate_region(-1, 2);
+            let (lookups, trace) = built.generator().heightmap().take();
+            let (chunks, blocks) = (tile.chunk_size(), tile.block_size());
+            out += &format!(
+                "d {case} TileGenerator {} {} {} {} {} {lookups} {trace:x} {:x}\n",
+                chunks.total,
+                blocks.size,
+                blocks.total,
+                tile.region_x(),
+                tile.region_z(),
+                fold_tile(&tile)
+            );
+        }
+        let unbuilt = std::panic::catch_unwind(|| {
+            TileGenerator::<FillHeightmap, NoFilters>::builder()
+                .size(1, 1)
+                .batch(2)
+                .build()
+        });
+        assert!(unbuilt.is_err());
+        out += "n throws NullPointerException\n";
         assert_eq!(out, ORACLE);
     }
 
@@ -870,40 +1018,29 @@ mod tests {
         assert!(matches!(payload.downcast_ref::<i32>(), Some(0..=3)));
     }
 
+    /// The builder's pool: `ThreadPools.create(size)` has `max(2, size)` batch threads, no pool
+    /// runs the batches on the calling thread, and [`TileGenerator::new`] uses the default pool.
     #[test]
-    fn tile_generator_builder_matches_engine_0_3_0() {
+    fn builder_pools_set_the_batch_threads() {
         let terrains = Arc::new(TerrainRegistry::new());
         let kinds = ["none", "coast", "beach", "hills"]
             .map(|name| terrains.get_by_name(name).expect("built-in terrain"));
         let create = || WorldGenerator::new(FillHeightmap::new(kinds.clone()), NoFilters);
-        let plain = TileGenerator::new(1, 0, 0, Arc::clone(&terrains), create());
-        let expected = fold_tile(&plain.generate_region(1, -1));
-
-        let direct = TileGenerator::builder()
-            .size(1, 0)
-            .batch(0)
-            .striped()
-            .factory(Arc::clone(&terrains), create())
-            .build();
-        assert_eq!(direct.kind, Kind::Plain);
-
-        let batched = TileGenerator::builder()
-            .factor(1)
-            .border(0)
-            .batch(3)
-            .factory(Arc::clone(&terrains), create())
-            .build();
-        assert_eq!(batched.kind, Kind::Batched);
-        assert_eq!(fold_tile(&batched.generate_region(1, -1)), expected);
-
-        let striped = TileGenerator::builder()
-            .size(1, 0)
-            .batch(3)
-            .striped()
-            .factory(Arc::clone(&terrains), create())
-            .build();
-        assert_eq!(striped.kind, Kind::Striped);
-        assert_eq!(fold_tile(&striped.generate_region(1, -1)), expected);
+        let built = |pool: Option<i32>| {
+            let mut builder = TileGenerator::builder()
+                .batch(2)
+                .factory(Arc::clone(&terrains), create());
+            if let Some(size) = pool {
+                builder = builder.pool(size);
+            }
+            builder.build().batch_threads
+        };
+        assert_eq!(built(None), Some(1));
+        for (size, threads) in [(-5, 2), (0, 2), (1, 2), (2, 2), (8, 8)] {
+            assert_eq!(built(Some(size)), Some(threads));
+        }
+        let plain = TileGenerator::new(0, 0, 2, Arc::clone(&terrains), create());
+        assert_eq!((plain.kind, plain.batch_threads), (Kind::Plain, None));
     }
 
     /// Engine shares one tile generator between its generation threads.
@@ -995,6 +1132,46 @@ e 0 0 0 throws ArithmeticException
 e 0 0 -2 throws NullPointerException
 e 0 1 0 throws ArithmeticException
 e 0 1 -2 throws NullPointerException
+u 0 - 0 0 TileGenerator 132 933dedba501bf8f1 ff293731a8dcafe2 2afe9d3c12774c0d 2afe9d3c12774c0d
+w 0 - 0 0 0 134 8ea15ead27a7ffee 1d834f8cd92c605 4166d8e307e01385
+u 0 - 0 1 TileGenerator 132 - ff293731a8dcafe2 2afe9d3c12774c0d 2afe9d3c12774c0d
+w 0 - 0 1 1 637 - fefc13f22665e006 29ad7e3985d0e0bc
+u 0 - 1 0 TileGenerator 132 933dedba501bf8f1 ff293731a8dcafe2 2afe9d3c12774c0d 2afe9d3c12774c0d
+w 0 - 1 0 2 256 6727ea6ac494b891 21f82f7b65700 d25a67c809fc7d0
+u 0 - 1 1 TileGenerator 132 - ff293731a8dcafe2 2afe9d3c12774c0d 2afe9d3c12774c0d
+w 0 - 1 1 3 8 - 3a5386a6f864af4 c94e0748cd32a3cd
+u 0 0 0 0 TileGenerator 132 933dedba501bf8f1 ff293731a8dcafe2 2afe9d3c12774c0d 2afe9d3c12774c0d
+w 0 0 0 0 4 388 b8f70426f6f55903 23001b79eacc210 ff2a52d36fd50b5d
+u 0 0 0 1 TileGenerator 132 - ff293731a8dcafe2 2afe9d3c12774c0d 2afe9d3c12774c0d
+w 0 0 0 1 0 134 - 1d834f8cd92c605 4166d8e307e01385
+u 0 0 1 0 TileGenerator 132 933dedba501bf8f1 ff293731a8dcafe2 2afe9d3c12774c0d 2afe9d3c12774c0d
+w 0 0 1 0 1 637 4ecaf1596e70d26 fefc13f22665e006 29ad7e3985d0e0bc
+u 0 0 1 1 TileGenerator 132 - ff293731a8dcafe2 2afe9d3c12774c0d 2afe9d3c12774c0d
+w 0 0 1 1 2 256 - 21f82f7b65700 d25a67c809fc7d0
+u 0 -3 0 0 TileGenerator 132 933dedba501bf8f1 ff293731a8dcafe2 2afe9d3c12774c0d 2afe9d3c12774c0d
+w 0 -3 0 0 3 8 8f7006778fc0c8d 3a5386a6f864af4 c94e0748cd32a3cd
+u 0 -3 0 1 TileGenerator 132 - ff293731a8dcafe2 2afe9d3c12774c0d 2afe9d3c12774c0d
+w 0 -3 0 1 4 388 - 23001b79eacc210 ff2a52d36fd50b5d
+u 0 -3 1 0 TileGenerator 132 933dedba501bf8f1 ff293731a8dcafe2 2afe9d3c12774c0d 2afe9d3c12774c0d
+w 0 -3 1 0 0 134 8ea15ead27a7ffee 1d834f8cd92c605 4166d8e307e01385
+u 0 -3 1 1 TileGenerator 132 - ff293731a8dcafe2 2afe9d3c12774c0d 2afe9d3c12774c0d
+w 0 -3 1 1 1 637 - fefc13f22665e006 29ad7e3985d0e0bc
+u 0 1 0 0 TileGeneratorBatched 140 e61f5dd69ccf3871 ff293731a98fd032 2afe9d3c12774c0d 2afe9d3c12774c0d
+w 0 1 0 0 2 264 1f60d3571d48855 21f82f8697838 d25a67c809fc7d0
+u 0 1 0 1 TileGeneratorBatched 140 - ff293731a98fd032 2afe9d3c12774c0d 2afe9d3c12774c0d
+w 0 1 0 1 3 20 - 3a5386a7092fd84 c94e0748cd32a3cd
+u 0 1 1 0 TileGeneratorStriped 140 e61f5dd69ccf3871 ff293731a98fd032 2afe9d3c12774c0d 2afe9d3c12774c0d
+w 0 1 1 0 4 391 17e0ef8926dd9870 23001b8816f54d4 ff2a52d36fd50b5d
+u 0 1 1 1 TileGeneratorStriped 140 - ff293731a98fd032 2afe9d3c12774c0d 2afe9d3c12774c0d
+w 0 1 1 1 0 143 - 1d834f8ce5c4fe1 4166d8e307e01385
+u 0 4 0 0 TileGeneratorBatched 140 e61f5dd69ccf3871 ff293731a98fd032 2afe9d3c12774c0d 2afe9d3c12774c0d
+w 0 4 0 0 1 640 379305f14f2fd451 fefc13f226a90bf4 29ad7e3985d0e0bc
+u 0 4 0 1 TileGeneratorBatched 140 - ff293731a98fd032 2afe9d3c12774c0d 2afe9d3c12774c0d
+w 0 4 0 1 2 264 - 21f82f8697838 d25a67c809fc7d0
+u 0 4 1 0 TileGeneratorStriped 140 e61f5dd69ccf3871 ff293731a98fd032 2afe9d3c12774c0d 2afe9d3c12774c0d
+w 0 4 1 0 3 20 7699b0f6fa05ff4d 3a5386a7092fd84 c94e0748cd32a3cd
+u 0 4 1 1 TileGeneratorStriped 140 - ff293731a98fd032 2afe9d3c12774c0d 2afe9d3c12774c0d
+w 0 4 1 1 4 391 - 23001b8816f54d4 ff2a52d36fd50b5d
 l 0 false 0 11 132 933dedba501bf8f1 -1 2 2afe9d3c12774c0d true 0 11 true
 m 0 false 0 11 134 8ea15ead27a7ffee 0 0 4166d8e307e01385 true 0 11 true
 g 1 397 7245952d37687c55 e76a63e92f8379dd
@@ -1039,6 +1216,46 @@ b 2 1 2 66 76f754be1ac50e 40bc3ec1ab771b58
 b 2 1 7 66 76f754be1ac50e 40bc3ec1ab771b58
 b 2 1 100 66 76f754be1ac50e 40bc3ec1ab771b58
 y 2 1 100 2 4 fffdc4acb8ae1c9c 4756c143b5e81e07
+u 2 - 0 0 TileGenerator 64 1dec756bf463a431 76f754bdedfca0 40bc3ec1ab771b58 40bc3ec1ab771b58
+w 2 - 0 0 2 4 7984c67e49e48d73 fffdc4acb8ae1c9c 4756c143b5e81e07
+u 2 - 0 1 TileGenerator 64 - 76f754bdedfca0 40bc3ec1ab771b58 40bc3ec1ab771b58
+w 2 - 0 1 3 4 - e9bf5b962e5b7a a6e0dce0067b12e9
+u 2 - 1 0 TileGenerator 64 1dec756bf463a431 76f754bdedfca0 40bc3ec1ab771b58 40bc3ec1ab771b58
+w 2 - 1 0 4 66 d5ffa2bb28613a2a 8c0064c0977191 51601f1cf26142c
+u 2 - 1 1 TileGenerator 64 - 76f754bdedfca0 40bc3ec1ab771b58 40bc3ec1ab771b58
+w 2 - 1 1 0 64 - 760d408fefbd60 bd0ab1842c50e7af
+u 2 0 0 0 TileGenerator 64 1dec756bf463a431 76f754bdedfca0 40bc3ec1ab771b58 40bc3ec1ab771b58
+w 2 0 0 0 1 128 3822735c75797611 ff90805455b5c7a0 cb3b77fd7a9dc52
+u 2 0 0 1 TileGenerator 64 - 76f754bdedfca0 40bc3ec1ab771b58 40bc3ec1ab771b58
+w 2 0 0 1 2 4 - fffdc4acb8ae1c9c 4756c143b5e81e07
+u 2 0 1 0 TileGenerator 64 1dec756bf463a431 76f754bdedfca0 40bc3ec1ab771b58 40bc3ec1ab771b58
+w 2 0 1 0 3 4 ae3ae2c61568fccf e9bf5b962e5b7a a6e0dce0067b12e9
+u 2 0 1 1 TileGenerator 64 - 76f754bdedfca0 40bc3ec1ab771b58 40bc3ec1ab771b58
+w 2 0 1 1 4 66 - 8c0064c0977191 51601f1cf26142c
+u 2 -3 0 0 TileGenerator 64 1dec756bf463a431 76f754bdedfca0 40bc3ec1ab771b58 40bc3ec1ab771b58
+w 2 -3 0 0 0 64 83a19de368360031 760d408fefbd60 bd0ab1842c50e7af
+u 2 -3 0 1 TileGenerator 64 - 76f754bdedfca0 40bc3ec1ab771b58 40bc3ec1ab771b58
+w 2 -3 0 1 1 128 - ff90805455b5c7a0 cb3b77fd7a9dc52
+u 2 -3 1 0 TileGenerator 64 1dec756bf463a431 76f754bdedfca0 40bc3ec1ab771b58 40bc3ec1ab771b58
+w 2 -3 1 0 2 4 7984c67e49e48d73 fffdc4acb8ae1c9c 4756c143b5e81e07
+u 2 -3 1 1 TileGenerator 64 - 76f754bdedfca0 40bc3ec1ab771b58 40bc3ec1ab771b58
+w 2 -3 1 1 3 4 - e9bf5b962e5b7a a6e0dce0067b12e9
+u 2 1 0 0 TileGeneratorBatched 66 31382c358b7f3b11 76f754be1ac50e 40bc3ec1ab771b58 40bc3ec1ab771b58
+w 2 1 0 0 4 67 deedfbcef3f19ba 8c00650c2da25e 51601f1cf26142c
+u 2 1 0 1 TileGeneratorBatched 66 - 76f754be1ac50e 40bc3ec1ab771b58 40bc3ec1ab771b58
+w 2 1 0 1 0 66 - 760d40901c86c2 bd0ab1842c50e7af
+u 2 1 1 0 TileGeneratorStriped 66 31382c358b7f3b11 76f754be1ac50e 40bc3ec1ab771b58 40bc3ec1ab771b58
+w 2 1 1 0 1 128 3822735c75797611 ff90805455b5c7a0 cb3b77fd7a9dc52
+u 2 1 1 1 TileGeneratorStriped 66 - 76f754be1ac50e 40bc3ec1ab771b58 40bc3ec1ab771b58
+w 2 1 1 1 2 4 - fffdc4acb8ae1c9c 4756c143b5e81e07
+u 2 4 0 0 TileGeneratorBatched 66 31382c358b7f3b11 76f754be1ac50e 40bc3ec1ab771b58 40bc3ec1ab771b58
+w 2 4 0 0 3 6 d15fcfd95dd2cb4f e9bf5b965b23e8 a6e0dce0067b12e9
+u 2 4 0 1 TileGeneratorBatched 66 - 76f754be1ac50e 40bc3ec1ab771b58 40bc3ec1ab771b58
+w 2 4 0 1 4 67 - 8c00650c2da25e 51601f1cf26142c
+u 2 4 1 0 TileGeneratorStriped 66 31382c358b7f3b11 76f754be1ac50e 40bc3ec1ab771b58 40bc3ec1ab771b58
+w 2 4 1 0 0 66 de31c0b5ca85951 760d40901c86c2 bd0ab1842c50e7af
+u 2 4 1 1 TileGeneratorStriped 66 - 76f754be1ac50e 40bc3ec1ab771b58 40bc3ec1ab771b58
+w 2 4 1 1 1 128 - ff90805455b5c7a0 cb3b77fd7a9dc52
 l 2 false 0 11 64 1dec756bf463a431 0 0 40bc3ec1ab771b58 true 0 11 true
 m 2 false 0 11 4 7984c67e49e48d73 0 0 4756c143b5e81e07 true 0 11 true
 g 3 326 e3c4cdf7c5eefaee 6f363908c2b37e18
@@ -1061,6 +1278,46 @@ b 3 1 2 338 fd5fd1e315136131 6f363908c2b37e18
 b 3 1 7 338 fd5fd1e315136131 6f363908c2b37e18
 b 3 1 100 338 fd5fd1e315136131 6f363908c2b37e18
 y 3 1 100 3 30 5b1a07cd4c1ae73 c7d462f17993a8db
+u 3 - 0 0 TileGenerator 326 e3c4cdf7c5eefaee fd5fd1e31406b5b7 6f363908c2b37e18 6f363908c2b37e18
+w 3 - 0 0 3 10 e5baee091137038c 5b1a07cd301da31 c7d462f17993a8db
+u 3 - 0 1 TileGenerator 326 - fd5fd1e31406b5b7 6f363908c2b37e18 6f363908c2b37e18
+w 3 - 0 1 4 490 - 36b028c8db94a8c b4a4cebe6cb0976c
+u 3 - 1 0 TileGenerator 326 e3c4cdf7c5eefaee fd5fd1e31406b5b7 6f363908c2b37e18 6f363908c2b37e18
+w 3 - 1 0 0 18 3b45073f941ef450 2e1d26995cfc911 6ca6c7d6745fb36a
+u 3 - 1 1 TileGenerator 326 - fd5fd1e31406b5b7 6f363908c2b37e18 6f363908c2b37e18
+w 3 - 1 1 1 876 - fec0d50e0bd1c540 339683019cd47a84
+u 3 0 0 0 TileGenerator 326 e3c4cdf7c5eefaee fd5fd1e31406b5b7 6f363908c2b37e18 6f363908c2b37e18
+w 3 0 0 0 2 176 c1be527b1c6e9de9 781538f7545d0 ee52c23ae4267780
+u 3 0 0 1 TileGenerator 326 - fd5fd1e31406b5b7 6f363908c2b37e18 6f363908c2b37e18
+w 3 0 0 1 3 10 - 5b1a07cd301da31 c7d462f17993a8db
+u 3 0 1 0 TileGenerator 326 e3c4cdf7c5eefaee fd5fd1e31406b5b7 6f363908c2b37e18 6f363908c2b37e18
+w 3 0 1 0 4 490 10079d51f1cdcca3 36b028c8db94a8c b4a4cebe6cb0976c
+u 3 0 1 1 TileGenerator 326 - fd5fd1e31406b5b7 6f363908c2b37e18 6f363908c2b37e18
+w 3 0 1 1 0 18 - 2e1d26995cfc911 6ca6c7d6745fb36a
+u 3 -3 0 0 TileGenerator 326 e3c4cdf7c5eefaee fd5fd1e31406b5b7 6f363908c2b37e18 6f363908c2b37e18
+w 3 -3 0 0 1 876 c2eea373f1f90a33 fec0d50e0bd1c540 339683019cd47a84
+u 3 -3 0 1 TileGenerator 326 - fd5fd1e31406b5b7 6f363908c2b37e18 6f363908c2b37e18
+w 3 -3 0 1 2 176 - 781538f7545d0 ee52c23ae4267780
+u 3 -3 1 0 TileGenerator 326 e3c4cdf7c5eefaee fd5fd1e31406b5b7 6f363908c2b37e18 6f363908c2b37e18
+w 3 -3 1 0 3 10 e5baee091137038c 5b1a07cd301da31 c7d462f17993a8db
+u 3 -3 1 1 TileGenerator 326 - fd5fd1e31406b5b7 6f363908c2b37e18 6f363908c2b37e18
+w 3 -3 1 1 4 490 - 36b028c8db94a8c b4a4cebe6cb0976c
+u 3 1 0 0 TileGeneratorBatched 338 87bde3f5fa751ace fd5fd1e315136131 6f363908c2b37e18 6f363908c2b37e18
+w 3 1 0 0 0 30 78250de8f9e4dbf5 2e1d26996dc80e4 6ca6c7d6745fb36a
+u 3 1 0 1 TileGeneratorBatched 338 - fd5fd1e315136131 6f363908c2b37e18 6f363908c2b37e18
+w 3 1 0 1 1 880 - fec0d50e0c2b5520 339683019cd47a84
+u 3 1 1 0 TileGeneratorStriped 338 87bde3f5fa751ace fd5fd1e315136131 6f363908c2b37e18 6f363908c2b37e18
+w 3 1 1 0 2 184 de53149a01189ea5 7815390286708 ee52c23ae4267780
+u 3 1 1 1 TileGeneratorStriped 338 - fd5fd1e315136131 6f363908c2b37e18 6f363908c2b37e18
+w 3 1 1 1 3 30 - 5b1a07cd4c1ae73 c7d462f17993a8db
+u 3 4 0 0 TileGeneratorBatched 338 30c880544cc985b0 fd5fd1e315136131 6f363908c2b37e18 6f363908c2b37e18
+w 3 4 0 0 4 496 b12c823d4a6b6315 36b028e533e6f86 b4a4cebe6cb0976c
+u 3 4 0 1 TileGeneratorBatched 338 - fd5fd1e315136131 6f363908c2b37e18 6f363908c2b37e18
+w 3 4 0 1 0 30 - 2e1d26996dc80e4 6ca6c7d6745fb36a
+u 3 4 1 0 TileGeneratorStriped 338 87bde3f5fa751ace fd5fd1e315136131 6f363908c2b37e18 6f363908c2b37e18
+w 3 4 1 0 1 880 37671de9185e4711 fec0d50e0c2b5520 339683019cd47a84
+u 3 4 1 1 TileGeneratorStriped 338 - fd5fd1e315136131 6f363908c2b37e18 6f363908c2b37e18
+w 3 4 1 1 2 184 - 7815390286708 ee52c23ae4267780
 l 3 false 0 11 326 e3c4cdf7c5eefaee -7 9 6f363908c2b37e18 true 0 11 true
 m 3 false 0 11 10 e5baee091137038c 0 0 c7d462f17993a8db true 0 11 true
 g 4 1568 b599986399fb3e01 9a47ad4f7c38f0ee
@@ -1115,5 +1372,9 @@ s 32 0 1 -1 7 -8 1000 -1000 2147483647 -2147483648
 s 33 0 0 -1 3 -4 500 -500 1073741823 -1073741824
 s -1 0 0 -1 0 -1 0 -1 0 -1
 s -31 0 0 -1 3 -4 500 -500 1073741823 -1073741824
+d 0 TileGenerator 1 16 16 -1 2 2 9ceef3334738d850 184eae53c5bf6135
+d 1 TileGenerator 2 32 32 -1 2 64 84688545135fa31 d9741ee0027beed3
+d 2 TileGenerator 1 16 16 -1 2 2 9ceef3334738d850 184eae53c5bf6135
+n throws NullPointerException
 ";
 }
