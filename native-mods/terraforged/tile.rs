@@ -417,7 +417,8 @@ impl ChunkReader<'_> {
     /// `visit(minX, minZ, maxX, maxZ, visitor)`, Engine's bugs included: it returns early when
     /// `maxZ` is past the chunk's last block (rather than `minZ`), and its loops run `z` from
     /// `minZ` to the clamped `maxX` and `x` from `minX` to the clamped `maxZ`. Where Engine's loop
-    /// never ends (a bound of `i32::MAX`, only for the chunk at block 0x7FFF_FFF0), this one stops.
+    /// never ends (a clamped bound of `i32::MAX`: a chunk at block x or z 0x7FFF_FFF0), this one
+    /// stops.
     pub fn visit(
         &self,
         min_x: i32,
@@ -439,6 +440,11 @@ impl ChunkReader<'_> {
         let min_z = min_z.max(region_min_z);
         let max_x = max_x.min(region_max_x);
         let max_z = max_z.min(region_max_z);
+        // With swapped bounds the outer loop can span ~2^32 rows of an empty inner loop (a chunk far
+        // off the x = z diagonal); skipping it visits the same cells.
+        if min_x > max_z {
+            return;
+        }
         for z in min_z..=max_x {
             for x in min_x..=max_z {
                 visitor(self.cell(x, z), x, z);
