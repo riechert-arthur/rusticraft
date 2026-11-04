@@ -727,7 +727,7 @@ impl Steepness {
 
 /// `Tile.getCellRaw(x, z)` with Java `int` coordinates: the index `z * total + x` wraps like Java's,
 /// and an index outside the backing array is `Cell.empty()` (`None`).
-fn java_cell_raw(map: &impl Filterable, x: i32, z: i32) -> Option<&Cell> {
+pub fn java_cell_raw(map: &impl Filterable, x: i32, z: i32) -> Option<&Cell> {
     let index = z.wrapping_mul(map.total_size() as i32).wrapping_add(x);
     usize::try_from(index)
         .ok()

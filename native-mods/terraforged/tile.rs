@@ -222,7 +222,8 @@ impl Tile {
     }
 
     /// `getCell(blockX, blockZ)`: the non-border cell at a world block position, wrapped into the
-    /// tile with `mask`.
+    /// tile with `mask`. Panics where Engine throws (a negative border or a zero block size can
+    /// put the masked index outside the backing).
     pub fn cell(&self, block_x: i32, block_z: i32) -> &Cell {
         &self.blocks[self.masked_index(block_x, block_z)]
     }
@@ -263,6 +264,8 @@ pub struct FilterRegion<'tile> {
     tile: &'tile mut Tile,
 }
 
+// `total_size`/`border_size` are Java `int`s stored as `usize`: the filters cast them back to `i32`
+// for Java math, so a negative border (or the negative total of an absurd size factor) round-trips.
 impl Filterable for FilterRegion<'_> {
     fn block_x(&self) -> i32 {
         self.tile.block_x
@@ -291,6 +294,7 @@ impl Filterable for FilterRegion<'_> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::terraforged_filters::java_cell_raw;
     use super::*;
 
     #[test]
@@ -513,8 +517,144 @@ mod tests {
         let mut filter = tile.filterable();
         assert_eq!((filter.block_x(), filter.block_z()), (-128, 192));
         assert_eq!((filter.total_size(), filter.border_size()), (96, 16));
-        assert_eq!(filter.backing()[677].value, 677.0);
+        assert_eq!(java_cell_raw(&filter, 5, 7).unwrap().value, 677.0);
+        assert!(java_cell_raw(&filter, -1, 0).is_none());
         filter.backing_mut()[677].value = -1.0;
         assert_eq!(tile.blocks[677].value, -1.0);
+    }
+
+    /// Replays `TileOracle.java` (`.local/terraforged/oracles/tile/`) on Engine 0.3.0's `Tile` and
+    /// its `FilterRegion`, for tiles with negative, `i32::MIN`/`MAX` and wrapping region positions,
+    /// shift factors Java masks to five bits (33, -31, 31: a zero block size), no border and
+    /// negative borders. Each `t` line has the tile's getters and its filter region's position and
+    /// size; the next line folds, over every pair of `VALUES` (negative, border, edge and
+    /// overflowing coordinates), `getCell`, `getRawCell` (-2 where Java throws) and the filter
+    /// region's `getCellRaw` (-1 for `Cell.empty()`), with each cell's value set to its index.
+    #[test]
+    fn tile_matches_engine_oracle() {
+        const VALUES: [i32; 33] = [
+            0,
+            1,
+            -1,
+            2,
+            5,
+            7,
+            15,
+            16,
+            17,
+            -16,
+            -17,
+            31,
+            32,
+            63,
+            64,
+            79,
+            80,
+            95,
+            96,
+            97,
+            127,
+            191,
+            192,
+            -96,
+            677,
+            1023,
+            1024,
+            9215,
+            9216,
+            0x4000_0000,
+            i32::MAX,
+            i32::MIN,
+            i32::MIN + 1,
+        ];
+        let code =
+            |cell: Option<&Cell>, missing: i32| cell.map_or(missing, |cell| cell.value as i32);
+        let terrains = TerrainRegistry::new();
+        let mut out = String::new();
+        for (region_x, region_z, size, border) in [
+            (-2, 3, 2, 1),
+            (0, 0, 3, 2),
+            (5, -7, 1, 0),
+            (i32::MIN, i32::MAX, 2, 1),
+            (1000, -1000, 33, 1),
+            (3, -3, -31, 1),
+            (1, 1, 0, 0),
+            (-1, -1, 4, 1),
+            (7, -9, 31, 1),
+            (2, 2, 1, -1),
+            (-3, 4, 3, -1),
+            (0x1234_5678, -0x0765_4321, 2, 1),
+        ] {
+            let mut tile = Tile::new(region_x, region_z, size, border, &terrains);
+            for (index, cell) in tile.blocks.iter_mut().enumerate() {
+                cell.value = index as f32;
+            }
+            let id = tile.region_id();
+            out += &format!(
+                "t {region_x} {region_z} {size} {border}: {} {} {} {} {} {} {} {} {} {id:x} {} {} {}",
+                tile.generation_size(),
+                tile.region_x(),
+                tile.region_z(),
+                tile.chunk_x(),
+                tile.chunk_z(),
+                tile.block_x(),
+                tile.block_z(),
+                tile.offset_chunks(),
+                tile.chunk_count(),
+                Tile::region_x_from(id),
+                Tile::region_z_from(id),
+                tile.block_count(),
+            );
+            let (mut cells, mut raws, mut filtered) = (17_i64, 17_i64, 17_i64);
+            for a in VALUES {
+                for b in VALUES {
+                    // `getCell` throws where its masked index leaves the backing (negative borders,
+                    // a zero block size); `cell` panics there, so the test reads the index itself.
+                    let index = tile.masked_index(a, b);
+                    cells = fold(cells, code(tile.blocks.get(index), -2));
+                    raws = fold(raws, code(tile.raw_cell(a, b), -2));
+                }
+            }
+            let filter = tile.filterable();
+            for a in VALUES {
+                for b in VALUES {
+                    filtered = fold(filtered, code(java_cell_raw(&filter, a, b), -1));
+                }
+            }
+            out += &format!(
+                " {} {} {} {}\nc {cells:x} {raws:x} {filtered:x}\n",
+                filter.block_x(),
+                filter.block_z(),
+                filter.total_size() as i32,
+                filter.border_size() as i32,
+            );
+        }
+        assert_eq!(
+            out,
+            "t -2 3 2 1: 2 -2 3 -8 12 -128 192 1 36 fffffffe00000003 -2 3 9216 -128 192 96 16\n\
+             c 4676d075e0c79d72 b8ad21aa9d7c1add 2daac5ee4e89e63a\n\
+             t 0 0 3 2: 3 0 0 0 0 0 0 2 144 0 0 0 36864 0 0 192 32\n\
+             c 510c8edd09604322 d0aa76a15123f3a0 6301d39e8beafa1d\n\
+             t 5 -7 1 0: 1 5 -7 10 -14 160 -224 0 4 5fffffff9 5 -7 1024 160 -224 32 0\n\
+             c cbd45f5a68cd9ea2 f1726c9ac36e6c7e 20b1e9c66e7eaf3c\n\
+             t -2147483648 2147483647 2 1: 2 -2147483648 2147483647 0 -4 0 -64 1 36 800000007fffffff -2147483648 2147483647 9216 0 -64 96 16\n\
+             c 4676d075e0c79d72 b8ad21aa9d7c1add 2daac5ee4e89e63a\n\
+             t 1000 -1000 33 1: 33 1000 -1000 2000 -2000 32000 -32000 1 16 3e8fffffc18 1000 -1000 4096 32000 -32000 64 16\n\
+             c 3eb1d77f7c592912 75d86ccb1f1fa8ff b6796627a9c02f3d\n\
+             t 3 -3 -31 1: -31 3 -3 6 -6 96 -96 1 16 3fffffffd 3 -3 4096 96 -96 64 16\n\
+             c 3eb1d77f7c592912 75d86ccb1f1fa8ff b6796627a9c02f3d\n\
+             t 1 1 0 0: 0 1 1 1 1 16 16 0 1 100000001 1 1 256 16 16 16 0\n\
+             c aa0f449a2540aa2 efe2f61fa6f19be4 1aee21c40bb74705\n\
+             t -1 -1 4 1: 4 -1 -1 -16 -16 -256 -256 1 324 ffffffffffffffff -1 -1 82944 -256 -256 288 16\n\
+             c 70e0414be31d7032 ef395657a637f88 bccfd1f1bb1a87c8\n\
+             t 7 -9 31 1: 31 7 -9 -2147483648 -2147483648 0 0 1 4 7fffffff7 7 -9 1024 0 0 32 16\n\
+             c b47b2f48dbcb99c f1726c9ac36e6c7e 20b1e9c66e7eaf3c\n\
+             t 2 2 1 -1: 1 2 2 4 4 64 64 -1 0 200000002 2 2 0 64 64 0 -16\n\
+             c ee6f3c4f6bd9120d ee6f3c4f6bd9120d 983a098804c0ce0e\n\
+             t -3 4 3 -1: 3 -3 4 -24 32 -384 512 -1 36 fffffffd00000004 -3 4 9216 -384 512 96 -16\n\
+             c 92264f80fb20476d b8ad21aa9d7c1add 2daac5ee4e89e63a\n\
+             t 305419896 -124076833 2 1: 2 305419896 -124076833 1221679584 -496307332 -1927963136 649017280 1 36 12345678f89abcdf 305419896 -124076833 9216 -1927963136 649017280 96 16\n\
+             c 4676d075e0c79d72 b8ad21aa9d7c1add 2daac5ee4e89e63a\n"
+        );
     }
 }
