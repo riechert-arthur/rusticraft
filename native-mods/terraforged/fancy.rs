@@ -25,10 +25,8 @@
 use horizon_core::random::{LegacyRandom, RandomSource};
 
 use super::{
-    terraforged::{
-        Domain, Interpolation, Line, Module, Source, SourceConfig, SourceKind, cos, java_max,
-        java_min, lerp, map, noise_curve, sin,
-    },
+    terraforged::{Domain, Line, SourceKind, cos, java_max, java_min, lerp, map, noise_curve, sin},
+    terraforged_continent::noise_warp,
     terraforged_engine::{Cell, ControlPoints, Seed, WorldSettings},
     terraforged_populator::Populator,
     terraforged_util::{
@@ -298,22 +296,26 @@ impl Island {
     }
 }
 
+/// Engine's `FancyContinent`: a main island and four arms of three ever smaller satellite islands, built from a
+/// `java.util.Random` seeded with the generator's first seed. The river generator it holds is not ported.
 pub struct FancyContinent {
     islands: Vec<Island>,
 }
 
 impl FancyContinent {
-    pub fn new(seed: i32, nodes: usize, radius: f32, control_points: ControlPoints) -> Self {
+    pub fn new(seed: i32, nodes: i32, radius: f32, control_points: ControlPoints) -> Self {
+        // `new Random(seed)`: the int seed widens to a long with sign extension.
         let mut random = LegacyRandom::new(i64::from(seed));
         Self {
             islands: Self::generate_islands(control_points, 3, nodes, radius, &mut random),
         }
     }
 
+    /// `getValue`: the largest island edge value (`Math.max(v, value)` keeps a NaN).
     pub fn value(&self, x: f32, y: f32) -> f32 {
-        self.islands
-            .iter()
-            .fold(0.0_f32, |value, island| value.max(island.edge_value(x, y)))
+        self.islands.iter().fold(0.0, |value, island| {
+            java_max(island.edge_value(x, y), value)
+        })
     }
 
     pub fn main(&self) -> &Island {
@@ -324,32 +326,38 @@ impl FancyContinent {
         &self.islands
     }
 
+    /// `getMin`: the smallest island minimum, packed as raw float bits.
     pub fn min(&self) -> i64 {
         let mut x = f32::MAX;
         let mut z = f32::MAX;
         for island in &self.islands {
-            x = x.min(island.min().x);
-            z = z.min(island.min().y);
+            x = java_min(x, island.min().x);
+            z = java_min(z, island.min().y);
         }
         pack_floats(x, z)
     }
 
+    /// `getMax`: as in Engine, the largest island *minimum* (not maximum), starting at `Float.MIN_VALUE` (the
+    /// smallest positive subnormal).
     pub fn max(&self) -> i64 {
-        let mut x = f32::MIN_POSITIVE;
-        let mut z = f32::MIN_POSITIVE;
+        let mut x = f32::from_bits(1);
+        let mut z = f32::from_bits(1);
         for island in &self.islands {
-            x = x.max(island.min().x);
-            z = z.max(island.min().y);
+            x = java_max(x, island.min().x);
+            z = java_max(z, island.min().y);
         }
         pack_floats(x, z)
     }
 
+    /// `getLandValue`: the largest island land value.
     pub fn land_value(&self, x: f32, y: f32) -> f32 {
-        self.islands
-            .iter()
-            .fold(0.0_f32, |value, island| value.max(island.land_value(x, y)))
+        self.islands.iter().fold(0.0, |value, island| {
+            java_max(island.land_value(x, y), value)
+        })
     }
 
+    /// `getValueId`: the id of the first island with the largest edge value (-1 when none is above 0) in the high
+    /// half, that value's raw bits in the low half.
     pub fn value_id(&self, x: f32, y: f32) -> i64 {
         let mut id = -1;
         let mut value = 0.0_f32;
@@ -359,51 +367,54 @@ impl FancyContinent {
                 value = next;
                 id = island.id();
             }
-            value = value.max(next);
+            value = java_max(next, value);
         }
         pack_mix_int_float(id, value)
     }
 
+    /// `generateIslands`: the main island (id 0), then per direction one yaw draw and `island_count` islands
+    /// (ids 1, 2, … in build order), each placed `radius()` away from the previous one in its arm.
     fn generate_islands(
         control_points: ControlPoints,
-        island_count: usize,
-        node_count: usize,
+        island_count: i32,
+        node_count: i32,
         radius: f32,
         random: &mut LegacyRandom,
     ) -> Vec<Island> {
-        let directions = 4;
+        const DIRECTIONS: i32 = 4;
         let main = Self::generate(0, control_points, node_count, radius, random);
-        let mut islands = Vec::with_capacity(1 + island_count * directions);
+        let mut islands = Vec::with_capacity((1 + island_count * DIRECTIONS) as usize);
         islands.push(main);
-        let yaw_step = 1.0 / directions as f32 * java_pi2();
-        for direction in 0..directions {
-            let mut previous_index = 0;
+        let yaw_step = 1.0 / DIRECTIONS as f32 * java_pi2();
+        for direction in 0..DIRECTIONS {
+            let mut previous = 0;
             let mut nodes = 2.max(node_count - 1);
             let mut next_radius = radius * 0.5;
             let yaw = yaw_step * direction as f32 + random.next_float() * yaw_step;
-            for island in 0..island_count {
-                let mut next =
-                    Self::generate(island as i32, control_points, nodes, next_radius, random);
+            for _ in 0..island_count {
+                let id = islands.len() as i32;
+                let mut next = Self::generate(id, control_points, nodes, next_radius, random);
                 let angle = yaw + next_float(random, -0.2, 0.2);
-                let previous = &islands[previous_index];
-                let distance = previous.radius();
-                let angle = angle * java_pi2();
-                let offset_x = previous.center().x + sin(angle) * distance;
-                let offset_y = previous.center().y + cos(angle) * distance;
-                next.translate(Vec2f::new(offset_x, offset_y));
+                let distance = islands[previous].radius();
+                let dx = sin(angle * java_pi2()) * distance;
+                let dz = cos(angle * java_pi2()) * distance;
+                let center = islands[previous].center();
+                next.translate(Vec2f::new(center.x + dx, center.y + dz));
                 nodes = 2.max(nodes - 1);
                 next_radius *= 0.8;
                 islands.push(next);
-                previous_index = islands.len() - 1;
+                previous = islands.len() - 1;
             }
         }
         islands
     }
 
+    /// `generate`: a polyline of `nodes - 1` segments from the origin, each draw in Engine's order (start scale,
+    /// start yaw, then per segment length, yaw turn and end scale).
     fn generate(
         id: i32,
         control_points: ControlPoints,
-        nodes: usize,
+        nodes: i32,
         radius: f32,
         random: &mut LegacyRandom,
     ) -> Island {
@@ -411,15 +422,19 @@ impl FancyContinent {
         let max_scale = 2.5;
         let min_length = radius * 1.5;
         let max_length = radius * 3.5;
+        // `1.5707964f`.
         let max_yaw = f32::from_bits(0x3fc9_0fdb);
-        let mut segments = Vec::with_capacity(nodes - 1);
+        let segment_count = (nodes - 1).max(0) as usize;
+        let mut segments = Vec::with_capacity(segment_count);
         let mut point_a = Vec2f::new(0.0, 0.0);
         let mut scale_a = next_float(random, min_scale, max_scale);
         let mut previous_yaw = next_float(random, 0.0, java_pi2());
-        for _ in 0..nodes - 1 {
+        for _ in 0..segment_count {
             let length = next_float(random, min_length, max_length);
             let yaw = previous_yaw + next_float(random, -max_yaw, max_yaw);
-            let point_b = Vec2f::new(point_a.x + sin(yaw) * length, point_a.y + cos(yaw) * length);
+            let dx = sin(yaw) * length;
+            let dz = cos(yaw) * length;
+            let point_b = Vec2f::new(point_a.x + dx, point_a.y + dz);
             let scale_b = next_float(random, min_scale, max_scale);
             segments.push(Segment::new(point_a, point_b, scale_a, scale_b));
             previous_yaw = yaw;
@@ -438,6 +453,8 @@ impl FancyContinent {
     }
 }
 
+/// Engine's `FancyContinentGenerator` (`ContinentType.EXPERIMENTAL`): one [`FancyContinent`] at the origin,
+/// sampled through three summed domain warps. Its river map is not ported.
 pub struct FancyContinentGenerator {
     frequency: f32,
     warp: Domain,
@@ -445,6 +462,8 @@ pub struct FancyContinentGenerator {
 }
 
 impl FancyContinentGenerator {
+    /// Draws four seeds: the continent's, then the first warp's (Simplex, its y source at `seed + 1`) and the
+    /// two Perlin warps' (`Domain.warp(seed, …)` defaults to Perlin).
     pub fn new(seed: &mut Seed, settings: WorldSettings) -> Self {
         let warp_scale = settings.continent.continent_scale / 2;
         let warp_strength = (f64::from(warp_scale) * 0.4) as f32;
@@ -462,8 +481,8 @@ impl FancyContinentGenerator {
             2,
             warp_strength,
         )
-        .add(noise_warp(SourceKind::Simplex, seed.next(), 80, 2, 40.0))
-        .add(noise_warp(SourceKind::Simplex, seed.next(), 20, 1, 15.0));
+        .add(noise_warp(SourceKind::Perlin, seed.next(), 80, 2, 40.0))
+        .add(noise_warp(SourceKind::Perlin, seed.next(), 20, 1, 15.0));
         Self {
             frequency,
             warp,
@@ -475,18 +494,21 @@ impl FancyContinentGenerator {
         &self.source
     }
 
+    /// `getEdgeValue`: the continent's value at the warped point times the frequency.
     pub fn edge_value(&self, x: f32, y: f32) -> f32 {
         let point_x = self.warp.x(x, y) * self.frequency;
         let point_y = self.warp.y(x, y) * self.frequency;
         self.source.value(point_x, point_y)
     }
 
+    /// `getLandValue`: the continent's land value at the warped point, mapped from 0.2..0.4.
     pub fn land_value(&self, x: f32, y: f32) -> f32 {
         let point_x = self.warp.x(x, y) * self.frequency;
         let point_y = self.warp.y(x, y) * self.frequency;
         map(self.source.land_value(point_x, point_y), 0.2, 0.4, 0.2)
     }
 
+    /// `getNearestCenter`: ignores its arguments; half of `getMax - getMin` in blocks, truncated like `(int)`.
     pub fn nearest_center(&self, _x: f32, _z: f32) -> i64 {
         let min = self.source.min();
         let max = self.source.max();
@@ -500,6 +522,8 @@ impl FancyContinentGenerator {
 }
 
 impl Populator for FancyContinentGenerator {
+    /// Writes `continentX`, `continentZ` and `continentId` (all 0) and `continentEdge`. Engine does not override
+    /// `getValue`, so [`Populator::value`] keeps the default: the scratch cell's untouched `value` (always 0).
     fn apply(&self, cell: &mut Cell, x: f32, y: f32) {
         cell.continent_x = 0;
         cell.continent_z = 0;
@@ -508,38 +532,20 @@ impl Populator for FancyContinentGenerator {
     }
 }
 
+/// `(float) Math.PI * 2`.
 fn java_pi2() -> f32 {
     f32::from_bits(0x40c9_0fdb)
 }
 
+/// `FancyContinent.nextFloat`: `min + nextFloat() * (max - min)`.
 fn next_float(random: &mut LegacyRandom, min: f32, max: f32) -> f32 {
     min + random.next_float() * (max - min)
 }
 
-fn noise_warp(kind: SourceKind, seed: i32, scale: i32, octaves: usize, strength: f32) -> Domain {
-    let source = |seed| {
-        Module::source(Source::new(
-            kind,
-            SourceConfig {
-                seed,
-                octaves,
-                gain: 0.5,
-                frequency: 1.0 / scale as f32,
-                lacunarity: 2.0,
-                interpolation: Interpolation::Curve3,
-            },
-        ))
-    };
-    Domain::domain_warp(
-        source(seed),
-        source(seed.wrapping_add(1)),
-        Module::constant(strength),
-    )
-}
-
 #[cfg(test)]
 mod tests {
-    use super::super::terraforged_engine::WorldControlPoints;
+    use super::super::terraforged_continent::tests::{XS as BLOCK_XS, filled, mix_cell};
+    use super::super::terraforged_engine::{TerrainRegistry, WorldControlPoints};
     use super::*;
 
     fn vector_bits(vector: Vec2f) -> [u32; 2] {
@@ -710,6 +716,29 @@ mod tests {
         )
     }
 
+    /// Every field the oracles print for a segment, in their order.
+    fn segment_fields(s: &Segment) -> [f32; 17] {
+        [
+            s.a.x,
+            s.a.y,
+            s.b.x,
+            s.b.y,
+            s.dx,
+            s.dy,
+            s.length,
+            s.length2,
+            s.scale_a,
+            s.scale2_a,
+            s.scale_b,
+            s.scale2_b,
+            s.min_x(),
+            s.min_y(),
+            s.max_x(),
+            s.max_y(),
+            s.max_scale(),
+        ]
+    }
+
     /// Folds what the oracle prints for one island into `h`.
     fn fold(h: &mut i64, island: &Island, all: &[Island]) {
         mix(h, i64::from(island.id()));
@@ -720,25 +749,7 @@ mod tests {
             mix_f(h, vector.y);
         }
         for s in island.segments() {
-            for value in [
-                s.a.x,
-                s.a.y,
-                s.b.x,
-                s.b.y,
-                s.dx,
-                s.dy,
-                s.length,
-                s.length2,
-                s.scale_a,
-                s.scale2_a,
-                s.scale_b,
-                s.scale2_b,
-                s.min_x(),
-                s.min_y(),
-                s.max_x(),
-                s.max_y(),
-                s.max_scale(),
-            ] {
+            for value in segment_fields(s) {
                 mix_f(h, value);
             }
         }
@@ -791,53 +802,158 @@ mod tests {
         }
     }
 
+    /// The configs of the Java oracle (`.local/terraforged/oracles/continent/FancyContinentOracle.java`):
+    /// (seed, settings).
+    fn config(index: usize) -> (i32, WorldSettings) {
+        let mut settings = WorldSettings {
+            seed: 246_813_579,
+            ..WorldSettings::default()
+        };
+        let continent = &mut settings.continent;
+        let seed = match index {
+            1 => {
+                continent.continent_scale = 777;
+                i32::MAX - 3
+            }
+            2 => {
+                continent.continent_scale = 1;
+                settings.control_points = WorldControlPoints {
+                    inland: 0.9,
+                    shallow_ocean: 0.05,
+                    ..WorldControlPoints::default()
+                };
+                -98_765
+            }
+            3 => {
+                continent.continent_scale = i32::MAX;
+                i32::MIN + 1
+            }
+            4 => {
+                continent.continent_scale = 2;
+                7
+            }
+            5 => {
+                continent.continent_scale = 0;
+                0
+            }
+            6 => {
+                continent.continent_scale = -3001;
+                -1
+            }
+            _ => 12_345,
+        };
+        (seed, settings)
+    }
+
+    /// Continent units: -2.5..=2.5 in steps of 0.125, then NaN, +inf, -0 and 1e30 (the oracle's `US`).
+    fn unit_grid() -> Vec<f32> {
+        let mut values: Vec<f32> = (0..41).map(|i| -2.5 + 0.125 * i as f32).collect();
+        values.extend([NAN, INF, -0.0, 1e30]);
+        values
+    }
+
+    /// Folds what the oracle prints for one config into `h`; returns the seed cursor after construction.
+    fn fold_continent(h: &mut i64, index: usize) -> i32 {
+        let registry = TerrainRegistry::new();
+        let (seed_value, settings) = config(index);
+        let mut seed = Seed::new(seed_value);
+        let generator = FancyContinentGenerator::new(&mut seed, settings);
+        mix(h, i64::from(seed.get()));
+        let source = generator.source();
+        mix(h, source.islands().len() as i64);
+        for island in source.islands() {
+            mix(h, i64::from(island.id()));
+            mix_f(h, island.radius());
+            mix_f(h, island.coast());
+            for vector in [island.center(), island.min(), island.max()] {
+                mix_f(h, vector.x);
+                mix_f(h, vector.y);
+            }
+            mix(h, island.segments().len() as i64);
+            for s in island.segments() {
+                for value in segment_fields(s) {
+                    mix_f(h, value);
+                }
+            }
+        }
+        mix(h, source.min());
+        mix(h, source.max());
+        let units = unit_grid();
+        for &x in &units {
+            for &z in &units {
+                mix_f(h, source.value(x, z));
+                mix_f(h, source.land_value(x, z));
+                mix(h, source.value_id(x, z));
+            }
+        }
+        for x in BLOCK_XS {
+            for z in BLOCK_XS {
+                let mut cell = Cell::new(&registry);
+                generator.apply(&mut cell, x, z);
+                mix_cell(h, &cell);
+                let mut cell = filled(&registry);
+                generator.apply(&mut cell, x, z);
+                mix_cell(h, &cell);
+                mix_f(h, generator.value(&registry, x, z));
+                mix_f(h, generator.edge_value(x, z));
+                mix_f(h, generator.land_value(x, z));
+                mix(h, generator.nearest_center(x, z));
+            }
+        }
+        seed.get()
+    }
+
+    #[test]
+    fn fancy_continents_match_engine_0_3_0_over_a_grid() {
+        // Per config: the seed cursor after construction and the running hash after it (`config N hash=`).
+        const EXPECTED: [(i32, i64); 7] = [
+            (12_349, 9_139_903_238_874_810_953),
+            (i32::MIN, 6_311_856_010_399_455_219),
+            (-98_761, -4_215_715_806_185_393_804),
+            (-2_147_483_643, 4_614_737_165_176_145_525),
+            (11, -8_057_806_375_809_892_168),
+            (4, 7_600_711_732_524_442_215),
+            (3, -1_961_742_243_151_308_495),
+        ];
+        let mut h = 17;
+        for (index, (seed, hash)) in EXPECTED.into_iter().enumerate() {
+            assert_eq!(fold_continent(&mut h, index), seed, "config {index} seed");
+            assert_eq!(h, hash, "config {index} hash");
+        }
+    }
+
     #[test]
     fn fancy_continent_matches_engine_0_3_0() {
-        let settings = WorldSettings::default();
+        let registry = TerrainRegistry::new();
         let mut seed = Seed::new(12_345);
-        let generator = FancyContinentGenerator::new(&mut seed, settings);
+        let generator = FancyContinentGenerator::new(&mut seed, WorldSettings::default());
         assert_eq!(seed.get(), 12_349);
-        assert_eq!(generator.source().islands().len(), 13);
-        assert_eq!(generator.source().min() as u64, 0xc0311076bff40052);
-        assert_eq!(generator.source().max() as u64, 0x3f17b54d3e668bf2);
+        let source = generator.source();
+        let ids: Vec<i32> = source.islands().iter().map(Island::id).collect();
+        assert_eq!(ids, (0..13).collect::<Vec<_>>());
+        // The main island, from the oracle's first `island` lines.
+        let main = source.main();
+        assert_eq!(main.radius().to_bits(), 0x3fa640ad);
+        assert_eq!(vector_bits(main.center()), [0xbf0efba6, 0xbe8c43f0]);
+        assert_eq!(vector_bits(main.min()), [0xbfc52cd5, 0xbfa55276]);
+        assert_eq!(main.segments().len(), 3);
+        assert_eq!(source.min() as u64, 0xc0311076bff40052);
+        assert_eq!(source.max() as u64, 0x3f17b54d3e668bf2);
         assert_eq!(
             generator.nearest_center(0.0, 0.0) as u64,
             0x000013ae00000c7d
         );
-
-        for (x, y, source, edge, land, value_id) in [
-            (
-                0.0,
-                0.0,
-                0x3f800000,
-                0x3f800000,
-                0x3f800000,
-                0x000000003f800000,
-            ),
-            (
-                12.25,
-                -98.75,
-                0x3f800000,
-                0x3f800000,
-                0x3f800000,
-                0x000000003f800000,
-            ),
-            (-4096.5, 8192.25, 0, 0, 0, 0xffffffff00000000),
-            (123456.75, -0.125, 0, 0, 0, 0xffffffff00000000),
-            (50000.0, 50000.0, 0, 0, 0, 0xffffffff00000000),
+        // (x, z, edge = land): inside the main island, then far out at sea.
+        for (x, z, edge) in [
+            (0.0, 0.0, 0x3f800000),
+            (12.25, -98.75, 0x3f800000),
+            (-4096.5, 8192.25, 0),
         ] {
-            assert_eq!(
-                generator.source().value(x / 3000.0, y / 3000.0).to_bits(),
-                source
-            );
-            assert_eq!(generator.edge_value(x, y).to_bits(), edge);
-            assert_eq!(generator.land_value(x, y).to_bits(), land);
-            assert_eq!(
-                generator.source().value_id(x / 3000.0, y / 3000.0) as u64,
-                value_id
-            );
-            let mut cell = Cell::new(&super::super::terraforged_engine::TerrainRegistry::new());
-            generator.apply(&mut cell, x, y);
+            assert_eq!(generator.edge_value(x, z).to_bits(), edge);
+            assert_eq!(generator.land_value(x, z).to_bits(), edge);
+            assert_eq!(generator.value(&registry, x, z).to_bits(), 0);
+            let mut cell = filled(&registry);
+            generator.apply(&mut cell, x, z);
             assert_eq!(cell.continent_edge.to_bits(), edge);
             assert_eq!(
                 (
@@ -847,6 +963,7 @@ mod tests {
                 ),
                 (0, 0, 0)
             );
+            assert_eq!(cell.value.to_bits(), 0.75_f32.to_bits());
         }
     }
 }

@@ -302,7 +302,14 @@ fn source(kind: SourceKind, seed: i32, scale: i32, octaves: usize) -> Module {
     ))
 }
 
-fn noise_warp(kind: SourceKind, seed: i32, scale: i32, octaves: usize, strength: f32) -> Domain {
+/// `Domain.warp(kind, seed, scale, octaves, strength)`: x from `seed`, y from `seed + 1`.
+pub fn noise_warp(
+    kind: SourceKind,
+    seed: i32,
+    scale: i32,
+    octaves: usize,
+    strength: f32,
+) -> Domain {
     Domain::domain_warp(
         source(kind, seed, scale, octaves),
         source(kind, seed.wrapping_add(1), scale, octaves),
