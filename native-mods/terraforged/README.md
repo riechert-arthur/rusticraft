@@ -717,8 +717,7 @@ the world's root seed, filter settings, levels, control points and terrain regis
 `GeneratorContext`. `apply(map, region_x, region_z, optional)` runs, when `optional` is set, erosion (built for the
 map's total size and kept in a `WorldErosion` until the size changes; `erosion.droplets_per_chunk` iterations) then
 smoothing (`smoothing.iterations` passes), and always steepness (radius 1, scaler 10) then beach detection;
-`apply_tile` (the tile layer, below) runs it on a tile. Nothing calls them yet: the tile generator is a later layer
-(#80). Its test replays `WorldFiltersOracle.java` in `.local/terraforged/oracles/world_filters/`, which builds Engine's
+`apply_tile` (the tile layer, below) runs it on a tile, as the tile generator (below) does after each fill. Its test replays `WorldFiltersOracle.java` in `.local/terraforged/oracles/world_filters/`, which builds Engine's
 `WorldFilters` from a `GeneratorContext` for four settings groups (long seeds, other levels, droplet counts and smoothing passes including 0, radii, rates, beach
 points, lifetimes) and runs each over several maps in turn (borders, negative positions, the optional filters on and
 off, cache reuse and rebuilds, NaN and infinite heights), folding every cell's value, erosion, sediment, gradient and
@@ -736,8 +735,8 @@ built from the world's registry. `cell(x, z)` is Engine's `getCell` (masked into
 `raw_cell(x, z)` its `getRawCell` (`None` where Java throws). `filterable()` is Engine's `FilterRegion`, the
 `Filterable` the filters read: its block position, block size and backing, with `getCellRaw`'s index in Java `int`
 math and `Cell.empty()` outside the backing. `WorldFilters::apply_tile(tile, optional)` is Engine's `apply(tile,
-optionalFilters)`: the filters over that region, seeded with the tile's region coordinates. Nothing builds tiles yet:
-the tile generator is a later layer (#80). Its tests replay `TileOracle.java` in `.local/terraforged/oracles/tile/` over
+optionalFilters)`: the filters over that region, seeded with the tile's region coordinates. The tile generator (below)
+builds tiles. Its tests replay `TileOracle.java` in `.local/terraforged/oracles/tile/` over
 negative and wrapping region positions, shift factors Java masks to five bits, missing and negative borders, and
 negative, border and overflowing coordinates, and run Engine's `WorldFilters.apply` on its own tiles (hashed cells,
 borders and the optional filters on and off) against `apply_tile`.
@@ -763,7 +762,7 @@ filled), and for each of its cells (z rows, then x) runs the base stage, picks t
 cell (the previous cell's map when it matches, carried from the tile's first cell to its last, else a lookup:
 `Rivermap::get_for_cell`), runs the river stage (`HeightmapRivers::apply`) and the climate stage, each with the cell's
 world block position as floats. `Heightmap` itself is not ported yet, so the stages and the lookup are closures; the
-tile generator, which runs the filters (`WorldFilters::apply_tile`) after the fill, is a later layer (#80). Its tests
+tile generator (below) runs the filters (`WorldFilters::apply_tile`) after the fill. Its tests
 replay `TileHeightmapOracle.java` in `.local/terraforged/oracles/tile_heightmap/` on six tiles (negative, wrapping and
 borderless ones, and one whose slots hold aliasing chunks made before the fill) with stub stages: the stage trace with
 every coordinate and lookup, every cell of the backing and every chunk read afterwards.
@@ -782,7 +781,7 @@ count).
 `generate_zoomed_heightmap` is Engine's `Tile.generate(Heightmap, offsetX, offsetZ, zoom)`: the same fill as
 `generate_heightmap`, but the stages get each cell's world block position scaled by the zoom and shifted by the offset
 less half the zoomed tile width (`block * zoom + offset - size * zoom / 2`, in Engine's `float` order). The tile
-generator's zoomed region is a later layer (#80). Its tests replay the same oracle's zoomed runs: thirteen offset and
+generator's zoomed region (below) runs this fill. Its tests replay the same oracle's zoomed runs: thirteen offset and
 zoom pairs over the six tiles, with fractional, unit, large, negative, signed-zero, NaN and overflowing zooms and NaN
 and infinite offsets, compared bit for bit (NaNs folded as Java's `floatToIntBits`).
 
@@ -804,12 +803,27 @@ size, the border left out); `generate` hands the cells out mutably. With a negat
 `int` math, which the batched tile generation (#82) uses. `TileOracle.java`'s `v` and `b` lines check both on the same
 tiles and on zero, negative and overflowing sizes and counts; debug and release builds agree.
 
-The synchronous tile generator now owns TerraForged's heightmap and filter stages, maps chunks to
-regions, creates empty tiles, generates regular or centered zoomed terrain, and post-processes filters.
+The tile-generator layer adds Engine's plain, synchronous `TileGenerator` (`tile_generator.rs`; what
+`TileGenerator.builder().build()` returns without a batch size) and its `WorldGenerator` (the heightmap and the filters).
+`Heightmap` is not ported yet, so the generator takes any `HeightmapSource` (its base, river-map, river and climate
+stages), and the filters are any `TileFilters` (`WorldFilters` runs `apply_tile`). The generator holds its tiles' size
+factor and border, the world's registry the cells start from (in place of Engine's resource pools) and the builder's
+batch size. `chunk_to_region` is `chunkToRegion` (`chunk >> factor`, the shift count modulo 32), `create_empty_region`
+is `createEmptyRegion`, and `generate_region(region_x, region_z)` is `generateRegion`: an empty tile filled whole by
+`generate_heightmap`, then the filters with the optional ones, so erosion, smoothing, steepness and beach detection see
+every cell, border included, only after the fill. `generate_zoomed_region(center_x, center_z, zoom, filter)` is the
+zoomed `generateRegion`: region (0, 0) filled by the uncached `generate_zoomed_heightmap` with the center as offset,
+then the filters, the optional ones only when `filter` is set. Lazy tiles (#81), the batched and striped generators
+(#82), the builder (#83), the async wrapper, the tile cache and tile disposal are later layers or not ported. Its test
+replays `TileGeneratorOracle.java` in `.local/terraforged/oracles/tile_generator/`: Engine's `generateRegion` with a
+`WorldGeneratorFactory` over a stub heightmap that hashes heights, continent edges, terrains and erosion and river
+masks, for two filter settings groups and six sizes and regions (borderless, wide-border, negative and wrapping),
+five zoomed regions on each (fractional, unit, negative, NaN and huge centers and zooms, filters on and off) and
+`chunkToRegion` for shift factors Java masks, folding the stage trace and every cell; debug and release builds agree.
 
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache) and the tile visitors. They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors and the tile generator. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
