@@ -3340,6 +3340,9 @@ mod tests {
             let map = Rivermap::new(17, -9, Vec::from(networks), warp);
             assert_eq!((map.x(), map.z()), (17, -9));
             assert!(map.timestamp() > 0);
+            // Engine's rivermap cache hands one map to every generation thread.
+            fn shared<T: Send + Sync>(_: &T) {}
+            shared(&map);
             #[rustfmt::skip]
             let samples = [
                 (0.0, 0.0), (500.0, 0.0), (500.0, 50.0), (1000.0, 0.0), (200.0, 100.0), (750.0, -100.0),
