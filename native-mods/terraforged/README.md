@@ -294,6 +294,18 @@ another base (its data spec is not ported). Engine's `Populator` is also a noise
 new and on a fully set cell, against a Java oracle running Engine's populators on Engine cells, including the hills
 and mountains landforms; the oracle lives outside Git, in `.local/terraforged/oracles/populator/`.
 
+The region-module layer adds Engine's `RegionModule` and `RegionConfig` (`region.rs`), the populator that splits the
+world into terrain regions. It offsets the point by a `DomainWarp` of the config's two axes at its strength, scales it
+by `1 / scale` (the region size; Engine's `Heightmap` passes `terrainRegionSize`, 1200 by default, and 1-octave simplex
+axes at scale 400 with a strength of 200) and finds the nearest of the 3×3 neighbouring cells' feature points (jitter
+0.7, natural distance, seeded with the config's seed plus 7, wrapping like Java's `int`). It writes only three cell
+fields: `terrain_region_id`, the nearest cell's `valCoord2D` mapped to 0..1; `terrain_region_edge`, the
+`DISTANCE_2_DIV` edge value mapped to 0..1, inverted, raised to 1.5 (`NoiseUtil.pow`) and stretched from 0..0.5 to
+0..1; and `terrain_region_center`, the nearest feature point in blocks packed like `PosUtil.pack` (each half truncated
+like Java's `(int)`: saturating, NaN to 0). Its test checks every cell field, on a new and on a fully set cell, over a
+grid of negative, large, NaN and infinite coordinates against a Java oracle running Engine's `RegionModule` on Engine
+cells, for `Heightmap`'s configuration and for overflowing seeds and zero, negative and huge scales and strengths; the
+oracle lives outside Git, in `.local/terraforged/oracles/region/`.
 
 ## Status: development only
 
