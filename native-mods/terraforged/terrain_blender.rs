@@ -182,7 +182,9 @@ impl TerrainBlender {
     /// jittered point divided by the frequency (back to blocks), `PosUtil.packf`ed. When the spiral runs out during
     /// a search, the point is Java's `0L` divided the same way (signed zeros, or NaN for a NaN frequency); once it is
     /// out, `next` is `None` (Java's `0L`). Java's spiral quirks are kept: a `min_radius` above `max_radius` revisits
-    /// one cell forever, so a search there that misses never returns, as in Java.
+    /// one cell forever, so a search there that misses never returns, as in Java, and a negative `min_radius` panics
+    /// on the first step where Java divides by zero. The finder holds no borrow of the blender (it copies the seed,
+    /// jitter, frequency and band), so it can outlive it or move to another thread.
     pub fn find_nearest(
         &self,
         x: f32,
@@ -648,6 +650,13 @@ mod tests {
         shareable::<TerrainBlender>();
         shareable::<TerrainNoise>();
         movable::<Blender>();
+        fn owned<T: Send + 'static>(_: T) {}
+        let registry = TerrainRegistry::new();
+        let blender = TerrainBlender::new(1, 64, 0.8, 0.65, vec![terrain(&registry, 1, 1.0, 1)]);
+        let hills = registry.get_by_name("hills").unwrap();
+        let finder = blender.find_nearest(0.0, 0.0, 1, 2, &hills);
+        drop(blender);
+        owned(finder);
     }
 
     #[test]
