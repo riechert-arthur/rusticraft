@@ -307,9 +307,23 @@ grid of negative, large, NaN and infinite coordinates against a Java oracle runn
 cells, for `Heightmap`'s configuration and for overflowing seeds and zero, negative and huge scales and strengths; the
 oracle lives outside Git, in `.local/terraforged/oracles/region/`.
 
+The region-selection layer adds Engine's `RegionSelector` and `RegionLerper` (`region.rs`), which Engine's `Heightmap`
+uses to pick each terrain region's landform. `RegionSelector` repeats each populator, in list order, by its weight
+divided by the smallest non-zero weight (rounded like `Math.round`; a populator that is not a `TerrainPopulator`, such
+as a selector, counts as weight 1, and zero-weight populators are left out), falling back to the unweighted list when
+no weight is non-zero or every count rounds to 0 (a NaN weight does this, through `Math.min`). It then applies the
+populator at `NoiseUtil.round(terrain_region_id * maxIndex)` (`maxIndex` is the repeated list's length minus 1); where Engine throws for an index outside the list,
+this port panics. `RegionLerper` reads `terrain_region_edge`: at exactly 0 it applies only its lower populator, at
+exactly 1 only its upper one, and otherwise both on the same cell, setting `value` to `NoiseUtil.lerp` of the two
+(other fields, the terrain included, keep what the upper one wrote). Heightmap passes a FLATS plains populator as the
+lower one (the region borders) and the selector as the upper one. Its test checks the weighted lists and every cell
+field against a Java oracle running Engine's selector and lerper on Engine cells, including Heightmap's chain
+(`RegionModule`, then the lerper) over real landforms with ModTerrains' weights; the oracle lives outside Git, in
+`.local/terraforged/oracles/region_selection/`.
+
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model and its terrain populators. They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators and its terrain regions. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development

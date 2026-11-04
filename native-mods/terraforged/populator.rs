@@ -35,6 +35,14 @@ use super::{
 pub trait Populator: Send + Sync {
     fn apply(&self, cell: &mut Cell, x: f32, z: f32);
 
+    /// The weight when this is one of Engine's `TerrainPopulator`s (or a subclass:
+    /// `ScaledPopulator`, later `VolcanoPopulator`), else `None`. `RegionSelector` weights a
+    /// populator by it where Engine checks `instanceof TerrainPopulator`, so every
+    /// [`TerrainPopulatorLike`] must return `Some(weight())`.
+    fn terrain_weight(&self) -> Option<f32> {
+        None
+    }
+
     /// `getValue`: `apply` on a scratch cell, then its `value`.
     fn value(&self, registry: &TerrainRegistry, x: f32, z: f32) -> f32 {
         let mut cell = Cell::new(registry);
@@ -154,6 +162,10 @@ impl Populator for TerrainPopulator {
     fn apply(&self, cell: &mut Cell, x: f32, z: f32) {
         self.apply_value(cell, self.base.value(x, z), self.variance.value(x, z));
     }
+
+    fn terrain_weight(&self) -> Option<f32> {
+        Some(self.weight)
+    }
 }
 
 impl TerrainPopulatorLike for TerrainPopulator {
@@ -209,6 +221,10 @@ impl Populator for ScaledPopulator {
         let base = self.populator.base.value(x, z) * self.base_scale;
         let variance = self.populator.variance.value(x, z) * self.variance_scale;
         self.populator.apply_value(cell, base, variance);
+    }
+
+    fn terrain_weight(&self) -> Option<f32> {
+        Some(self.populator.weight)
     }
 }
 
