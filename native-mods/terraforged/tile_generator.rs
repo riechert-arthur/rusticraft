@@ -1360,8 +1360,11 @@ mod tests {
     /// sweep keeps an entry stamped exactly a lifetime ago and drops one a millisecond older (the
     /// next `getTile` makes a new tile), and eight threads asking for one region generate it once;
     /// `q` lines (`ThreadPools.create(8)`, run 3): `queueRegion`/`queueChunk` start tiles, eight
-    /// threads share one tile, and a batched generator's cache. The oracle injects stamps through
-    /// Engine's private fields; here the cache's clock sets them.
+    /// threads share one tile, and a batched generator's cache; `h` lines: `getChunk` (region,
+    /// chunk-array slot, position, cells and `visit` rectangles of negative, extreme and aliasing
+    /// chunks), a reader for every chunk around two regions, `getChunk` stamping while reads do
+    /// not, a reader outliving its swept entry, and eight threads asking for one chunk. The oracle
+    /// injects stamps through Engine's private fields; here the cache's clock sets them.
     #[test]
     fn tile_cache_matches_engine_oracle() {
         let terrains = Arc::new(TerrainRegistry::new());
@@ -1553,9 +1556,10 @@ mod tests {
         none.generator().heightmap().take();
         let fresh = hc.get_chunk(-3, 5).unwrap();
         let new = !std::ptr::eq(fresh.tile(), reader.tile());
+        let new_cell = !std::ptr::eq(fresh.reader().cell(0, 0), reader.reader().cell(0, 0));
         let lookups = none.generator().heightmap().take().0;
         out += &format!(
-            "h1 {stamped} {unstamped} {swept} {gone} {kept} {new} {new} {lookups} {}\n",
+            "h1 {stamped} {unstamped} {swept} {gone} {kept} {new} {new_cell} {lookups} {}\n",
             read_cells(&fresh)
         );
         out += &format!("h2 {}\n", chunk_line(&pc, -6, 13));
