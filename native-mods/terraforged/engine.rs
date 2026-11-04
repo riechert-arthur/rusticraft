@@ -999,6 +999,117 @@ pub struct WorldSettings {
     pub properties: WorldProperties,
 }
 
+/// Engine's `RiverSettings`, with Engine's defaults (the serializer's `@Range` limits are not enforced).
+/// TerraForged 0.3.1 keeps these defaults but never uses them: its own continent noise carves rivers with its
+/// own config instead of Engine's river map.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RiverSettings {
+    pub seed_offset: i32,
+    pub river_count: i32,
+    pub main_rivers: River,
+    pub branch_rivers: River,
+    pub lakes: Lake,
+    pub wetlands: Wetland,
+}
+
+impl Default for RiverSettings {
+    fn default() -> Self {
+        Self {
+            seed_offset: 0,
+            river_count: 8,
+            main_rivers: River::new(5, 2, 6, 20, 8, 0.75),
+            branch_rivers: River::new(4, 1, 4, 14, 5, 0.975),
+            lakes: Lake::default(),
+            wetlands: Wetland::default(),
+        }
+    }
+}
+
+/// Engine's `RiverSettings.River`; `Default` is Engine's no-argument constructor (all zero).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct River {
+    pub bed_depth: i32,
+    pub min_bank_height: i32,
+    pub max_bank_height: i32,
+    pub bed_width: i32,
+    pub bank_width: i32,
+    pub fade: f32,
+}
+
+impl River {
+    /// Engine's `River(depth, minBank, maxBank, outer, inner, fade)`: `outer` is the bank width, `inner` the
+    /// bed width.
+    pub const fn new(
+        depth: i32,
+        min_bank: i32,
+        max_bank: i32,
+        outer: i32,
+        inner: i32,
+        fade: f32,
+    ) -> Self {
+        Self {
+            bed_depth: depth,
+            min_bank_height: min_bank,
+            max_bank_height: max_bank,
+            bed_width: inner,
+            bank_width: outer,
+            fade,
+        }
+    }
+}
+
+impl Default for River {
+    fn default() -> Self {
+        Self::new(0, 0, 0, 0, 0, 0.0)
+    }
+}
+
+/// Engine's `RiverSettings.Lake`, with Engine's defaults.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Lake {
+    pub chance: f32,
+    pub min_start_distance: f32,
+    pub max_start_distance: f32,
+    pub depth: i32,
+    pub size_min: i32,
+    pub size_max: i32,
+    pub min_bank_height: i32,
+    pub max_bank_height: i32,
+}
+
+impl Default for Lake {
+    fn default() -> Self {
+        Self {
+            chance: 0.3,
+            min_start_distance: 0.0,
+            max_start_distance: 0.03,
+            depth: 10,
+            size_min: 75,
+            size_max: 150,
+            min_bank_height: 2,
+            max_bank_height: 10,
+        }
+    }
+}
+
+/// Engine's `RiverSettings.Wetland`, with Engine's defaults.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Wetland {
+    pub chance: f32,
+    pub size_min: i32,
+    pub size_max: i32,
+}
+
+impl Default for Wetland {
+    fn default() -> Self {
+        Self {
+            chance: 0.6,
+            size_min: 175,
+            size_max: 225,
+        }
+    }
+}
+
 /// Engine's `TerrainSettings.Terrain`: one landform's weight and its base, vertical and
 /// horizontal scales. Engine's `apply` (scale, bias, then `TerrainPopulator.clamp`) is not ported.
 #[derive(Clone, Copy, Debug, PartialEq)]
