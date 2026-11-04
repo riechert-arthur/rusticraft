@@ -48,14 +48,6 @@ pub trait Populator: Send + Sync {
         None
     }
 
-    fn terrain_variance(&self) -> Option<&Module> {
-        None
-    }
-
-    fn terrain_type(&self) -> Option<&Terrain> {
-        None
-    }
-
     /// `getValue`: `apply` on a scratch cell, then its `value`.
     fn value(&self, registry: &TerrainRegistry, x: f32, z: f32) -> f32 {
         let mut cell = Cell::new(registry);
@@ -179,14 +171,6 @@ impl Populator for TerrainPopulator {
     fn terrain_weight(&self) -> Option<f32> {
         Some(self.weight)
     }
-
-    fn terrain_variance(&self) -> Option<&Module> {
-        Some(&self.variance)
-    }
-
-    fn terrain_type(&self) -> Option<&Terrain> {
-        Some(&self.terrain_type)
-    }
 }
 
 impl TerrainPopulatorLike for TerrainPopulator {
@@ -247,14 +231,6 @@ impl Populator for ScaledPopulator {
     fn terrain_weight(&self) -> Option<f32> {
         Some(self.populator.weight)
     }
-
-    fn terrain_variance(&self) -> Option<&Module> {
-        Some(&self.populator.variance)
-    }
-
-    fn terrain_type(&self) -> Option<&Terrain> {
-        Some(&self.populator.terrain_type)
-    }
 }
 
 impl TerrainPopulatorLike for ScaledPopulator {
@@ -267,7 +243,7 @@ impl TerrainPopulatorLike for ScaledPopulator {
     }
 
     fn terrain_type(&self) -> &Terrain {
-        TerrainPopulatorLike::terrain_type(&self.populator)
+        self.populator.terrain_type()
     }
 
     fn as_config(&self) -> TerrainConfig {
@@ -415,14 +391,6 @@ impl Populator for VolcanoPopulator {
     fn terrain_weight(&self) -> Option<f32> {
         Some(self.populator.weight)
     }
-
-    fn terrain_variance(&self) -> Option<&Module> {
-        Some(&self.populator.variance)
-    }
-
-    fn terrain_type(&self) -> Option<&Terrain> {
-        Some(&self.populator.terrain_type)
-    }
 }
 
 impl TerrainPopulatorLike for VolcanoPopulator {
@@ -435,7 +403,7 @@ impl TerrainPopulatorLike for VolcanoPopulator {
     }
 
     fn terrain_type(&self) -> &Terrain {
-        TerrainPopulatorLike::terrain_type(&self.populator)
+        self.populator.terrain_type()
     }
 
     fn as_config(&self) -> TerrainConfig {
@@ -799,8 +767,8 @@ mod tests {
             "{name} seed after={} weight={} type={} same={} vmin={} vmax={}",
             seed.get(),
             bits(volcano.weight()),
-            TerrainPopulatorLike::terrain_type(&volcano).id(),
-            TerrainPopulatorLike::terrain_type(&volcano).is_same(&registry.get_by_id(14)),
+            volcano.terrain_type().id(),
+            volcano.terrain_type().is_same(&registry.get_by_id(14)),
             bits(volcano.variance().min_value()),
             bits(volcano.variance().max_value()),
         )

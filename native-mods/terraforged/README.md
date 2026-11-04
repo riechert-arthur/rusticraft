@@ -349,14 +349,11 @@ last one; name lookups compare like Java's `equalsIgnoreCase`. Engine's `Generat
 provider takes the world seed, levels and terrain settings directly. Its tests rebuild a Java oracle's text over two
 configurations (Engine's defaults; a seed offset, zero and NaN weights, scaled landforms and a negative long seed):
 the seed cursor, registered populators, variant and name lookups, both shuffled lists with samples on a grid, and the
-registry's composites.
-
-The standard-provider layer registers every LandForm and volcano variant, builds all weighted terrain
-composites, preserves variant fallback and performs Java-compatible deterministic shuffling.
+registry's composites; the oracle lives outside Git, in `.local/terraforged/oracles/provider/`.
 
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions and its volcano populator. They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator and its standard terrain provider. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
