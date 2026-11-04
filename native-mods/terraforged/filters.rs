@@ -49,6 +49,9 @@ impl Default for SmoothingSettings {
     }
 }
 
+/// Engine's `FilterSettings.Erosion` (defaults: 135 droplets per chunk, lifetime 12, volume and
+/// velocity 0.7, erosion and deposit rates 0.5; Engine's field is spelled `depositeRate`). As for
+/// smoothing, Engine's `@Range` limits are only enforced by its settings UI.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ErosionSettings {
     pub droplets_per_chunk: i32,
@@ -143,6 +146,9 @@ impl RangeModifier {
     }
 }
 
+/// Engine's `util.FastRandom` (a SplitMix-style stream), as `Erosion.apply` uses it: reseeded per
+/// chunk with `seed(chunkSeed, iterationSeed)`, which mixes the second value into the gamma, then
+/// drawn from with `nextInt(bound)`.
 #[derive(Clone, Copy, Debug)]
 pub struct FastRandom {
     seed: u64,
@@ -150,6 +156,7 @@ pub struct FastRandom {
 }
 
 impl FastRandom {
+    /// `new FastRandom().seed(seed, gamma)`: the gamma goes through `mixGamma`.
     pub fn seeded(seed: i64, gamma: i64) -> Self {
         Self {
             seed: seed as u64,
@@ -157,9 +164,12 @@ impl FastRandom {
         }
     }
 
+    /// `nextInt(bound)`: masks for powers of two (and for 0 and `i32::MIN`, as in Engine), otherwise
+    /// rejects draws whose `u + m - r` wraps negative. A non-positive bound is not rejected (Engine
+    /// doesn't check it): 0 returns the raw draw, a negative bound a remainder of its magnitude.
     pub fn next_int(&mut self, bound: i32) -> i32 {
         let mut result = mix32(self.next_seed());
-        let mask = bound - 1;
+        let mask = bound.wrapping_sub(1);
         if bound & mask == 0 {
             return result & mask;
         }
@@ -195,48 +205,69 @@ fn mix_gamma(mut value: u64) -> u64 {
     }
 }
 
+/// Engine's `Erosion.initBrushes(size, radius)` (`Erosion` uses radius 4): for each cell of a
+/// `size * size` map, the indices of the cells within `radius` (squared distance below `radius²`,
+/// clipped to the map) and their weights `1 - d / radius`, normalized to sum to 1. As in Engine,
+/// only cells near the map's edge (rows up to `radius` from the top and from `size - radius`,
+/// columns up to `radius + 1` and from `size - radius`) compute their own brush; every other cell
+/// reuses the offsets and weights of the last computed one, re-centred. The brushes are stored in
+/// one flat array (Engine allocates one pair of arrays per cell).
 #[derive(Debug)]
-struct ErosionBrush {
+pub struct ErosionBrushes {
+    /// `starts[i]..starts[i + 1]` is cell `i`'s range in `indices` and `weights`.
+    starts: Vec<usize>,
     indices: Vec<usize>,
     weights: Vec<f32>,
 }
 
-#[derive(Debug)]
-pub struct ErosionBrushes {
-    entries: Vec<ErosionBrush>,
-}
-
 impl ErosionBrushes {
-    pub fn new(size: usize, radius: isize) -> Self {
-        let capacity = (radius * radius * 4) as usize;
-        let mut x_offsets = vec![0_isize; capacity];
-        let mut y_offsets = vec![0_isize; capacity];
+    /// Panics where Engine throws: a `size * size` or `radius * radius * 4` that is negative or
+    /// does not fit Java's `int`, or more points in a brush than `radius * radius * 4` (only for
+    /// radii whose square wraps).
+    pub fn new(size: usize, radius: i32) -> Self {
+        let cells = i32::try_from(size)
+            .ok()
+            .and_then(|size| size.checked_mul(size))
+            .expect("Erosion's map size squared must fit Java's int");
+        let size = size as i32;
+        let capacity = usize::try_from(radius.wrapping_mul(radius).wrapping_mul(4))
+            .expect("Erosion's brush capacity must not be negative");
+        let mut x_offsets = vec![0_i32; capacity];
+        let mut y_offsets = vec![0_i32; capacity];
         let mut weights = vec![0.0_f32; capacity];
         let mut weight_sum = 0.0_f32;
         let mut add_index = 0;
-        let mut entries = Vec::with_capacity(size * size);
-        for index in 0..size * size {
+        let mut brushes = Self {
+            starts: Vec::with_capacity(cells as usize + 1),
+            indices: Vec::new(),
+            weights: Vec::new(),
+        };
+        brushes.starts.push(0);
+        let radius_squared = radius.wrapping_mul(radius) as f32;
+        for index in 0..cells {
             let center_x = index % size;
             let center_y = index / size;
-            if center_y <= radius as usize
-                || center_y >= size - radius as usize
-                || center_x <= radius as usize + 1
-                || center_x >= size - radius as usize
+            if center_y <= radius
+                || center_y >= size.wrapping_sub(radius)
+                || center_x <= radius.wrapping_add(1)
+                || center_x >= size.wrapping_sub(radius)
             {
                 weight_sum = 0.0;
                 add_index = 0;
-                for y in -radius..=radius {
-                    for x in -radius..=radius {
-                        let squared_distance = (x * x + y * y) as f32;
-                        if squared_distance >= (radius * radius) as f32 {
+                for y in radius.wrapping_neg()..=radius {
+                    for x in radius.wrapping_neg()..=radius {
+                        let squared_distance =
+                            x.wrapping_mul(x).wrapping_add(y.wrapping_mul(y)) as f32;
+                        // Engine's `!(sqrDst < radius²)`; neither side can be NaN.
+                        if squared_distance >= radius_squared {
                             continue;
                         }
-                        let coordinate_x = center_x as isize + x;
-                        let coordinate_y = center_y as isize + y;
+                        let coordinate_x = center_x.wrapping_add(x);
+                        let coordinate_y = center_y.wrapping_add(y);
                         if coordinate_x < 0
-                            || coordinate_x >= size as isize
+                            || coordinate_x >= size
                             || coordinate_y < 0
-                            || coordinate_y >= size as isize
+                            || coordinate_y >= size
                         {
                             continue;
                         }
@@ -250,27 +281,26 @@ impl ErosionBrushes {
                     }
                 }
             }
-            let mut indices = Vec::with_capacity(add_index);
-            let mut normalized_weights = Vec::with_capacity(add_index);
             for point in 0..add_index {
-                indices.push(
-                    ((y_offsets[point] + center_y as isize) * size as isize
-                        + x_offsets[point]
-                        + center_x as isize) as usize,
-                );
-                normalized_weights.push(weights[point] / weight_sum);
+                let cell = y_offsets[point]
+                    .wrapping_add(center_y)
+                    .wrapping_mul(size)
+                    .wrapping_add(x_offsets[point])
+                    .wrapping_add(center_x);
+                // Always inside the map: edge brushes are clipped and reused ones stay a full
+                // radius away from every edge.
+                brushes.indices.push(cell as usize);
+                brushes.weights.push(weights[point] / weight_sum);
             }
-            entries.push(ErosionBrush {
-                indices,
-                weights: normalized_weights,
-            });
+            brushes.starts.push(brushes.indices.len());
         }
-        Self { entries }
+        brushes
     }
 
+    /// `erosionBrushIndices[index]` and `erosionBrushWeights[index]`.
     pub fn get(&self, index: usize) -> (&[usize], &[f32]) {
-        let brush = &self.entries[index];
-        (&brush.indices, &brush.weights)
+        let range = self.starts[index]..self.starts[index + 1];
+        (&self.indices[range.clone()], &self.weights[range])
     }
 }
 
@@ -954,14 +984,126 @@ mod tests {
                 [(105, 0x3c7afb1b), (128, 0x3d0541cd), (143, 0x3e1f1216)],
             ),
         ] {
-            let brush = &brushes.entries[cell];
-            let points = [0, brush.indices.len() / 2, brush.indices.len() - 1];
+            let (indices, weights) = brushes.get(cell);
+            let points = [0, indices.len() / 2, indices.len() - 1];
             assert_eq!(
-                points.map(|point| (brush.indices[point], brush.weights[point].to_bits())),
+                points.map(|point| (indices[point], weights[point].to_bits())),
                 expected,
                 "brush {cell}"
             );
         }
+    }
+
+    /// Replays `ErosionPrimitivesOracle.java` (`.local/terraforged/oracles/erosion_primitives/`).
+    /// `r` lines: Engine's `FastRandom` seeded as `Erosion.apply` seeds it (`NoiseUtil.seed` of a
+    /// chunk and of `root + 12768` (wrapping) and an iteration), 12 `nextInt` draws for each bound
+    /// (powers of two, 0, 1, negative, `i32::MIN`/`MAX` and bounds that make it reject draws): the
+    /// first draw and a fold of all of them. `b` lines: `Erosion.initBrushes(size, radius)` for map
+    /// sizes 0 to 40 and radii -1 to 6: the number of brush points and a fold of every cell's
+    /// length, indices and weight bits.
+    #[test]
+    fn erosion_primitives_match_engine_oracle() {
+        let mut out = String::new();
+        for root in [12_345, -7, i32::MAX] {
+            for iteration in 0..3 {
+                let iteration_seed = pack_seed(root.wrapping_add(12_768), iteration);
+                for (x, z) in [(-11, 29), (0, 0), (i32::MIN, i32::MAX)] {
+                    out += &format!("r {root} {iteration} {x} {z}");
+                    for bound in [
+                        16,
+                        1,
+                        0,
+                        3,
+                        7,
+                        100,
+                        -1,
+                        -3,
+                        -16,
+                        i32::MIN,
+                        i32::MAX,
+                        1_500_000_000,
+                        0x4000_0001,
+                    ] {
+                        let mut random = FastRandom::seeded(pack_seed(x, z), iteration_seed);
+                        let draws: [i32; 12] = std::array::from_fn(|_| random.next_int(bound));
+                        let fold = draws.iter().fold(17_i64, |fold, &draw| {
+                            fold.wrapping_mul(31).wrapping_add(i64::from(draw))
+                        });
+                        out += &format!(" {}:{fold:x}", draws[0]);
+                    }
+                    out += "\n";
+                }
+            }
+        }
+        assert_eq!(
+            out,
+            "r 12345 0 -11 29 12:be38420ac4fc6344 0:b9d3c92fd6b36e91 703628972:558c6501c3689d64 1:ba30f78911c6f42d 2:ba9a2e2a00831111 86:d847f4392843bb6b 0:b9d3c92fd6b36e91 1:ba30f78911c6f42d 6:bc06ba2bcf004f5b 703628972:a3f726b343689d64 351814486:561accc437947d7b 351814486:20cd767eb4a8947e 351814486:20c93b30a8aa55aa\n\
+             r 12345 0 0 0 5:bb9d3cd9493eb76f 0:b9d3c92fd6b36e91 -254163931:827aea12ac3f51af 1:ba31111bc6c62db2 5:bba5e292725b5361 82:d6f7ea9adf2557c1 0:b9d3c92fd6b36e91 1:ba31111bc6c62db2 2:ba8c15230d5008d1 1893319717:2f8769d2ac3f51af 2020401682:cb06aaeb282e4901 1152695168:fc9361441635919 331681005:dd7fac17bd41cb0a\n\
+             r 12345 0 -2147483648 2147483647 3:baf7f654da802d2d 0:b9d3c92fd6b36e91 -1639369581:1450fc002e4cdced 0:b9d3cabd6ad9cab8 0:b9e575e5fdb4b195 57:ce098c7f5c2164df 0:b9d3c92fd6b36e91 0:b9d3cabd6ad9cab8 9:bd0a35c71be24b9f 508114067:b106e9c1ae4cdced 1327798857:399b8c9b621f18f 1327798857:2526cf99bb5ccdab 245606685:cbd59e2c7ea82c64\n\
+             r 12345 1 -11 29 4:bb63973c0e62754e 0:b9d3c92fd6b36e91 274292084:10d5ffedb4711afe 1:ba33e1bb9ff93d14 5:bba642b60d7bcf11 42:c92204f912bad20c 0:b9d3c92fd6b36e91 1:ba33e1bb9ff93d14 10:bd6c5c46b5ecc5b8 274292084:d461920db4711afe 137146042:28def589020df888 137146042:25d77a104bb807a1 137146042:b03747d7b7c7f292\n\
+             r 12345 1 0 0 1:ba4f117cccd859f4 0:b9d3c92fd6b36e91 2013648929:bc2d5dc546c82114 2:ba8e55f3cbe39853 2:ba91282107a53b51 64:d105e11c90e65433 0:b9d3c92fd6b36e91 2:ba8e55f3cbe39853 0:b9fa28280cae4803 2013648929:3b21dfd5c6c82114 1006824464:39c67e5e8c7af983 1006824464:d3d1118e538dc3f1 1006824464:42b1d21522860379\n\
+             r 12345 1 -2147483648 2147483647 14:bec72592e3d75f99 0:b9d3c92fd6b36e91 -141673794:b7a97e2ed5398359 2:ba8b547b73ee5ecc 4:bb48fb9014bf30ee 51:cbe4b7de9cc5d396 0:b9d3c92fd6b36e91 2:ba8b547b73ee5ecc 15:bf1ede01f7b00596 2005809854:7f069eeed5398359 2076646751:1a43b01084c086 1388299099:e78bcc7c389c3539 121538803:a3ef78e0d2017f17\n\
+             r 12345 2 -11 29 1:ba4bdf22387cafa4 0:b9d3c92fd6b36e91 353176529:229068bf7bc1f3d4 2:ba8b6d4dfc89de6c 6:bbf7b27f08fe4765 64:d0d34d117d811328 0:b9d3c92fd6b36e91 2:ba8b6d4dfc89de6c 8:bcb58ce15e6b6b54 353176529:eb1cd7e07bc1f3d4 176588264:3691593c2c4faf94 176588264:26ba59130cd2e94a 176588264:ec53aa34de877e8d\n\
+             r 12345 2 0 0 5:bba9ecb6968e53a3 0:b9d3c92fd6b36e91 2054166037:8c1feb2392954933 0:b9d3e1489e460a2e 3:baf48d70bb06c2dd 18:c12fe825ccc5bd6e 0:b9d3c92fd6b36e91 0:b9d3e1489e460a2e 10:bd64a64c9b73db62 2054166037:1ed1d53412954933 1027083018:357ea1ca30cb8932 1027083018:1b27f13b3b12301b 1027083018:cd75d422ff69a06\n\
+             r 12345 2 -2147483648 2147483647 11:bddae67cfe94bab9 0:b9d3c92fd6b36e91 1180869643:e7608704eb925549 0:b9d9cc39ba9507b1 4:bb3d272e6118393a 21:c15af06a68c95d14 0:b9d3c92fd6b36e91 0:b9d9cc39ba9507b1 5:bbc0003baee35eac 1180869643:2c81e3646b925549 590434821:958ce14a7e38d3ec 590434821:2002c79a5d1cbb06 590434821:4945e0ab21522e57\n\
+             r -7 0 -11 29 12:be38134210f9145b 0:b9d3c92fd6b36e91 -1234656980:29f8681777040ccb 1:ba2e0e167b492334 0:b9d45b04bfd8c9b1 58:cf6bbee87bca5303 0:b9d3c92fd6b36e91 1:ba2e0e167b492334 6:bc05e232ded822cf 912826668:5cc83df5f7040ccb 1530155158:a4b5e27c11693f0f 97688199:66fe9c7daf48ee61 97688199:b7019821998a2bb2\n\
+             r -7 0 0 0 14:bedb69a1a71c7faa 0:b9d3c92fd6b36e91 -1413288514:8de206f90da77b7a 0:b9d3e2d5fbb52333 5:bba5e35892a29054 91:da44d7c8e5099bb2 0:b9d3c92fd6b36e91 0:b9d3e2d5fbb52333 15:bf2a80f8b6a97556 734195134:3bc1e7488da77b7a 1440839391:51bac860bd627066 1440839391:3a1444092d0647ce 526798382:ca95899d9cce415e\n\
+             r -7 0 -2147483648 2147483647 6:bbf8611b2c723804 0:b9d3c92fd6b36e91 -936119434:ae9123ef8335e594 0:b9d6cc4859e28bcc 3:baebcc89e667f62b 31:c58f6174677af3a3 0:b9d3c92fd6b36e91 0:b9d6cc4859e28bcc 11:bdb841f59798aa43 1211364214:5b9da5908335e594 1679423931:613ef7ca2e006403 1402675846:6e6cc47faa9a9c5f 606750500:e06afe870267796c\n\
+             r -7 1 -11 29 5:bb9a2df7e10170e0 0:b9d3c92fd6b36e91 -734086859:5deaf5c57246af40 2:ba8b6e14c91eb590 4:bb459aa2ed5f22dc 18:c06b3c30fc46c396 0:b9d3c92fd6b36e91 2:ba8b6e14c91eb590 10:bd5b3ff7b1e6b7aa 1413396789:e10832357246af40 1780440218:8ecdf8bb5b32bdea 1466423920:19b028ff5ff3b42d 849536744:f858dae709edb088\n\
+             r -7 1 0 0 3:bafa7d4891abad9b 0:b9d3c92fd6b36e91 152890739:8f63f36d5398babb 2:ba8884956469918f 0:b9d7152c69f66cc9 69:d3484ecdbecdc2f6 0:b9d3c92fd6b36e91 2:ba8884956469918f 9:bd237362bc37d276 152890739:a403116dd398babb 76445369:390dd9df1145fc06 76445369:b8b74665da4a0bca 76445369:ad3a911a2d83511b\n\
+             r -7 1 -2147483648 2147483647 1:ba3cd46739fee7ba 0:b9d3c92fd6b36e91 1533274529:edeed0593c3796a 2:ba8e3f7afe4643f0 1:ba3fd2c564285ea3 64:d0b1afdc54273841 0:b9d3c92fd6b36e91 2:ba8e3f7afe4643f0 0:b9da7dd1b5b3521d 1533274529:d263755513c3796a 766637264:27af4bda68dd3ded 766637264:53132795ed79635e 766637264:f530c37b02145187\n\
+             r -7 2 -11 29 7:bc6658ccc83a1bf5 0:b9d3c92fd6b36e91 -508185593:a0583a743baf15d5 2:ba8884a1ca5f710a 2:ba91140f99eb8152 51:cc4bd642d0484b90 0:b9d3c92fd6b36e91 2:ba8884a1ca5f710a 3:bb0679c1c348a444 1639298055:f294c1433baf15d5 1893390851:7f23e56e8bef4d24 467548140:ed25b4bf0b213c82 467548140:6f8951676af68b37\n\
+             r -7 2 0 0 9:bd0382d5d639b020 0:b9d3c92fd6b36e91 -816281767:190fe1bed7e65a90 1:ba33f9ce642ddd55 5:bba05a1275a6f69c 64:d16837454e0342eb 0:b9d3c92fd6b36e91 1:ba33f9ce642ddd55 12:be0f3bde41df792f 1331201881:683c85ded7e65a90 1739342764:386fe20aa38ae95f 331587730:b3dd93652e459b8e 331587730:b3dd93652e459b8e\n\
+             r -7 2 -2147483648 2147483647 10:bd5eb99b52e5deed 0:b9d3c92fd6b36e91 -292705638:3b5fc74f7368776d 2:ba8e27690d8e68f4 5:bba5e34cd3da680f 29:c4e7802d852cfc07 0:b9d3c92fd6b36e91 2:ba8e27690d8e68f4 13:be81454284f1347f 1854778010:84b125dff368776d 2001130829:43e9b1b0413b41af 1136896472:1c30d4ed11b8080b 73798427:8c1af404048a7e92\n\
+             r 2147483647 0 -11 29 13:be81b81d9eedb3e0 0:b9d3c92fd6b36e91 1398028173:3753e089a03f4d90 1:ba3110623729dbaf 1:ba36cf2f53251cda 86:d91168868a4217bd 0:b9d3c92fd6b36e91 1:ba3110623729dbaf 6:bc15b05fafc92f31 1398028173:1552561aa03f4d90 699014086:d66527fdb6c5e301 699014086:c5f7197de368ca2e 699014086:b7c507acfed2a264\n\
+             r 2147483647 0 0 0 13:be89a23235f52af5 0:b9d3c92fd6b36e91 553533309:1e378785bf073835 1:ba2e3ef4c6a3e6cd 3:bae2ca6241e786e8 54:ccfd65a56d4d6ddb 0:b9d3c92fd6b36e91 1:ba2e3ef4c6a3e6cd 14:bee98b801e9a2783 553533309:6c9b3d85bf073835 276766654:ba3abb2b67fa1513 276766654:ee69f61acaffad8a 276766654:ee66189e4672bdf9\n\
+             r 2147483647 0 -2147483648 2147483647 11:bdc39679e5b5ffc5 0:b9d3c92fd6b36e91 575283611:62d8ce3c181a32f5 2:ba8e5787275a358d 3:baee725a1107201f 5:bc99fe0117059744 0:b9d3c92fd6b36e91 2:ba8e5787275a358d 13:be867f6a93a0f754 575283611:c898b36d181a32f5 287641805:73e78db47aff49e4 287641805:5c23e8c447180399 287641805:651d3fc3874d1376\n\
+             r 2147483647 1 -11 29 11:bdcf10e0a15685e0 0:b9d3c92fd6b36e91 -86662325:4b472be566ae9ff0 2:ba886c8904bafcaf 1:ba317151d2012caa 85:d8c9c4f3c5d26c7d 0:b9d3c92fd6b36e91 2:ba886c8904bafcaf 5:bbba1bd3fccc0f41 2060821323:b405afc5e6ae9ff0 2104152485:eb1d5b38a2494641 1318407084:bd243b2f91ce2fc4 694043488:277d0e7f015b9915\n\
+             r 2147483647 1 0 0 2:baa594923fc1b14d 0:b9d3c92fd6b36e91 1676042610:81ee1e6309e7644d 0:b9d3fa0e8bdb98ce 2:ba8b40506f8c50b9 5:bbf43bf20ac78b03 0:b9d3c92fd6b36e91 0:b9d3fa0e8bdb98ce 9:bd261571ab11f18f 1676042610:968d3c7309e7644d 838021305:b28005d37628aeff 838021305:a3bb7f480c60b4ef 838021305:cf8b2942ad17887\n\
+             r 2147483647 1 -2147483648 2147483647 15:bf480b1e857e6865 0:b9d3c92fd6b36e91 1133823247:e4829a79ce76e905 0:b9d6b36f67bdc4d3 5:bb973a69c4e61b94 23:c206a999b44e575b 0:b9d3c92fd6b36e91 0:b9d6b36f67bdc4d3 7:bc780717816e341b 1133823247:f91a728ace76e905 566911623:6395db0c8a6e5b5b 566911623:53d78c5ef9044a0a 566911623:15c8f6700e99f982\n\
+             r 2147483647 2 -11 29 6:bbfb01691144c950 0:b9d3c92fd6b36e91 -2126773898:97fbebd9c667cd50 1:ba33e1020cd7fef0 0:b9d6cad5ad2b3089 99:dd14dafac0b22d68 0:b9d3c92fd6b36e91 1:ba33e1020cd7fef0 11:bdb80bc090b1d300 20709750:4ae378db4667cd50 1084096699:dbcde6c6eea90210 1084096699:cda54f15b847d402 1056800340:6ac4ab6150c0bd2e\n\
+             r 2147483647 2 0 0 2:baa1074560c58d5f 0:b9d3c92fd6b36e91 1998755266:a9f2b16d0adbbe5f 2:ba8883db36282d4b 2:ba945db25fb17e5a 33:c637910964f218e4 0:b9d3c92fd6b36e91 2:ba8883db36282d4b 1:ba51adff77986608 1998755266:8716f6be0adbbe5f 999377633:8f0776995c287868 999377633:27856667c3ad68bc 999377633:1f38c15fbd5a3525\n\
+             r 2147483647 2 -2147483648 2147483647 3:bb007b9198133204 0:b9d3c92fd6b36e91 1660584083:c9492bd61846e2c4 2:ba8e26a873f50311 5:bba0112dd2ee8758 41:c9462bc02b9a88ff 0:b9d3c92fd6b36e91 2:ba8e26a873f50311 9:bd0fedba00ddf4cb 1660584083:5c442df59846e2c4 830292041:545c5a32584f861b 830292041:b0360a4b5a044a2a 830292041:a8c11b24a463bafe\n"
+        );
+
+        let mut out = String::new();
+        for size in [0, 1, 2, 3, 5, 8, 9, 10, 11, 12, 16, 23, 40] {
+            out += &format!("b {size}");
+            for radius in -1..=6 {
+                let brushes = ErosionBrushes::new(size, radius);
+                let mut fold = 17_i64;
+                let mut points = 0;
+                for cell in 0..size * size {
+                    let (indices, weights) = brushes.get(cell);
+                    fold = fold.wrapping_mul(31).wrapping_add(indices.len() as i64);
+                    for (&index, weight) in indices.iter().zip(weights) {
+                        fold = fold.wrapping_mul(31).wrapping_add(index as i64);
+                        fold = fold
+                            .wrapping_mul(31)
+                            .wrapping_add(i64::from(weight.to_bits() as i32));
+                        points += 1;
+                    }
+                }
+                out += &format!(" {points}:{fold:x}");
+            }
+            out += "\n";
+        }
+        assert_eq!(
+            out,
+            "b 0 0:11 0:11 0:11 0:11 0:11 0:11 0:11 0:11\n\
+             b 1 0:20f 0:20f 1:3f87be10 1:3f87be10 1:3f87be10 1:3f87be10 1:3f87be10 1:3f87be10\n\
+             b 2 0:ef8f91 0:ef8f91 4:be657efc7c5bbb8f 16:1d4e852cc7b569d1 16:6e4df5c32590a91 16:d1a909535a8a1c91 16:438f4fdd7de5a411 16:6127d4aaed016791\n\
+             b 3 0:198cb38e0830f 0:198cb38e0830f 9:f32bf2d7e670868c 49:3f878b51ab3b6ab2 81:c345e0104e801411 81:bf513ee9751da67c 81:27fdfdb3eb8970c6 81:c735797b83feb8d9\n\
+             b 5 0:5d34b4191f6e850f 0:5d34b4191f6e850f 25:52c2a87fae135784 169:864b8c71c61d172a 361:26f73acab0cff2ac 513:ca7f81b8a1b3e654 605:930e8af82fc6892a 625:e76fad41ebf7d617\n\
+             b 8 0:35e1b45929b6f811 0:35e1b45929b6f811 64:1cf122d8731f37f1 484:fd1e49586a71f34f 1156:6f4a0009cbc0ca9f 1836:4d51a5fc189b528d 2480:9db9530f93cc3d3f 3232:b84eaa2ada3fbe19\n\
+             b 9 0:f9f0779819c80c0f 0:f9f0779819c80c0f 81:c559a38200a252e8 625:5b9182eb54218b8e 1521:71408d6f11f93630 2457:bd490478ab8a03c8 3381:5adc8ef442da1cd0 4537:65e433e6378107c5\n\
+             b 10 0:ddadd1d5e9c00391 0:ddadd1d5e9c00391 100:6789b4f7390e0f5f 784:91a1e591662b9261 1936:bd3f274f9b9b1481 3168:1ca1ef0155af4d97 4420:317cfbaa82a93147 6060:aa095f3ddaf9cfb0\n\
+             b 11 0:71359020712e910f 0:71359020712e910f 121:67a593acd1c73d54 961:5e0992aa10ba777a 2401:d4e51d27bca77afc 3969:318a1e71803a9f4 5597:8cec6594173e8f8c 7801:4959c29c64e46bb8\n\
+             b 12 0:e27e71dcc115ae11 0:e27e71dcc115ae11 144:4658a553cf70bdc9 1156:4f1e9cf8516ef167 2916:c3f90c227b40c027 4860:f42dc452ab8cc7cd 6912:9ea2278b6ec4e0bb 9760:475002df5a775b3c\n\
+             b 16 0:4562e551705be011 0:4562e551705be011 256:ab9dd70527dcdf91 2116:4560a0d282a8a74f 5476:2416c1e0adb74bf 9324:256878be4a19a9bd 13552:a8fc05f3c9a18de7 19776:cf69148ccf51470\n\
+             b 23 0:c433b318f770440f 0:c433b318f770440f 529:6c7fcafb7cb92e08 4489:1b665d62c039052e 11881:16cb47cd48fcf050 20601:a665d4f3d1996108 30485:3fe67d4f6e3c2290 45697:27be5fc2d5a75f8c\n\
+             b 40 0:53eda68c6dde3811 0:53eda68c6dde3811 1600:e2422ed16cc74f1 13924:9da19106999a7ecf 37636:cad9cdae5551dc9f 66348:3c313e4b659bdfcd 99760:2e5bb7ca2a1aa85f 153120:49681053cb99cab8\n"
+        );
     }
 
     #[test]
