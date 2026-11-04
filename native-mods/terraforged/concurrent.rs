@@ -31,7 +31,9 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 /// As with Engine's `StampedLock`, `create` runs under an exclusive lock: callers that arrive
 /// while it runs wait for it, and so does `is_done`, which then reports whether it succeeded. A
 /// `create` that panics (Engine: throws) stores nothing; the next caller, or one already waiting,
-/// runs it again. Engine's `create` may not return null (`Objects.requireNonNull`); here it always
+/// runs it again. The lock is not reentrant: a `create` that calls `call`, `get` or `is_done` on
+/// its own callable never returns (Engine's `StampedLock` hangs there too; std's `Mutex` may
+/// instead panic). Engine's `create` may not return null (`Objects.requireNonNull`); here it always
 /// returns a value. Dropping the callable drops the value: Engine's `LazyCallable` disposes of
 /// nothing either. Its adapters (`adapt`, `adaptComplete`, `callAsync`, `then`) and the timed
 /// `get` are not ported.

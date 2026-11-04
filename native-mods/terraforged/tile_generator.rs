@@ -136,7 +136,9 @@ where
     }
 
     /// `getTile(regionX, regionZ)`: a `CallableTile`, which runs [`Self::generate_region`] on its
-    /// first `get` (nothing runs before it) and hands every later caller that tile.
+    /// first `get` (nothing runs before it) and hands every later caller that tile. Like
+    /// `CallableTile`, which keeps a reference to its generator, the handle borrows `self`; it is
+    /// `Send + Sync` when the generator is, so threads can share it.
     pub fn get_tile(
         &self,
         region_x: i32,
