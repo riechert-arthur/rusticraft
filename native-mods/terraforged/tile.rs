@@ -101,9 +101,10 @@ impl Size {
 /// of border on each side), at chunk `region << size` and block `chunk << 4`. Its block backing is
 /// `block_size().array_size` cells, all allocated up front with the world's registry (Engine's
 /// pooled arrays fill their cells lazily, `computeCell`, and may be longer than the tile needs when
-/// a larger pooled array is reused; neither is observable once a tile is generated). The chunk
-/// views, generation, disposal and resource pools are later layers. A negative array size (only
-/// from absurd sizes or borders) gives an empty backing where Java throws.
+/// a larger pooled array is reused; neither is observable once a tile is generated). Its chunk
+/// array holds the `GenChunk`s `chunk_writer` has created, as Engine's does. Generation, disposal
+/// and resource pools are later layers. A negative array size (only from absurd sizes or borders)
+/// gives an empty backing where Java throws.
 #[derive(Clone)]
 pub struct Tile {
     region_x: i32,
@@ -117,6 +118,7 @@ pub struct Tile {
     block_size: Size,
     chunk_size: Size,
     blocks: Vec<Cell>,
+    chunks: Vec<Option<GenChunk>>,
 }
 
 impl Tile {
@@ -135,6 +137,7 @@ impl Tile {
         let block_size = Size::blocks(size, border_chunks);
         let chunk_size = Size::chunks(size, border_chunks);
         let cells = usize::try_from(block_size.array_size).unwrap_or(0);
+        let chunks = usize::try_from(chunk_size.array_size).unwrap_or(0);
         Self {
             region_x,
             region_z,
@@ -147,6 +150,7 @@ impl Tile {
             block_size,
             chunk_size,
             blocks: vec![Cell::new(terrains); cells],
+            chunks: vec![None; chunks],
         }
     }
 
@@ -241,6 +245,42 @@ impl Tile {
             .and_then(|index| self.blocks.get(index))
     }
 
+    /// `getChunkWriter(chunkX, chunkZ)`: the chunk at `indexOf(chunkX, chunkZ)` of the chunk array
+    /// (tile-local chunk coordinates, border included), created there with these coordinates if
+    /// the slot is empty (`computeChunk`). As in Engine, a slot keeps the chunk first created in it,
+    /// so coordinates past the tile's edge that alias a filled slot return that slot's chunk.
+    /// Engine throws `ArrayIndexOutOfBoundsException` for an index outside the array; this returns
+    /// `None`.
+    pub fn chunk_writer(&mut self, chunk_x: i32, chunk_z: i32) -> Option<ChunkWriter<'_>> {
+        let index = usize::try_from(self.chunk_size.index_of(chunk_x, chunk_z)).ok()?;
+        let chunk = match *self.chunks.get(index)? {
+            Some(chunk) => chunk,
+            None => {
+                let chunk = GenChunk::new(self, chunk_x, chunk_z);
+                self.chunks[index] = Some(chunk);
+                chunk
+            }
+        };
+        Some(ChunkWriter { tile: self, chunk })
+    }
+
+    /// `getChunk(chunkX, chunkZ)`: the chunk at a world chunk position, wrapped into the tile with
+    /// `border + mask(chunk)` like `cell`. `None` where Engine throws a `NullPointerException`: no
+    /// `chunk_writer` call has created that chunk yet. Panics where Engine throws
+    /// `ArrayIndexOutOfBoundsException` (a negative border can put the index outside the array).
+    pub fn chunk(&self, chunk_x: i32, chunk_z: i32) -> Option<ChunkReader<'_>> {
+        let chunk = self.chunks[self.masked_chunk_index(chunk_x, chunk_z) as usize]?;
+        Some(ChunkReader { tile: self, chunk })
+    }
+
+    /// `border + mask(chunk)` on both axes: the chunk-array index `getChunk` reads.
+    fn masked_chunk_index(&self, chunk_x: i32, chunk_z: i32) -> i32 {
+        let size = self.chunk_size;
+        let x = size.border.wrapping_add(size.mask(chunk_x));
+        let z = size.border.wrapping_add(size.mask(chunk_z));
+        size.index_of(x, z)
+    }
+
     /// `Tile.getRegionId(regionX, regionZ)`.
     pub fn region_id_for(region_x: i32, region_z: i32) -> i64 {
         pack(region_x, region_z)
@@ -289,6 +329,167 @@ impl Filterable for FilterRegion<'_> {
 
     fn backing_mut(&mut self) -> &mut [Cell] {
         &mut self.tile.blocks
+    }
+}
+
+/// Engine's `Tile.GenChunk` without its tile: a chunk's world chunk and block position and the
+/// block offset of its 16x16 cells in the tile backing, from its tile-local chunk coordinates
+/// (`regionChunkX`, border included). `ChunkReader`/`ChunkWriter` pair it with the tile.
+#[derive(Clone, Copy)]
+pub struct GenChunk {
+    chunk_x: i32,
+    chunk_z: i32,
+    block_x: i32,
+    block_z: i32,
+    region_block_x: i32,
+    region_block_z: i32,
+}
+
+impl GenChunk {
+    /// `new GenChunk(regionChunkX, regionChunkZ)`: chunk `tile.chunk + regionChunk - border`.
+    fn new(tile: &Tile, region_chunk_x: i32, region_chunk_z: i32) -> Self {
+        let chunk_x = tile
+            .chunk_x
+            .wrapping_add(region_chunk_x)
+            .wrapping_sub(tile.border);
+        let chunk_z = tile
+            .chunk_z
+            .wrapping_add(region_chunk_z)
+            .wrapping_sub(tile.border);
+        Self {
+            chunk_x,
+            chunk_z,
+            block_x: chunk_x.wrapping_shl(4),
+            block_z: chunk_z.wrapping_shl(4),
+            region_block_x: region_chunk_x.wrapping_shl(4),
+            region_block_z: region_chunk_z.wrapping_shl(4),
+        }
+    }
+
+    pub const fn chunk_x(&self) -> i32 {
+        self.chunk_x
+    }
+
+    pub const fn chunk_z(&self) -> i32 {
+        self.chunk_z
+    }
+
+    /// `getBlockX()`: the world block position of the chunk's first cell.
+    pub const fn block_x(&self) -> i32 {
+        self.block_x
+    }
+
+    pub const fn block_z(&self) -> i32 {
+        self.block_z
+    }
+
+    /// The backing index `getCell`/`genCell` read, `indexOf(regionBlock + (block & 15))`; `None`
+    /// outside the backing, where Engine throws (only for a chunk past the tile's edge or with a
+    /// negative border), and `cell`/`gen_cell` panic.
+    fn index(&self, tile: &Tile, block_x: i32, block_z: i32) -> Option<usize> {
+        let x = self.region_block_x.wrapping_add(block_x & 15);
+        let z = self.region_block_z.wrapping_add(block_z & 15);
+        usize::try_from(tile.block_size.index_of(x, z))
+            .ok()
+            .filter(|&index| index < tile.blocks.len())
+    }
+}
+
+/// Engine's `ChunkReader` (a `GenChunk` from `Tile::chunk`): reads a chunk's cells. Engine's
+/// `open`/`close` reference count belongs to its disposal, which is not ported.
+pub struct ChunkReader<'tile> {
+    tile: &'tile Tile,
+    chunk: GenChunk,
+}
+
+impl ChunkReader<'_> {
+    /// The chunk's position.
+    pub const fn chunk(&self) -> GenChunk {
+        self.chunk
+    }
+
+    /// `getCell(blockX, blockZ)`: the cell of a block, by its position inside the chunk (`& 15`).
+    pub fn cell(&self, block_x: i32, block_z: i32) -> &Cell {
+        let index = self.chunk.index(self.tile, block_x, block_z);
+        &self.tile.blocks[index.expect("chunk cell outside the tile backing")]
+    }
+
+    /// `visit(minX, minZ, maxX, maxZ, visitor)`, Engine's bugs included: it returns early when
+    /// `maxZ` is past the chunk's last block (rather than `minZ`), and its loops run `z` from
+    /// `minZ` to the clamped `maxX` and `x` from `minX` to the clamped `maxZ`. Where Engine's loop
+    /// never ends (a clamped bound of `i32::MAX`: a chunk at block x or z 0x7FFF_FFF0), this one
+    /// stops.
+    pub fn visit(
+        &self,
+        min_x: i32,
+        min_z: i32,
+        max_x: i32,
+        max_z: i32,
+        mut visitor: impl FnMut(&Cell, i32, i32),
+    ) {
+        let (region_min_x, region_min_z) = (self.chunk.block_x, self.chunk.block_z);
+        if max_x < region_min_x || max_z < region_min_z {
+            return;
+        }
+        let region_max_x = region_min_x.wrapping_add(15);
+        let region_max_z = region_min_z.wrapping_add(15);
+        if min_x > region_max_x || max_z > region_max_z {
+            return;
+        }
+        let min_x = min_x.max(region_min_x);
+        let min_z = min_z.max(region_min_z);
+        let max_x = max_x.min(region_max_x);
+        let max_z = max_z.min(region_max_z);
+        // With swapped bounds the outer loop can span ~2^32 rows of an empty inner loop (a chunk far
+        // off the x = z diagonal); skipping it visits the same cells.
+        if min_x > max_z {
+            return;
+        }
+        for z in min_z..=max_x {
+            for x in min_x..=max_z {
+                visitor(self.cell(x, z), x, z);
+            }
+        }
+    }
+
+    /// `iterate(visitor)`: every cell with its position in the chunk, row by row.
+    pub fn iterate(&self, mut visitor: impl FnMut(&Cell, i32, i32)) {
+        for dz in 0..16 {
+            for dx in 0..16 {
+                visitor(self.cell(dx, dz), dx, dz);
+            }
+        }
+    }
+}
+
+/// Engine's `ChunkWriter` (a `GenChunk` from `Tile::chunk_writer`): fills a chunk's cells.
+pub struct ChunkWriter<'tile> {
+    tile: &'tile mut Tile,
+    chunk: GenChunk,
+}
+
+impl ChunkWriter<'_> {
+    /// The chunk's position.
+    pub const fn chunk(&self) -> GenChunk {
+        self.chunk
+    }
+
+    /// `genCell(blockX, blockZ)`: the cell of a block, by its position inside the chunk (`& 15`).
+    pub fn gen_cell(&mut self, block_x: i32, block_z: i32) -> &mut Cell {
+        let index = self.chunk.index(self.tile, block_x, block_z);
+        &mut self.tile.blocks[index.expect("chunk cell outside the tile backing")]
+    }
+
+    /// `generate(ctx, visitor)`: every cell, row by row, with its position in the chunk and in the
+    /// world (`blockX + dx`, wrapping like Java's `int`).
+    pub fn generate(&mut self, mut visitor: impl FnMut(&mut Cell, i32, i32, i32, i32)) {
+        let (block_x, block_z) = (self.chunk.block_x, self.chunk.block_z);
+        for dz in 0..16 {
+            for dx in 0..16 {
+                let (x, z) = (block_x.wrapping_add(dx), block_z.wrapping_add(dz));
+                visitor(self.gen_cell(dx, dz), dx, dz, x, z);
+            }
+        }
     }
 }
 
@@ -523,6 +724,59 @@ mod tests {
         assert_eq!(tile.blocks[677].value, -1.0);
     }
 
+    /// Coordinates `TileOracle.java` reads cells and chunks at.
+    const TILE_VALUES: [i32; 33] = [
+        0,
+        1,
+        -1,
+        2,
+        5,
+        7,
+        15,
+        16,
+        17,
+        -16,
+        -17,
+        31,
+        32,
+        63,
+        64,
+        79,
+        80,
+        95,
+        96,
+        97,
+        127,
+        191,
+        192,
+        -96,
+        677,
+        1023,
+        1024,
+        9215,
+        9216,
+        0x4000_0000,
+        i32::MAX,
+        i32::MIN,
+        i32::MIN + 1,
+    ];
+
+    /// The tiles `TileOracle.java` checks: region x and z, size factor, border chunks.
+    const TILE_CONFIGS: [(i32, i32, i32, i32); 12] = [
+        (-2, 3, 2, 1),
+        (0, 0, 3, 2),
+        (5, -7, 1, 0),
+        (i32::MIN, i32::MAX, 2, 1),
+        (1000, -1000, 33, 1),
+        (3, -3, -31, 1),
+        (1, 1, 0, 0),
+        (-1, -1, 4, 1),
+        (7, -9, 31, 1),
+        (2, 2, 1, -1),
+        (-3, 4, 3, -1),
+        (0x1234_5678, -0x0765_4321, 2, 1),
+    ];
+
     /// Replays `TileOracle.java` (`.local/terraforged/oracles/tile/`) on Engine 0.3.0's `Tile` and
     /// its `FilterRegion`, for tiles with negative, `i32::MIN`/`MAX` and wrapping region positions,
     /// shift factors Java masks to five bits (33, -31, 31: a zero block size), no border and
@@ -532,59 +786,11 @@ mod tests {
     /// region's `getCellRaw` (-1 for `Cell.empty()`), with each cell's value set to its index.
     #[test]
     fn tile_matches_engine_oracle() {
-        const VALUES: [i32; 33] = [
-            0,
-            1,
-            -1,
-            2,
-            5,
-            7,
-            15,
-            16,
-            17,
-            -16,
-            -17,
-            31,
-            32,
-            63,
-            64,
-            79,
-            80,
-            95,
-            96,
-            97,
-            127,
-            191,
-            192,
-            -96,
-            677,
-            1023,
-            1024,
-            9215,
-            9216,
-            0x4000_0000,
-            i32::MAX,
-            i32::MIN,
-            i32::MIN + 1,
-        ];
         let code =
             |cell: Option<&Cell>, missing: i32| cell.map_or(missing, |cell| cell.value as i32);
         let terrains = TerrainRegistry::new();
         let mut out = String::new();
-        for (region_x, region_z, size, border) in [
-            (-2, 3, 2, 1),
-            (0, 0, 3, 2),
-            (5, -7, 1, 0),
-            (i32::MIN, i32::MAX, 2, 1),
-            (1000, -1000, 33, 1),
-            (3, -3, -31, 1),
-            (1, 1, 0, 0),
-            (-1, -1, 4, 1),
-            (7, -9, 31, 1),
-            (2, 2, 1, -1),
-            (-3, 4, 3, -1),
-            (0x1234_5678, -0x0765_4321, 2, 1),
-        ] {
+        for (region_x, region_z, size, border) in TILE_CONFIGS {
             let mut tile = Tile::new(region_x, region_z, size, border, &terrains);
             for (index, cell) in tile.blocks.iter_mut().enumerate() {
                 cell.value = index as f32;
@@ -606,8 +812,8 @@ mod tests {
                 tile.block_count(),
             );
             let (mut cells, mut raws, mut filtered) = (17_i64, 17_i64, 17_i64);
-            for a in VALUES {
-                for b in VALUES {
+            for a in TILE_VALUES {
+                for b in TILE_VALUES {
                     // `getCell` throws where its masked index leaves the backing (negative borders,
                     // a zero block size); `cell` panics there, so the test reads the index itself.
                     let index = tile.masked_index(a, b);
@@ -616,8 +822,8 @@ mod tests {
                 }
             }
             let filter = tile.filterable();
-            for a in VALUES {
-                for b in VALUES {
+            for a in TILE_VALUES {
+                for b in TILE_VALUES {
                     filtered = fold(filtered, code(java_cell_raw(&filter, a, b), -1));
                 }
             }
@@ -655,6 +861,227 @@ mod tests {
              c 92264f80fb20476d b8ad21aa9d7c1add 2daac5ee4e89e63a\n\
              t 305419896 -124076833 2 1: 2 305419896 -124076833 1221679584 -496307332 -1927963136 649017280 1 36 12345678f89abcdf 305419896 -124076833 9216 -1927963136 649017280 96 16\n\
              c 4676d075e0c79d72 b8ad21aa9d7c1add 2daac5ee4e89e63a\n"
+        );
+    }
+
+    #[test]
+    fn tile_chunks_match_engine_0_3_0() {
+        let terrains = TerrainRegistry::new();
+        let mut tile = Tile::new(-2, 3, 2, 1, &terrains);
+        for (index, cell) in tile.blocks.iter_mut().enumerate() {
+            cell.value = index as f32;
+        }
+        assert!(tile.chunk(-7, 14).is_none());
+        let mut writer = tile.chunk_writer(2, 3).unwrap();
+        let chunk = writer.chunk();
+        assert_eq!(
+            (
+                chunk.chunk_x(),
+                chunk.chunk_z(),
+                chunk.block_x(),
+                chunk.block_z()
+            ),
+            (-7, 14, -112, 224)
+        );
+        assert_eq!(writer.gen_cell(0, 0).value, 4_640.0);
+        writer.gen_cell(17, -1).value = -1.0;
+        let mut generated = Vec::new();
+        writer.generate(|cell, dx, dz, x, z| {
+            if (dx, dz) == (1, 15) {
+                generated.push((cell.value, x, z));
+            }
+        });
+        assert_eq!(generated, [(-1.0, -111, 239)]);
+        assert!(tile.chunk_writer(-1, 0).is_none());
+        assert!(tile.chunk_writer(6, 6).is_none());
+
+        let reader = tile.chunk(-7, 14).unwrap();
+        assert_eq!(reader.chunk().chunk_x(), -7);
+        assert_eq!(reader.cell(-111, 239).value, -1.0);
+        let mut count = 0;
+        reader.iterate(|_, _, _| count += 1);
+        assert_eq!(count, 256);
+    }
+
+    const OFFSETS: [i32; 9] = [0, 1, 15, 16, -1, 17, -16, i32::MIN, i32::MAX];
+
+    /// `TileOracle.writer`: a writer's position, `genCell` at `OFFSETS` pairs (-2 outside the
+    /// backing) and, when every cell is inside, a `generate` pass adding 1 to each cell.
+    fn fold_writer(tile: &mut Tile, f: &mut i64, chunk_x: i32, chunk_z: i32) {
+        let Some(mut writer) = tile.chunk_writer(chunk_x, chunk_z) else {
+            *f = fold(*f, -2);
+            return;
+        };
+        let chunk = writer.chunk();
+        for value in [
+            chunk.chunk_x(),
+            chunk.chunk_z(),
+            chunk.block_x(),
+            chunk.block_z(),
+        ] {
+            *f = fold(*f, value);
+        }
+        let mut inside = true;
+        for a in OFFSETS {
+            for b in OFFSETS {
+                // `gen_cell` panics where Engine throws: test the index first.
+                if chunk.index(writer.tile, a, b).is_some() {
+                    *f = fold(*f, writer.gen_cell(a, b).value as i32);
+                } else {
+                    *f = fold(*f, -2);
+                    inside = false;
+                }
+            }
+        }
+        if inside {
+            writer.generate(|cell, dx, dz, x, z| {
+                for value in [cell.value as i32, dx, dz, x, z] {
+                    *f = fold(*f, value);
+                }
+                cell.value += 1.0;
+            });
+        }
+    }
+
+    /// `TileOracle.reader`: a reader's position, `getCell` at `OFFSETS` pairs, `iterate` and, with
+    /// `visits`, `visit` over rectangles around the chunk; -3 for a missing chunk, -2 outside.
+    fn fold_reader(tile: &Tile, f: &mut i64, chunk_x: i32, chunk_z: i32, visits: bool) {
+        let index = tile.masked_chunk_index(chunk_x, chunk_z);
+        let Some(slot) = usize::try_from(index).ok().and_then(|i| tile.chunks.get(i)) else {
+            *f = fold(*f, -2);
+            return;
+        };
+        assert_eq!(slot.is_some(), tile.chunk(chunk_x, chunk_z).is_some());
+        let Some(reader) = tile.chunk(chunk_x, chunk_z) else {
+            *f = fold(*f, -3);
+            return;
+        };
+        let chunk = reader.chunk();
+        for value in [
+            chunk.chunk_x(),
+            chunk.chunk_z(),
+            chunk.block_x(),
+            chunk.block_z(),
+        ] {
+            *f = fold(*f, value);
+        }
+        let mut inside = true;
+        for a in OFFSETS {
+            for b in OFFSETS {
+                if chunk.index(tile, a, b).is_some() {
+                    *f = fold(*f, reader.cell(a, b).value as i32);
+                } else {
+                    *f = fold(*f, -2);
+                    inside = false;
+                }
+            }
+        }
+        if !inside {
+            return;
+        }
+        reader.iterate(|cell, dx, dz| {
+            for value in [cell.value as i32, dx, dz] {
+                *f = fold(*f, value);
+            }
+        });
+        if !visits {
+            return;
+        }
+        let bounds = |block: i32| {
+            [-1, 0, 7, 16]
+                .map(|offset| block.wrapping_add(offset))
+                .into_iter()
+                .chain([i32::MIN, i32::MAX])
+        };
+        for x0 in bounds(chunk.block_x()) {
+            for z0 in bounds(chunk.block_z()) {
+                for x1 in bounds(chunk.block_x()) {
+                    for z1 in bounds(chunk.block_z()) {
+                        reader.visit(x0, z0, x1, z1, |cell, x, z| {
+                            for value in [cell.value as i32, x, z] {
+                                *f = fold(*f, value);
+                            }
+                        });
+                        *f = fold(*f, -7);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Replays the `k` lines of `TileOracle.java` on Engine 0.3.0's `getChunk`/`getChunkWriter`
+    /// and its `ChunkReader`/`ChunkWriter` defaults, for every `TILE_CONFIGS` tile: `getChunk`
+    /// over `TILE_VALUES` pairs before any chunk exists; `getChunkWriter` over tile-local chunks
+    /// (negative, last, one and two past the edge, `i32::MIN`/`MAX`: aliasing and out-of-range
+    /// slots) followed by Engine's `generate(Consumer)` loop over every chunk; `getChunk` over
+    /// `TILE_VALUES` pairs again; and `visit` (Engine's swapped bounds included) over rectangles
+    /// around a few chunks.
+    #[test]
+    fn tile_chunks_match_engine_oracle() {
+        let terrains = TerrainRegistry::new();
+        let mut out = String::new();
+        for (region_x, region_z, size, border) in TILE_CONFIGS {
+            let mut tile = Tile::new(region_x, region_z, size, border, &terrains);
+            for (index, cell) in tile.blocks.iter_mut().enumerate() {
+                cell.value = index as f32;
+            }
+            let total = tile.chunk_size().total;
+            let mut folds = [17_i64; 4];
+            for a in TILE_VALUES {
+                for b in TILE_VALUES {
+                    fold_reader(&tile, &mut folds[0], a, b, false);
+                }
+            }
+            let chunks = [
+                0,
+                1,
+                -1,
+                total.wrapping_sub(1),
+                total,
+                total.wrapping_add(1),
+                total.wrapping_mul(2).wrapping_add(1),
+                i32::MIN,
+                i32::MAX,
+            ];
+            for a in chunks {
+                for b in chunks {
+                    fold_writer(&mut tile, &mut folds[1], a, b);
+                }
+            }
+            for z in 0..total {
+                for x in 0..total {
+                    let chunk = tile.chunk_writer(x, z).unwrap().chunk();
+                    folds[1] = fold(fold(folds[1], chunk.chunk_x()), chunk.chunk_z());
+                }
+            }
+            for a in TILE_VALUES {
+                for b in TILE_VALUES {
+                    fold_reader(&tile, &mut folds[2], a, b, false);
+                }
+            }
+            let visited = [0, -1, 3, 0x4000_0000];
+            for a in visited {
+                for b in visited {
+                    fold_reader(&tile, &mut folds[3], a, b, true);
+                }
+            }
+            let [p, w, r, v] = folds;
+            out += &format!("k {region_x} {region_z} {size} {border}: {p:x} {w:x} {r:x} {v:x}\n");
+        }
+        assert_eq!(
+            out,
+            "k -2 3 2 1: 44a46f16d2f1560c f354ca027ee4b45b a3b5537885ba0e92 ff7c713e91248951\n\
+             k 0 0 3 2: 44a46f16d2f1560c 9f40df21cb6669c1 99aa32e702134cea c3cabf4b7ad872c1\n\
+             k 5 -7 1 0: 44a46f16d2f1560c 4132099aa7b90c96 87a518fda6f90f03 f29cd237f42d3ed1\n\
+             k -2147483648 2147483647 2 1: 44a46f16d2f1560c f91411f858cda42b 4993606e7bc5762a 4686187ea8988151\n\
+             k 1000 -1000 33 1: 44a46f16d2f1560c 2b116ee6f7155cfd e43456961d996dfe a1d1d8c1027f3e91\n\
+             k 3 -3 -31 1: 44a46f16d2f1560c 4cf41f85a782d815 6ea3cd20ef9861ea af98c9a1a9e1da91\n\
+             k 1 1 0 0: 44a46f16d2f1560c 8f6aaba4859b7618 102d785cdea4f553 4846a14635fc811\n\
+             k -1 -1 4 1: 44a46f16d2f1560c f6298a7ef48fb3cf d08b7b4214c802b8 db6c0fb974ead861\n\
+             k 7 -9 31 1: 3873a8cb5279868f 6f52d94832ae78a6 158272460fad3556 6d49e0a4b24306d4\n\
+             k 2 2 1 -1: ee6f3c4f6bd9120d dfdc731c059a160d ee6f3c4f6bd9120d c1d46ccbbc4d7c11\n\
+             k -3 4 3 -1: 9f22577826ba2b3e c5d08c6ccb5d1c23 36aea14c8a36bc41 7e15d1295b601ab4\n\
+             k 305419896 -124076833 2 1: 44a46f16d2f1560c 54a98b432968876b 94f7691aa357e28a 3d600e7d4bee6151\n"
         );
     }
 
