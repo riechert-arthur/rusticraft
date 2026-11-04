@@ -929,7 +929,7 @@ region's entry, whose task is the generator's `generate_region` (`CallableTile`)
 `get_tile_if_present` returns an entry only once it is done, stamping it; on `NONE` an entry is done at once, so this
 runs a cached region nobody has got yet, as Engine does. `get` neither stamps nor generates. `queue_region` and
 `queue_chunk` start tiles only on pools larger than four (`QUEUING_MIN_POOL_SIZE`; `ThreadPool::create(4)` is 6). The
-cache has no zoomed path. `getChunk` and the dispose listener (`onDispose`) are later layers. A swept tile is dropped,
+cache has no zoomed path. The dispose listener (`onDispose`) is a later layer. A swept tile is dropped,
 not closed (as Engine's sweep); Engine's `Tile.close`, which hands a tile's cells back to `TileResources` pools, is not
 ported, and the cells are freed with the last holder of the entry. Its test replays `TileCacheOracle.java` in
 `.local/terraforged/oracles/tile_cache/` (Engine's real `TileCache` from `TileGenerator.cached()` over
@@ -938,9 +938,21 @@ cache's clock): which pools queue, region ids, tiles bit for bit equal to `gener
 `ThreadPools.create(8)` and from a batched generator, hits, stamps, the sweep at exactly a lifetime and a millisecond
 past it, and eight threads asking for one region; debug and release builds agree.
 
+The cached-chunk layer adds `TileProvider.getChunk` as `TileCache::get_chunk(chunkX, chunkZ)`: `get_tile` of the
+chunk's region (`chunkToRegion`, an arithmetic shift, so negative chunks round down), which stamps the entry and waits
+for or runs the tile, then the tile's `chunk(chunkX, chunkZ)` (the slot `border + mask(chunk)`). It returns a
+`CachedChunk` that holds the tile's cache entry, as Engine's `GenChunk` (an inner class of its `Tile`) keeps its tile:
+the chunk stays readable after the cache sweeps the entry, and the next `get_chunk` makes a new tile. `reader()` is the
+tile-chunk layer's `ChunkReader` (`cell`, `iterate`, `visit` with Engine's swapped bounds), and reads do not stamp the
+entry. `None` stands where Engine would throw `NullPointerException` for a slot with no chunk; every tile the generator
+makes fills all its slots, so it does not happen. Engine's `open`/`close` reader count belongs to tile disposal, a later
+layer. The test replays the `h` lines of `TileCacheOracle.java`: chunks at negative, extreme and aliasing positions
+(region, slot of the chunk array, position, cells, `visit` rectangles), `getChunk` over 8x8 chunks around two regions,
+stamping, a reader outliving its swept entry, and eight threads asking for one chunk at once.
+
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries and the tile cache. They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache and its cached chunks. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
