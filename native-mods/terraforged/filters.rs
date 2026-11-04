@@ -953,6 +953,9 @@ mod tests {
         assert!(map.cells[0].terrain.is_same(&registry.get_by_id(0)));
     }
 
+    /// Engine's erosion defaults, eight `nextInt(16)` draws as `Erosion.apply` makes them for chunk
+    /// (-11, 29) of iteration 7 at root seed 12345, and sampled points of corner, edge and interior
+    /// brushes of a 12x12 map.
     #[test]
     fn erosion_primitives_match_engine_0_3_0() {
         assert_eq!(
