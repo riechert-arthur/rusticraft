@@ -428,12 +428,30 @@ geometry, `getMin`/`getMax`, the continent's values over a grid in continent uni
 over the block grid for seven configs (continent scale 0, 1, 2, -3001 and `Integer.MAX_VALUE`, seeds at the `int`
 edges, custom control points), against a fourth Java oracle in `.local/terraforged/oracles/continent/`.
 
-The river-configuration layer adds TerraForged's default river, lake and wetland settings, normalized
-river profiles, fork scaling and the original variance semantics used by later network generation.
+The river-configuration layer adds Engine's river settings and the configs its river map builds from them
+(`river.rs`). `RiverSettings` (in `engine.rs`) keeps Engine 0.3.0's defaults: seed offset 0, 8 main rivers per
+continent; main rivers with bed depth 5, bank heights 2 to 6, bed width 8, bank width 20 and fade 0.75; branch
+rivers with 4, 1 to 4, 5, 14 and 0.975; lakes with chance 0.3, start distance 0 to 0.03, depth 10, size 75 to 150
+and bank heights 2 to 10; wetlands with chance 0.6 and size 175 to 225. `RiverConfig` and its builder (defaults
+bed width 4, bank width 15, bed depth 5, bank heights 1, length 1000, fade 0.2) turn the block counts into heights
+normalized by `Levels` (`water(-depth)`, `water(bank)`), with `length2 = length * length` wrapping as a Java `int`;
+Engine's river generator builds main rivers with length 5000 and branches with 4500. `createFork` scales a river's
+widths down to a connecting width (rounded with `NoiseUtil.round`) and drops its banks one block, to at least
+ground level. `LakeConfig` subtracts its sizes as floats, and `WetlandConfig` keeps Engine's `Variance.of(sizeMin,
+sizeMax)`, whose second argument is a range: wetlands are 175 to 400 blocks long, not 175 to 225. These are
+Engine's settings, not what TerraForged 0.3.1 carves with: TerraForged's `NoiseGenerator` builds Engine's `Settings`
+with these river defaults untouched, but its own continent noise never builds Engine's river map and carves rivers
+with its own continent river config (`ContinentConfig.rivers`: seed 0, lake density 0.75; rivers with erosion 0.075, bed width
+1 to 7, bank width 3 to 30, valley width 80 to 200, bed depth 1.25 to 5 and bank depth 1.25 to 3; lakes with bed
+width 8 to 15, bank width 30 to 45, valley width 80 to 120, bed depth 2 to 8 and bank depth 1 to 1.5), which this
+layer does not port. Its tests fold every field of the river, fork, lake, wetland and variance configs over edge
+cases (`int` limits, NaN, infinite and negative widths, six `Levels`, including TerraForged's swapped
+`Levels(63, 255)`), against a Java oracle in `.local/terraforged/oracles/river/`, which also prints TerraForged's
+own config.
 
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators and the fancy continents (island geometry and generator). They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator) and Engine's river configuration. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development

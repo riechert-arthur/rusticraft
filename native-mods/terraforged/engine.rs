@@ -1000,7 +1000,8 @@ pub struct WorldSettings {
 }
 
 /// Engine's `RiverSettings`, with Engine's defaults (the serializer's `@Range` limits are not enforced).
-/// TerraForged 0.3.1 does not read it: its own continent river config replaces Engine's river map.
+/// TerraForged 0.3.1 keeps these defaults but never uses them: its own continent noise carves rivers with its
+/// own config instead of Engine's river map.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RiverSettings {
     pub seed_offset: i32,
