@@ -1066,6 +1066,15 @@ and NaN, infinite, signed-zero and huge points, the river stage through `getRive
 `new Climate(continent, context)` on the created continent (its draws and every cell field after `apply`); the test
 also checks that each created continent samples like the generator built directly.
 
+Every continent constructor, and so the factory, takes the context's river settings (`context.settings.rivers`) and
+levels, which reach the river generator as in Engine's `BaseRiverGenerator`. A second test replays the same oracle's
+`RIVERS` lines, for each type with Engine's default river settings and with every river setting changed (count and
+seed offset; main and branch bed and bank widths, bed depths, bank heights given in the wrong order, which the builder
+sorts, and fades; lake chance, start distances, depth, sizes and banks; wetland chance and sizes): the river
+generator's count and seed and its main and branch `RiverConfig`s (lengths 5000 and 4500), `LakeConfig` and
+`WetlandConfig` bit for bit, and every cell field after the river stage over a 151x151 grid with 43- to 47-block
+spacing.
+
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives, the biome climate types, the climate settings, the climate module, the climate stage and the continent factory. They change nothing in the game, so there is
