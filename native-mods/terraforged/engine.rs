@@ -541,6 +541,187 @@ fn java_min(first: f32, second: f32) -> f32 {
     }
 }
 
+/// Engine's `TerrainType` registry: the 16 built-in terrains with ids 0..=15 in Engine's order,
+/// then every registered terrain with the next id. Names are unique ignoring case, as Java's
+/// `String.equalsIgnoreCase` compares them.
+///
+/// Engine's registry is a static global, so in one Java process the ids of composite and custom
+/// terrains depend on what earlier worlds registered. Here each world owns a registry, so the ids
+/// it assigns only depend on that world's own registrations. Built-in terrains are distinct
+/// objects in each registry: compare a terrain with the built-ins of the registry it came from
+/// (`is_same`), never with another registry's. Registration takes `&mut self`; share a registry
+/// that is no longer registered into behind an `Arc`, or one that still is behind a lock, as
+/// Engine's `lock` does.
+pub struct TerrainRegistry {
+    terrains: Vec<Terrain>,
+}
+
+impl TerrainRegistry {
+    pub fn new() -> Self {
+        let terrains = vec![
+            Terrain::new(0, "none", TerrainCategory::None),
+            Terrain::new(1, "deep_ocean", TerrainCategory::DeepOcean),
+            Terrain::new(2, "ocean", TerrainCategory::ShallowOcean),
+            Terrain::new(3, "coast", TerrainCategory::Coast),
+            Terrain::new(4, "beach", TerrainCategory::Beach),
+            Terrain::new(5, "river", TerrainCategory::River),
+            Terrain::new(6, "lake", TerrainCategory::Lake),
+            Terrain::configured_river_override(7, "wetland", TerrainCategory::Wetland, true),
+            Terrain::new(8, "flats", TerrainCategory::Flatland),
+            Terrain::configured_erosion(9, "badlands", TerrainCategory::Flatland, 0.3),
+            Terrain::new(10, "plateau", TerrainCategory::Lowland),
+            Terrain::new(11, "hills", TerrainCategory::Lowland),
+            Terrain::configured_mountain(12, "mountains", TerrainCategory::Highland, true, true),
+            Terrain::configured_mountain(
+                13,
+                "mountain_chain",
+                TerrainCategory::Highland,
+                true,
+                true,
+            ),
+            Terrain::volcano(14, "volcano", TerrainCategory::Highland),
+            Terrain::volcano(15, "volcano_pipe", TerrainCategory::Highland),
+        ];
+        Self { terrains }
+    }
+
+    pub fn terrains(&self) -> &[Terrain] {
+        &self.terrains
+    }
+
+    pub fn find(&self, filter: impl Fn(&Terrain) -> bool) -> Option<Terrain> {
+        self.terrains
+            .iter()
+            .find(|terrain| filter(terrain))
+            .cloned()
+    }
+
+    /// `TerrainType.get(String)`: the first terrain whose name equals `name` ignoring case.
+    pub fn get_by_name(&self, name: &str) -> Option<Terrain> {
+        self.terrains
+            .iter()
+            .find(|terrain| java_equals_ignore_case(terrain.name(), name))
+            .cloned()
+    }
+
+    /// `TerrainType.get(int)`: the terrain with this id, or `none` (id 0) for an unknown id.
+    pub fn get_by_id(&self, id: i32) -> Terrain {
+        usize::try_from(id)
+            .ok()
+            .and_then(|id| self.terrains.get(id))
+            .unwrap_or(&self.terrains[0])
+            .clone()
+    }
+
+    /// `TerrainType.register`: the registered terrain with `instance`'s name if there is one, else
+    /// `instance.with_id(next id)`, registered.
+    pub fn register(&mut self, instance: Terrain) -> Terrain {
+        if let Some(current) = self.get_by_name(instance.name()) {
+            return current;
+        }
+        let terrain = instance.with_id(self.terrains.len() as i32);
+        self.terrains.push(terrain.clone());
+        terrain
+    }
+
+    /// `TerrainType.registerComposite`: `first` itself if both are the same object, else the
+    /// composite of the lower-id and the higher-id terrain, named `lower-higher`, registered once.
+    /// As in Engine, two distinct terrains with the same id make a composite of `second` with itself.
+    pub fn register_composite(&mut self, first: &Terrain, second: &Terrain) -> Terrain {
+        if first.is_same(second) {
+            return first.clone();
+        }
+        let min = if first.id() < second.id() {
+            first.clone()
+        } else {
+            second.clone()
+        };
+        let max = if first.id() > second.id() {
+            first.clone()
+        } else {
+            second.clone()
+        };
+        let name = format!("{}-{}", min.name(), max.name());
+        if let Some(current) = self.get_by_name(&name) {
+            return current;
+        }
+        let terrain = Terrain::composite(self.terrains.len() as i32, min, max);
+        self.terrains.push(terrain.clone());
+        terrain
+    }
+
+    /// `TerrainHelper.getOrCreate`: `none` without a parent or when the parent is this registry's
+    /// `none`, else the terrain registered under `name`, or a new one delegating to `parent`.
+    pub fn get_or_create(&mut self, name: &str, parent: Option<Terrain>) -> Terrain {
+        let Some(parent) = parent else {
+            return self.get_by_id(0);
+        };
+        if parent.is_same(&self.terrains[0]) {
+            return self.get_by_id(0);
+        }
+        if let Some(current) = self.get_by_name(name) {
+            return current;
+        }
+        self.register(Terrain::with_parent(0, Arc::<str>::from(name), parent))
+    }
+}
+
+impl Default for TerrainRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Java's `String.equalsIgnoreCase`: the same UTF-16 length and, code point by code point, equal,
+/// equal after `Character.toUpperCase`, or equal after `Character.toLowerCase` of those.
+fn java_equals_ignore_case(first: &str, second: &str) -> bool {
+    if first.is_ascii() && second.is_ascii() {
+        // ASCII letters only case-map to ASCII letters.
+        return first.eq_ignore_ascii_case(second);
+    }
+    if first.encode_utf16().count() != second.encode_utf16().count() {
+        return false;
+    }
+    let mut second_chars = second.chars();
+    first.chars().all(|a| {
+        second_chars.next().is_some_and(|b| {
+            let (upper_a, upper_b) = (java_to_upper(a), java_to_upper(b));
+            a == b || upper_a == upper_b || java_to_lower(upper_a) == java_to_lower(upper_b)
+        })
+    }) && second_chars.next().is_none()
+}
+
+/// Java's `Character.toUpperCase(int)`, a simple (one code point) mapping. Rust's `to_uppercase`
+/// is the full mapping; they agree wherever that is one code point, except for the Greek letters
+/// with a iota subscript, whose simple uppercase is their titlecase. Checked against Java 26's
+/// tables for every code point (Rust 1.95).
+fn java_to_upper(c: char) -> char {
+    let simple = match c {
+        '\u{1f80}'..='\u{1f87}' | '\u{1f90}'..='\u{1f97}' | '\u{1fa0}'..='\u{1fa7}' => {
+            u32::from(c) + 8
+        }
+        '\u{1fb3}' | '\u{1fc3}' | '\u{1ff3}' => u32::from(c) + 9,
+        _ => return single_case_mapping(c.to_uppercase(), c),
+    };
+    char::from_u32(simple).unwrap_or(c)
+}
+
+/// Java's `Character.toLowerCase(int)`, as [`java_to_upper`]: only `İ` (U+0130) has a longer full
+/// lowercase, and its simple one is `i`.
+fn java_to_lower(c: char) -> char {
+    if c == '\u{130}' {
+        return 'i';
+    }
+    single_case_mapping(c.to_lowercase(), c)
+}
+
+fn single_case_mapping(mut mapped: impl Iterator<Item = char>, c: char) -> char {
+    match (mapped.next(), mapped.next()) {
+        (Some(mapped), None) => mapped,
+        _ => c,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -955,5 +1136,294 @@ mod tests {
         // Terrains are shared by world-generation threads.
         fn send_sync<T: Send + Sync>() {}
         send_sync::<Terrain>();
+    }
+
+    /// One registered terrain as TerrainRegistryOracle prints it: id, name, category, hue bits,
+    /// erosion bits and property bits.
+    type Row = (i32, &'static str, TerrainCategory, u32, u32, u16);
+
+    fn assert_row(terrain: &Terrain, row: Row) {
+        let (id, name, category, hue, erosion, properties) = row;
+        assert_eq!(terrain.id(), id, "{terrain:?}");
+        assert_eq!(terrain.name(), name);
+        assert_eq!(terrain.category(), category, "{terrain:?}");
+        assert_eq!(terrain.render_hue().to_bits(), hue, "{terrain:?}");
+        assert_eq!(terrain.erosion_modifier().to_bits(), erosion, "{terrain:?}");
+        assert_eq!(property_bits(terrain), properties, "{terrain:?}");
+    }
+
+    const BUILT_INS: [Row; 16] = {
+        use TerrainCategory::*;
+        [
+            (0, "none", None, 0xbee66da8, 0x3f800000, 0x000),
+            (1, "deep_ocean", DeepOcean, 0x3ba86a77, 0x3f800000, 0x0a8),
+            (2, "ocean", ShallowOcean, 0xbef0c69a, 0x3f800000, 0x0a4),
+            (3, "coast", Coast, 0xbf14bc2f, 0x3f800000, 0x0d0),
+            (4, "beach", Beach, 0xbf22122b, 0x3f800000, 0x0d0),
+            (5, "river", River, 0x3cffd9f0, 0x3f800000, 0x022),
+            (6, "lake", Lake, 0x3f4c300b, 0x3f800000, 0x220),
+            (7, "wetland", Wetland, 0xbf605aad, 0x3f800000, 0x4c0),
+            (8, "flats", Flatland, 0x3efbff1a, 0x3f800000, 0x041),
+            (9, "badlands", Flatland, 0x3f1fa6c2, 0x3e99999a, 0x041),
+            (10, "plateau", Lowland, 0x3f09beec, 0x3f800000, 0x040),
+            (11, "hills", Lowland, 0xbea446db, 0x3f800000, 0x040),
+            (12, "mountains", Highland, 0x3eb6130c, 0x3f800000, 0x8c0),
+            (
+                13,
+                "mountain_chain",
+                Highland,
+                0xbb95b75d,
+                0x3f800000,
+                0x8c0,
+            ),
+            (14, "volcano", Highland, 0x3ee7697b, 0x3f800000, 0x19c0),
+            (15, "volcano_pipe", Highland, 0xbe0851fc, 0x3f800000, 0x19c0),
+        ]
+    };
+
+    #[test]
+    fn default_terrain_registry_matches_engine_0_3_0() {
+        // TerrainRegistryOracle (.local/terraforged/oracles/terrain_registry/), a fresh JVM.
+        let registry = TerrainRegistry::new();
+        assert_eq!(registry.terrains().len(), BUILT_INS.len());
+        for (terrain, row) in registry.terrains().iter().zip(BUILT_INS) {
+            assert_row(terrain, row);
+        }
+        let none = registry.get_by_id(0);
+        for id in [-1, 16, 999, i32::MIN] {
+            assert!(registry.get_by_id(id).is_same(&none), "{id}");
+        }
+        assert!(registry.get_by_id(15).is_same(&registry.terrains()[15]));
+        assert_eq!(registry.get_by_name("OcEaN").unwrap().id(), 2);
+        assert!(registry.get_by_name("ocean ").is_none());
+        assert!(registry.get_by_name("").is_none());
+        let hills = registry.find(|terrain| terrain.name() == "hills");
+        assert_eq!(hills.unwrap().id(), 11);
+
+        // Each world owns its registry; registries are shared by world-generation threads.
+        assert!(!TerrainRegistry::new().get_by_id(0).is_same(&none));
+        fn send_sync<T: Send + Sync>() {}
+        send_sync::<TerrainRegistry>();
+    }
+
+    #[test]
+    fn terrain_registration_matches_engine_0_3_0() {
+        // TerrainRegistryOracle: register, registerComposite and TerrainHelper.getOrCreate in one
+        // registry, in this order.
+        use TerrainCategory::{Flatland, Highland, Lowland, None, River};
+        let mut registry = TerrainRegistry::new();
+        let builtin = |registry: &TerrainRegistry, id: i32| registry.get_by_id(id);
+        let hills = builtin(&registry, 11);
+        let custom = registry.register(Terrain::with_parent(999, "Custom", hills.clone()));
+        assert_row(
+            &custom,
+            (16, "Custom", Lowland, 0xbf380ad4, 0x3f800000, 0x040),
+        );
+        assert!(
+            matches!(&custom.0.delegate, TerrainDelegate::Terrain(parent) if parent.is_same(&hills))
+        );
+        let duplicate = registry.register(Terrain::new(999, "cUsToM", River));
+        assert!(duplicate.is_same(&custom));
+        // register() re-ids with withId, which delegates to the configured terrain itself.
+        let badlands2 =
+            registry.register(Terrain::configured_erosion(5, "badlands2", Flatland, 0.3));
+        assert_row(
+            &badlands2,
+            (17, "badlands2", Flatland, 0x3e79820d, 0x3e99999a, 0x041),
+        );
+
+        let badlands = builtin(&registry, 9);
+        let composite = registry.register_composite(&custom, &badlands);
+        let composite_row = (
+            18,
+            "badlands-Custom",
+            Flatland,
+            0xbf336802,
+            0x3e99999a,
+            0x040,
+        );
+        assert_row(&composite, composite_row);
+        assert!(
+            registry
+                .register_composite(&badlands, &custom)
+                .is_same(&composite)
+        );
+        assert!(
+            registry
+                .register_composite(&custom, &custom)
+                .is_same(&custom)
+        );
+        assert!(
+            registry
+                .get_by_name("BADLANDS-custom")
+                .unwrap()
+                .is_same(&composite)
+        );
+        // Distinct terrains with the same id: Engine's min and max are both the second terrain.
+        let twin = Terrain::new(9, "twin", Flatland);
+        let twin_twin = registry.register_composite(&badlands, &twin);
+        assert_row(
+            &twin_twin,
+            (19, "twin-twin", Flatland, 0x3f0beb34, 0x3f800000, 0x041),
+        );
+        let badlands_badlands = registry.register_composite(&twin, &badlands);
+        let row = (
+            20,
+            "badlands-badlands",
+            Flatland,
+            0xbf10c48b,
+            0x3e99999a,
+            0x041,
+        );
+        assert_row(&badlands_badlands, row);
+        let volcano = builtin(&registry, 14);
+        let nested = registry.register_composite(&composite, &volcano);
+        let row = (
+            21,
+            "volcano-badlands-Custom",
+            Highland,
+            0xbf01e800,
+            0x3e99999a,
+            0x19c0,
+        );
+        assert_row(&nested, row);
+
+        let none = builtin(&registry, 0);
+        assert!(
+            registry
+                .get_or_create("null_child", Option::None)
+                .is_same(&none)
+        );
+        assert!(
+            registry
+                .get_or_create("none_child", Some(none.clone()))
+                .is_same(&none)
+        );
+        let river = builtin(&registry, 5);
+        assert!(
+            registry
+                .get_or_create("CUSTOM", Some(river))
+                .is_same(&custom)
+        );
+        let child = registry.get_or_create("child", Some(custom.clone()));
+        assert_row(
+            &child,
+            (22, "child", Lowland, 0xbf58360a, 0x3f800000, 0x040),
+        );
+        assert!(
+            matches!(&child.0.delegate, TerrainDelegate::Terrain(parent) if parent.is_same(&custom))
+        );
+        // A copy of `none` is not `none` (Engine compares with ==).
+        let none_copy = registry.get_or_create("none_copy", Some(none.with_id(0)));
+        assert_row(
+            &none_copy,
+            (23, "none_copy", None, 0xbf2f1dea, 0x3f800000, 0x000),
+        );
+
+        // Names compare like Java's equalsIgnoreCase: Unicode simple case mappings, one code
+        // point at a time, so `ß` never matches `SS`.
+        let names = [
+            "Straße", "Kelvin", "ſtone", "izmir", "irmak", "ᾳ", "𐐀bc", "σας", "ǅ", "µ",
+        ];
+        let hues = [
+            0xbde1adc4, 0x3e455dad, 0xbf03a805, 0xbf23fbcc, 0xbef81c13, 0xbe06d705, 0x3e2de400,
+            0xbf39f238, 0x3f1aae18, 0xbf76b202,
+        ];
+        for (index, (name, hue)) in names.into_iter().zip(hues).enumerate() {
+            let terrain = registry.register(Terrain::new(0, name, Lowland));
+            assert_row(
+                &terrain,
+                (24 + index as i32, name, Lowland, hue, 0x3f800000, 0x040),
+            );
+        }
+        let lookups = [
+            ("STRASSE", -1),
+            ("STRAßE", 24),
+            ("\u{212a}elvin", 25),
+            ("STONE", 26),
+            ("İZMIR", 27),
+            ("IRMAK", 28),
+            ("ırmak", 28),
+            ("ᾼ", 29),
+            ("ΑΙ", -1),
+            ("𐐨BC", 30),
+            ("ΣΑΣ", 31),
+            ("Ǆ", 32),
+            ("Μ", 33),
+            ("μ", 33),
+        ];
+        for (query, id) in lookups {
+            let found = registry
+                .get_by_name(query)
+                .map_or(-1, |terrain| terrain.id());
+            assert_eq!(found, id, "{query}");
+        }
+
+        // The final registry, in id order.
+        let rows = [
+            composite_row,
+            (19, "twin-twin", Flatland, 0x3f0beb34, 0x3f800000, 0x041),
+            (
+                20,
+                "badlands-badlands",
+                Flatland,
+                0xbf10c48b,
+                0x3e99999a,
+                0x041,
+            ),
+        ];
+        assert_eq!(registry.terrains().len(), 34);
+        for (terrain, row) in registry.terrains().iter().zip(BUILT_INS) {
+            assert_row(terrain, row);
+        }
+        for (terrain, row) in registry.terrains()[18..].iter().zip(rows) {
+            assert_row(terrain, row);
+        }
+        for (id, terrain) in registry.terrains().iter().enumerate() {
+            assert_eq!(terrain.id(), id as i32);
+            assert!(registry.get_by_id(id as i32).is_same(terrain));
+        }
+    }
+
+    #[test]
+    fn java_equals_ignore_case_matches_java_26() {
+        // Java 26's String.equalsIgnoreCase. The oracle folder's CasePairs/CaseDump check (with
+        // jcase.rs) also compares every code point's simple case mappings and every pair of code
+        // points that share one (6,134 pairs).
+        let cases = [
+            ("OcEaN", "ocean", true),
+            ("\u{212a}", "k", true),
+            ("ſ", "S", true),
+            ("İ", "i", true),
+            ("ı", "I", true),
+            ("ı", "i", true),
+            ("ᾳ", "ᾼ", true),
+            ("ᾀ", "ᾈ", true),
+            ("ᾳ", "ΑΙ", false),
+            ("ß", "SS", false),
+            ("ﬀ", "FF", false),
+            ("ς", "Σ", true),
+            ("ǅ", "ǆ", true),
+            ("µ", "Μ", true),
+            ("ÿ", "Ÿ", true),
+            ("𐐀bc", "𐐨BC", true),
+            ("a𐐀", "𐐨a", false),
+            ("e\u{301}", "É", false),
+            ("é", "É", true),
+            ("", "", true),
+            ("ab", "a", false),
+        ];
+        for (first, second, equal) in cases {
+            assert_eq!(
+                java_equals_ignore_case(first, second),
+                equal,
+                "{first} {second}"
+            );
+            assert_eq!(
+                java_equals_ignore_case(second, first),
+                equal,
+                "{second} {first}"
+            );
+        }
     }
 }
