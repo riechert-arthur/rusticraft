@@ -146,7 +146,7 @@ impl Tile {
             size,
             block_size,
             chunk_size,
-            blocks: (0..cells).map(|_| Cell::new(terrains)).collect(),
+            blocks: vec![Cell::new(terrains); cells],
         }
     }
 
@@ -656,5 +656,104 @@ mod tests {
              t 305419896 -124076833 2 1: 2 305419896 -124076833 1221679584 -496307332 -1927963136 649017280 1 36 12345678f89abcdf 305419896 -124076833 9216 -1927963136 649017280 96 16\n\
              c 4676d075e0c79d72 b8ad21aa9d7c1add 2daac5ee4e89e63a\n"
         );
+    }
+
+    /// Replays the `w` lines of `TileOracle.java`: Engine's `WorldFilters.apply(tile, optional)` on
+    /// tiles with hashed cells (heights, river and erosion masks, continent edges, terrains), built
+    /// from two settings groups, with and without borders and the optional filters, at negative
+    /// regions. Each line folds every backing cell's value, erosion, sediment and gradient bits and
+    /// terrain id.
+    #[test]
+    fn world_filters_on_tiles_match_engine_oracle() {
+        use super::super::terraforged_engine::{Levels, WorldControlPoints};
+        use super::super::terraforged_filters::{FilterSettings, WorldFilters};
+
+        let terrains = TerrainRegistry::new();
+        let kinds = ["none", "coast", "beach", "hills"]
+            .map(|name| terrains.get_by_name(name).expect("built-in terrain"));
+        let filters =
+            [(12345, 20, 1, 0.327), (-9, 5, 2, 0.4)].map(|(seed, droplets, passes, beach)| {
+                let mut settings = FilterSettings::default();
+                settings.erosion.droplets_per_chunk = droplets;
+                settings.smoothing.iterations = passes;
+                let points = WorldControlPoints {
+                    beach,
+                    ..WorldControlPoints::default()
+                };
+                WorldFilters::new(seed, settings, Levels::new(256, 63), points, &terrains)
+            });
+        let mut out = String::new();
+        for (run, (group, region_x, region_z, size, border, optional)) in [
+            (0, -1, 2, 1, 1, true),
+            (0, 3, -5, 2, 1, true),
+            (1, 0, 0, 1, 0, true),
+            (1, -1, 2, 1, 1, false),
+            (1, -7, 9, 1, 1, true),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let salt = run as i32;
+            let mut tile = Tile::new(region_x, region_z, size, border, &terrains);
+            let total = tile.block_size().total;
+            for (index, cell) in tile.blocks.iter_mut().enumerate() {
+                let index = index as i32;
+                let (x, z) = (index % total, index / total);
+                let mut h = index
+                    .wrapping_mul(7919)
+                    .wrapping_add(salt.wrapping_mul(104_729));
+                h ^= ((h as u32) >> 13) as i32;
+                h = h.wrapping_mul(0x5bd1_e995);
+                h ^= ((h as u32) >> 15) as i32;
+                let h = h as u32;
+                *cell = Cell::new(&terrains);
+                cell.value = ((3 * x + 2 * z + salt) % 97) as f32 / 2000.0
+                    + 0.2
+                    + ((h >> 8) & 0xFFFF) as f32 / 40_000_000.0;
+                cell.river_mask = if (h >> 4) & 3 == 0 { 0.05 } else { 1.0 };
+                cell.erosion_mask = h & 63 == 17;
+                cell.continent_edge = ((h >> 12) & 0x3FF) as f32 / 1600.0;
+                cell.terrain = kinds[((h >> 1) & 3) as usize].clone();
+            }
+            filters[group].apply_tile(&mut tile, optional);
+            let bits = |value: f32| {
+                if value.is_nan() {
+                    0x7fc0_0000
+                } else {
+                    value.to_bits() as i32
+                }
+            };
+            let mut folds = [17_i64; 5];
+            for cell in &tile.blocks {
+                let values = [
+                    bits(cell.value),
+                    bits(cell.erosion),
+                    bits(cell.sediment),
+                    bits(cell.gradient),
+                    cell.terrain.id(),
+                ];
+                for (slot, value) in folds.iter_mut().zip(values) {
+                    *slot = fold(*slot, value);
+                }
+            }
+            let [v, e, s, g, t] = folds;
+            out += &format!("w {run} {v:x} {e:x} {s:x} {g:x} {t:x}\n");
+        }
+        assert_eq!(
+            out,
+            "w 0 78353e881e79d874 94d49cd6ced8988f 4c789901940be6fc 392a6fa117a2a29a 9b357af0388e9be0\n\
+             w 1 e36a67ca0adfd553 15b9d13d12cc6d8a 8a93963318e02e8a 59f11be02765b987 27ad111cd483b1ef\n\
+             w 2 e1152b41c2272c6e 89dafe5a36917f5d 655ba97b673166e6 aae493e9fd6049 f94ef798a48a202a\n\
+             w 3 f1abc2a41207e9fe bcb74212e5be0011 bcb74212e5be0011 e3e693d1b08be63d 8d940be0f635f540\n\
+             w 4 3bcfc87a7ec4212e 9a4db5329ff5152c d10543f7129cf897 90e87f4ad4a4bba 35389eeae71f8f8a\n"
+        );
+    }
+
+    /// Engine's tile generators build a tile on one thread and hand it to others (cache, chunk
+    /// readers).
+    #[test]
+    fn tiles_are_shared_between_threads() {
+        fn shareable<T: Send + Sync>() {}
+        shareable::<Tile>();
     }
 }
