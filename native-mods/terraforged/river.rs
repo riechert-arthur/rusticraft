@@ -25,12 +25,56 @@
 // Engine 0.3.0's river configuration (`rivermap.river.RiverConfig`, `rivermap.river.Range`,
 // `rivermap.lake.LakeConfig`, `rivermap.wetland.WetlandConfig` and `util.Variance`). Engine's
 // `BaseRiverGenerator` builds them from `RiverSettings`; TerraForged 0.3.1 itself carves rivers with its own
-// continent river config instead, which this module does not port.
+// continent river config instead, which this module does not port. `GenWarp` (`rivermap.gen.GenWarp`) holds the
+// lake and river domain warps Engine's river generators build per continent.
 
 use super::{
-    terraforged::round,
+    terraforged::{Domain, SourceKind, round},
+    terraforged_continent::noise_warp,
     terraforged_engine::{Lake, Levels, Wetland},
 };
+
+/// Engine's `rivermap.gen.GenWarp`: the lake and river domain warps a river map carves its networks with.
+/// `BaseRiverGenerator` and `FancyRiverGenerator` build one per continent from `(int) id`.
+#[derive(Clone)]
+pub struct GenWarp {
+    pub lake: Domain,
+    pub river: Domain,
+}
+
+impl GenWarp {
+    /// `GenWarp.EMPTY`: both warps are `Domain.DIRECT`.
+    pub fn direct() -> Self {
+        Self {
+            lake: Domain::direct(),
+            river: Domain::direct(),
+        }
+    }
+
+    /// `new GenWarp(seed, continentScale)`. Engine ignores `continentScale`. Each warp is
+    /// `Domain.warp(++seed, scale, octaves, strength)`: Perlin, x from the seed and y from seed + 1, so one
+    /// warp's y source shares its seed with the next warp's x source.
+    pub fn new(seed: i32, _continent_scale: i32) -> Self {
+        let warp = |n: i32, scale, octaves, strength| {
+            noise_warp(
+                SourceKind::Perlin,
+                seed.wrapping_add(n),
+                scale,
+                octaves,
+                strength,
+            )
+        };
+        Self {
+            lake: warp(1, 200, 1, 300.0).add(warp(2, 50, 2, 50.0)),
+            river: warp(3, 95, 1, 25.0).add(warp(4, 16, 1, 5.0)),
+        }
+    }
+
+    /// Engine's private, unused `scaleMegaWarp`: `NoiseUtil.round((float) scale / 3000 * 1500)`.
+    pub fn scale_mega_warp(scale: i32) -> i32 {
+        round(scale as f32 / 3000.0 * 1500.0)
+    }
+}
 
 /// Engine's `Variance`: `min + value * range`. `min`, `range` and `of` narrow their `double` arguments to
 /// `float` as Engine does; `next(random)` (`apply(random.nextFloat())`) comes with the generators that draw.
@@ -641,5 +685,150 @@ mod tests {
             }
         }
         assert_eq!(fold.0, 265982105);
+    }
+
+    // Expected values from `.local/terraforged/oracles/river/GenWarpOracle.java`.
+    const WARP_COORDS: [f32; 22] = [
+        0.0,
+        -0.0,
+        12.25,
+        -98.75,
+        -4096.5,
+        8192.25,
+        123456.75,
+        -0.125,
+        1e-3,
+        3.0e7,
+        -3.0e7,
+        16_777_217.0,
+        1e20,
+        -1e30,
+        f32::MAX,
+        -f32::MAX,
+        f32::from_bits(1),
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        f32::NAN,
+        2_147_483_647.0,
+        -2_147_483_648.0,
+    ];
+
+    fn mix_domain(fold: &mut Fold, domain: &Domain, x: f32, z: f32) {
+        fold.mix([
+            bits(domain.offset_x(x, z)),
+            bits(domain.offset_y(x, z)),
+            bits(domain.x(x, z)),
+            bits(domain.y(x, z)),
+        ]);
+    }
+
+    #[test]
+    fn gen_warp_is_shareable_across_workers() {
+        fn shareable<T: Send + Sync>(_: &T) {}
+        shareable(&GenWarp::new(12_345, 3000));
+    }
+
+    #[test]
+    fn scale_mega_warp_rounds_like_engine() {
+        let scales = [
+            0,
+            1,
+            2,
+            3,
+            -1,
+            -2,
+            -3,
+            3000,
+            4500,
+            -4500,
+            1001,
+            -1001,
+            7,
+            -7,
+            16_777_217,
+            i32::MAX,
+            i32::MIN,
+            123_456_789,
+        ];
+        let rounded = scales.map(GenWarp::scale_mega_warp);
+        assert_eq!(
+            rounded,
+            [
+                0,
+                1,
+                1,
+                2,
+                -1,
+                -1,
+                -2,
+                1500,
+                2250,
+                -2250,
+                500,
+                -500,
+                3,
+                -3,
+                8_388_608,
+                1_073_741_824,
+                -1_073_741_824,
+                61_728_400
+            ]
+        );
+    }
+
+    #[test]
+    fn empty_warp_is_direct() {
+        let warp = GenWarp::direct();
+        let mut fold = Fold::new();
+        for domain in [&warp.lake, &warp.river] {
+            for x in WARP_COORDS {
+                for z in WARP_COORDS {
+                    mix_domain(&mut fold, domain, x, z);
+                }
+            }
+        }
+        assert_eq!(fold.0, 215664657);
+    }
+
+    #[test]
+    fn generation_warps_fold_like_engine() {
+        let cases = [
+            (0, -515557086),
+            (12_345, -949602364),
+            (-1, -1524105944),
+            (1, -359467591),
+            (i32::MAX, -1524105944),
+            (i32::MAX - 2, 887431308),
+            (i32::MIN, -515557086),
+            (-987_654_321, -1312107752),
+        ];
+        for (seed, expected) in cases {
+            let warp = GenWarp::new(seed, 3000);
+            let mut fold = Fold::new();
+            for x in WARP_COORDS {
+                for z in WARP_COORDS {
+                    mix_domain(&mut fold, &warp.lake, x, z);
+                    mix_domain(&mut fold, &warp.river, x, z);
+                }
+            }
+            assert_eq!(fold.0, expected, "seed {seed}");
+        }
+        let warp = GenWarp::new(12_345, 3000);
+        assert_eq!(
+            [
+                warp.lake.x(12.25, -98.75),
+                warp.lake.y(12.25, -98.75),
+                warp.river.x(12.25, -98.75),
+                warp.river.y(12.25, -98.75)
+            ]
+            .map(f32::to_bits),
+            [0xc1d41efe, 0xc2b23d7a, 0x4137be2b, 0xc2c129bf]
+        );
+        // Engine ignores `continentScale`.
+        let other = GenWarp::new(12_345, i32::MIN);
+        assert_eq!(
+            other.lake.x(5.0, 7.0).to_bits(),
+            GenWarp::new(12_345, 0).lake.x(5.0, 7.0).to_bits()
+        );
     }
 }

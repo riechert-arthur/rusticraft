@@ -449,9 +449,19 @@ cases (`int` limits, NaN, infinite and negative widths, six `Levels`, including 
 `Levels(63, 255)`), against a Java oracle in `.local/terraforged/oracles/river/`, which also prints TerraForged's
 own config.
 
+The river-warp layer adds Engine's `GenWarp` (`river.rs`), the pair of domain warps its river generators build per
+continent to carve lakes and river channels. The lake warp adds a Perlin `Domain.warp` with scale 200, 1 octave and
+strength 300 to one with scale 50, 2 octaves and strength 50; the river warp adds scale 95, 1 octave, strength 25 to
+scale 16, 1 octave, strength 5. As in Engine, the four warps take seeds `seed + 1` to `seed + 4` (wrapping as Java
+`int`s), each warp's y noise uses its seed + 1, the continent scale argument is ignored and `GenWarp.EMPTY` is
+`GenWarp::direct()`. Engine's private, unused `scaleMegaWarp` is kept as `scale_mega_warp`. Nothing uses these warps
+yet: the river networks that do are not ported. Its tests fold every warp's offsets and coordinates over a grid with
+-0, huge, infinite and NaN coordinates for eight seeds (the `int` edges among them) against a Java oracle running
+Engine's `GenWarp`, `GenWarpOracle.java` in `.local/terraforged/oracles/river/`.
+
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator) and Engine's river configuration. They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration and its river warps. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
