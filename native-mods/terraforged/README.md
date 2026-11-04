@@ -401,12 +401,22 @@ field and every lookup over the simple-continent grid for six configs (skipping 
 scale 0, 1, 2 and `Integer.MAX_VALUE`, jitter 0 and NaN, zero octaves with a negative gain, custom control
 points), against a second Java oracle in `.local/terraforged/oracles/continent/`.
 
-The fancy-island layer adds scaled line segments, translated island bounds, overlap and containment,
-deep/shallow/coast edge shaping and curved land-distance values.
+The fancy-island layer adds the island geometry of Engine's fancy continents (`fancy.rs`): `Segment`, a line
+segment with a scale at each end, and `Island`, a polyline of segments with its centre (the mean of its points), its
+bounding box (the segments' box grown by the coast distance, then by the coast times the largest scale, at least 1), overlap and
+containment tests (strict), and translation. `getEdgeValue` reads the squared distance to the nearest segment,
+divided by the squared scale interpolated along it, and maps it to 0 beyond the deep ocean, up to 0.25 at the
+shallow ocean, up to 1 at the coast and 1 inland; `getLandValue` curves the distance inside the shallow ocean. As
+in Engine, the box's maximum starts at `Float.MIN_VALUE`, and a zero-length segment or a NaN coordinate makes the
+distance NaN (Java's `Math.min` keeps it). `FancyContinent`, which builds the islands, and its generator are not
+ported yet. Its tests fold every segment field, the bounds and the edge, land and containment samples over a grid
+with -0, subnormal, huge, infinite and NaN coordinates, before and after translation, for seven islands (empty,
+zero coast, zero-length, NaN and infinite segments, zero and NaN scales), against a third Java oracle in
+`.local/terraforged/oracles/continent/`.
 
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities and its simple and advanced continent generators. They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators and the fancy continents' island geometry. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
