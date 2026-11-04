@@ -23,6 +23,7 @@
  */
 
 use super::{
+    terraforged::floor,
     terraforged_engine::{Cell, TerrainRegistry},
     terraforged_filters::Filterable,
     terraforged_heightmap::HeightmapCache,
@@ -325,6 +326,46 @@ impl Tile {
         });
     }
 
+    /// `generate(HeightmapCache, offsetX, offsetZ, zoom)`: [`Self::generate_cached_heightmap`] at
+    /// [`Self::generate_zoomed_heightmap`]'s positions, floored: each cell goes through
+    /// [`HeightmapCache::generate`] at `NoiseUtil.floor` of its zoomed `float` position (noise.rs
+    /// [`floor`]: `(int) f`, minus 1 below zero, in Java `int` math: a NaN sample is -1, +infinity
+    /// and huge samples saturate to `i32::MAX`, -infinity and huge negative ones wrap from
+    /// `i32::MIN - 1` to `i32::MAX`, and a negative whole sample such as -16.0 floors to -17). The
+    /// cache key and the
+    /// stages both get that `int` position (as floats), as Engine's cache computes from the key.
+    /// Zoomed blocks that floor to one position share its cached cell, also with unzoomed cached
+    /// runs on the same cache. The same chunk and cell order, river-map carry and panics.
+    ///
+    #[allow(clippy::too_many_arguments)]
+    pub fn generate_cached_zoomed_heightmap(
+        &mut self,
+        cache: &HeightmapCache,
+        offset_x: f32,
+        offset_z: f32,
+        zoom: f32,
+        mut apply_base: impl FnMut(&mut Cell, f32, f32),
+        mut lookup: impl FnMut(i32, i32) -> Arc<Rivermap>,
+        mut apply_rivers: impl FnMut(&mut Cell, f32, f32, &Rivermap),
+        mut apply_climate: impl FnMut(&mut Cell, f32, f32),
+    ) {
+        let translate_x = offset_x - self.block_size.size as f32 * zoom / 2.0;
+        let translate_z = offset_z - self.block_size.size as f32 * zoom / 2.0;
+        let mut current = None;
+        self.fill_cells(|cell, x, z| {
+            current = cache.generate(
+                cell,
+                floor(x as f32 * zoom + translate_x),
+                floor(z as f32 * zoom + translate_z),
+                current.take(),
+                &mut apply_base,
+                &mut lookup,
+                &mut apply_rivers,
+                &mut apply_climate,
+            );
+        });
+    }
+
     /// The loop the heightmap fills share: every tile-local chunk, z rows then x (border
     /// included), taken as [`Self::chunk_writer`] does (`computeChunk`), then its cells in
     /// [`ChunkWriter::generate`]'s order with their world block position.
@@ -335,54 +376,6 @@ impl Tile {
                 self.chunk_writer(chunk_x, chunk_z)
                     .expect("tile-local chunk inside the chunk array")
                     .generate(|cell, _, _, x, z| fill(cell, x, z));
-            }
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn generate_cached_zoomed_heightmap(
-        &mut self,
-        cache: &HeightmapCache,
-        offset_x: f32,
-        offset_z: f32,
-        zoom: f32,
-        mut apply_base: impl FnMut(&mut Cell, f32, f32),
-        mut lookup_rivermap: impl FnMut(i32, i32) -> Arc<Rivermap>,
-        mut apply_rivers: impl FnMut(&mut Cell, f32, f32, &Rivermap),
-        mut apply_climate: impl FnMut(&mut Cell, f32, f32),
-    ) {
-        let mut current = None;
-        let translate_x = offset_x - self.block_size.size as f32 * zoom / 2.0;
-        let translate_z = offset_z - self.block_size.size as f32 * zoom / 2.0;
-        for chunk_z in 0..self.chunk_size.total {
-            let world_chunk_z = self.chunk_z.wrapping_add(chunk_z).wrapping_sub(self.border);
-            let region_block_z = chunk_z.wrapping_shl(4);
-            for chunk_x in 0..self.chunk_size.total {
-                let world_chunk_x = self.chunk_x.wrapping_add(chunk_x).wrapping_sub(self.border);
-                let region_block_x = chunk_x.wrapping_shl(4);
-                for delta_z in 0..16 {
-                    let region_z = region_block_z.wrapping_add(delta_z);
-                    let world_z = world_chunk_z.wrapping_shl(4).wrapping_add(delta_z);
-                    let sample_z = world_z as f32 * zoom + translate_z;
-                    let cache_z = java_floor(sample_z);
-                    for delta_x in 0..16 {
-                        let region_x = region_block_x.wrapping_add(delta_x);
-                        let world_x = world_chunk_x.wrapping_shl(4).wrapping_add(delta_x);
-                        let sample_x = world_x as f32 * zoom + translate_x;
-                        let cache_x = java_floor(sample_x);
-                        let index = self.block_size.index_of(region_x, region_z) as usize;
-                        current = cache.generate(
-                            &mut self.blocks[index],
-                            cache_x,
-                            cache_z,
-                            current,
-                            |cell, x, z| apply_base(cell, x, z),
-                            &mut lookup_rivermap,
-                            |cell, x, z, map| apply_rivers(cell, x, z, map),
-                            |cell, x, z| apply_climate(cell, x, z),
-                        );
-                    }
-                }
             }
         }
     }
@@ -491,14 +484,6 @@ impl Filterable for FilterRegion<'_> {
 
     fn backing_mut(&mut self) -> &mut [Cell] {
         &mut self.tile.blocks
-    }
-}
-
-fn java_floor(value: f32) -> i32 {
-    if value >= 0.0 {
-        value as i32
-    } else {
-        (value as i32).wrapping_sub(1)
     }
 }
 
@@ -1357,7 +1342,7 @@ mod tests {
     }
 
     /// `TileHeightmapOracle.java`'s output (`h <tile> <lookups> <trace> <cells> <chunks>`; `c`,
-    /// `r` alike, zoomed runs tagged `z<run>`).
+    /// `r` alike, zoomed runs tagged `z<run>`, cached zoomed runs `y<run>`).
     const ORACLE_HEIGHTMAP: &str = "\
 h 0 137 c579e321cc64ef46 7822c03163bbbc11 607ea5d406ecf6e3
 h 1 392 c0e0a699c90ced0d 2981a38add7f911 53f9d0616309a431
@@ -1389,6 +1374,22 @@ z9 4 192 388dc8006597a611 d1994d5cf898d4d1 34af015dc4958431
 z10 0 1 1368551b5e1d0e92 8184acb51a1f7011 81ad7116de88f6e3
 z11 5 3 2df8e02d6cd392c5 9ad4e7a2c49f5836 f941d58eec9b5de1
 z12 4 1 6ce2a26113d5f45e 4b01fc4e28169c11 774fcf24a9588431
+y0 0 2 a7e0ab491573d2d0 ac7e32c39950bc11 607ea5d406ecf6e3
+y1 0 0 11 6b4dae6acd257811 32f4da291568f6e3
+y2 0 139 7f7c4258cbdb0d39 6dd3c7d0f1c3f851 d99d5f68b41ef6e3
+y3 0 72 2438783e20bbdf8f 5502ddd13a2410d1 744e9f090aa3f6e3
+y4 1 385 9b728057440c161 b2753fe30d995891 903d45883edea431
+y5 2 4 654d0d9bae4a88f1 d12f3bdecb2d9e31 33ea3f4d303bb09
+y6 3 6400 139452c69a7a6211 64f5a0b360f76781 abfd5fd77d2000af
+y7 4 1288 b2cc25411a03631e e2a33b11dc63c211 bddb97f873458431
+y8 1 0 11 3522cae4d88f0011 efddc98dcf89a431
+y9 3 0 11 a65e2ef6c57fc011 27d53d6c44cd6af
+y10 2 0 11 b37849dc0c668011 e9ed0e4a9e4ffb09
+y11 0 0 11 6945a3e482cdc051 c3d32c661e08f6e3
+y12 4 2 fd50b4bd5ddf1c61 bfc8b9826a4f8af1 6a72b0b284958431
+y13 0 0 11 bd1f192621116011 818a6c9ad688f6e3
+y14 4 1 fd8324c270903dda 4b01fc4e28169c11 774fcf24a9588431
+y15 0 0 11 5502ddd13a2410d1 744e9f090aa3f6e3
 ";
 
     /// `TileHeightmapOracle.java`'s zoomed runs: offset x, offset z, zoom, then the
@@ -1410,12 +1411,38 @@ z12 4 1 6ce2a26113d5f45e 4b01fc4e28169c11 774fcf24a9588431
         (-1.0e7, 1.0e7, 1.0e-3, 4),
     ];
 
+    /// `TileHeightmapOracle.java`'s cached zoomed runs, as [`HEIGHTMAP_ZOOMS`]: unit, halved and
+    /// doubled zooms over tile 0's cached blocks (hits, but negative whole samples floor one
+    /// below and miss; all hits with repeats; hits and misses), every zoomed row but tile 5's (NaN,
+    /// infinite and saturating keys; tile 1's unit row shifted 64 blocks, off the blocks whose
+    /// cached cells tile 5's aliasing chunks refilled in Engine), then the first zoomed row again
+    /// (all hits).
+    const HEIGHTMAP_CACHED_ZOOMS: [(f32, f32, f32, usize); 16] = [
+        (16.0, 16.0, 1.0, 0),
+        (16.0, 8.0, 0.5, 0),
+        (0.0, 0.0, 2.0, 0),
+        (100.0, -50.0, 0.5, 0),
+        (64.0, 64.0, 1.0, 1),
+        (-12345.678, 9876.5, 0.3, 2),
+        (3.0e6, -7.0e5, 1000.0, 3),
+        (17.25, -3.5, -2.5, 4),
+        (-0.0, 0.0, 0.0, 1),
+        (-0.0, -0.0, -0.0, 3),
+        (5.0, 5.0, f32::NAN, 2),
+        (f32::NAN, 1.0, 1.0, 0),
+        (0.0, 0.0, 1e37, 4),
+        (f32::INFINITY, f32::NEG_INFINITY, 2.0, 0),
+        (-1.0e7, 1.0e7, 1.0e-3, 4),
+        (100.0, -50.0, 0.5, 0),
+    ];
+
     /// How [`replay_heightmap`] fills its tile.
     #[derive(Clone, Copy)]
     enum HeightmapFill<'a> {
         Direct,
         Cached(&'a HeightmapCache),
         Zoomed(f32, f32, f32),
+        CachedZoomed(&'a HeightmapCache, f32, f32, f32),
     }
 
     /// The tiles `TileHeightmapOracle.java` fills: region x and z, size factor, border chunks,
@@ -1438,7 +1465,9 @@ z12 4 1 6ce2a26113d5f45e 4b01fc4e28169c11 774fcf24a9588431
     /// gets), every backing cell and `getChunk` over every tile-local chunk position. Tile 5 is
     /// not repeated: Engine's cache holds the tile's cell objects, which its aliasing chunk refills.
     /// Last, `Tile.generate(Heightmap, offsetX, offsetZ, zoom)` over [`HEIGHTMAP_ZOOMS`] (`z`
-    /// lines). Floats fold as `floatToIntBits` (NaNs canonical).
+    /// lines), and `Tile.generate(HeightmapCache, offsetX, offsetZ, zoom)` over
+    /// [`HEIGHTMAP_CACHED_ZOOMS`] on the `c`/`r` runs' cache (`y` lines: hits shared with the
+    /// unzoomed runs and between zoomed blocks). Floats fold as `floatToIntBits` (NaNs canonical).
     #[test]
     fn tile_heightmap_generation_matches_engine_0_3_0() {
         let terrains = Arc::new(TerrainRegistry::new());
@@ -1458,12 +1487,18 @@ z12 4 1 6ce2a26113d5f45e 4b01fc4e28169c11 774fcf24a9588431
             let fill = HeightmapFill::Zoomed(offset_x, offset_z, zoom);
             out += &replay_heightmap(&terrains, &format!("z{run}"), tile, fill);
         }
+        for (run, (offset_x, offset_z, zoom, tile)) in
+            HEIGHTMAP_CACHED_ZOOMS.into_iter().enumerate()
+        {
+            let fill = HeightmapFill::CachedZoomed(&cache, offset_x, offset_z, zoom);
+            out += &replay_heightmap(&terrains, &format!("y{run}"), tile, fill);
+        }
         assert_eq!(out, ORACLE_HEIGHTMAP);
     }
 
     /// One line of `TileHeightmapOracle.java`: fills tile `run` of [`HEIGHTMAP_TILES`] with
-    /// `generate_heightmap`, `generate_cached_heightmap` or `generate_zoomed_heightmap`, and
-    /// folds it.
+    /// `generate_heightmap`, `generate_cached_heightmap`, `generate_zoomed_heightmap` or
+    /// `generate_cached_zoomed_heightmap`, and folds it.
     fn replay_heightmap(
         terrains: &TerrainRegistry,
         tag: &str,
@@ -1529,6 +1564,17 @@ z12 4 1 6ce2a26113d5f45e 4b01fc4e28169c11 774fcf24a9588431
                 apply_rivers,
                 apply_climate,
             ),
+            HeightmapFill::CachedZoomed(cache, offset_x, offset_z, zoom) => tile
+                .generate_cached_zoomed_heightmap(
+                    cache,
+                    offset_x,
+                    offset_z,
+                    zoom,
+                    apply_base,
+                    lookup,
+                    apply_rivers,
+                    apply_climate,
+                ),
         }
         let mut cells = 17_i64;
         for cell in &tile.blocks {
@@ -1589,46 +1635,5 @@ z12 4 1 6ce2a26113d5f45e 4b01fc4e28169c11 774fcf24a9588431
         } else {
             value.to_bits() as i32
         }
-    }
-
-    #[test]
-    fn cached_zoomed_tile_heightmap_generation_matches_engine_0_3_0() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        let terrains = Arc::new(TerrainRegistry::new());
-        let cache =
-            HeightmapCache::with_capacity(Levels::new(256, 63), Arc::clone(&terrains), 8_192);
-        let calls = AtomicUsize::new(0);
-        let generate = |tile: &mut Tile| {
-            tile.generate_cached_zoomed_heightmap(
-                &cache,
-                100.0,
-                -50.0,
-                0.5,
-                |cell, x, z| {
-                    calls.fetch_add(1, Ordering::Relaxed);
-                    cell.value = x * 1_000.0 + z;
-                    cell.continent_x = 7;
-                    cell.continent_z = -9;
-                },
-                |x, z| Arc::new(Rivermap::new(x, z, Vec::new(), GenWarp::direct())),
-                |cell, _, _, _| cell.river_mask = 0.25,
-                |cell, _, _| cell.temperature = 0.75,
-            );
-        };
-
-        let mut first = Tile::new(0, 0, 1, 1, &terrains);
-        generate(&mut first);
-        let unique_samples = calls.load(Ordering::Relaxed);
-        let mut second = Tile::new(0, 0, 1, 1, &terrains);
-        generate(&mut second);
-
-        assert_eq!(calls.load(Ordering::Relaxed), unique_samples);
-        assert!(unique_samples < 4_096);
-        for tile in [&first, &second] {
-            assert_eq!(tile.raw_cell(0, 0).unwrap().value, 83_933.0);
-            assert_eq!(tile.raw_cell(63, 63).unwrap().value, 114_965.0);
-        }
-        assert_eq!(java_floor(-66.0), -67);
-        assert_eq!(java_floor(-34.5), -35);
     }
 }
