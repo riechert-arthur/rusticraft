@@ -2951,13 +2951,13 @@ fn sin_table() -> &'static [f32; SIN_COUNT] {
 }
 
 /// `NoiseUtil.sin`: a 4096-entry lookup (`as i32` saturates and maps NaN to 0, like Java's `(int)`).
-fn sin(radians: f32) -> f32 {
+pub fn sin(radians: f32) -> f32 {
     let rad_to_index = SIN_COUNT as f32 / PI2;
     sin_table()[((radians * rad_to_index) as i32 & SIN_MASK) as usize]
 }
 
 /// `NoiseUtil.cos`: `sin(r + 1.5708f)`.
-fn cos(radians: f32) -> f32 {
+pub fn cos(radians: f32) -> f32 {
     sin(radians + f32::from_bits(0x3fc9_0ff9))
 }
 

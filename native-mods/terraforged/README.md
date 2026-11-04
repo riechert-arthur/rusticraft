@@ -408,15 +408,29 @@ containment tests (strict), and translation. `getEdgeValue` reads the squared di
 divided by the squared scale interpolated along it, and maps it to 0 beyond the deep ocean, up to 0.25 at the
 shallow ocean, up to 1 at the coast and 1 inland; `getLandValue` curves the distance inside the shallow ocean. As
 in Engine, the box's maximum starts at `Float.MIN_VALUE`, and a zero-length segment or a NaN coordinate makes the
-distance NaN (Java's `Math.min` keeps it). `FancyContinent`, which builds the islands, and its generator are not
-ported yet. Its tests fold every segment field, the bounds and the edge, land and containment samples over a grid
+distance NaN (Java's `Math.min` keeps it). Its tests fold every segment field, the bounds and the edge, land and containment samples over a grid
 with -0, subnormal, huge, infinite and NaN coordinates, before and after translation, for seven islands (empty,
 zero coast, zero-length, NaN and infinite segments, zero and NaN scales), against a third Java oracle in
 `.local/terraforged/oracles/continent/`.
 
+The fancy-continent layer ports `FancyContinent` and `FancyContinentGenerator` (Engine's experimental continent
+type, `fancy.rs`). The continent draws from a `java.util.Random` seeded with the generator's first seed: a main
+island of three segments (id 0), then for each of four directions one yaw and three ever smaller islands (ids 1 to 12
+in build order), each placed one radius away from the previous island of its arm, with `NoiseUtil`'s sin/cos lookup.
+Its value is the largest island edge value, its land value the largest island land value, and `getValueId` packs the
+id of the first island with the largest edge value (-1 when none is above 0) with that value. The generator samples it
+through three summed domain warps (Simplex at half the continent scale, then Perlin at 80 and 20 blocks), maps the land
+value from 0.2..0.4, writes only `continentEdge` (and 0 to `continentX`, `continentZ` and `continentId`), and its
+`getValue` is Engine's default: the scratch cell's `value`, always 0. As in Engine, `getNearestCenter` ignores its
+arguments and returns half of `getMax - getMin` in blocks, and `getMax` takes the largest island *minimum*, starting
+at `Float.MIN_VALUE`. The river map it holds (`FancyRiverGenerator`) is not ported. Its tests fold every island's
+geometry, `getMin`/`getMax`, the continent's values over a grid in continent units and every cell field and lookup
+over the block grid for seven configs (continent scale 0, 1, 2, -3001 and `Integer.MAX_VALUE`, seeds at the `int`
+edges, custom control points), against a fourth Java oracle in `.local/terraforged/oracles/continent/`.
+
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators and the fancy continents' island geometry. They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators and the fancy continents (island geometry and generator). They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
