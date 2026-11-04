@@ -281,7 +281,7 @@ through both. Engine's default terrain is the static `TerrainType.NONE`; here `C
 take the world's `TerrainRegistry` and use its `none`. Engine's `Cell.empty()` is one shared mutable object and its
 cells come from per-thread pools; here `empty` returns a new cell and callers own their cells. It also adds
 `BiomeType`'s eleven types in Engine's order with their ids and `isExtreme`; their colours and the climate ranges and
-lookup map Engine loads from TerraForged's biome-type image come later. Its test checks every field's bits after
+lookup map Engine loads from TerraForged's biome-type image are the biome-type layer's. Its test checks every field's bits after
 construction, `copy_from` and `reset` against a Java oracle.
 
 The terrain-populator layer adds Engine's `TerrainPopulator` and `ScaledPopulator` (`populator.rs`), which write one
@@ -995,9 +995,23 @@ frequencies and eleven powers, moisture over a module and over seeds, scales and
 -0.0 and subnormals to ±infinity and NaN, and a few raw samples. The climate settings and the `Climate` stage are
 later layers.
 
+The biome-type layer adds the rest of Engine's `BiomeType` (`biome_type.rs`): the 256×256 type map that
+`BiomeTypeLoader` builds from TerraForged's `biomes.png` (squares below the diagonal are `ALPINE`, the rest take the
+type with the nearest lookup colour), stored run-length encoded, so no image is decoded; each type's temperature and
+moisture ranges (`getRanges` over that map), lookup and display colours (the display colours come from
+TerraForged's `biomes.txt`, which overrides every constructor default) and `mapTemperature`/`mapMoisture`. The lookups
+are `getCurve` (also `get(float, float)`, here `at_climate`) and `getLinear`, with `NoiseUtil.round` and Java int
+math for the map indices; like Engine, an index outside the map fails (a panic here, an
+`ArrayIndexOutOfBoundsException` there): a temperature outside about -0.002..1.002 or a moisture below about -0.002
+(a NaN input reads as index 0, and a moisture above 1 is capped by the temperature's index). `apply` and `applyCurve` set the cell's biome by the curve, and so does `applyLinear`, whose
+Engine body is the same as `applyCurve`'s. The test replays `BiomeTypeOracle.java` (in
+`.local/terraforged/oracles/biome_type/`): the whole map, every type's range bits, colours and mapped values, every
+lookup and `apply` variant over all pairs of 33 edge inputs (the 0/1 rounding edges, values just outside 0..1,
+subnormals, NaN, ±infinity) and both lookups over a 661×661 grid from -0.05 to 1.05.
+
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory and the climate primitives. They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives and the biome climate types. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development

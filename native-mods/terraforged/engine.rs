@@ -723,8 +723,8 @@ fn single_case_mapping(mut mapped: impl Iterator<Item = char>, c: char) -> char 
 }
 
 /// Engine's `BiomeType` identities: the eleven climate types in Engine's order, with their ids
-/// (the ordinals) and `isExtreme`. Their colours and the temperature/moisture ranges and lookup
-/// map that Engine loads from TerraForged's biome-type image are not part of this layer.
+/// (the ordinals) and `isExtreme`. Their colours, temperature/moisture ranges and climate lookups
+/// (Engine's type map, loaded from TerraForged's biome-type image) are in `biome_type.rs`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum BiomeType {
