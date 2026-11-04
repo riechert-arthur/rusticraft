@@ -22,7 +22,10 @@
  * SOFTWARE.
  */
 
-use super::terraforged::floor;
+use super::{
+    terraforged::floor, terraforged_engine::TerrainProperties,
+    terraforged_terrain_data::TerrainData,
+};
 
 /// TerraForged's `MathUtil.clamp(int, int, int)`: `value < min ? min : value > max ? max : value`. Unlike
 /// `i32::clamp` it never panics when `min > max` (then `min` wins for values below it and `max` for the rest).
@@ -128,7 +131,7 @@ impl NoiseLevels {
 ///
 /// The limits are TerraForged's, read from 1.18.2's `DimensionType` (`MIN_Y` -2032, `Y_SIZE` 4064: the same in
 /// 26.3). The defaults are TerraForged's, not vanilla's: `max_y` 480 (vanilla 26.3's overworld ends at 320) and sea
-/// level 62. Not ported: the settings codec (and its field ranges) and `getWaterLevel`, which reads `TerrainData`.
+/// level 62. Not ported: the settings codec (and its field ranges).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TerrainLevels {
     pub min_y: i32,
@@ -234,6 +237,23 @@ impl TerrainLevels {
     /// `getHeight`: `NoiseUtil.floor` (one lower for negative whole numbers: -480.0 gives -481; NaN gives -1).
     pub fn height(self, scaled_height: f32) -> i32 {
         floor(scaled_height)
+    }
+
+    /// Java's static `getWaterLevel(x, z, seaLevel, terrainData)`: a river or lake cell whose river noise is
+    /// exactly 0 (either sign; NaN is not) fills to its base height, every other cell to `sea_level`. `x`/`z`
+    /// wrap into the chunk (`Index.CHUNK` masks them). Panics where Java throws a NullPointerException: a
+    /// cell with no terrain.
+    pub fn water_level(x: i32, z: i32, sea_level: i32, terrain_data: &TerrainData) -> i32 {
+        let river = terrain_data.river().get(x, z);
+        let terrain = terrain_data
+            .terrain()
+            .get(x, z)
+            .expect("TerrainLevels.getWaterLevel: null terrain");
+        if (terrain.is_river() || terrain.is_lake()) && river == 0.0 {
+            terrain_data.base_height_at(x, z)
+        } else {
+            sea_level
+        }
     }
 }
 

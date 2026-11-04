@@ -159,3 +159,10 @@ file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_terrain_levels"
 source = "terrain_levels.rs"
 visibility = "pub"
+
+[[module]]
+id = "terrain_data"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_terrain_data"
+source = "terrain_data.rs"
+visibility = "pub"
