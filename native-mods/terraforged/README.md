@@ -260,8 +260,16 @@ Java oracle over a grid of positive, negative and large coordinates and at huge,
 three modes, a source sampling -1 or NaN, zero and negative octaves, negative, zero and tiny grid sizes, and the
 `int` wrap of `octaves + 1`.
 
-The mountain LandForms layer adds all three ridge and cell-edge mountain graphs, including optional
-directional fancy-mountain erosion and the original advanced terrace variant.
+The mountain LandForms layer adds `mountains`, `mountains2` and `mountains3`. `mountains` multiplies a 4-octave Ridge
+(scale `410 * mountains.horizontalScale` through `Math.round`, gain 1.15, lacunarity 2.35) by a Perlin detail and warps
+it; `mountains2` and `mountains3` multiply a warped, clamped cell-edge source (cells of 360 and 400, `DISTANCE_2`) by a
+Perlin blur and a Ridge surface and raise it to 1.1, and `mountains3` adds an advanced terrace. With
+`general.fancyMountains` on (the default), Engine's `makeFancy` wraps each in the erosion Ridge (2 octaves, strength
+0.65, grid 128, `CONSTANT`) warped along a Perlin direction and draws two more seeds; with it off (TerraForged's
+`ModTerrains` turns it off for `mountains_ridge_1` and `mountains_ridge_2`) the graph is left as is. They scale by `0.7`
+and `0.645` times the global vertical scale, computed in double. The landform grid test checks them against the Java
+oracle for every settings case, with fancy mountains on and off, including mountain scales whose `Math.round` gives 0
+or keeps an odd integer above 2^23 and vertical scales whose `scale(1)` leaves the graph unscaled.
 
 ## Status: development only
 
