@@ -1425,7 +1425,9 @@ impl RiverCache {
             .entries
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        entries.retain(|_, map| now.saturating_sub(map.timestamp()) < Self::EXPIRY_MILLIS);
+        // Engine's `Cache.test`: an entry expires once its timestamp is before `now - lifetime`.
+        let timeout = now.saturating_sub(Self::EXPIRY_MILLIS);
+        entries.retain(|_, map| map.timestamp() >= timeout);
         Arc::clone(
             entries
                 .entry(id)
@@ -3851,28 +3853,43 @@ mod tests {
         }
     }
 
+    /// Engine 0.3.0's `RiverCache` and `LegacyRiverCache` against `RiverCacheOracle.java` (in the maintainer's
+    /// `.local/terraforged/oracles/river/`): the (x, z, id) each passes its generator, one generation per cell, and the
+    /// cached instance on the second lookup.
     #[test]
     fn river_caches_match_engine_0_3_0() {
-        let calls = std::sync::atomic::AtomicUsize::new(0);
-        let id = std::sync::Mutex::new(0_i64);
+        #[rustfmt::skip]
+        let expected: [(i32, i32, u64, u64); 6] = [
+            (-7, 9, 0xfffffff9_00000009, 0x00000009_fffffff9),
+            (0, 0, 0, 0),
+            (17, -9, 0x00000011_fffffff7, 0xfffffff7_00000011),
+            (i32::MIN, i32::MAX, 0x80000000_7fffffff, 0x7fffffff_80000000),
+            (-1, -1, u64::MAX, u64::MAX),
+            (3, i32::MIN, 0x00000003_80000000, 0x80000000_00000003),
+        ];
         let cache = RiverCache::new();
-        let first = cache.get_rivers(-7, 9, |x, z, next_id| {
-            calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            *id.lock().unwrap() = next_id;
-            Rivermap::new(x, z, Vec::new(), GenWarp::direct())
-        });
-        let second = cache.get_rivers(-7, 9, |_, _, _| unreachable!());
-        assert!(Arc::ptr_eq(&first, &second));
-        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
-        assert_eq!(*id.lock().unwrap() as u64, 0xfffffff900000009);
-
         let legacy = LegacyRiverCache::new();
-        let map = legacy.get_rivers(-7, 9, |x, z, next_id| {
-            *id.lock().unwrap() = next_id;
-            Rivermap::new(x, z, Vec::new(), GenWarp::direct())
-        });
-        assert_eq!((map.x(), map.z()), (-7, 9));
-        assert_eq!(*id.lock().unwrap() as u64, 0x00000009fffffff9);
+        for (x, z, id, legacy_id) in expected {
+            for (is_legacy, expected_id) in [(false, id), (true, legacy_id)] {
+                let mut calls = Vec::new();
+                let mut lookup = || {
+                    let generate = |gx, gz, gid: i64| {
+                        calls.push((gx, gz, gid as u64));
+                        Rivermap::new(gx, gz, Vec::new(), GenWarp::direct())
+                    };
+                    if is_legacy {
+                        legacy.get_rivers(x, z, generate)
+                    } else {
+                        cache.get_rivers(x, z, generate)
+                    }
+                };
+                let first = lookup();
+                let second = lookup();
+                assert!(Arc::ptr_eq(&first, &second));
+                assert_eq!((first.x(), first.z()), (x, z));
+                assert_eq!(calls, [(x, z, expected_id)]);
+            }
+        }
     }
 
     /// Engine 0.3.0's `BaseRiverGenerator` against `BaseRiverGeneratorOracle.java` (in the maintainer's
@@ -4296,6 +4313,38 @@ mod tests {
                 (applies, networks, nodes, fold.0),
                 (151_290, 1163, 1702, -1_536_805_052)
             );
+        }
+
+        /// `FancyContinentGenerator.getRivermap`: the river cache over the continent's own `FancyRiverGenerator`, with
+        /// a continent seed that differs from the context's, folded like `generates_networks_like_engine`.
+        #[test]
+        fn rivermaps_match_engine() {
+            const CELLS: [(i32, i32); 6] = [
+                (-7, 9),
+                (0, 0),
+                (17, -9),
+                (i32::MIN, i32::MAX),
+                (-1, -1),
+                (3, i32::MIN),
+            ];
+            let registry = Arc::new(TerrainRegistry::new());
+            let mut fold = Fold(17);
+            let (mut networks, mut nodes) = (0, 0);
+            for variant in 0..5 {
+                let (continent, _) = continent(variant, -98_765, &registry);
+                for (x, z) in CELLS {
+                    let map = continent.rivermap(x, z);
+                    assert!(Arc::ptr_eq(&map, &continent.rivermap(x, z)));
+                    fold.mix(map.x());
+                    fold.mix(map.z());
+                    fold.mix(map.networks.len() as i32);
+                    networks += map.networks.len();
+                    for network in &map.networks {
+                        nodes += mix_network(&mut fold, network);
+                    }
+                }
+            }
+            assert_eq!((networks, nodes, fold.0), (1216, 1781, 92_682_963));
         }
 
         #[test]
