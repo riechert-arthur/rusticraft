@@ -689,9 +689,21 @@ Engine's `Tile.getCellRaw`, as for steepness. Invalid control points fall back t
 8x8 to 33x33 maps (absent cells, NaN, infinite and signed-zero heights, NaN continent edges, valid and invalid beach
 control points) and prints every cell's terrain id folded together with the cells it turned into beach.
 
+The erosion-primitives layer adds the parts Engine's `Erosion` filter is built from (`filters.rs`): its settings
+(`ErosionSettings`, Engine's `FilterSettings.Erosion`: 135 droplets per chunk, lifetime 12, droplet volume and velocity
+0.7, erosion and deposit rates 0.5), the `FastRandom` stream it reseeds per chunk (`seed(chunkSeed, iterationSeed)`,
+which mixes the second value into the gamma, then `nextInt(bound)`), and its droplet brushes (`ErosionBrushes`,
+`Erosion.initBrushes`): for each cell, the cells within radius 4 and their normalized `1 - d / 4` weights. As in Engine,
+only cells near the map's edge (with an asymmetric extra column on the left) compute their own brush, clipped to the
+map; every other cell reuses the last computed brush, re-centred. Nothing uses them yet (the droplet simulation,
+`Erosion.apply`, is not ported). Its tests replay `ErosionPrimitivesOracle.java` in
+`.local/terraforged/oracles/erosion_primitives/`, which draws from Engine's `FastRandom` for 13 bounds (including 0,
+negative bounds and ones that make it reject draws) over 27 seeds, and runs `initBrushes` for map sizes 0 to 40 and
+radii -1 to 6, printing the draws and every brush's indices and weight bits folded together.
+
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter and the beach detection filter. They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter and the erosion filter's settings, random stream and brushes. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
