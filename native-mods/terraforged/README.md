@@ -375,12 +375,21 @@ all of it wraps like Java `int`s. Its tests fold every result over 0, -1, `MIN`/
 `range2D` is `range_3d` here), against a Java oracle running Engine's classes; the oracle lives outside Git, in
 `.local/terraforged/oracles/posutil/`.
 
-The simple-continent layer adds warped tectonic cells, shape modulation, nearest-center and boundary
-searches, ocean-distance solving and the single-continent center filter.
+The simple-continent layer adds Engine's `MultiContinentGenerator` and `SingleContinentGenerator`
+(`continent.rs`): continents are jittered cells of a cellular lattice (frequency `1 / (4 * continentScale)`, the
+configured shape as distance function, `continentJitter` as jitter) sampled through two compounded domain warps, and
+their `DISTANCE_2_DIV` edge is remapped from 0.2..1 to 0..1 and faded by a simplex shape mask below the `inland` control point.
+`apply` writes only `continentId`, `continentEdge`, `continentX` and `continentZ`; the single-continent generator
+zeroes those four outside the continent nearest to (0, 0), so its `getValue` reads 0 there while `getEdgeValue`
+does not. It also ports the nearest-centre lookup and the edge and ocean distance searches rivers use; the river
+map itself is not ported yet. Its tests fold every cell field and every lookup over a grid with -0, huge, infinite
+and NaN coordinates for six configs (all three shapes, jitter 0, 1 and NaN, scale 1 and `Integer.MAX_VALUE`, custom
+control points), against a Java oracle running Engine's classes on Engine cells; the oracle lives outside Git, in
+`.local/terraforged/oracles/continent/`.
 
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders and its position utilities. They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities and its simple continent generator. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
