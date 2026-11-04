@@ -128,6 +128,7 @@ type Task<'a, T> = Box<dyn Fn() -> T + Send + Sync + 'a>;
 /// [`LazyCallable`], callers arriving while it runs wait for it and all see the same value. The
 /// task runs at most once: like a failed Engine `Future`, a task that panicked makes every later
 /// `get`/`call` panic too, without running it again, and `is_done` reports it done.
+/// A task that calls `get` or `call` on its own entry never returns, as with [`LazyCallable`].
 ///
 /// The timestamp is `System.currentTimeMillis()` (`river.rs`'s [`current_time_millis`]) at
 /// construction, and again at the start of every `get`, before the task runs; `call`, `is_done`
