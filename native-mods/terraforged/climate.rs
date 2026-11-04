@@ -1138,6 +1138,13 @@ x 5 0
         })
     }
 
+    /// Engine's climate stage samples one `ClimateModule` from every tile-generation thread.
+    #[test]
+    fn climate_module_is_shared_between_threads() {
+        fn shareable<T: Send + Sync>() {}
+        shareable::<ClimateModule>();
+    }
+
     #[test]
     fn climate_module_matches_engine_oracle() {
         let registry = TerrainRegistry::new();
