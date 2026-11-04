@@ -365,12 +365,19 @@ NaN and infinities, degenerate and reversed ranges, populators that read the cel
 grid, against a Java oracle running Engine's classes on Engine cells; the oracle lives outside Git, in
 `.local/terraforged/oracles/blend/`.
 
-The position-utility layer adds mixed integer/float packing, half-open containment, rectangular
-visitation and TerraForged's exact 2D/3D iterator state transitions, including its Y-step sentinel.
+The position-utility layer adds Engine's `PosUtil`, `PosIterator` and `MutableVeci` (`util.rs`). `pack` puts two ints
+in a `long` (left in the high half); the float variants either truncate like Java's `(int)` (`pack(float, float)`, which
+`RegionModule`'s region centre now uses) or keep the raw bits, NaN payloads included, as `floatToRawIntBits` does
+(`packf`, `packMix`). `contains` is half-open, `iterate` visits a rectangle row by row, and `PosIterator` walks x, then
+z, then y with Engine's quirks: moving to the next y layer does not advance the index, its size is `w * h * l - 1`, and
+all of it wraps like Java `int`s. Its tests fold every result over 0, -1, `MIN`/`MAX`, quiet and signalling NaNs,
+-0.0, infinities, subnormals and the `(int)` saturation edges, and every iterator factory (Engine's six-argument
+`range2D` is `range_3d` here), against a Java oracle running Engine's classes; the oracle lives outside Git, in
+`.local/terraforged/oracles/posutil/`.
 
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider and its heightmap blenders. They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders and its position utilities. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
