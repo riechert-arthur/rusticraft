@@ -24,10 +24,11 @@
 
 use super::{
     terraforged::{
-        CellFunction, DistanceFunction, Domain, EdgeFunction, Interpolation, Module, Source,
-        SourceConfig, SourceKind,
+        CellFunction, DistanceFunction, Domain, EdgeFunction, Interpolation, Module, SourceConfig,
+        SourceKind,
     },
     terraforged_engine::{Cell, Levels, Seed, Terrain, TerrainFormSettings, TerrainRegistry},
+    terraforged_landforms::{noise_warp, perlin, source},
     terraforged_region::RegionConfig,
 };
 
@@ -250,6 +251,15 @@ impl TerrainPopulatorLike for ScaledPopulator {
     }
 }
 
+/// Engine's `VolcanoPopulator`, a [`TerrainPopulator`] of `volcano` (base and variance 0, so its
+/// config and variance are those of a zero populator) that writes only `value` and `terrain`.
+/// `value` is the levels' ground plus a cone: an inverted cell-edge distance (the region config's
+/// seed, scale and warp) curved, clamped, mapped and warped, scaled by a per-cell height of
+/// 0.45..0.65. Above 94% of that height the cone turns down into a throat, and where it is more
+/// than 92.5% of the way to the top the terrain becomes `volcano_pipe`; below 0.15 the cone gets
+/// ridged lowlands and below 0.45 a fading share of them, both with terrain `volcano`. Between
+/// those bands the cell's terrain is left as it was. It draws four seeds, in Engine's order.
+/// Its terrains must come from the world's [`TerrainRegistry`].
 pub struct VolcanoPopulator {
     populator: TerrainPopulator,
     cone: Module,
@@ -281,9 +291,9 @@ impl VolcanoPopulator {
         let blend_upper = blend_lower + range;
         let blend_range = blend_upper - blend_lower;
         let height_noise =
-            perlin(seed.next(), 2, 1).map(Module::constant(0.45), Module::constant(0.65));
+            perlin(seed.next(), 2, 1, 2.0).map(Module::constant(0.45), Module::constant(0.65));
         let height = Module::cell_source(
-            source_config(region.seed, region.scale, 1, 0.5, 2.0),
+            cell_config(region.seed, region.scale),
             1.0,
             CellFunction::NoiseLookup,
             DistanceFunction::Euclidean,
@@ -295,7 +305,7 @@ impl VolcanoPopulator {
             Module::constant(region.warp_strength as f32),
         ));
         let cone = Module::cell_edge_source(
-            source_config(region.seed, region.scale, 1, 0.5, 2.0),
+            cell_config(region.seed, region.scale),
             1.0,
             EdgeFunction::Distance2Div,
             DistanceFunction::Euclidean,
@@ -341,11 +351,15 @@ impl VolcanoPopulator {
         }
     }
 
+    /// `modifyVolcanoType`, which Heightmap runs after the rivers: a `volcano_pipe` cell (the
+    /// registry's own, as Engine's `==` compares) below the water level or with a river mask under
+    /// 0.85 becomes `volcano`. A NaN value or mask compares false and keeps the pipe.
     pub fn modify_volcano_type(cell: &mut Cell, levels: Levels, terrains: &TerrainRegistry) {
-        if cell.terrain.id() == 15
+        let builtins = terrains.terrains();
+        if cell.terrain.is_same(&builtins[15])
             && (cell.value < levels.water || cell.river_mask < Self::RIVER_MASK)
         {
-            cell.terrain = terrains.get_by_id(14);
+            cell.terrain = builtins[14].clone();
         }
     }
 }
@@ -397,47 +411,17 @@ impl TerrainPopulatorLike for VolcanoPopulator {
     }
 }
 
-fn perlin(seed: i32, scale: i32, octaves: usize) -> Module {
-    source(SourceKind::Perlin, seed, scale, octaves, 0.5, 2.0)
-}
-
-fn source(
-    kind: SourceKind,
-    seed: i32,
-    scale: i32,
-    octaves: usize,
-    gain: f32,
-    lacunarity: f32,
-) -> Module {
-    Module::source(Source::new(
-        kind,
-        source_config(seed, scale, octaves, gain, lacunarity),
-    ))
-}
-
-fn source_config(
-    seed: i32,
-    scale: i32,
-    octaves: usize,
-    gain: f32,
-    lacunarity: f32,
-) -> SourceConfig {
+/// The builder config of `Source.cellNoise` / `Source.cellEdge(seed, scale, ...)`: Engine's defaults
+/// otherwise (one octave, gain 0.5, lacunarity 2, Curve3).
+fn cell_config(seed: i32, scale: i32) -> SourceConfig {
     SourceConfig {
         seed,
-        octaves,
-        gain,
+        octaves: 1,
+        gain: 0.5,
         frequency: 1.0 / scale as f32,
-        lacunarity,
+        lacunarity: 2.0,
         interpolation: Interpolation::Curve3,
     }
-}
-
-fn noise_warp(seed: i32, scale: i32, octaves: usize, strength: f32) -> Domain {
-    Domain::domain_warp(
-        perlin(seed, scale, octaves),
-        perlin(seed.wrapping_add(1), scale, octaves),
-        Module::constant(strength),
-    )
 }
 
 #[cfg(test)]
@@ -445,9 +429,11 @@ mod tests {
     use super::super::{
         terraforged_engine::{BiomeType, Levels, Seed, TerrainSettings},
         terraforged_landforms::LandForms,
+        terraforged_region::RegionSelector,
     };
     use super::*;
     use std::fmt::Write as _;
+    use std::sync::Arc;
 
     // Java's `BiomeType` names in id order, for the oracle's text.
     const BIOME_NAMES: [&str; 11] = [
@@ -714,43 +700,286 @@ mod tests {
         assert_eq!(fnv1a(&text), 0xcc7b_1581_6f0c_afc3);
     }
 
+    /// The oracle's name for a cell's terrain: Java's `==` against `TerrainType`'s built-ins.
+    fn identity(registry: &TerrainRegistry, cell: &Cell) -> &'static str {
+        [
+            (14, "volcano"),
+            (15, "pipe"),
+            (0, "none"),
+            (12, "mountains"),
+        ]
+        .into_iter()
+        .find(|&(id, _)| cell.terrain.is_same(&registry.get_by_id(id)))
+        .map_or("other", |(_, name)| name)
+    }
+
+    /// The oracle's lines for one point: `getValue` and both cells' terrains, then a fresh cell and
+    /// a fully set one (holding `mountains`, so an unchanged terrain shows) after `apply`. Where
+    /// Engine's cell lookup throws (a NullPointerException, for non-finite coordinates) the port
+    /// panics, which is the oracle's `throws` line. Returns the filled cell's terrain identity.
+    fn volcano_point(
+        out: &mut String,
+        registry: &TerrainRegistry,
+        name: &str,
+        volcano: &VolcanoPopulator,
+        x: f32,
+        z: f32,
+    ) -> &'static str {
+        let prefix = format!("{name} {} {}", bits(x), bits(z));
+        let probe = std::panic::catch_unwind(|| volcano.value(registry, x, z));
+        if probe.is_err() {
+            writeln!(out, "{prefix} throws").unwrap();
+            return "throws";
+        }
+        let mut fresh = Cell::new(registry);
+        volcano.apply(&mut fresh, x, z);
+        let mut full = filled(registry);
+        full.terrain = registry.get_by_id(12);
+        volcano.apply(&mut full, x, z);
+        writeln!(
+            out,
+            "{prefix} getValue={} ids={},{}",
+            bits(volcano.value(registry, x, z)),
+            identity(registry, &fresh),
+            identity(registry, &full),
+        )
+        .unwrap();
+        writeln!(out, "{prefix} fresh {}", dump(&fresh)).unwrap();
+        writeln!(out, "{prefix} filled {}", dump(&full)).unwrap();
+        identity(registry, &full)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn volcano_run(
+        out: &mut String,
+        registry: &TerrainRegistry,
+        name: &str,
+        mut seed: Seed,
+        region: &RegionConfig,
+        levels: Levels,
+        weight: f32,
+        (step, origin_x, origin_z): (f32, f32, f32),
+        (dense, pipe_x, pipe_z): (f32, f32, f32),
+    ) {
+        let volcano = VolcanoPopulator::new(&mut seed, region, levels, weight, registry);
+        writeln!(
+            out,
+            "{name} seed after={} weight={} type={} same={} vmin={} vmax={}",
+            seed.get(),
+            bits(volcano.weight()),
+            volcano.terrain_type().id(),
+            volcano.terrain_type().is_same(&registry.get_by_id(14)),
+            bits(volcano.variance().min_value()),
+            bits(volcano.variance().max_value()),
+        )
+        .unwrap();
+        let mut counts = [0; 3];
+        let mut count = |identity: &str| match identity {
+            "pipe" => counts[0] += 1,
+            "volcano" => counts[1] += 1,
+            "throws" => {}
+            _ => counts[2] += 1,
+        };
+        for i in -20..=20 {
+            for j in -20..=20 {
+                let (x, z) = (origin_x + i as f32 * step, origin_z + j as f32 * step);
+                count(volcano_point(out, registry, name, &volcano, x, z));
+            }
+        }
+        let pipe_name = format!("{name}-pipe");
+        for i in -10..=10 {
+            for j in -10..=10 {
+                let (x, z) = (pipe_x + i as f32 * dense, pipe_z + j as f32 * dense);
+                count(volcano_point(out, registry, &pipe_name, &volcano, x, z));
+            }
+        }
+        let special = [
+            0.0,
+            -0.0,
+            1.0e9,
+            -3.0e7,
+            f32::NAN,
+            f32::INFINITY,
+            1.4e-45,
+            123_456.75,
+        ];
+        for x in special {
+            for z in special {
+                count(volcano_point(out, registry, name, &volcano, x, z));
+            }
+        }
+        let [pipe, volcano, kept] = counts;
+        writeln!(
+            out,
+            "{name} counts pipe={pipe} volcano={volcano} kept={kept}"
+        )
+        .unwrap();
+    }
+
+    fn simplex(seed: i32, scale: i32) -> Module {
+        source(SourceKind::Simplex, seed, scale, 1, 0.5, 2.0)
+    }
+
+    /// Rebuilds the text `VolcanoOracle` prints from Engine 0.3.0 (TerraForged's
+    /// `.local/terraforged/oracles/volcano/`): seed draws, weight and every cell field after `apply`
+    /// over a grid and a dense window around a pipe, for Heightmap's region config, a small-scale
+    /// one and an overflowing seed with ModTerrains' swapped `Levels`; `modifyVolcanoType` around
+    /// the water level and the 0.85 river mask; and a `RegionSelector` weighting volcanoes.
+    fn volcano_oracle_text() -> String {
+        let registry = TerrainRegistry::new();
+        let mut out = String::new();
+        let levels = Levels::new(256, 63);
+        let world = Seed::new(12_345);
+        let mut region_warp = world.offset(8934);
+        let warp_x = simplex(region_warp.next(), 400);
+        let warp_z = simplex(region_warp.next(), 400);
+        let heightmap = RegionConfig::new(world.offset(789_124).get(), 1200, warp_x, warp_z, 200.0);
+        volcano_run(
+            &mut out,
+            &registry,
+            "heightmap",
+            world.offset(0),
+            &heightmap,
+            levels,
+            5.0,
+            (150.25, 0.0, 0.0),
+            (2.5, 1502.5, -150.25),
+        );
+        let small = RegionConfig::new(
+            777,
+            400,
+            perlin(91, 100, 2, 2.0),
+            perlin(92, 100, 2, 2.0),
+            50.5,
+        );
+        volcano_run(
+            &mut out,
+            &registry,
+            "small",
+            Seed::new(12_345),
+            &small,
+            levels,
+            2.75,
+            (37.5, -940.0, -1960.0),
+            (1.25, -940.0, -1960.0),
+        );
+        let wrap = RegionConfig::new(
+            i32::MIN,
+            300,
+            simplex(i32::MAX, 200),
+            simplex(i32::MIN, 200),
+            75.0,
+        );
+        volcano_run(
+            &mut out,
+            &registry,
+            "wrap",
+            Seed::new(i32::MAX - 1),
+            &wrap,
+            Levels::new(63, 255),
+            0.0,
+            (23.125, 5000.5, -7000.25),
+            (30.5, 5000.5, -7000.25),
+        );
+
+        for levels in [levels, Levels::new(63, 255)] {
+            let water = levels.water;
+            let values = [
+                water,
+                water.next_down(),
+                water.next_up(),
+                0.1,
+                0.9,
+                f32::NAN,
+            ];
+            let masks = [0.85_f32, 0.85_f32.next_down(), 1.0, 0.0, f32::NAN];
+            for (t, id) in [15, 14, 12].into_iter().enumerate() {
+                for value in values {
+                    for mask in masks {
+                        let mut cell = filled(&registry);
+                        cell.terrain = registry.get_by_id(id);
+                        cell.value = value;
+                        cell.river_mask = mask;
+                        VolcanoPopulator::modify_volcano_type(&mut cell, levels, &registry);
+                        writeln!(
+                            out,
+                            "modify {} {t} {} {} {} {}",
+                            bits(water),
+                            bits(value),
+                            bits(mask),
+                            identity(&registry, &cell),
+                            dump(&cell),
+                        )
+                        .unwrap();
+                    }
+                }
+            }
+        }
+
+        let mut seed = Seed::new(4242);
+        let constant = |terrain, value, weight| -> Arc<dyn Populator> {
+            Arc::new(TerrainPopulator::new(
+                registry.get_by_id(terrain),
+                Module::constant(0.0),
+                Module::constant(value),
+                weight,
+            ))
+        };
+        let list: Vec<Arc<dyn Populator>> = vec![
+            constant(8, 0.2, 1.5),
+            Arc::new(VolcanoPopulator::new(
+                &mut seed, &small, levels, 5.0, &registry,
+            )),
+            constant(11, 0.4, 2.5),
+            Arc::new(VolcanoPopulator::new(
+                &mut seed, &heightmap, levels, 0.5, &registry,
+            )),
+        ];
+        let selector = RegionSelector::new(list.clone());
+        let nodes: String = (0..19)
+            .map(|i| {
+                let node = selector.get(i as f32 / 18.0) as *const dyn Populator as *const ();
+                let index = list
+                    .iter()
+                    .position(|p| Arc::as_ptr(p) as *const () == node)
+                    .unwrap();
+                format!(" {index}")
+            })
+            .collect();
+        writeln!(out, "selector nodes=19{nodes}").unwrap();
+        for id in [0.0, 0.2, 0.45, 0.75, 1.0] {
+            let mut cell = Cell::new(&registry);
+            cell.terrain_region_id = id;
+            selector.apply(&mut cell, -940.0, -1960.0);
+            let identity = identity(&registry, &cell);
+            writeln!(out, "selector {} {identity} {}", bits(id), dump(&cell)).unwrap();
+        }
+        out
+    }
+
     #[test]
     fn volcano_populator_matches_engine_0_3_0() {
-        let terrains = TerrainRegistry::new();
-        let region = RegionConfig::new(777, 400, perlin(91, 100, 2), perlin(92, 100, 2), 50.5);
-        let levels = Levels::new(256, 63);
-        let mut seed = Seed::new(12_345);
-        let volcano = VolcanoPopulator::new(&mut seed, &region, levels, 2.75, &terrains);
-        assert_eq!(seed.get(), 12_349);
-        assert_eq!(volcano.weight().to_bits(), 0x40300000);
-        for ((x, z), value) in [
-            ((0.0, 0.0), 0x3ee4ebeb),
-            ((12.25, -98.75), 0x3ee42413),
-            ((-4096.5, 8192.25), 0x3e8d8c0f),
-            ((123456.75, -0.125), 0x3edcbdc2),
-        ] {
-            let mut cell = Cell::new(&terrains);
-            volcano.apply(&mut cell, x, z);
-            assert_eq!(cell.value.to_bits(), value);
-            assert_eq!(cell.terrain.id(), 14);
-        }
-        let mut pipe = Cell::new(&terrains);
-        volcano.apply(&mut pipe, -940.0, -1960.0);
-        assert_eq!(pipe.value.to_bits(), 0x3f243fe2);
-        assert_eq!(pipe.terrain.id(), 15);
-
-        for (value, river_mask, terrain) in [
-            (0.1, 0.5, 14),
-            (0.1, 1.0, 14),
-            (0.5, 0.5, 14),
-            (0.5, 1.0, 15),
-        ] {
-            let mut cell = Cell::new(&terrains);
-            cell.terrain = terrains.get_by_id(15);
-            cell.value = value;
-            cell.river_mask = river_mask;
-            VolcanoPopulator::modify_volcano_type(&mut cell, levels, &terrains);
-            assert_eq!(cell.terrain.id(), terrain);
-        }
+        let text = volcano_oracle_text();
+        let summary: Vec<&str> = text
+            .lines()
+            .filter(|line| line.contains("seed after=") || line.contains("counts "))
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                "heightmap seed after=12349 weight=40a00000 type=14 same=true vmin=00000000 vmax=00000000",
+                "heightmap counts pipe=62 volcano=1716 kept=380",
+                "small seed after=12349 weight=40300000 type=14 same=true vmin=00000000 vmax=00000000",
+                "small counts pipe=41 volcano=1696 kept=421",
+                "wrap seed after=-2147483646 weight=00000000 type=14 same=true vmin=00000000 vmax=00000000",
+                "wrap counts pipe=0 volcano=2137 kept=21",
+            ]
+        );
+        // The weighted list: a volcano weighs 5 (Engine's `instanceof TerrainPopulator`), not 1.
+        assert!(text.contains("\nselector nodes=19 0 0 0 1 1 1 1 1 1 1 1 1 1 2 2 2 2 2 3\n"));
+        assert!(text.contains("\nsmall c46b0000 c4f50000 getValue=3f243fe2 ids=pipe,pipe\n"));
+        assert_eq!(text.lines().count(), 19_698);
+        assert_eq!(text.len(), 5_028_189);
+        assert_eq!(fnv1a(&text), 0x129b_6273_a118_513f);
     }
 }
