@@ -1196,7 +1196,7 @@ the nine surrounding cells' noises with squared border weights, each terrain sam
 `Object2FloatCache` (a NaN there is sampled again, as the jar's `isNaN` test does), and the sum is clamped with
 `NoiseUtil.clamp`. Where Java throws, this port panics: when no cell's squared distance is below `Float.MAX_VALUE`
 (NaN, infinite or huge coordinates leave the closest index at -1) or when the weight map has no terrain for a cell
-(NaN weights). Reseeding the noises (`withSeed`) and the nearest-terrain search come with later layers. Its test
+(NaN weights). Reseeding the noises (`withSeed`) comes with a later layer. Its test
 replays `TerrainBlenderOracle.java` (in `.local/terraforged/oracles/terrain_blender/`), which runs the jar's classes
 with stubs for Minecraft's `Holder` and the mod's codec classes: 15 terrain noises (signed zeros, NaN, negative,
 and values one ulp around the 5/255 bound), then nine blenders (seeds with high bits, `Long.MIN_VALUE`, wrapping
@@ -1204,9 +1204,22 @@ seed sums, negative and tiny scales, zero, negative and huge jitters, NaN, zero 
 zero weights) over 72 points (negative, huge, infinite and NaN coordinates), each value, closest pair and terrain,
 bit for bit.
 
+The blender's nearest-terrain search (`find_nearest` and `iterator`, the jar's `findNearest`, `iterator` and `find`)
+walks `SpiralIterator`'s square rings around the point's warped, scaled cell. `find_nearest` picks the first terrain
+noise whose terrain has the asked terrain's name (`String.equals`, as the jar; `None` where it returns null) and its
+weight band (`getBand`, by identity); each `next` walks on to the next cell whose hash falls in the band (above the
+lower bound, up to the upper one) and returns its jittered point divided by the frequency, `PosUtil.packf`ed. When
+the rings run out during a search the result is the jar's `0L` divided the same way (signed zeros), then `None`
+(the jar's `0L`). The spiral's quirks stay: ring 0 is empty, a negative start radius panics where Java divides by
+zero, and a start radius above the maximum revisits one cell forever, so a search there that misses never returns,
+as in Java. The same oracle replays ten blenders (the nine above and one with two noises named "hills") over 13
+start points (signed zeros, negative, huge, infinite and NaN coordinates): each `iterator(x, z, 1, 2)` walk, then
+for five query terrains (the set's first and last, another instance named "hills", "Hills", and river) and six
+radius pairs (including 0..0, -1..3 and `Integer.MAX_VALUE - 1`..`Integer.MAX_VALUE`) four finder steps, bit for bit.
+
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives, the biome climate types, the climate settings, the climate module, the climate stage, the continent factory, the generator context, the heightmap, the world generator factory, TerraForged's terrain levels, its terrain data, its terrain generator, its terrain-blend utilities and its terrain blender. They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives, the biome climate types, the climate settings, the climate module, the climate stage, the continent factory, the generator context, the heightmap, the world generator factory, TerraForged's terrain levels, its terrain data, its terrain generator, its terrain-blend utilities and its terrain blender with its nearest-terrain search. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development

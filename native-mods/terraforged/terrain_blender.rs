@@ -25,7 +25,11 @@
 use super::terraforged::{Domain, Module, Source, SourceConfig, SourceKind, clamp, floor, hash_2d};
 use super::terraforged_engine::Terrain;
 use super::terraforged_terrain_blend_util::{
-    Object2FloatCache, WeightMap, Weighted, X_PRIME, Y_PRIME, random,
+    Object2FloatCache, PositionFinder, SpiralIterator, WeightMap, Weighted, X_PRIME, Y_PRIME,
+    random,
+};
+use super::terraforged_util::{
+    pack_floats, unpack_left, unpack_left_float, unpack_right, unpack_right_float,
 };
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -86,7 +90,7 @@ impl Weighted for TerrainNoise {
 /// generator: the point is warped and scaled into a grid of jittered cells; each cell's hash picks a terrain from the
 /// weight map, and points near the border of their nearest cell blend in the neighbouring cells' terrain noises.
 /// As in the jar, the seed is bound when the blender is built. Not ported here: `withSeed` (reseeding the terrain
-/// noises) and the nearest-terrain search (`findNearest`, `iterator`).
+/// noises).
 pub struct TerrainBlender {
     region_seed: i32,
     frequency: f32,
@@ -170,6 +174,50 @@ impl TerrainBlender {
     /// `getTerrain(blender)`: the terrain of the blender's nearest cell (from the last `value_with`).
     pub fn terrain<'a>(&'a self, blender: &Blender) -> &'a Terrain {
         terrain_at(&self.terrains, blender.centre_noise_index()).terrain()
+    }
+
+    /// `findNearest(x, z, minRadius, maxRadius, terrain)`: `None` (Java's null) when no terrain noise has the
+    /// terrain's name (`String.equals`, the first match); otherwise a finder over [`TerrainBlender::iterator`] whose
+    /// `next` walks on to the next cell in that noise's weight band (`WeightMap.getBand`, by identity) and returns its
+    /// jittered point divided by the frequency (back to blocks), `PosUtil.packf`ed. When the spiral runs out during
+    /// a search, the point is Java's `0L` divided the same way (a zero, negative for a negative scale); once it is
+    /// out, `next` is `None` (Java's `0L`). Java's spiral quirks are kept: a `min_radius` above `max_radius` revisits
+    /// one cell forever, so a search there that misses never returns, as in Java, and a negative `min_radius` panics
+    /// when the walk steps into ring 0, where Java divides by zero. The finder holds no borrow of the blender (it copies the seed,
+    /// jitter, frequency and band), so it can outlive it or move to another thread.
+    pub fn find_nearest(
+        &self,
+        x: f32,
+        z: f32,
+        min_radius: i32,
+        max_radius: i32,
+        terrain: &Terrain,
+    ) -> Option<PositionFinder<impl FnMut(&mut SpiralIterator) -> i64 + use<>>> {
+        let noise = self
+            .terrains
+            .find(|candidate| candidate.terrain().name() == terrain.name())?;
+        let band = self.terrains.band(noise);
+        let lower = unpack_left_float(band);
+        let upper = unpack_right_float(band);
+        let (seed, jitter, frequency) = (self.region_seed, self.jitter, self.frequency);
+        Some(
+            self.iterator(x, z, min_radius, max_radius)
+                .finder(move |spiral| {
+                    let position = find(seed, jitter, lower, upper, spiral);
+                    pack_floats(
+                        unpack_left_float(position) / frequency,
+                        unpack_right_float(position) / frequency,
+                    )
+                }),
+        )
+    }
+
+    /// `iterator(x, z, minRadius, maxRadius)`: the [`SpiralIterator`] of cells around the point's warped,
+    /// scaled cell (`NoiseUtil.floor`, as `getValue` locates it).
+    pub fn iterator(&self, x: f32, z: f32, min_radius: i32, max_radius: i32) -> SpiralIterator {
+        let region_x = self.warp.x(x, z) * self.frequency;
+        let region_z = self.warp.y(x, z) * self.frequency;
+        SpiralIterator::new(floor(region_x), floor(region_z), min_radius, max_radius)
     }
 }
 
@@ -374,6 +422,25 @@ fn random2(seed: i32, offset: i32) -> f32 {
     random((hash >> 13) ^ hash)
 }
 
+/// `TerrainBlender.find(seed, jitter, lower, upper, spiral)`: walks the spiral (while `hasNext`) to the first
+/// cell whose `MathUtil.rand(hash)` is in the band, strictly above `lower` and at most `upper` (so NaN never matches),
+/// and returns its jittered point `PosUtil.packf(cell + MathUtil.rand(hash, prime) * jitter)`; `0L` once the spiral
+/// runs out.
+fn find(seed: i32, jitter: f32, lower: f32, upper: f32, spiral: &mut SpiralIterator) -> i64 {
+    for position in spiral {
+        let cell_x = unpack_left(position);
+        let cell_z = unpack_right(position);
+        let hash = hash_2d(seed, cell_x, cell_z);
+        let noise = random(hash);
+        if noise > lower && noise <= upper {
+            let point_x = cell_x as f32 + random2(hash, X_PRIME) * jitter;
+            let point_z = cell_z as f32 + random2(hash, Y_PRIME) * jitter;
+            return pack_floats(point_x, point_z);
+        }
+    }
+    0
+}
+
 /// `TerrainBlender.Blender.getWeight(distance, origin, blendRange)`: 1 up to the origin, 0 from `blendRange` past
 /// it, `(1 - delta / blendRange)^2` between (NaN comparisons fall through to the formula, as in Java).
 fn weight(distance: f32, origin: f32, blend_range: f32) -> f32 {
@@ -390,7 +457,7 @@ fn weight(distance: f32, origin: f32, blend_range: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::super::terraforged_engine::TerrainRegistry;
+    use super::super::terraforged_engine::{TerrainCategory, TerrainRegistry};
     use super::*;
     use std::fmt::Write;
     use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -465,7 +532,7 @@ mod tests {
     }
 
     /// `{terrain, weight, noise}` per terrain noise, per set.
-    const SETS: [&[(usize, f32, usize)]; 7] = [
+    const SETS: [&[(usize, f32, usize)]; 8] = [
         &[(0, 2.0, 0), (1, 3.0, 1), (2, 5.0, 2)],
         &[(3, 1.0, 3), (4, 1.0, 4), (5, 1.0, 5), (6, 2.0, 6)],
         &[(7, 1.0, 7), (0, 1.0, 8), (1, 1.0, 9), (2, 1.0, 10)],
@@ -473,6 +540,7 @@ mod tests {
         &[(6, 1.0, 6)],
         &[(0, 0.0, 0), (1, 1.0, 9), (2, 3.0, 7)],
         &[(0, f32::NAN, 0), (1, 1.0, 1)],
+        &[(1, 1.0, 0), (1, 2.0, 1), (2, 1.0, 2)],
     ];
 
     const SEEDS: [i64; 9] = [
@@ -582,6 +650,13 @@ mod tests {
         shareable::<TerrainBlender>();
         shareable::<TerrainNoise>();
         movable::<Blender>();
+        fn owned<T: Send + 'static>(_: T) {}
+        let registry = TerrainRegistry::new();
+        let blender = TerrainBlender::new(1, 64, 0.8, 0.65, vec![terrain(&registry, 1, 1.0, 1)]);
+        let hills = registry.get_by_name("hills").unwrap();
+        let finder = blender.find_nearest(0.0, 0.0, 1, 2, &hills);
+        drop(blender);
+        owned(finder);
     }
 
     #[test]
@@ -599,5 +674,148 @@ mod tests {
         assert_eq!(lines[20], "P 0 4 throw -1 -1 throw");
         assert_eq!(lines[380], "B 5 -2125992525");
         assert_eq!(fnv(&out), 0x14b1_fe45_32e6_a8ff);
+    }
+
+    /// The search runs' start points.
+    const SEARCH_POINTS: [(f32, f32); 13] = [
+        (0.0, 0.0),
+        (-0.0, -0.0),
+        (37.25, -91.5),
+        (-240.0, 118.75),
+        (-1e5, -3e4),
+        (1e7, -1e7),
+        (3e9, 1.0),
+        (1e20, -1e20),
+        (f32::MAX, 1.0),
+        (f32::INFINITY, 0.0),
+        (f32::NAN, 5.0),
+        (5.0, f32::NAN),
+        (f32::NEG_INFINITY, f32::NEG_INFINITY),
+    ];
+    /// `{minRadius, maxRadius}`: ring 0 (empty), several rings, one ring, none, a negative start (Java divides by
+    /// zero) and wrapping ring sizes.
+    const RADII: [(i32, i32); 6] = [
+        (0, 3),
+        (1, 8),
+        (4, 6),
+        (0, 0),
+        (-1, 3),
+        (i32::MAX - 1, i32::MAX),
+    ];
+
+    /// The lines `TerrainBlenderOracle.search` prints: per blender (the nine above, then one over set 7, whose
+    /// first two noises are both named "hills") and start point, the cells `iterator(x, z, 1, 2)` visits, then per
+    /// query terrain and radii four finder steps (`hasNext`, then `next`'s packed floats) or "null"/"throw".
+    fn search_lines() -> String {
+        let registry = TerrainRegistry::new();
+        // Same name as the registry's hills, another instance and id; a name differing only in case; a terrain in no set.
+        let hills_copy = Terrain::new(99, "hills", TerrainCategory::Flatland);
+        let hills_case = Terrain::new(98, "Hills", TerrainCategory::Flatland);
+        let river = registry.get_by_name("river").unwrap();
+        let mut out = String::new();
+        for s in 0..=SEEDS.len() {
+            let (config, set) = if s == SEEDS.len() {
+                (0, 7)
+            } else {
+                (s, SET_OF[s])
+            };
+            let terrains = SETS[set]
+                .iter()
+                .map(|&(t, weight, n)| terrain(&registry, t, weight, n))
+                .collect();
+            let blender = TerrainBlender::new(
+                SEEDS[config],
+                SCALES[config],
+                JITTERS[config],
+                BLENDINGS[config],
+                terrains,
+            );
+            let name = |index: usize| registry.get_by_name(TERRAINS[SETS[set][index].0]).unwrap();
+            let queries = [
+                name(0),
+                name(SETS[set].len() - 1),
+                hills_copy.clone(),
+                hills_case.clone(),
+                river.clone(),
+            ];
+            for (p, &(x, z)) in SEARCH_POINTS.iter().enumerate() {
+                write!(out, "I {s} {p}").unwrap();
+                for position in blender.iterator(x, z, 1, 2) {
+                    write!(out, " {},{}", unpack_left(position), unpack_right(position)).unwrap();
+                }
+                out.push('\n');
+                for (q, query) in queries.iter().enumerate() {
+                    for (r, &(min, max)) in RADII.iter().enumerate() {
+                        write!(out, "F {s} {p} {q} {r}").unwrap();
+                        let Some(mut finder) = blender.find_nearest(x, z, min, max, query) else {
+                            out.push_str(" null\n");
+                            continue;
+                        };
+                        for _ in 0..4 {
+                            let more = finder.has_next();
+                            let Ok(position) = catch_unwind(AssertUnwindSafe(|| finder.next()))
+                            else {
+                                out.push_str(" throw");
+                                break;
+                            };
+                            assert_eq!(
+                                position.is_some(),
+                                more,
+                                "next is None exactly when has_next is false"
+                            );
+                            let position = position.unwrap_or(0);
+                            write!(
+                                out,
+                                " {}:{},{}",
+                                u8::from(more),
+                                h(unpack_left_float(position)),
+                                h(unpack_right_float(position)),
+                            )
+                            .unwrap();
+                        }
+                        out.push('\n');
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn nearest_terrain_search_matches_the_jar() {
+        let out = search_lines();
+        let lines: Vec<_> = out.lines().collect();
+        assert_eq!(lines.len(), 4030);
+        // Ring 1 then ring 2 around the warped cell, each from its (-r, -r) corner along +x, +z, -x, -z.
+        assert_eq!(
+            lines[0],
+            "I 0 0 -1,-1 0,-1 1,-1 1,0 1,1 0,1 -1,1 -1,0 -2,-2 -1,-2 0,-2 1,-2 2,-2 2,-1 2,0 2,1 2,2 1,2 0,2 \
+             -1,2 -2,2 -2,1 -2,0 -2,-1"
+        );
+        // Ring 0 is empty, so radii 0..3 and 1..8 find the same cells; each step resumes the walk.
+        assert_eq!(
+            lines[1],
+            "F 0 0 0 0 1:41af898b,c2003568 1:42c66aa0,c2d9ddaa 1:4304a861,40c9a94d 1:42cb37c4,431dfa6d"
+        );
+        assert_eq!(lines[2][9..], lines[1][9..]);
+        // No rings; a negative start radius divides by zero; a miss on the last ring returns Java's 0L / frequency.
+        assert_eq!(
+            lines[4],
+            "F 0 0 0 3 0:00000000,00000000 0:00000000,00000000 0:00000000,00000000 0:00000000,00000000"
+        );
+        assert_eq!(lines[5], "F 0 0 0 4 throw");
+        assert_eq!(
+            lines[6],
+            "F 0 0 0 5 1:00000000,00000000 0:00000000,00000000 0:00000000,00000000 0:00000000,00000000"
+        );
+        // A negative frequency (scale -50) turns that 0L into -0.0.
+        assert!(out.contains(
+            "\nF 6 0 0 5 1:80000000,80000000 0:00000000,00000000 0:00000000,00000000 0:00000000,00000000\n"
+        ));
+        // Names match with `String.equals`: another instance named "hills" finds the first "hills" noise's band.
+        assert_eq!(lines[3702][9..], lines[3690][9..]);
+        assert!(lines[3702].starts_with("F 9 2 2 0 1:4191054f,c32f21e7"));
+        assert_eq!(lines.iter().filter(|l| l.ends_with(" null")).count(), 1794);
+        assert_eq!(fnv(&out), 0xb76e_5dcb_6b68_055a);
     }
 }
