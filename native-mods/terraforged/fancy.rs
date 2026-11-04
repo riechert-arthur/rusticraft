@@ -22,15 +22,23 @@
  * SOFTWARE.
  */
 
+use std::sync::Arc;
+
 use horizon_core::random::{LegacyRandom, RandomSource};
 
 use super::{
     terraforged::{Domain, Line, SourceKind, cos, java_max, java_min, lerp, map, noise_curve, sin},
     terraforged_continent::noise_warp,
-    terraforged_engine::{Cell, ControlPoints, Seed, WorldSettings},
+    terraforged_engine::{
+        Cell, ControlPoints, Levels, RiverSettings, Seed, TerrainRegistry, WorldSettings,
+    },
     terraforged_populator::Populator,
+    terraforged_river::{
+        BaseRiverGenerator, GenWarp, River, RiverCarver, RiverCarverSettings, RiverNetwork,
+        RiverNetworkBuilder, RiverWarp, Rivermap, Variance,
+    },
     terraforged_util::{
-        pack, pack_floats, pack_mix_int_float, unpack_left_float, unpack_right_float,
+        pack, pack_floats, pack_mix_int_float, unpack_left, unpack_left_float, unpack_right_float,
     },
 };
 
@@ -297,7 +305,8 @@ impl Island {
 }
 
 /// Engine's `FancyContinent`: a main island and four arms of three ever smaller satellite islands, built from a
-/// `java.util.Random` seeded with the generator's first seed. The river generator it holds is not ported.
+/// `java.util.Random` seeded with the generator's first seed. Engine's `FancyContinent` also builds the continent's
+/// `FancyRiverGenerator` and answers `generateRivers` with it; here `FancyRiverGenerator` owns the continent generator.
 pub struct FancyContinent {
     islands: Vec<Island>,
 }
@@ -518,6 +527,243 @@ impl FancyContinentGenerator {
             (width * 0.5 / self.frequency) as i32,
             (height * 0.5 / self.frequency) as i32,
         )
+    }
+}
+
+/// Engine's `FancyRiverGenerator`: per island of the fancy continent, main rivers projected across its segments
+/// and out of its two endpoints until the continent value falls below 0.1, each forked and given wetlands as soon
+/// as it is placed. In Engine, `FancyContinent` builds one in its constructor and `FancyContinentGenerator`'s
+/// river cache asks it for maps; here it owns the continent generator and the caller passes what Engine reads
+/// from the `GeneratorContext` (see `BaseRiverGenerator::new`).
+pub struct FancyRiverGenerator {
+    base: BaseRiverGenerator<FancyContinentGenerator>,
+    frequency: f32,
+}
+
+impl FancyRiverGenerator {
+    /// `END_VALUE`: the continent value below which a river ends.
+    const END_VALUE: f32 = 0.1;
+    const MAIN_PADDING: Variance = Variance::of(0.05, 0.1);
+    const MAIN_JITTER: Variance = Variance::of(-0.2, 0.4);
+
+    pub fn new(
+        continent: FancyContinentGenerator,
+        root_seed: i32,
+        world: &WorldSettings,
+        rivers: &RiverSettings,
+        levels: Levels,
+        registry: Arc<TerrainRegistry>,
+    ) -> Self {
+        Self {
+            frequency: 1.0 / world.continent.continent_scale as f32,
+            base: BaseRiverGenerator::new(continent, root_seed, world, rivers, levels, registry),
+        }
+    }
+
+    /// `generateRivers(x, z, id)`: no shuffle and no second fork pass, unlike the base class; every island's
+    /// roots become networks in placement order.
+    pub fn generate_rivers(&self, x: i32, z: i32, id: i64) -> Rivermap {
+        let mut random = LegacyRandom::new(id.wrapping_add(i64::from(self.base.seed)));
+        let warp = GenWarp::new(id as i32, self.base.continent_scale);
+        let mut networks = Vec::with_capacity(32);
+        let mut roots = Vec::with_capacity(16);
+        for island in self.base.continent.source().islands() {
+            self.generate_roots(island, &mut random, &warp, &mut roots);
+            networks.extend(roots.drain(..).map(RiverNetworkBuilder::build));
+        }
+        Rivermap::new(x, z, networks, warp)
+    }
+
+    fn generate_roots(
+        &self,
+        island: &Island,
+        random: &mut LegacyRandom,
+        warp: &GenWarp,
+        roots: &mut Vec<RiverNetworkBuilder>,
+    ) {
+        let segments = island.segments();
+        let line_count = 1.max(8 - island.id());
+        let end_count = 4.max(12 - island.id());
+        for (index, segment) in segments.iter().enumerate() {
+            let end = index == 0 || index == segments.len() - 1;
+            let river_count = if end { line_count - 1 } else { line_count };
+            self.collect_segment_roots(island, segment, river_count, random, warp, roots);
+        }
+        // Engine reads `segments[0]` unchecked; every island has at least one segment (`nodes >= 2`).
+        let first = &segments[0];
+        self.collect_point_roots(
+            island,
+            first.a,
+            first.scale_a,
+            end_count,
+            random,
+            warp,
+            roots,
+        );
+        let last = &segments[segments.len() - 1];
+        self.collect_point_roots(island, last.b, last.scale_b, end_count, random, warp, roots);
+    }
+
+    fn collect_segment_roots(
+        &self,
+        island: &Island,
+        segment: &Segment,
+        count: i32,
+        random: &mut LegacyRandom,
+        warp: &GenWarp,
+        roots: &mut Vec<RiverNetworkBuilder>,
+    ) {
+        let dx = segment.dx;
+        let dy = segment.dy;
+        let normal_x = dy / segment.length;
+        let normal_z = -dx / segment.length;
+        let step_size = 1.0 / (count + 2) as f32;
+        for index in 0..count {
+            let progress = step_size + step_size * index as f32;
+            if progress > 1.0 {
+                return;
+            }
+            let start_x = segment.a.x + dx * progress;
+            let start_z = segment.a.y + dy * progress;
+            let radius_scale = lerp(segment.scale_a, segment.scale_b, progress);
+            let radius = island.coast() * radius_scale;
+            let direction: f32 = if random.next_boolean() { -1.0 } else { 1.0 };
+            let direction_x = normal_x * direction + Self::MAIN_JITTER.next(random);
+            let direction_z = normal_z * direction + Self::MAIN_JITTER.next(random);
+            let scale = self.extend_scale(
+                island.id(),
+                start_x,
+                start_z,
+                direction_x,
+                direction_z,
+                radius,
+            );
+            if scale == 0.0 {
+                continue;
+            }
+            let start_padding = Self::MAIN_PADDING.next(random);
+            let x1 = start_x + direction * direction_x * radius * start_padding;
+            let z1 = start_z + direction * direction_z * radius * start_padding;
+            let x2 = start_x + direction_x * radius * scale;
+            let z2 = start_z + direction_z * radius * scale;
+            self.add_root(x1, z1, x2, z2, random, warp, roots);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn collect_point_roots(
+        &self,
+        island: &Island,
+        point: Vec2f,
+        radius_scale: f32,
+        count: i32,
+        random: &mut LegacyRandom,
+        warp: &GenWarp,
+        roots: &mut Vec<RiverNetworkBuilder>,
+    ) {
+        let yaw_step = java_pi2() / count as f32;
+        let radius = island.coast() * radius_scale;
+        for index in 0..count {
+            let yaw = yaw_step * index as f32;
+            let dx = cos(yaw);
+            let dz = sin(yaw);
+            let scale = self.extend_scale(island.id(), point.x, point.y, dx, dz, radius);
+            if scale == 0.0 {
+                continue;
+            }
+            let start_padding = Self::MAIN_PADDING.next(random);
+            let start_x = point.x + dx * start_padding * radius;
+            let start_z = point.y + dz * start_padding * radius;
+            let end_x = point.x + dx * radius * scale;
+            let end_z = point.y + dz * radius * scale;
+            if self.base.continent.source().value(end_x, end_z) > Self::END_VALUE {
+                continue;
+            }
+            self.add_root(start_x, start_z, end_x, end_z, random, warp, roots);
+        }
+    }
+
+    /// `addRoot(x1, z1, x2, z2, main, random, warp, roots)`: the root is added to `roots` before its forks are
+    /// generated, so they are tested against it (by Engine's parent rule) as well as the island's other roots.
+    #[allow(clippy::too_many_arguments)]
+    fn add_root(
+        &self,
+        x1: f32,
+        z1: f32,
+        x2: f32,
+        z2: f32,
+        random: &mut LegacyRandom,
+        warp: &GenWarp,
+        roots: &mut Vec<RiverNetworkBuilder>,
+    ) {
+        let config = self.base.main;
+        let river = River::new(
+            x1 / self.frequency,
+            z1 / self.frequency,
+            x2 / self.frequency,
+            z2 / self.frequency,
+        );
+        if BaseRiverGenerator::<FancyContinentGenerator>::river_overlaps(river, None, roots) {
+            return;
+        }
+        // `creatSettings` draws the valley curve first, then the valley size, then the warp.
+        let valley_curve = RiverCarver::valley_type(random);
+        let valley_size = River::VALLEY_WIDTH as f32 * River::FORK_VALLEY.next(random);
+        let settings = RiverCarverSettings {
+            connecting: false,
+            fade_in: config.fade,
+            valley_size,
+            valley_curve,
+        };
+        let river_warp = RiverWarp::create_range(0.1, 0.85, random);
+        let carver = RiverCarver::new(
+            river,
+            river_warp,
+            config,
+            settings,
+            self.base.levels,
+            &self.base.registry,
+        );
+        roots.push(RiverNetwork::builder(carver));
+        let index = roots.len() - 1;
+        self.base.generate_forks(
+            roots,
+            &[index],
+            River::FORK_SPACING,
+            self.base.fork,
+            random,
+            warp,
+            0,
+        );
+        self.base.generate_wetlands(&mut roots[index], random);
+    }
+
+    /// `getExtendScale`: steps out from `start` by `0.075 * radius` up to 25 times; 0 when a step leaves the
+    /// island (`getValueId`'s id differs) or never reaches a value below 0.1.
+    #[allow(clippy::too_many_arguments)]
+    fn extend_scale(
+        &self,
+        island_id: i32,
+        start_x: f32,
+        start_z: f32,
+        dx: f32,
+        dz: f32,
+        radius: f32,
+    ) -> f32 {
+        let mut scale = 1.0_f32;
+        for _ in 0..25 {
+            let x = start_x + dx * radius * scale;
+            let z = start_z + dz * radius * scale;
+            let packed = self.base.continent.source().value_id(x, z);
+            if unpack_left(packed) != island_id {
+                return 0.0;
+            }
+            if unpack_right_float(packed) < Self::END_VALUE {
+                return scale;
+            }
+            scale += 0.075;
+        }
+        0.0
     }
 }
 
