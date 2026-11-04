@@ -227,9 +227,22 @@ warped twice (scale 300, 1 octave, strength 150; scale 20, 1 octave, strength 40
 4-octave Perlin at scale 150 warped twice (scale 300, 1 octave, strength 200; scale 20, 2 octaves, strength 20). The
 blend goes through an advanced terrace (modulation: a 1-octave Perlin at scale 120 times 0.25; mask: a 1-octave Perlin
 at scale 200 times 0.5 plus 0.5; slope 0.5, blend 0..0.3, 6 steps, 1 octave), is boosted again and scaled by 0.5. The
-grid test covers both with the same cases, whose start seeds include ones where a warp's second axis seed wraps. The
-other landforms, the ocean and land bases, and TerraForged's `RandSeed` (ModTerrains builds its landforms from a
-`SplittableRandom` seed rather than Engine's counter) are not ported yet.
+grid test covers both with the same cases, whose start seeds include ones where a warp's second axis seed wraps.
+
+The ocean LandForms layer gives `LandForms::new` Engine's other two constructor arguments, the world's `Levels` and the
+`ground` module, and adds `deepOcean` and the two bases: `getOceanBase` is `Source.ZERO` and `getLandBase` returns
+the `ground` module. Unlike the other landforms, `deepOcean` takes a plain `int` seed, which it increments six times
+(wrapping like Java's `int`) without touching any `Seed`. It scales by the `Levels`' `water` level (`seaLevel` in
+Engine): its hills, a 3-octave Perlin at scale 150 times `water * 0.7` plus a 1-octave Perlin at scale 200 times
+`water * 0.2`, and its canyons, a 4-octave Perlin at scale 150 through a 0.2 power curve, inverted and times `water *
+0.7`, plus a 1-octave Perlin at scale 170 times `water * 0.15`, are blended linearly (midpoint 0.6, range 0.65) by a
+1-octave Perlin at scale 500 and warped (scale 50, 2 octaves, strength 50). As in Engine, `water * 0.7` is computed in
+double and the other two products in float. Its test checks the water level, the bounds and every grid sample's bits
+against a Java oracle for Engine's default levels (256 high, sea level 63), TerraForged's continent levels (480 and
+62), ModTerrains' swapped `new Levels(63, 255)` (a water level of 1), a negative and a zero water level and a sea
+level whose `- 1` wraps, with start seeds where the increments and the warp's second axis seed wrap. The other
+landforms and TerraForged's `RandSeed` (ModTerrains builds its landforms from a `SplittableRandom` seed rather than
+Engine's counter) are not ported yet.
 
 ## Status: development only
 
