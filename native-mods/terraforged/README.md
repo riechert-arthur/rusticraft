@@ -284,9 +284,20 @@ cells come from per-thread pools; here `empty` returns a new cell and callers ow
 lookup map Engine loads from TerraForged's biome-type image come later. Its test checks every field's bits after
 construction, `copy_from` and `reset` against a Java oracle.
 
+The terrain-populator layer adds Engine's `TerrainPopulator` and `ScaledPopulator` (`populator.rs`), which write one
+landform into a cell: `value` becomes base plus variance (each multiplied by its scale in `ScaledPopulator`), clamped
+to 0..1 with NaN left as NaN, and `terrain` becomes the populator's terrain, which must come from the world's
+`TerrainRegistry`; no other cell field changes. `TerrainPopulator.of` picks `ScaledPopulator` unless the base and
+vertical scales are both 1, and `TerrainConfig` keeps a populator's terrain, variance and weight to rebuild it on
+another base (its data spec is not ported). Engine's `Populator` is also a noise `Module`; here its `getValue` is
+`Populator::value`, which takes the world's registry for its scratch cell. Its test checks every cell field, on a
+new and on a fully set cell, against a Java oracle running Engine's populators on Engine cells, including the hills
+and mountains landforms; the oracle lives outside Git, in `.local/terraforged/oracles/populator/`.
+
+
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms and its cell model. They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model and its terrain populators. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
