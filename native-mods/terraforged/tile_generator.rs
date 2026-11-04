@@ -555,6 +555,14 @@ impl DisposeListener<Tile> for Cache<CacheEntry<'static, Tile>> {
     }
 }
 
+/// `TileCache.onDispose(tile)`, public in Engine (`TileProvider` is a `Disposable.Listener`): the
+/// cache's own, which its generator's tiles call.
+impl<H: Send + Sync, F: Send + Sync> DisposeListener<Tile> for TileCache<H, F> {
+    fn on_dispose(&self, tile: &Tile) {
+        self.cache.on_dispose(tile);
+    }
+}
+
 impl<H, F> TileCache<H, F>
 where
     H: HeightmapSource + Send + Sync + 'static,
@@ -2109,6 +2117,10 @@ x10 -1 8 4 16 false false 5 true false -1 8000 4 16 false false 7997
             ec_log.events.lock().unwrap().len()
         );
         assert_eq!(out, TILE_DISPOSAL_ORACLE);
+        let entry = ec.get_tile_at(1, 1);
+        ec.on_dispose(entry.call());
+        assert!(!has(&ec, 1, 1), "onDispose removes the tile's region");
+        assert_eq!(entry.call().active(), -1, "and closes its unopened tile");
     }
 
     /// `TileGeneratorOracle.java`'s output (`./run.sh` writes it to `out.txt`).
