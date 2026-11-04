@@ -695,15 +695,27 @@ The erosion-primitives layer adds the parts Engine's `Erosion` filter is built f
 which mixes the second value into the gamma, then `nextInt(bound)`), and its droplet brushes (`ErosionBrushes`,
 `Erosion.initBrushes`): for each cell, the cells within radius 4 and their normalized `1 - d / 4` weights. As in Engine,
 only cells near the map's edge (with an asymmetric extra column on the left) compute their own brush, clipped to the
-map; every other cell reuses the last computed brush, re-centred. Nothing uses them yet (the droplet simulation,
-`Erosion.apply`, is not ported). Its tests replay `ErosionPrimitivesOracle.java` in
+map; every other cell reuses the last computed brush, re-centred. Its tests replay `ErosionPrimitivesOracle.java` in
 `.local/terraforged/oracles/erosion_primitives/`, which draws from Engine's `FastRandom` for 13 bounds (including 0,
 negative bounds and ones that make it reject draws) over 27 seeds, and runs `initBrushes` for map sizes 0 to 40 and
 radii -1 to 6, printing the draws and every brush's indices and weight bits folded together.
 
+The hydraulic-erosion layer adds the filter itself (`Erosion`, `filters.rs`): for each iteration and each whole chunk
+of the map, one droplet starts at a random block of the chunk (`FastRandom` seeded with `NoiseUtil.seed` of the chunk's
+world position, borders included, and of the filter seed and the iteration, so neighbouring tiles agree) and runs
+downhill for up to `droplet_lifetime` steps: bilinear height and gradient, inertia 0.05, sediment capacity
+`max(-Δh · speed · water · 4, 0.01)`, bilinear deposits and radius-4 brush erosion, evaporation 1 % and gravity 3, with
+Engine's `(float) Math.sqrt` in double and its NaN guards. Every change goes through Engine's filter `Modifier`, now
+ported in both forms: `Modifier::range(min, max)` (erosion uses `range(ground, ground(15))`, seed root + 12768) and
+`.invert()` (smoothing). Its test replays `ErosionOracle.java` in `.local/terraforged/oracles/erosion/`, which runs
+Engine's `Erosion.apply` on 16 maps (several seeds, sizes from 0 to 64 with and without borders, negative and extreme
+block positions, custom settings, zero and negative iterations, NaN and infinite heights) and folds every cell's
+value, erosion and sediment bits. Nothing calls the filter yet: wiring Engine's filter chain into tiles is a later
+layer.
+
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter and the erosion filter's settings, random stream and brushes. They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter and the hydraulic erosion filter (with its settings, random stream and brushes). They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
