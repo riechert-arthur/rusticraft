@@ -855,6 +855,9 @@ batch counts 1, 2, 3, 7 and 100, zoomed for 3 and 100, folding the lookups, an o
 cell; the cells equal the `g`/`z` lines') and `e` lines (counts 0 and -2), and check that one thread or many give the
 same cells and that a panic keeps its payload. Debug and release builds agree.
 
+The tile-generator builder now mirrors TerraForged's factor, border, batch, and striped configuration,
+selecting direct generation unless a positive batch size requests batched or striped traversal.
+
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles and its batched and striped generation. They change nothing in the game, so there is

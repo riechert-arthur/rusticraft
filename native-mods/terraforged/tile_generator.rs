@@ -83,19 +83,118 @@ impl<H, F> WorldGenerator<H, F> {
     }
 }
 
-/// Engine 0.3.0's plain, synchronous `TileGenerator` (`com.terraforged.engine.tile.gen`, what
-/// `TileGenerator.builder().build()` returns without a batch size): the size factor and border
-/// (in chunks) of its tiles, the batch size (kept for the batched generators), the world's
-/// registry the tiles' cells start from (in place of Engine's `TileResources` pools) and the
-/// world generator. Engine's `TileGeneratorBatched` and `TileGeneratorStriped` are the
-/// `generate_batched_*` and `generate_striped_*` methods. The async wrapper, the tile cache, the
-/// builder and tile disposal are not ported.
+/// Engine 0.3.0's `TileGenerator` (`com.terraforged.engine.tile.gen`): the size factor and border
+/// (in chunks) of its tiles, the batch size, the world's registry the tiles' cells start from (in
+/// place of Engine's `TileResources` pools), the world generator, and which of Engine's three
+/// generator classes it is ([`Self::builder`] picks it as `Builder.build()` does; [`Self::new`]
+/// makes the plain one). Engine's `TileGeneratorBatched` and `TileGeneratorStriped` are also the
+/// `generate_batched_*` and `generate_striped_*` methods. The async wrapper, the tile cache and
+/// tile disposal are not ported.
 pub struct TileGenerator<H, F> {
     factor: i32,
     border: i32,
     batch_size: i32,
+    kind: Kind,
     terrains: Arc<TerrainRegistry>,
     generator: WorldGenerator<H, F>,
+}
+
+/// The Engine class `TileGenerator.Builder.build()` returns, which decides what `generateRegion`
+/// runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    /// `TileGenerator`: the whole tile filled at once.
+    Plain,
+    /// `TileGeneratorBatched`: `Tile.generateArea` with the batch size.
+    Batched,
+    /// `TileGeneratorStriped`: `Tile.generateAreaStriped` with the batch size.
+    Striped,
+}
+
+/// Engine's `TileGenerator.Builder` (from [`TileGenerator::builder`]): size factor 0, border 0,
+/// batch size 0 and not striped until set. Like Engine's builder it checks no
+/// argument; [`Self::build`] panics without a [`Self::factory`], where Engine throws
+/// `NullPointerException`.
+pub struct TileGeneratorBuilder<H, F> {
+    factor: i32,
+    border: i32,
+    batch_size: i32,
+    striped: bool,
+    factory: Option<(Arc<TerrainRegistry>, WorldGenerator<H, F>)>,
+}
+
+impl<H, F> TileGeneratorBuilder<H, F>
+where
+    H: HeightmapSource,
+    F: TileFilters,
+{
+    /// `size(factor, border)`: `factor(factor).border(border)`.
+    #[must_use]
+    pub const fn size(self, factor: i32, border: i32) -> Self {
+        self.factor(factor).border(border)
+    }
+
+    /// `factor(factor)`: the tiles' size factor (`1 << factor` chunks a side).
+    #[must_use]
+    pub const fn factor(mut self, factor: i32) -> Self {
+        self.factor = factor;
+        self
+    }
+
+    /// `border(border)`: the tiles' border, in chunks.
+    #[must_use]
+    pub const fn border(mut self, border: i32) -> Self {
+        self.border = border;
+        self
+    }
+
+    /// `factory(factory)`: the world generator the factory supplies, and the world's registry the
+    /// tiles' cells start from.
+    #[must_use]
+    pub fn factory(
+        mut self,
+        terrains: Arc<TerrainRegistry>,
+        generator: WorldGenerator<H, F>,
+    ) -> Self {
+        self.factory = Some((terrains, generator));
+        self
+    }
+
+    /// `batch(batchSize)`.
+    #[must_use]
+    pub const fn batch(mut self, batch_size: i32) -> Self {
+        self.batch_size = batch_size;
+        self
+    }
+
+    /// `striped()`.
+    #[must_use]
+    pub const fn striped(mut self) -> Self {
+        self.striped = true;
+        self
+    }
+
+    /// `build()`: `TileGeneratorStriped` for a positive batch size with `striped()`,
+    /// `TileGeneratorBatched` for a positive batch size without it, the plain `TileGenerator`
+    /// otherwise (whatever `striped()` says). Panics without a factory.
+    pub fn build(self) -> TileGenerator<H, F> {
+        let kind = match (self.batch_size > 0, self.striped) {
+            (false, _) => Kind::Plain,
+            (true, false) => Kind::Batched,
+            (true, true) => Kind::Striped,
+        };
+        let (terrains, generator) = self.factory.expect(
+            "TileGenerator.Builder.build() without a factory: Engine throws NullPointerException",
+        );
+        TileGenerator {
+            factor: self.factor,
+            border: self.border,
+            batch_size: self.batch_size,
+            kind,
+            terrains,
+            generator,
+        }
+    }
 }
 
 impl<H, F> TileGenerator<H, F>
@@ -103,8 +202,11 @@ where
     H: HeightmapSource,
     F: TileFilters,
 {
-    /// `TileGenerator.builder().size(factor, border).batch(batch_size)` with a factory supplying
-    /// `generator`; `terrains` is the world's registry.
+    /// The plain generator (Engine's `TileGenerator` class) with `size(factor, border)`, a factory
+    /// supplying `generator` and the batch size, which only the `generate_batched_*` and
+    /// `generate_striped_*` methods use (on Engine's default pool, `max(2, processors)` threads);
+    /// `terrains` is the world's registry. Engine's builder makes the plain class only for batch
+    /// sizes of 0 and less: use [`Self::builder`] for its choice.
     pub const fn new(
         factor: i32,
         border: i32,
@@ -116,8 +218,20 @@ where
             factor,
             border,
             batch_size,
+            kind: Kind::Plain,
             terrains,
             generator,
+        }
+    }
+
+    /// `TileGenerator.builder()`.
+    pub const fn builder() -> TileGeneratorBuilder<H, F> {
+        TileGeneratorBuilder {
+            factor: 0,
+            border: 0,
+            batch_size: 0,
+            striped: false,
+            factory: None,
         }
     }
 
@@ -126,7 +240,7 @@ where
         &self.generator
     }
 
-    /// The builder's `batchSize`, which the plain generator ignores.
+    /// The builder's `batchSize`, which the plain generator's `generateRegion` ignores.
     pub const fn batch_size(&self) -> i32 {
         self.batch_size
     }
@@ -144,7 +258,10 @@ where
         &self,
         region_x: i32,
         region_z: i32,
-    ) -> LazyCallable<Tile, impl Fn() -> Tile + '_> {
+    ) -> LazyCallable<Tile, impl Fn() -> Tile + '_>
+    where
+        H: Sync,
+    {
         LazyCallable::new(move || self.generate_region(region_x, region_z))
     }
 
@@ -156,15 +273,32 @@ where
         center_z: f32,
         zoom: f32,
         filter: bool,
-    ) -> LazyCallable<Tile, impl Fn() -> Tile + '_> {
+    ) -> LazyCallable<Tile, impl Fn() -> Tile + '_>
+    where
+        H: Sync,
+    {
         LazyCallable::new(move || self.generate_zoomed_region(center_x, center_z, zoom, filter))
     }
 
-    /// `generateRegion(regionX, regionZ)`: an empty region ([`Self::create_empty_region`]), filled
-    /// whole by [`Tile::generate_heightmap`] with the heightmap's stages, then `postProcess(tile)`:
+    /// `generateRegion(regionX, regionZ)` of the generator's Engine class: the batched and striped
+    /// ones run [`Self::generate_batched_region`] or [`Self::generate_striped_region`] with the
+    /// batch size. The plain one fills an empty region ([`Self::create_empty_region`]) whole by
+    /// [`Tile::generate_heightmap`] with the heightmap's stages, then runs `postProcess(tile)`:
     /// the filters with the optional ones (`apply(tile, true)`), which see every cell of the tile,
     /// border included, only after the fill.
-    pub fn generate_region(&self, region_x: i32, region_z: i32) -> Tile {
+    pub fn generate_region(&self, region_x: i32, region_z: i32) -> Tile
+    where
+        H: Sync,
+    {
+        match self.kind {
+            Kind::Plain => {}
+            Kind::Batched => {
+                return self.generate_batched_region(region_x, region_z, self.batch_size);
+            }
+            Kind::Striped => {
+                return self.generate_striped_region(region_x, region_z, self.batch_size);
+            }
+        }
         let mut tile = self.create_empty_region(region_x, region_z);
         let heightmap = self.generator.heightmap();
         tile.generate_heightmap(
@@ -177,18 +311,35 @@ where
         tile
     }
 
-    /// `generateRegion(centerX, centerZ, zoom, filter)`: region (0, 0), filled by
-    /// [`Tile::generate_zoomed_heightmap`] with the center as its offset (uncached, as Engine's
-    /// `tile.generate(heightmap, centerX, centerZ, zoom)`), then `postProcess(tile, filter)`: the
-    /// filters, the optional ones only when `filter` is set. The filters are seeded with region
-    /// (0, 0) whatever the center.
+    /// `generateRegion(centerX, centerZ, zoom, filter)` of the generator's Engine class: the
+    /// batched and striped ones run [`Self::generate_batched_zoomed_region`] or
+    /// [`Self::generate_striped_zoomed_region`] with the batch size. The plain one fills region
+    /// (0, 0) by [`Tile::generate_zoomed_heightmap`] with the center as its offset (uncached, as
+    /// Engine's `tile.generate(heightmap, centerX, centerZ, zoom)`), then runs
+    /// `postProcess(tile, filter)`: the filters, the optional ones only when `filter` is set. The
+    /// filters are seeded with region (0, 0) whatever the center.
     pub fn generate_zoomed_region(
         &self,
         center_x: f32,
         center_z: f32,
         zoom: f32,
         filter: bool,
-    ) -> Tile {
+    ) -> Tile
+    where
+        H: Sync,
+    {
+        let count = self.batch_size;
+        match self.kind {
+            Kind::Plain => {}
+            Kind::Batched => {
+                return self
+                    .generate_batched_zoomed_region(center_x, center_z, zoom, filter, count);
+            }
+            Kind::Striped => {
+                return self
+                    .generate_striped_zoomed_region(center_x, center_z, zoom, filter, count);
+            }
+        }
         let mut tile = self.create_empty_region(0, 0);
         let heightmap = self.generator.heightmap();
         tile.generate_zoomed_heightmap(
@@ -207,7 +358,7 @@ where
     /// `TileGeneratorBatched.generateRegion(regionX, regionZ)` with `batch(batch_count)`: an empty
     /// region filled by [`Tile::generate_area`] (`batch_count` squared batches of chunks on
     /// [`batch_workers`] threads, each chunk as [`drive_chunk`]), then the filters with the optional
-    /// ones. The cells equal [`Self::generate_region`]'s for any batch count; only the river-map
+    /// ones. The cells equal the plain generator's for any batch count; only the river-map
     /// lookups differ, as each chunk starts without one. Engine's builder never makes a batched
     /// generator for a count below 1; called with one, it throws, and so does this:
     /// `ArithmeticException` for 0 (`getBatchSize`), and for a negative count, which fills no cell,
@@ -717,6 +868,42 @@ mod tests {
         });
         let payload = panicked.expect_err("a batch panicked");
         assert!(matches!(payload.downcast_ref::<i32>(), Some(0..=3)));
+    }
+
+    #[test]
+    fn tile_generator_builder_matches_engine_0_3_0() {
+        let terrains = Arc::new(TerrainRegistry::new());
+        let kinds = ["none", "coast", "beach", "hills"]
+            .map(|name| terrains.get_by_name(name).expect("built-in terrain"));
+        let create = || WorldGenerator::new(FillHeightmap::new(kinds.clone()), NoFilters);
+        let plain = TileGenerator::new(1, 0, 0, Arc::clone(&terrains), create());
+        let expected = fold_tile(&plain.generate_region(1, -1));
+
+        let direct = TileGenerator::builder()
+            .size(1, 0)
+            .batch(0)
+            .striped()
+            .factory(Arc::clone(&terrains), create())
+            .build();
+        assert_eq!(direct.kind, Kind::Plain);
+
+        let batched = TileGenerator::builder()
+            .factor(1)
+            .border(0)
+            .batch(3)
+            .factory(Arc::clone(&terrains), create())
+            .build();
+        assert_eq!(batched.kind, Kind::Batched);
+        assert_eq!(fold_tile(&batched.generate_region(1, -1)), expected);
+
+        let striped = TileGenerator::builder()
+            .size(1, 0)
+            .batch(3)
+            .striped()
+            .factory(Arc::clone(&terrains), create())
+            .build();
+        assert_eq!(striped.kind, Kind::Striped);
+        assert_eq!(fold_tile(&striped.generate_region(1, -1)), expected);
     }
 
     /// Engine shares one tile generator between its generation threads.
