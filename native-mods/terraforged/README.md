@@ -992,8 +992,8 @@ turns each into a graph node with the `Noise` default bounds 0..1. Their powers 
 `NoiseUtil.copySign` (noise.rs `copy_sign`, which leaves zeros and NaNs alone). The test replays `ClimateOracle.java`
 (in `.local/terraforged/oracles/climate/`): compressors with edge-case insets and ranges, temperatures over nine
 frequencies and eleven powers, moisture over a module and over seeds, scales and powers, each over 41 inputs from
--0.0 and subnormals to ±infinity and NaN, and a few raw samples. The climate settings and the `Climate` stage are
-later layers.
+-0.0 and subnormals to ±infinity and NaN, and a few raw samples. The climate settings follow; the climate module
+and the `Climate` stage are later layers.
 
 The biome-type layer adds the rest of Engine's `BiomeType` (`biome_type.rs`): the 256×256 type map that
 `BiomeTypeLoader` builds from TerraForged's `biomes.png` (squares below the diagonal are `ALPINE`, the rest take the
@@ -1009,9 +1009,21 @@ Engine body is the same as `applyCurve`'s. The test replays `BiomeTypeOracle.jav
 lookup and `apply` variant over all pairs of 33 edge inputs (the 0/1 rounding edges, values just outside 0..1,
 subnormals, NaN, ±infinity) and both lookups over a 661×661 grid from -0.05 to 1.05.
 
+The climate-settings layer adds Engine's `ClimateSettings` (`climate.rs`) with its defaults: the temperature and
+moisture `RangeValue`s (`ClimateRange`: seed offset, scale, falloff, min, max, bias), `BiomeShape` and the biome-edge
+`BiomeNoise`. `ClimateRange`'s `min`/`max`/`bias` are `getMin`/`getMax`/`getBias` (`Math.min`/`Math.max` and
+`NoiseUtil.clamp`, so swapped bounds are reordered, -0.0 is kept and NaN passes through) and `apply` biases a module
+by half the bias and clamps it to that range. `BiomeNoise::build` is Engine's `build(seed)`; as in Engine, its
+`SIMPLEX_RIDGE` type builds a `Simplex2` noise, and where Engine throws for a negative octave count this port builds
+no octaves. Engine's settings serializer (keys, `@Range` limits, `@Rand` seed offsets) is not ported: the settings are
+plain structs. The test replays `ClimateSettingsOracle.java` (in `.local/terraforged/oracles/climate_settings/`):
+every default bit for bit, `getMin`/`getMax`/`getBias` and `apply` over all combinations of 15 edge values (0 and 1,
+signed zeros, values outside 0..1, subnormals, ±infinity, NaN) for min, max and bias, and `build` over seven noise
+types, four seeds and eight scale/octave/gain/lacunarity configurations.
+
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives and the biome climate types. They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives, the biome climate types and the climate settings. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
