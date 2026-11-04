@@ -27,6 +27,7 @@ use super::terraforged_engine::Terrain;
 use super::terraforged_terrain_blend_util::{
     Object2FloatCache, WeightMap, Weighted, X_PRIME, Y_PRIME, random,
 };
+use std::cell::RefCell;
 use std::sync::Arc;
 
 /// `TerrainBlender.REGION_SEED_OFFSET`, added to the world seed's low 32 bits for the cell hashes.
@@ -134,9 +135,21 @@ impl TerrainBlender {
         }
     }
 
-    /// `getValue(x, z)`, with a fresh [`Blender`] (the jar's is per thread; `getValue` overwrites all its state).
+    /// `getValue(x, z)`, with this thread's [`Blender`] (`localBlender`; one per thread is shared by all
+    /// blenders, which is the same since `getValue` overwrites all its state). Its cache is cleared afterwards, so
+    /// it holds no terrain past the call; a nested call on the same thread uses a fresh blender.
     pub fn value(&self, x: f32, z: f32) -> f32 {
-        self.value_with(x, z, &mut Blender::new())
+        thread_local! {
+            static BLENDER: RefCell<Blender> = RefCell::new(Blender::new());
+        }
+        BLENDER.with(|blender| match blender.try_borrow_mut() {
+            Ok(mut blender) => {
+                let value = self.value_with(x, z, &mut blender);
+                blender.cache.clear();
+                value
+            }
+            Err(_) => self.value_with(x, z, &mut Blender::new()),
+        })
     }
 
     /// `getValue(x, z, blender)`: finds the point's cells, then blends. Panics where Java throws: when no cell's
@@ -571,6 +584,15 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn blenders_are_shareable_across_worldgen_threads() {
+        fn shareable<T: Send + Sync>() {}
+        fn movable<T: Send>() {}
+        shareable::<TerrainBlender>();
+        shareable::<TerrainNoise>();
+        movable::<Blender>();
     }
 
     #[test]
