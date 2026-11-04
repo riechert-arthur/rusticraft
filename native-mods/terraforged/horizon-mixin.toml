@@ -152,3 +152,10 @@ file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_context"
 source = "context.rs"
 visibility = "pub"
+
+[[module]]
+id = "terrain_levels"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_terrain_levels"
+source = "terrain_levels.rs"
+visibility = "pub"

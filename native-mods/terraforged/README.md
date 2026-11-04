@@ -1124,9 +1124,26 @@ first), what the factory shares, cells of the factory's, a direct and the lazy h
 tiles, `TileGenerator.builder().factory(factory)` regions (plain and batched) and a zoomed region with the real
 heightmap and filters, every backing cell compared bit for bit.
 
+The terrain-level layer adds TerraForged's own (the mod's, not Engine's) `TerrainLevels` and `NoiseLevels`
+(`terrain_levels.rs`): the world's build bounds in block Y and the noise fractions derived from them. `max_y` is the
+exclusive top block and the height every fraction divides by, counted from block 0; `sea_level` is the highest water
+block. They are separate from Engine's `Levels`, which TerraForged's terrains build themselves (`ModTerrains`' `new
+Levels(63, 255)`, kept as is). The constructor clamps as TerraForged does: `min_y` to -2032..0 and `max_y` to
+128..4064 (1.18.2's `DimensionType` limits, the same in 26.3), the sea level to 32..half the `max_y` *argument*
+(before `max_y` is clamped, so a small or negative `max_y` gives a lower sea level), then the sea floor and the base
+height, with `MathUtil.clamp`'s order when a bound pair is inverted. `copy()` re-clamps, the no-argument
+`unconfigured()` keeps Java's `min_y` of +64, and `height`, `floor` and `ceil` use `NoiseUtil.floor` (one lower for
+negative whole numbers, -1 for NaN). The defaults are TerraForged's, not vanilla 26.3's: `max_y` 480 (the 26.3
+overworld ends at 320), sea level 62 (water up to Y 62, as vanilla's sea level 63), base height 128, sea floor 22,
+automatic horizontal frequency `194 / (max_y - sea_level) * scale`. The settings codec and `getWaterLevel` (it reads
+`TerrainData`, the next layer) are not ported. Its test replays `TerrainLevelsOracle.java` (in
+`.local/terraforged/oracles/terrain_levels/`), which runs TerraForged's own classes from the mod jar, stubbing only
+`DimensionType` and the logger: 19 constructed levels and their copies, the default and no-argument levels,
+`calcFrequency` and every transform over signed zeros, subnormals, huge values, infinities and NaN, bit for bit.
+
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives, the biome climate types, the climate settings, the climate module, the climate stage, the continent factory, the generator context, the heightmap and the world generator factory. They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives, the biome climate types, the climate settings, the climate module, the climate stage, the continent factory, the generator context, the heightmap, the world generator factory and TerraForged's terrain levels. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
