@@ -205,26 +205,33 @@ impl Smoothing {
     }
 }
 
+/// Engine's `Steepness` filter: sets each cell's `gradient` from its height differences to the 15
+/// cells at `(dx, dz) * radius` for `dx, dz` in `-1..=2` (Engine's neighbourhood is asymmetric),
+/// with neighbours below sea level raised to it. Neighbours `Tile.getCellRaw` answers with
+/// `Cell.empty()` (outside the backing array) or that are absent are skipped. Engine's unused
+/// `maxBeachLevel` field is not kept.
 #[derive(Clone, Copy, Debug)]
 pub struct Steepness {
-    radius: isize,
+    radius: i32,
     scaler: f32,
     water_level: f32,
-    _max_beach_level: f32,
 }
 
 impl Steepness {
+    /// `new Steepness(radius, scaler, levels)`; `WorldFilters` uses radius 1 and scaler 10.
     pub fn new(radius: i32, scaler: f32, levels: Levels) -> Self {
         Self {
-            radius: radius as isize,
+            radius,
             scaler,
             water_level: levels.water,
-            _max_beach_level: levels.water(6),
         }
     }
 
+    /// `apply(map, seedX, seedZ, iterations)`: one pass over every cell, row by row (Engine's
+    /// `Filter.iterate`); the seeds and the iteration count are unused, as in Engine.
     pub fn apply(&self, map: &mut impl Filterable, _seed_x: i32, _seed_z: i32, _iterations: i32) {
         let total = map.total_size();
+        let radius = self.radius as f32;
         for z in 0..total {
             for x in 0..total {
                 let cell_value = map
@@ -232,22 +239,22 @@ impl Steepness {
                     .expect("filter coordinates are in bounds")
                     .value;
                 let mut total_height_difference = 0.0_f32;
-                for dz in -1_isize..=2 {
-                    for dx in -1_isize..=2 {
+                for dz in -1_i32..=2 {
+                    for dx in -1_i32..=2 {
                         if dx == 0 && dz == 0 {
                             continue;
                         }
-                        let Some(neighbour) = map.cell_raw(
-                            x.wrapping_add_signed(dx * self.radius),
-                            z.wrapping_add_signed(dz * self.radius),
-                        ) else {
+                        // Java `int` arithmetic: `cx + dx * radius`, then `z * total + x`.
+                        let neighbour_x = (x as i32).wrapping_add(dx.wrapping_mul(self.radius));
+                        let neighbour_z = (z as i32).wrapping_add(dz.wrapping_mul(self.radius));
+                        let Some(neighbour) = java_cell_raw(map, neighbour_x, neighbour_z) else {
                             continue;
                         };
                         if neighbour.is_absent() {
                             continue;
                         }
                         let height = java_max(neighbour.value, self.water_level);
-                        total_height_difference += (cell_value - height).abs() / self.radius as f32;
+                        total_height_difference += (cell_value - height).abs() / radius;
                     }
                 }
                 map.cell_raw_mut(x, z)
@@ -256,6 +263,15 @@ impl Steepness {
             }
         }
     }
+}
+
+/// `Tile.getCellRaw(x, z)` with Java `int` coordinates: the index `z * total + x` wraps like Java's,
+/// and an index outside the backing array is `Cell.empty()` (`None`).
+fn java_cell_raw(map: &impl Filterable, x: i32, z: i32) -> Option<&Cell> {
+    let index = z.wrapping_mul(map.total_size() as i32).wrapping_add(x);
+    usize::try_from(index)
+        .ok()
+        .and_then(|index| map.backing().get(index))
 }
 
 /// Engine's `WorldErosion<T>`: a lazily built value shared between threads, rebuilt by `factory`
@@ -437,6 +453,86 @@ mod tests {
              8 ec8ecb93e7989f9e 3f3d54ca be3b8bad 3f78779b 3ea53f7e 3e14ea4b 3f4d38ef 3f843d70 3f46ca58 3f243c9f\n\
              9 9669758e74e9a8c9 3fa185f0 3f7507c9 3e22e48f 3eb47e28 bde538f0 bda5bc02 3f527a0f 3fa0d35a be0793de\n\
              10 e596f2904148f08e 3eac9ba6 3d56bb94 3f90a4a8 3f48538f 3fa786c2 3e932ca6 3fb6acda bd59999c 3f262b6b\n"
+        );
+    }
+
+    /// Replays `SteepnessOracle.java` (`.local/terraforged/oracles/steepness/`), which runs Engine's
+    /// `Steepness.apply` on the smoothing oracle's 14x14 maps: `WorldFilters`' radius 1 and scaler 10,
+    /// wider radii, radius 0 (division by zero), negative radii, radii that reach past the map (7, 20)
+    /// or wrap Java's `int` arithmetic (`i32::MAX`, `i32::MIN`), a negative scaler, swapped levels,
+    /// and maps with NaN, -0.0 and 0.0 heights (one with water level 0). Each line folds every cell's
+    /// gradient bits (NaNs canonical, `fold * 31 + bits`, from 17) and lists every 23rd cell's bits
+    /// from cell 5.
+    #[test]
+    fn steepness_matches_engine_oracle() {
+        let registry = TerrainRegistry::new();
+        let total = 14;
+        let cases = [
+            (1, 10.0, 256, 63, false),
+            (2, 0.05, 256, 63, false),
+            (3, 0.5, 384, 127, false),
+            (0, 10.0, 256, 63, false),
+            (-1, 10.0, 256, 63, false),
+            (-2, 2.5, 256, 63, false),
+            (7, 0.1, 256, 63, false),
+            (20, 10.0, 256, 63, false),
+            (i32::MAX, 10.0, 256, 63, false),
+            (i32::MIN, 10.0, 256, 63, false),
+            (1, -3.0, 256, 63, false),
+            (1, 0.2, 63, 255, false),
+            (1, 0.25, 256, 0, true),
+            (2, 1.0, 256, 63, true),
+        ];
+        let mut out = String::new();
+        for (case, (radius, scaler, height, sea_level, specials)) in cases.into_iter().enumerate() {
+            let mut cells = oracle_cells(&registry, total, case as i32);
+            if specials {
+                for (index, cell) in cells.iter_mut().enumerate() {
+                    if index % 61 == 4 {
+                        cell.value = f32::NAN;
+                    }
+                    if index % 13 == 6 {
+                        cell.value = -0.0;
+                    }
+                    if index % 17 == 2 {
+                        cell.value = 0.0;
+                    }
+                }
+            }
+            let mut map = TestMap { total, cells };
+            Steepness::new(radius, scaler, Levels::new(height, sea_level))
+                .apply(&mut map, 123, -456, 99);
+            let mut fold = 17_i64;
+            let mut samples = String::new();
+            for (index, cell) in map.cells.iter().enumerate() {
+                let bits = if cell.gradient.is_nan() {
+                    0x7fc0_0000
+                } else {
+                    cell.gradient.to_bits()
+                };
+                fold = fold.wrapping_mul(31).wrapping_add(i64::from(bits as i32));
+                if index % 23 == 5 {
+                    samples += &format!(" {bits:08x}");
+                }
+            }
+            out += &format!("{case} {fold:016x}{samples}\n");
+        }
+        assert_eq!(
+            out,
+            "0 dd8f5852f6207791 3f800000 3f800000 3f800000 3f800000 3f800000 3f800000 3f800000 3f800000 3f800000\n\
+             1 2bdb47d06ebd99a0 3d5ee97a 3e19c0eb 3e02e6da 3de711f0 3dfe6668 3e8b4b5e 3e004799 3dbf28b7 3e16ddec\n\
+             2 148098a72e7358f3 3f2c73c8 3f800000 3f800000 3f46bcae 3f800000 3f800000 3f800000 3ed9fcff 3e376087\n\
+             3 1401a87416207791 7fc00000 7fc00000 3f800000 7fc00000 7fc00000 7fc00000 00000000 7fc00000 7fc00000\n\
+             4 ce02f2cc83d7ab23 c257b688 c22275e3 c2884c28 c2464561 c2aa0cad c2c74354 c243f312 c2806b95 c248347e\n\
+             5 af24849e597f53e0 c095e687 c09307af c0aa7ba4 c13bf924 c19f863e c13edd82 c0a13668 c162bee9 c0c42be6\n\
+             6 6d08bffe7aae90a8 3d218847 3d1a15bf 3dc4aad1 3d40c34c 3d0fb18b 3dd2de02 3d6f11a2 3d761075 3cd3f410\n\
+             7 4143b0a1239d946b 3f5bf764 3f2b1eb8 3f0dc01a 3f800000 3eb83fe4 3f1d7176 3f800000 3f76e978 3ebe1e50\n\
+             8 f97440a2a3db3598 31be5a1c 32a63666 32a5ebc7 3263cc8a 32919f1b 3265be34 32596a7b 3229c7ae 31d80625\n\
+             9 e9452892e248b625 00000000 00000000 b13a2c06 00000000 b2464d91 00000000 00000000 00000000 b251c4dd\n\
+             10 e2a736b305a93819 c18e8824 c1a4ba6d c1a41fa9 c1896950 c1f1f8f6 c1ca3659 c1cff4ea c1c3354e c1142c98\n\
+             11 068e0d0e17e14776 3f57be72 3f800000 3f800000 3f4f6112 3f800000 3f5bdaf3 3f800000 3f3b0e7d 3f2b2766\n\
+             12 2b14e288d61df853 7fc00000 3f800000 7fc00000 3f800000 7fc00000 3f800000 3f800000 3f800000 3ed315b5\n\
+             13 d16a5f5730b00644 7fc00000 7fc00000 3f800000 3f800000 3f800000 3f800000 3f800000 3f800000 7fc00000\n"
         );
     }
 
