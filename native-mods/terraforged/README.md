@@ -498,9 +498,22 @@ negative, NaN and infinite sizes), for eight lake configs (wrapping `int` settin
 `Levels` (TerraForged's swapped `Levels(63, 255)` among them), plus bounds built from NaN, -0 and infinite records,
 against a Java oracle running Engine's classes, `LakeOracle.java` in `.local/terraforged/oracles/river/`.
 
+The wetland layer adds Engine's `Wetland` (`WetlandCarver` in `river.rs`, since `Wetland` is the settings struct): a
+valley of `radius` around a segment, measured at the (warped) river coordinates. In the valley, a cell above the bank
+height (`ground(3)`) is lowered toward it and its `riverMask` lowered; past 65% of the way in, a cell between the bed
+and the banks is lowered toward the bed, the innermost part sets `erosionMask`, cells where the pool alpha beats an
+edge noise are tagged with the world registry's `wetland` terrain, and cells from the bed up to the mound top move
+toward seeded mound noise, sampled at the terrain coordinates. `recordBounds` adds the segment's box widened by the
+radius. Engine's `TerrainPopulator` base is not ported, as for the river carver and lakes. Nothing uses wetlands yet:
+the river networks are not ported. Its tests fold every cell field over 1927800 applies of fresh and filled cells
+(NaN, infinite and -0 values and masks) at points inside, on the edge of and outside wetlands (degenerate, NaN and
+infinite segments; zero, negative, NaN and infinite radii; seeds that wrap) for three `Levels` (TerraForged's swapped
+`Levels(63, 255)` among them), with both plain and warped coordinates, against a Java oracle running Engine's class,
+`WetlandOracle.java` in `.local/terraforged/oracles/river/`.
+
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver and its lakes. They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes and its wetlands. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development

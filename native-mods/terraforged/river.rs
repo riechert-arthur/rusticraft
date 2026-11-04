@@ -29,18 +29,20 @@
 // lake and river domain warps Engine's river generators build per continent. `River`, `RiverWarp`
 // (`rivermap.river`) and `Vec2i` (`noise.util.Vec2i`) are the channel segments those generators lay out, and
 // `RiverCarver` (`rivermap.river`) carves one segment's valley, banks and bed into a cell; `LakeCarver`
-// (`rivermap.lake.Lake`) carves a lake and its valley, and `Boundsf` (`util.Boundsf`) bounds them.
+// (`rivermap.lake.Lake`) carves a lake and its valley, `WetlandCarver` (`rivermap.wetland.Wetland`) a wetland
+// along a segment, and `Boundsf` (`util.Boundsf`) bounds them.
 
 use super::{
     terraforged::{
-        CurveFunction, Domain, Line, PI2, SourceKind, clamp, cos, java_max, java_min, lerp, map,
-        round, simplex, sin,
+        CurveFunction, Domain, Line, Module, PI2, SourceKind, clamp, cos, java_max, java_min, lerp,
+        map, round, simplex, sin,
     },
     terraforged_continent::noise_warp,
     terraforged_engine::{
         Cell, Lake, Levels, Terrain, TerrainProperties, TerrainRegistry, Wetland,
     },
     terraforged_fancy::Vec2f,
+    terraforged_landforms::source,
     terraforged_util::{pack_floats, unpack_left_float, unpack_right_float},
 };
 use horizon_core::{
@@ -1014,6 +1016,135 @@ impl LakeCarver {
     }
 }
 
+/// Engine's `rivermap.wetland.Wetland` (named `WetlandCarver` here: `Wetland` is the settings struct): a valley of
+/// `radius` around the segment `start..end`, with pools, banks and seeded mound noise. `apply_warped` measures the
+/// distance to the segment at the (warped) river coordinates and samples the noise at the terrain coordinates;
+/// `apply` uses the same coordinates for both. It writes only the cell's `value`, `erosion_mask`, `terrain` and
+/// `river_mask`, in Engine's order.
+///
+/// Engine's class extends `TerrainPopulator` (terrain `WETLAND`, zero sources, weight 1) only to be typed as one
+/// and to hand `getType()` to the cells it tags; the other populator fields are unused, so they are not ported.
+pub struct WetlandCarver {
+    start: Vec2f,
+    end: Vec2f,
+    radius: f32,
+    radius2: f32,
+    bed: f32,
+    banks: f32,
+    mound_min: f32,
+    mound_max: f32,
+    mound_variance: f32,
+    mound_shape: Module,
+    mound_height: Module,
+    terrain_edge: Module,
+    /// `TerrainType.WETLAND`, from the world's registry so `is_same` checks against its built-ins hold.
+    wetland_terrain: Terrain,
+}
+
+impl WetlandCarver {
+    /// `new Wetland(seed, a, b, radius, levels)`. `registry` is the world's terrain registry: the wetland tags
+    /// cells with its `wetland` terrain. The three noises take `++seed` in turn (wrapping like Java's `int`).
+    pub fn new(
+        seed: i32,
+        start: Vec2f,
+        end: Vec2f,
+        radius: f32,
+        levels: Levels,
+        registry: &TerrainRegistry,
+    ) -> Self {
+        let mound_min = levels.water(1);
+        let mound_max = levels.water(2);
+        // `Source.perlin/simplex(seed, scale, 1)`: Builder defaults (gain 0.5, lacunarity 2, Curve3).
+        let noise = |kind, seed, scale, min, max, range| {
+            source(kind, seed, scale, 1, 0.5, 2.0)
+                .clamp(Module::constant(min), Module::constant(max))
+                .map(Module::constant(0.0), Module::constant(range))
+        };
+        Self {
+            start,
+            end,
+            radius,
+            radius2: radius * radius,
+            bed: levels.water(-1) - 0.5 / levels.world_height as f32,
+            banks: levels.ground(3),
+            mound_min,
+            mound_max,
+            mound_variance: mound_max - mound_min,
+            mound_shape: noise(SourceKind::Perlin, seed.wrapping_add(1), 10, 0.3, 0.6, 1.0),
+            mound_height: noise(SourceKind::Simplex, seed.wrapping_add(2), 20, 0.0, 0.3, 1.0),
+            terrain_edge: noise(SourceKind::Perlin, seed.wrapping_add(3), 8, 0.2, 0.8, 0.9),
+            wetland_terrain: registry.get_by_id(7),
+        }
+    }
+
+    /// `apply(cell, x, z)`.
+    pub fn apply(&self, cell: &mut Cell, x: f32, z: f32) {
+        self.apply_warped(cell, x, z, x, z);
+    }
+
+    /// `apply(cell, rx, rz, x, z)`. Engine's tests are `<`/`>`/`<=`/`>=`, so a NaN value or distance passes them
+    /// as Java's do.
+    pub fn apply_warped(&self, cell: &mut Cell, river_x: f32, river_z: f32, x: f32, z: f32) {
+        if cell.value < self.bed {
+            return;
+        }
+        let (a, b) = (self.start, self.end);
+        let t = Line::distance_on_line(river_x, river_z, a.x, a.y, b.x, b.y);
+        let distance2 = if t <= 0.0 {
+            Line::dist2(river_x, river_z, a.x, a.y)
+        } else if t >= 1.0 {
+            Line::dist2(river_x, river_z, b.x, b.y)
+        } else {
+            Line::dist2(
+                river_x,
+                river_z,
+                a.x + t * (b.x - a.x),
+                a.y + t * (b.y - a.y),
+            )
+        };
+        if distance2 > self.radius2 {
+            return;
+        }
+        let distance = 1.0 - distance2 / self.radius2;
+        if distance <= 0.0 {
+            return;
+        }
+        let valley_alpha = map(distance, 0.0, 0.65, 0.65);
+        if cell.value > self.banks {
+            cell.value = lerp(cell.value, self.banks, valley_alpha);
+        }
+        let pools_alpha = map(distance, 0.65, 0.7, 0.050_000_012);
+        if cell.value > self.bed && cell.value <= self.banks {
+            cell.value = lerp(cell.value, self.bed, pools_alpha);
+        }
+        if pools_alpha >= 1.0 {
+            cell.erosion_mask = true;
+        }
+        if distance > 0.65 && pools_alpha > self.terrain_edge.value(x, z) {
+            cell.terrain = self.wetland_terrain.clone();
+        }
+        if cell.value >= self.bed && cell.value < self.mound_max {
+            let shape_alpha = self.mound_shape.value(x, z) * pools_alpha;
+            let mounds = self.mound_min + self.mound_height.value(x, z) * self.mound_variance;
+            cell.value = lerp(cell.value, mounds, shape_alpha);
+        }
+        cell.river_mask = java_min(cell.river_mask, 1.0 - valley_alpha);
+    }
+
+    /// `recordBounds(builder)`: the segment's box widened by `radius`.
+    pub fn record_bounds(&self, builder: &mut BoundsfBuilder) {
+        let (a, b) = (self.start, self.end);
+        builder.record(
+            java_min(a.x, b.x) - self.radius,
+            java_min(a.y, b.y) - self.radius,
+        );
+        builder.record(
+            java_max(a.x, b.x) + self.radius,
+            java_max(a.y, b.y) + self.radius,
+        );
+    }
+}
+
 impl LakeConfig {
     pub fn new(settings: Lake, levels: Levels) -> Self {
         let size_min = settings.size_min as f32;
@@ -1705,11 +1836,11 @@ mod tests {
             fn mix(&mut self, v: i32) {
                 self.0 = self.0.wrapping_mul(31).wrapping_add(v);
             }
-            fn b(&mut self, v: bool) {
+            pub(super) fn b(&mut self, v: bool) {
                 self.mix(i32::from(v));
             }
             /// `Float.floatToIntBits`: every NaN folds as 0x7fc00000.
-            fn f(&mut self, v: f32) {
+            pub(super) fn f(&mut self, v: f32) {
                 self.mix(if v.is_nan() {
                     0x7fc0_0000
                 } else {
@@ -1905,24 +2036,24 @@ mod tests {
             (0.6, 1.0, -1.0, 7, false),
         ];
 
-        struct Fold(i32);
+        pub(super) struct Fold(pub(super) i32);
 
         impl Fold {
-            fn mix(&mut self, v: i32) {
+            pub(super) fn mix(&mut self, v: i32) {
                 self.0 = self.0.wrapping_mul(31).wrapping_add(v);
             }
-            fn b(&mut self, v: bool) {
+            pub(super) fn b(&mut self, v: bool) {
                 self.mix(i32::from(v));
             }
             /// `Float.floatToIntBits`: every NaN folds as 0x7fc00000.
-            fn f(&mut self, v: f32) {
+            pub(super) fn f(&mut self, v: f32) {
                 self.mix(if v.is_nan() {
                     0x7fc0_0000
                 } else {
                     v.to_bits() as i32
                 });
             }
-            fn cell(&mut self, c: &Cell, registry: &TerrainRegistry) {
+            pub(super) fn cell(&mut self, c: &Cell, registry: &TerrainRegistry) {
                 for v in [
                     c.value,
                     c.erosion,
@@ -2248,24 +2379,24 @@ mod tests {
             (0.242_187_5, 0.25, 3),
         ];
 
-        struct Fold(i32);
+        pub(super) struct Fold(pub(super) i32);
 
         impl Fold {
-            fn mix(&mut self, v: i32) {
+            pub(super) fn mix(&mut self, v: i32) {
                 self.0 = self.0.wrapping_mul(31).wrapping_add(v);
             }
-            fn b(&mut self, v: bool) {
+            pub(super) fn b(&mut self, v: bool) {
                 self.mix(i32::from(v));
             }
             /// `Float.floatToIntBits`: every NaN folds as 0x7fc00000.
-            fn f(&mut self, v: f32) {
+            pub(super) fn f(&mut self, v: f32) {
                 self.mix(if v.is_nan() {
                     0x7fc0_0000
                 } else {
                     v.to_bits() as i32
                 });
             }
-            fn cell(&mut self, c: &Cell, registry: &TerrainRegistry) {
+            pub(super) fn cell(&mut self, c: &Cell, registry: &TerrainRegistry) {
                 for v in [
                     c.value,
                     c.erosion,
@@ -2312,14 +2443,14 @@ mod tests {
                     self.f(v);
                 }
             }
-            fn bounds(&mut self, b: Boundsf) {
+            pub(super) fn bounds(&mut self, b: Boundsf) {
                 for v in [b.min_x, b.min_y, b.max_x, b.max_y] {
                     self.f(v);
                 }
             }
         }
 
-        fn levels() -> [Levels; 3] {
+        pub(super) fn levels() -> [Levels; 3] {
             // TerraForged's own, swapped `Levels(63, 255)` among them.
             [
                 Levels::new(256, 63),
@@ -2356,9 +2487,18 @@ mod tests {
         }
 
         fn fill(i: Option<usize>, registry: &TerrainRegistry) -> Cell {
+            fill_from(&FILLS, i, registry)
+        }
+
+        /// A fresh cell (`None`) or `fills[i]` with every other field set.
+        pub(super) fn fill_from(
+            fills: &[(f32, f32, i32)],
+            i: Option<usize>,
+            registry: &TerrainRegistry,
+        ) -> Cell {
             let mut c = Cell::new(registry);
             let Some(i) = i else { return c };
-            let (value, river_mask, terrain) = FILLS[i];
+            let (value, river_mask, terrain) = fills[i];
             c.value = value;
             c.river_mask = river_mask;
             c.terrain = registry.get_by_id(terrain);
@@ -2487,6 +2627,173 @@ mod tests {
                     (0x3f0a4ccd, 0x3f500000, 0),
                     (0x3f19999a, 0x3f800000, 0),
                 ]
+            );
+        }
+    }
+
+    /// Engine 0.3.0's `Wetland` against `WetlandOracle.java` (`.local/terraforged/oracles/river/`,
+    /// `run-wetland.sh`), which runs Engine's class on the same inputs.
+    mod wetland_oracle {
+        use super::lake_oracle::{Fold, fill_from, levels};
+        use super::*;
+
+        const NAN: f32 = f32::NAN;
+        const INF: f32 = f32::INFINITY;
+        const SEEDS: [i32; 3] = [12_345, i32::MAX - 1, -1];
+        /// a.x, a.y, b.x, b.y.
+        #[rustfmt::skip]
+        const SEGMENTS: [[f32; 4]; 6] = [
+            [0.0, 0.0, 500.0, 200.0], [-0.0, -0.0, -0.0, -0.0], [1e7, -3.5e6, 1e7 + 300.0, -3.5e6],
+            [-120.0, 40.0, -120.0, -260.0], [NAN, 0.0, 10.0, 10.0], [0.0, 0.0, INF, 0.0],
+        ];
+        const RADII: [f32; 7] = [100.0, 150.0, 0.0, -75.0, NAN, INF, 1e20];
+        const TS: [f32; 5] = [-0.25, 0.0, 0.5, 1.0, 1.25];
+        #[rustfmt::skip]
+        const OFFS: [f32; 17] = [
+            0.0, -0.0, 1.0, 20.0, 50.0, 59.160_797, 59.999_996, 60.0, 70.0, 99.999_99, 100.0, 100.000_01,
+            150.0, 1e20, NAN, INF, -INF,
+        ];
+        /// value, river mask, terrain id (erosion mask: even fills); for `Levels(256, 63)` the bed is
+        /// 0.236328125, the mound top 0.25 and the banks 0.2578125.
+        #[rustfmt::skip]
+        const FILLS: [(f32, f32, i32); 14] = [
+            (0.6, 1.0, 0), (0.3, 0.5, 7), (0.2, NAN, 5), (0.0, -0.0, 6), (1.0, 1.0, 12), (NAN, 1.0, 0),
+            (0.24, 0.75, 8), (0.25, 1.0, 7), (-0.5, 1.0, 11), (-0.0, 2.0, 0), (INF, -1.0, 0),
+            (0.242_187_5, 0.25, 3), (0.236_328_125, 0.5, 0), (0.257_812_5, 1.0, 10),
+        ];
+
+        fn mix_wetland(fold: &mut Fold, w: &WetlandCarver) {
+            for v in [
+                w.radius,
+                w.radius2,
+                w.bed,
+                w.banks,
+                w.mound_min,
+                w.mound_max,
+                w.mound_variance,
+                w.start.x,
+                w.start.y,
+                w.end.x,
+                w.end.y,
+            ] {
+                fold.f(v);
+            }
+        }
+
+        #[test]
+        fn applies_every_cell_field_like_engine() {
+            let registry = TerrainRegistry::new();
+            let fill = |i| fill_from(&FILLS, i, &registry);
+            let mut fold = Fold(17);
+            let mut applies = 0;
+            for levels in levels() {
+                for seed in SEEDS {
+                    let mut all = Boundsf::builder();
+                    for [ax, ay, bx, by] in SEGMENTS {
+                        for radius in RADII {
+                            let w = WetlandCarver::new(
+                                seed,
+                                Vec2f::new(ax, ay),
+                                Vec2f::new(bx, by),
+                                radius,
+                                levels,
+                                &registry,
+                            );
+                            mix_wetland(&mut fold, &w);
+                            let mut one = Boundsf::builder();
+                            w.record_bounds(&mut one);
+                            w.record_bounds(&mut all);
+                            fold.bounds(one.build());
+                            for t in TS {
+                                for off in OFFS {
+                                    let (px, pz) = (ax + t * (bx - ax), ay + t * (by - ay));
+                                    for [x, z] in [[px, pz + off], [px + off * 0.6, pz - off * 0.8]]
+                                    {
+                                        for i in
+                                            std::iter::once(None).chain((0..FILLS.len()).map(Some))
+                                        {
+                                            let mut c = fill(i);
+                                            w.apply(&mut c, x, z);
+                                            fold.cell(&c, &registry);
+                                            let mut c = fill(i);
+                                            w.apply_warped(
+                                                &mut c,
+                                                x,
+                                                z,
+                                                x * 0.5 + 1000.5,
+                                                z - 777.25,
+                                            );
+                                            fold.cell(&c, &registry);
+                                            applies += 2;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    fold.bounds(all.build());
+                }
+            }
+            assert_eq!((applies, fold.0), (1_927_800, -1_805_994_020));
+        }
+
+        #[test]
+        fn samples_match_engine() {
+            let registry = TerrainRegistry::new();
+            let wetland = WetlandCarver::new(
+                12_345,
+                Vec2f::new(0.0, 0.0),
+                Vec2f::new(500.0, 200.0),
+                100.0,
+                Levels::new(256, 63),
+                &registry,
+            );
+            let sample = |[river_x, river_z, x, z, value]: [f32; 5]| {
+                let mut cell = Cell::new(&registry);
+                cell.value = value;
+                cell.river_mask = 1.0;
+                wetland.apply_warped(&mut cell, river_x, river_z, x, z);
+                assert!(cell.terrain.is_same(&registry.get_by_id(cell.terrain.id())));
+                (
+                    cell.value.to_bits(),
+                    cell.river_mask.to_bits(),
+                    cell.erosion_mask,
+                    cell.terrain.id(),
+                )
+            };
+            assert_eq!(
+                [
+                    [0.0, 0.0, 0.0, 0.0, 0.6],
+                    [250.0, 100.0, 250.0, 100.0, 0.6],
+                    [250.0, 150.0, 250.0, 150.0, 0.6],
+                    [250.0, 190.0, 250.0, 190.0, 0.6],
+                    [250.0, 210.0, 250.0, 210.0, 0.6],
+                    [550.0, 220.0, 550.0, 220.0, 0.6],
+                    [250.0, 100.0, 1000.0, -1000.0, 0.6],
+                    [250.0, 100.0, 250.0, 100.0, 0.1],
+                    [250.0, 160.0, 250.0, 160.0, 0.24],
+                    [250.0, 168.0, 250.0, 168.0, 0.25],
+                ]
+                .map(sample),
+                [
+                    (0x3e7b5555, 0, true, 7),
+                    (0x3e7b5555, 0, true, 7),
+                    (0x3e7b5555, 0, true, 7),
+                    (0x3ee1dfaf, 0x3f092ac9, false, 0),
+                    (0x3f19999a, 0x3f800000, false, 0),
+                    (0x3e7b5555, 0, true, 7),
+                    (0x3e7b5555, 0, true, 7),
+                    (0x3dcccccd, 0x3f800000, false, 0),
+                    (0x3e79c4d7, 0, false, 7),
+                    (0x3e800000, 0x3d993150, false, 0),
+                ]
+            );
+            let mut builder = Boundsf::builder();
+            wetland.record_bounds(&mut builder);
+            let bounds = builder.build();
+            assert_eq!(
+                [bounds.min_x, bounds.min_y, bounds.max_x, bounds.max_y].map(f32::to_bits),
+                [0xc2c80000, 0xc2c80000, 0x44160000, 0x43960000]
             );
         }
     }
