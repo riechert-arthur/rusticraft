@@ -407,8 +407,9 @@ impl<T> ExpiringEntry for CacheEntry<'_, T> {
         self.timestamp.load(Ordering::Acquire)
     }
 
-    /// `close()`: closes the value with [`Self::closing`]'s function, if the task has produced it
-    /// (Engine reads the callable's value, still `null` while the task has not run or is running).
+    /// `close()`: closes the value with [`Self::closing`]'s function, if a `get` or `call` has read
+    /// it (Engine reads the callable's `value`, still `null` until then, even after a pool's task
+    /// has finished).
     fn close(&self) {
         if let (Some(close), Some(value)) = (self.on_close, self.value.value.get()) {
             close(value);

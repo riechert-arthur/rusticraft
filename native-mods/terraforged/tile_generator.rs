@@ -1848,6 +1848,7 @@ x7 1 0 0 4 16 true true false false true 0 0 1 1 true true -1 0 1 1 false false 
 x8 0 4 4 16 true true -1 0 4 16 false false 6[-1,2,true,false;-1,2,false,false;-1,2,false,false;5,-6,true,false;3,3,true,false;0,0,false,false] false
 x9 7[-1,2,true,false;-1,2,false,false;-1,2,false,false;5,-6,true,false;3,3,true,false;0,0,false,false;9,9,true,false] 1[10,10,false,false] false true 0 4 4 16 true true
 x10 -1 8 4 16 false false 5 true false -1 8000 4 16 false false 7997
+x11 0 0 4 16 true true -1 0 4 16 false false true
 ";
 
     /// `TileDisposalOracle`'s `Logged`: logs each `onDispose` (`<regionX>,<regionZ>,<the cache's
@@ -1931,7 +1932,7 @@ x10 -1 8 4 16 false false 5 true false -1 8000 4 16 false false 7997
         let terrains = Arc::new(TerrainRegistry::new());
         let kinds = ["none", "coast", "beach", "hills"]
             .map(|name| terrains.get_by_name(name).expect("built-in terrain"));
-        let generator = |size| {
+        let world = || {
             let mut settings = FilterSettings::default();
             settings.erosion.droplets_per_chunk = 20;
             settings.smoothing.iterations = 1;
@@ -1941,11 +1942,13 @@ x10 -1 8 4 16 false false 5 true false -1 8000 4 16 false false 7997
             };
             let filters =
                 WorldFilters::new(12345, settings, Levels::new(256, 63), points, &terrains);
-            let world = WorldGenerator::new(FillHeightmap::new(kinds.clone()), filters);
+            WorldGenerator::new(FillHeightmap::new(kinds.clone()), filters)
+        };
+        let generator = |size| {
             Arc::new(
                 TileGenerator::builder()
                     .size(size, size)
-                    .factory(Arc::clone(&terrains), world)
+                    .factory(Arc::clone(&terrains), world())
                     .build(),
             )
         };
@@ -2092,10 +2095,9 @@ x10 -1 8 4 16 false false 5 true false -1 8000 4 16 false false 7997
         });
         let burst = {
             let events = ec_log.events.lock().unwrap();
-            let unlocked = events
-                .iter()
-                .all(|e| e.starts_with("-4,6,") && e.ends_with(",false"));
-            format!("{} {unlocked}", events.len())
+            // Whether the entry still held the tile depends on the threads' order.
+            let region = events.iter().all(|e| e.starts_with("-4,6,"));
+            format!("{} {region}", events.len())
         };
         let entry9 = ec.get_tile_at(2, 2);
         ec_log.events.lock().unwrap().clear();
@@ -2116,6 +2118,24 @@ x10 -1 8 4 16 false false 5 true false -1 8000 4 16 false false 7997
             disposal_state(entry9.call()),
             ec_log.events.lock().unwrap().len()
         );
+        let pooled = Arc::new(
+            TileGenerator::builder()
+                .size(1, 1)
+                .pool(8)
+                .factory(Arc::clone(&terrains), world())
+                .build(),
+        );
+        let pc = TileCache::with_clock(Arc::clone(&pooled), pooled.pool.clone(), clock);
+        let unread = pc.get_or_compute(Tile::region_id_for(1, 1));
+        while !unread.is_done() {
+            std::hint::spin_loop();
+        }
+        pc.cache.remove(Tile::region_id_for(1, 1));
+        let late = disposal_state(unread.get());
+        let read = pc.get_tile_at(2, 1);
+        pc.cache.remove(Tile::region_id_for(2, 1));
+        let state = disposal_state(read.call());
+        out += &format!("x11 {late} {state} {}\n", !has(&pc, 1, 1));
         assert_eq!(out, TILE_DISPOSAL_ORACLE);
         let entry = ec.get_tile_at(1, 1);
         ec.on_dispose(entry.call());

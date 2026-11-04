@@ -956,7 +956,8 @@ thread with no lock held. A tile takes the listener its generator has when `crea
 (`TileGenerator::set_listener`; none by default), zoomed tiles too, as region (0, 0). `TileCache::new` sets itself, so
 a disposed tile runs `onDispose`, `cache.remove(tile.getRegionId())`: it removes whatever entry the region has at that
 moment (a newer tile's too) and closes it outside the cache's lock. A cache entry closes its tile (`Tile::close`) only
-when the task has produced it, and the tile closes only when no reader is open: `get_chunk` opens one, and
+once a `get` or `call` has read it (a pool's finished task that no one has read is not closed), and the tile closes
+only when no reader is open: `get_chunk` opens one, and
 `CachedChunk::close` closes it (up to the caller, as in Engine, whose `WorldLookup` never closes its readers);
 `Tile::active` is Engine's count, -1 once closed. The sweep and eviction remove entries without closing them or telling
 the listener, as in Engine. The listener is held weakly, so a dropped cache tells no one. Engine's `close` also resets
@@ -964,7 +965,8 @@ the cells and hands the arrays back to `TileResources` pools; pools are not port
 cells until the last holder drops it. The test replays `TileDisposalOracle.java` (in `.local/terraforged/oracles/tile_cache/`,
 a `TileCache` subclass logging each `onDispose`): the counts, which disposal fires, for which region and tile, open
 readers blocking the close, a stale tile's disposal removing the region's new entry, sweep, eviction and `remove`,
-zoomed tiles, a second cache taking over the generator's listener, and eight threads disposing at once.
+zoomed tiles, a second cache taking over the generator's listener, eight threads disposing at once, and an unread
+entry on a pool that is not closed.
 
 ## Status: development only
 
