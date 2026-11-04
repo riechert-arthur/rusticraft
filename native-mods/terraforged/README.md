@@ -191,7 +191,19 @@ seed + 1). `scaleH` is `Math.round(250 * horizontalScale)` of the landform's set
 plains by `0.15 * globalVerticalScale`, and both subtract 0.02. Its tests check the seed afterwards, the bounds and the
 bits of every sample over a grid of positive, negative and large coordinates against a Java oracle, for Engine's
 default settings, ModTerrains' (a global vertical scale of 1) and degenerate scales (zero, negative, NaN, huge, and
-`Math.round`'s edges). The other landforms, the ocean and land bases, and TerraForged's `RandSeed` (ModTerrains
+`Math.round`'s edges).
+
+The hill LandForms layer adds `hills1`, `hills2` and `dales`. `hills1` draws four seeds: a 3-octave Perlin at scale 200
+multiplied by a 3-octave Billow at scale 400 (alpha 0.5), then two Perlin noise warps (scale 30, 3 octaves, strength
+20; scale 400, 3 octaves, strength 200), scaled by `0.6 * globalVerticalScale`. `hills2` draws five: a 2-octave cubic
+at scale 128 times a 4-octave Perlin at scale 32 (alpha 0.075), the same two warps, then times a 2-octave Ridge at
+scale 512 (alpha 0.8, with the builder's ridge gain of 0.975), scaled by `0.55 * globalVerticalScale`. `dales` draws
+four and ignores the settings: a 1-octave Perlin at scale 400, clamped to 0.3..0.6 and mapped to 0..1, blends linearly
+(midpoint 0.4, range 0.75) from a 4-octave Billow at scale 300 (gain 0.8, lacunarity 4, power curve 0.5, times 0.75)
+to a 3-octave Billow at scale 350 (gain 0.8, lacunarity 4, raised to 1.25); the result is raised to 1.125, warped
+(scale 300, 1 octave, strength 100) and scaled by 0.4. As in Engine, a vertical scale whose product with 0.6 or 0.55
+is exactly 1 leaves that hill landform unscaled. The same grid test covers the three, with the same settings cases and
+two such vertical scales. The other landforms, the ocean and land bases, and TerraForged's `RandSeed` (ModTerrains
 builds its landforms from a `SplittableRandom` seed rather than Engine's counter) are not ported yet.
 
 ## Status: development only
