@@ -26,7 +26,8 @@
 // `rivermap.lake.LakeConfig`, `rivermap.wetland.WetlandConfig` and `util.Variance`). Engine's
 // `BaseRiverGenerator` builds them from `RiverSettings`; TerraForged 0.3.1 itself carves rivers with its own
 // continent river config instead, which this module does not port. `GenWarp` (`rivermap.gen.GenWarp`) holds the
-// lake and river domain warps Engine's river generators build per continent.
+// lake and river domain warps Engine's river generators build per continent. `River`, `RiverWarp`
+// (`rivermap.river`) and `Vec2i` (`noise.util.Vec2i`) are the channel segments those generators lay out.
 
 use super::{
     terraforged::{
@@ -140,6 +141,7 @@ impl Range {
     }
 }
 
+/// Noise's `util.Vec2i`: an integer river node.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Vec2i {
     pub x: i32,
@@ -152,6 +154,8 @@ impl Vec2i {
     }
 }
 
+/// Engine's `rivermap.river.River`: a channel segment with its direction, normal, length and bounds padded
+/// by twice the valley radius. As in Engine, a zero-length segment has NaN directions and normals.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct River {
     pub x1: f32,
@@ -184,6 +188,7 @@ impl River {
         Self::with_radius(x1, z1, x2, z2, Self::VALLEY_WIDTH as f32)
     }
 
+    /// `new River(x1, z1, x2, z2, radius)`: the length is `(float) Math.sqrt` of the `float` squared length.
     pub fn with_radius(x1: f32, z1: f32, x2: f32, z2: f32, radius: f32) -> Self {
         let radius = radius * 2.0;
         let dx = x2 - x1;
@@ -215,14 +220,17 @@ impl River {
         self.length
     }
 
+    /// `getAngle`: `(float) Math.atan2(dx, dz)`.
     pub fn angle(self) -> f32 {
         jmath::atan2(f64::from(self.dx), f64::from(self.dz)) as f32
     }
 
+    /// `pos(distance)`: the point at `distance` (a fraction of the length), packed by `PosUtil.packf`.
     pub fn pos(self, distance: f32) -> i64 {
         pack_floats(self.x1 + self.dx * distance, self.z1 + self.dz * distance)
     }
 
+    /// `pos(distance, warp)`: `pos` minus the warp's offset where `warp.test(distance)`.
     pub fn warped_pos(self, distance: f32, warp: RiverWarp) -> i64 {
         let mut x = self.x1 + self.dx * distance;
         let mut z = self.z1 + self.dz * distance;
@@ -240,6 +248,7 @@ impl River {
         )
     }
 
+    /// `intersects(other, extend)`: both segments lengthened at each end by `extend` blocks, at most their length.
     pub fn intersects_extended(self, other: Self, extend: f32) -> bool {
         let extend_a = clamp(extend / self.length, 0.0, 1.0);
         let extend_b = clamp(extend / other.length, 0.0, 1.0);
@@ -276,6 +285,8 @@ impl River {
         )
     }
 
+    /// `shorten`: moves the start `distance` blocks along the river, rounded by `NoiseUtil.round`, with the
+    /// default radius.
     pub fn shorten(self, distance: i32) -> Self {
         let factor = distance as f32 / self.length;
         Self::new(
@@ -297,6 +308,9 @@ impl River {
     }
 }
 
+/// Engine's `rivermap.river.RiverWarp`: bends a river sideways by simplex noise, faded in over `0..lower` and out
+/// over `upper..1`, plus a wiggle whose amplitude fades in over the first 7.5% of the river. Engine tells
+/// `RiverWarp.NONE` apart by identity; here `none()` carries an `enabled: false` flag instead.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RiverWarp {
     seed: i32,
@@ -336,6 +350,7 @@ impl RiverWarp {
         }
     }
 
+    /// `createChild`: one `nextInt` draw for the seed, frequency and scale multiplied by `factor`.
     pub fn child(self, lower: f32, upper: f32, factor: f32, random: &mut LegacyRandom) -> Self {
         Self::new(
             random.next_int(),
@@ -350,6 +365,7 @@ impl RiverWarp {
         self.enabled && distance >= 0.0 && distance <= 1.0
     }
 
+    /// `getOffset`: the packed (x, z) offset `pos(distance, warp)` subtracts.
     pub fn offset(self, x: f32, z: f32, distance: f32, river: River) -> i64 {
         let noise = simplex(x * self.frequency, z * self.frequency, self.seed);
         let warp_distance = self.warp_alpha(distance) * self.scale;
@@ -368,6 +384,7 @@ impl RiverWarp {
         Self::create_range(fade, 1.0 - fade, random)
     }
 
+    /// `create(lower, upper, random)`: draws `nextInt(50)` (scale), `nextFloat` (frequency), then `nextInt` (seed).
     pub fn create_range(lower: f32, upper: f32, random: &mut LegacyRandom) -> Self {
         let scale = 125.0 + random.next_int_bound(50).expect("positive bound") as f32;
         let frequency = 0.0005 + random.next_float() * 0.0005;
