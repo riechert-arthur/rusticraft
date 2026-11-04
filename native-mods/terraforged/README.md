@@ -459,9 +459,21 @@ yet: the river networks that do are not ported. Its tests fold every warp's offs
 -0, huge, infinite and NaN coordinates for eight seeds (the `int` edges among them) against a Java oracle running
 Engine's `GenWarp`, `GenWarpOracle.java` in `.local/terraforged/oracles/river/`.
 
+The river-geometry layer adds Engine's `River` and `RiverWarp` (`river.rs`), the channel segments its river
+generators lay out. A `River` keeps its direction, normal (NaN for a zero-length segment, as in Engine), length
+(`Math.sqrt` of the `float` squared length) and bounds padded by twice the valley radius (275 blocks, 300 from
+nodes), and samples positions, angles, segment intersections (optionally extended at both ends), bound overlaps
+and shortened copies (`NoiseUtil.round`). A `RiverWarp` bends a river sideways by simplex noise, faded in over
+`0..lower` and out over `upper..1`, plus a wiggle of 2 to 45 blocks faded in over the first 7.5% of the river;
+its `create` and `createChild` draw from `java.util.Random` in Engine's order. Engine compares `RiverWarp.NONE` by
+identity; the port marks it with a flag. Nothing uses these yet: the river generators are not ported. Its tests
+fold every field and method over 2560 segments (zero-length, NaN, infinite and -0 ends, odd radii), every pair's
+intersections and overlaps, and warps with degenerate and NaN fades over distances outside 0..1, against a Java
+oracle running Engine's classes, `RiverGeometryOracle.java` in `.local/terraforged/oracles/river/`.
+
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration and its river warps. They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps and its river geometry. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development

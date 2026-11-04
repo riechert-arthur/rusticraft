@@ -1096,7 +1096,8 @@ fn spectral_weight(frequency: f32) -> f32 {
     1.0 / frequency
 }
 
-fn clamp(value: f32, min: f32, max: f32) -> f32 {
+/// `NoiseUtil.clamp`: NaN passes through.
+pub fn clamp(value: f32, min: f32, max: f32) -> f32 {
     if value < min {
         min
     } else if value > max {
@@ -2928,7 +2929,7 @@ pub fn java_min(first: f32, second: f32) -> f32 {
 }
 
 /// `NoiseUtil.PI2` and `radFull`: `(float) Math.PI * 2` (the cast binds first; doubling is exact either way).
-const PI2: f32 = std::f64::consts::PI as f32 * 2.0;
+pub const PI2: f32 = std::f64::consts::PI as f32 * 2.0;
 const SIN_MASK: i32 = 4095;
 const SIN_COUNT: usize = 4096;
 
