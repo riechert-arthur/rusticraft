@@ -687,42 +687,142 @@ mod tests {
         assert_eq!(fold.0, 265982105);
     }
 
+    // Expected values from `.local/terraforged/oracles/river/GenWarpOracle.java`.
+    const WARP_COORDS: [f32; 22] = [
+        0.0,
+        -0.0,
+        12.25,
+        -98.75,
+        -4096.5,
+        8192.25,
+        123456.75,
+        -0.125,
+        1e-3,
+        3.0e7,
+        -3.0e7,
+        16_777_217.0,
+        1e20,
+        -1e30,
+        f32::MAX,
+        -f32::MAX,
+        f32::from_bits(1),
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        f32::NAN,
+        2_147_483_647.0,
+        -2_147_483_648.0,
+    ];
+
+    fn mix_domain(fold: &mut Fold, domain: &Domain, x: f32, z: f32) {
+        fold.mix([
+            bits(domain.offset_x(x, z)),
+            bits(domain.offset_y(x, z)),
+            bits(domain.x(x, z)),
+            bits(domain.y(x, z)),
+        ]);
+    }
+
     #[test]
-    fn generation_warps_match_engine_0_3_0() {
-        let warp = GenWarp::new(12_345, 3_000);
-        assert_eq!(GenWarp::scale_mega_warp(3_000), 1_500);
-        assert_eq!(GenWarp::scale_mega_warp(4_500), 2_250);
+    fn scale_mega_warp_rounds_like_engine() {
+        let scales = [
+            0,
+            1,
+            2,
+            3,
+            -1,
+            -2,
+            -3,
+            3000,
+            4500,
+            -4500,
+            1001,
+            -1001,
+            7,
+            -7,
+            16_777_217,
+            i32::MAX,
+            i32::MIN,
+            123_456_789,
+        ];
+        let rounded = scales.map(GenWarp::scale_mega_warp);
         assert_eq!(
+            rounded,
             [
-                (0.0, 0.0),
-                (12.25, -98.75),
-                (-4096.5, 8192.25),
-                (123456.75, -0.125)
-            ]
-            .map(|(x, z)| [
-                warp.lake.x(x, z).to_bits(),
-                warp.lake.y(x, z).to_bits(),
-                warp.river.x(x, z).to_bits(),
-                warp.river.y(x, z).to_bits(),
-                warp.lake.offset_x(x, z).to_bits(),
-                warp.river.offset_y(x, z).to_bits(),
-            ]),
-            [
-                [0, 0, 0, 0, 0, 0],
-                [
-                    0xc1d41efe, 0xc2b23d7a, 0x4137be2b, 0xc2c129bf, 0xc21b0f7f, 0x400ac828
-                ],
-                [
-                    0xc582a736, 0x45ffbe18, 0xc5802959, 0x45ffe9d0, 0xc2a8cd8f, 0xc0417f7c
-                ],
-                [
-                    0x47f13e31, 0x4175d274, 0x47f123e3, 0x40d4f618, 0x426e8747, 0x40d8f618
-                ],
+                0,
+                1,
+                1,
+                2,
+                -1,
+                -1,
+                -2,
+                1500,
+                2250,
+                -2250,
+                500,
+                -500,
+                3,
+                -3,
+                8_388_608,
+                1_073_741_824,
+                -1_073_741_824,
+                61_728_400
             ]
         );
+    }
 
-        let direct = GenWarp::direct();
-        assert_eq!(direct.lake.x(12.25, -98.75).to_bits(), 0x41440000);
-        assert_eq!(direct.river.y(12.25, -98.75).to_bits(), 0xc2c58000);
+    #[test]
+    fn empty_warp_is_direct() {
+        let warp = GenWarp::direct();
+        let mut fold = Fold::new();
+        for domain in [&warp.lake, &warp.river] {
+            for x in WARP_COORDS {
+                for z in WARP_COORDS {
+                    mix_domain(&mut fold, domain, x, z);
+                }
+            }
+        }
+        assert_eq!(fold.0, 215664657);
+    }
+
+    #[test]
+    fn generation_warps_fold_like_engine() {
+        let cases = [
+            (0, -515557086),
+            (12_345, -949602364),
+            (-1, -1524105944),
+            (1, -359467591),
+            (i32::MAX, -1524105944),
+            (i32::MAX - 2, 887431308),
+            (i32::MIN, -515557086),
+            (-987_654_321, -1312107752),
+        ];
+        for (seed, expected) in cases {
+            let warp = GenWarp::new(seed, 3000);
+            let mut fold = Fold::new();
+            for x in WARP_COORDS {
+                for z in WARP_COORDS {
+                    mix_domain(&mut fold, &warp.lake, x, z);
+                    mix_domain(&mut fold, &warp.river, x, z);
+                }
+            }
+            assert_eq!(fold.0, expected, "seed {seed}");
+        }
+        let warp = GenWarp::new(12_345, 3000);
+        assert_eq!(
+            [
+                warp.lake.x(12.25, -98.75),
+                warp.lake.y(12.25, -98.75),
+                warp.river.x(12.25, -98.75),
+                warp.river.y(12.25, -98.75)
+            ]
+            .map(f32::to_bits),
+            [0xc1d41efe, 0xc2b23d7a, 0x4137be2b, 0xc2c129bf]
+        );
+        // Engine ignores `continentScale`.
+        let other = GenWarp::new(12_345, i32::MIN);
+        assert_eq!(
+            other.lake.x(5.0, 7.0).to_bits(),
+            GenWarp::new(12_345, 0).lake.x(5.0, 7.0).to_bits()
+        );
     }
 }
