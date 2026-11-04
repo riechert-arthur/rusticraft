@@ -724,12 +724,16 @@ points, lifetimes) and runs each over several maps in turn (borders, negative po
 off, cache reuse and rebuilds, NaN and infinite heights), folding every cell's value, erosion, sediment, gradient and
 terrain.
 
-The tile foundation reproduces TerraForged's block/chunk size, border, masking, indexing, and coordinate
-conversion model with Java-width wrapping arithmetic.
+The tile-size layer adds Engine's `Size` (`tile.rs`), the first part of its tile map: a tile's edge length and border
+(`chunks(factor, border)` for `1 << factor` chunks, `blocks` for the same tile in blocks), the total edge and array size,
+`mask`, `indexOf` and the chunk/block conversions, all in Java `int` math (wrapping sums and products, shift counts
+modulo 32, arithmetic `>>`). Nothing uses it yet; `Filterable` still stands in for the tile map. Its test replays
+`SizeOracle.java` in `.local/terraforged/oracles/size/` over negative, overflowing and `i32::MIN`/`MAX` sizes,
+borders, coordinates and shift factors.
 
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes) and the world filter chain. They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain and the tile sizes. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development

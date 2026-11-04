@@ -22,6 +22,10 @@
  * SOFTWARE.
  */
 
+/// Engine 0.3.0's tile `Size` (`com.terraforged.engine.tile.Size`): `size` cells per edge plus
+/// `border` on each side (`total`), stored in a `total * total` array. `mask` assumes `size` is a
+/// power of two, as `chunks`/`blocks` make it. All of it is Java `int` math: sums and products
+/// wrap, shifts take their count modulo 32 and `>>` is arithmetic.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Size {
     pub size: i32,
@@ -34,6 +38,7 @@ pub struct Size {
 }
 
 impl Size {
+    /// Engine's `new Size(size, border)`.
     pub const fn new(size: i32, border: i32) -> Self {
         let total = size.wrapping_add(border.wrapping_mul(2));
         Self {
@@ -47,32 +52,39 @@ impl Size {
         }
     }
 
+    /// `value & (size - 1)`: the position inside a tile.
     pub const fn mask(self, value: i32) -> i32 {
         value & self.mask
     }
 
+    /// `z * total + x`, the array index of a cell (border included); not bounds-checked.
     pub const fn index_of(self, x: i32, z: i32) -> i32 {
         z.wrapping_mul(self.total).wrapping_add(x)
     }
 
+    /// `value << 4`.
     pub const fn chunk_to_block(value: i32) -> i32 {
         value.wrapping_shl(4)
     }
 
+    /// `value >> 4`, rounding toward negative infinity.
     pub const fn block_to_chunk(value: i32) -> i32 {
         value >> 4
     }
 
+    /// `(max_x - min_x) * (max_z - min_z)`.
     pub const fn count(min_x: i32, min_z: i32, max_x: i32, max_z: i32) -> i32 {
         max_x
             .wrapping_sub(min_x)
             .wrapping_mul(max_z.wrapping_sub(min_z))
     }
 
+    /// A size of `1 << factor` chunks with `border_chunks` chunks of border.
     pub const fn chunks(factor: i32, border_chunks: i32) -> Self {
         Self::new(1_i32.wrapping_shl(factor as u32), border_chunks)
     }
 
+    /// The same tile in blocks: `(1 << factor) << 4` blocks with `border_chunks << 4` blocks of border.
     pub const fn blocks(factor: i32, border_chunks: i32) -> Self {
         let chunks = 1_i32.wrapping_shl(factor as u32);
         Self::new(chunks.wrapping_shl(4), border_chunks.wrapping_shl(4))
