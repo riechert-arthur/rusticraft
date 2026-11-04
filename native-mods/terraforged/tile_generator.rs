@@ -36,8 +36,8 @@ type TileListener = Weak<dyn DisposeListener<Tile>>;
 
 /// The stages of Engine's `Heightmap` that `Tile.generate(Heightmap ...)` calls, in the order the
 /// tile fills run them: `applyBase`, `getContinent().getRivermap(x, z)` (when the cell's continent
-/// cell has no river map yet), `applyRivers` and `applyClimate`. `Heightmap` itself is not ported
-/// yet, so the generator takes any implementation.
+/// cell has no river map yet), `applyRivers` and `applyClimate`. The generator takes any
+/// implementation; `Heightmap` is the real one.
 pub trait HeightmapSource {
     /// `applyBase(cell, x, z)`.
     fn apply_base(&self, cell: &mut Cell, x: f32, z: f32);

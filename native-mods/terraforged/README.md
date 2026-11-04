@@ -608,8 +608,8 @@ The heightmap-river layer adds the river stage of Engine's `Heightmap` (`heightm
 `apply` is `applyRivers(cell, x, z, rivermap)`, which applies the river map to the cell and then turns a volcano pipe
 back into a volcano when its value is below the water level or its river mask below 0.85
 (`VolcanoPopulator.modifyVolcanoType`); `apply_continent` is the private `applyRivers(cell, x, z)` that
-`Heightmap.apply` runs, which takes the river map of the cell's continent cell (`Continent.getRivermap(cell)`). The
-rest of `Heightmap` is not ported, so nothing calls the stage yet. Its tests check the pipe demotion at the 0.85
+`Heightmap.apply` runs, which takes the river map of the cell's continent cell (`Continent.getRivermap(cell)`). `Heightmap`
+(below) runs it. Its tests check the pipe demotion at the 0.85
 boundary and with NaN values and masks, and fold every cell field over 522060 applies through the multi, single,
 advanced and fancy continents' river caches (five settings variants each, a block grid plus NaN, infinite and -0
 points, fresh cells and six fills of value, river mask and terrain), against `HeightmapRiversOracle.java` in
@@ -617,8 +617,8 @@ points, fresh cells and six fills of value, river mask and terrain), against `He
 
 The heightmap-cache layer adds Engine's `HeightmapCache.get` (`heightmap.rs`, `HeightmapCache`): it keeps up to 4096
 cells keyed by packed block coordinates and, on a miss, runs the heightmap on a new cell and turns a coast whose value
-is above the water level and at most five blocks over it into a beach (the correction `WorldLookup` also makes). As
-`Heightmap.apply` is not ported, `get` takes it as a closure; it returns a copy of the cached cell where Engine returns
+is above the water level and at most five blocks over it into a beach (the correction `WorldLookup` also makes). `get`
+takes `Heightmap.apply` as a closure; it returns a copy of the cached cell where Engine returns
 the shared object. A full cache drops its oldest cell, and misses are computed outside the cache's lock (Engine splits
 it into sections and computes under a section's lock); neither changes the cells returned. Engine's `generate` (the
 tile path) is the contextual layer's, below. Its tests check hits, eviction, sharing between threads and the coast
@@ -637,7 +637,7 @@ different `x`, a different `z`, swapped coordinates or no current map run exactl
 
 The contextual heightmap-cache layer adds Engine's `HeightmapCache.generate(cell, x, z, rivermap)` (`heightmap.rs`,
 `HeightmapCache::generate`), the path `Tile.generate(HeightmapCache, ...)` takes for each block: on a miss it runs
-the heightmap's base, river and climate stages (closures, as `Heightmap` is not ported) on the caller's cell in that
+the heightmap's base, river and climate stages (closures, e.g. `Heightmap`'s) on the caller's cell in that
 order, picking the river map with `Rivermap::get_for_cell` (reusing the caller's current map when it belongs to the
 cell's continent cell), caches the cell and returns the map it used; on a hit it copies the cached cell into the
 caller's (`copyFrom`, which leaves `terrain_region_center` alone) and returns the caller's map unchanged. It shares
@@ -762,7 +762,7 @@ takes the chunk of that slot as `chunk_writer` does (a slot already holding a ch
 filled), and for each of its cells (z rows, then x) runs the base stage, picks the river map of the cell's continent
 cell (the previous cell's map when it matches, carried from the tile's first cell to its last, else a lookup:
 `Rivermap::get_for_cell`), runs the river stage (`HeightmapRivers::apply`) and the climate stage, each with the cell's
-world block position as floats. `Heightmap` itself is not ported yet, so the stages and the lookup are closures; the
+world block position as floats. The stages and the lookup are closures (`Heightmap`'s, below); the
 tile generator (below) runs the filters (`WorldFilters::apply_tile`) after the fill. Its tests
 replay `TileHeightmapOracle.java` in `.local/terraforged/oracles/tile_heightmap/` on six tiles (negative, wrapping and
 borderless ones, and one whose slots hold aliasing chunks made before the fill) with stub stages: the stage trace with
@@ -806,7 +806,7 @@ tiles and on zero, negative and overflowing sizes and counts; debug and release 
 
 The tile-generator layer adds Engine's plain, synchronous `TileGenerator` (`tile_generator.rs`; what
 `TileGenerator.builder().build()` returns without a batch size) and its `WorldGenerator` (the heightmap and the filters).
-`Heightmap` is not ported yet, so the generator takes any `HeightmapSource` (its base, river-map, river and climate
+The generator takes any `HeightmapSource` (`Heightmap` implements it) (its base, river-map, river and climate
 stages), and the filters are any `TileFilters` (`WorldFilters` runs `apply_tile`). The generator holds its tiles' size
 factor and border, the world's registry the cells start from (in place of Engine's resource pools) and the builder's
 batch size. `chunk_to_region` is `chunkToRegion` (`chunk >> factor`, the shift count modulo 32), `create_empty_region`
@@ -1043,7 +1043,7 @@ runs the masked climate module; a cell at or below the water level then turns `c
 module again, unmasked, at a point moved by the biome-edge noise (both offsets sampled at the original point); last,
 the temperature drops by up to 0.05 above height 0.45 (0.05 above 0.75, floored at 0) and rises by up to 0.05 from 0.45
 down to the ground level (capped at 1), with `Math.max`/`Math.min` semantics, so a NaN height changes nothing. Terrains
-are compared and written by identity with the world registry's own. `Heightmap` itself is not ported, so the stage
+are compared and written by identity with the world registry's own. The stage
 plugs into the heightmap cache's and the tile fills' `apply_climate` closures as `|cell, x, z| climate.apply(cell, x,
 z)`. The test replays `ClimateStageOracle.java` (in `.local/terraforged/oracles/climate_stage/`), which builds Engine's
 real `Climate` from a `GeneratorContext` over eight settings (the climate-module oracle's, each with its own biome-edge
@@ -1058,7 +1058,7 @@ implemented by the multi and single, advanced and fancy continent generators, an
 it draws from in that constructor's order (4, 4, 7 and 4 draws), and what the constructor reads from Engine's
 `GeneratorContext`. Its result plugs into the climate module and stage, which take a continent's land value. Engine's
 settings deserializer (which reads the type by its exact name and keeps `MULTI_IMPROVED` for an unknown one) is
-not ported, nor is `Heightmap`, which calls the factory. Its test replays `ContinentFactoryOracle.java` (in
+not ported; `Heightmap` calls the factory through `context.continent()`. Its test replays `ContinentFactoryOracle.java` (in
 `.local/terraforged/oracles/continent_factory/`), which calls Engine's `ContinentType.create` for every type over
 five settings variants with the context's seed (as `Heightmap` does) and once with a separate seed: the created
 class and the seed draws, every edge, land and nearest-centre value and cell field after `apply` over a 41x41 grid
@@ -1089,9 +1089,26 @@ for eight heights and sea levels (zero, negative and `Integer.MAX_VALUE` include
 continent, 7 for the climate) and cell fields of a continent of each type and its climate built from the context, and
 the seeds of `copy`, `split` and `seed()` after the parent drew.
 
+The heightmap layer adds Engine's `Heightmap` (`heightmap.rs`), built from the generator context in Engine's order:
+the terrain-region config (from the seed's root), the warped cell-edge mountain shape (two draws from the terrain seed
+offset), the standard terrain provider and its shuffled populators (whose composite terrains go into the context's
+registry, so `Heightmap::new` needs that registry unshared), the region borders (`plains`, drawing from the context
+seed), the mountain chain, the continent (`context.continent()`), the climate (`context.climate`) and the deep ocean
+(one more draw); land (region terrains and mountains blended by the mountain shape) and oceans are blended by the
+continent value. `apply` runs `apply_base` (terrain `flats`, the continent and the terrain regions at the block
+position, the terrain graph, volcanoes included, at the block position times `1 / globalHorizontalScale`), the river
+stage on the cell's continent river map and the climate stage. It implements the tile generator's `HeightmapSource`
+and plugs into the heightmap cache and tile fills as closures. `populator(terrain, variant)` returns the heightmap
+itself where Engine's provider falls back to its default populator (the heightmap). Its test replays
+`HeightmapGraphOracle.java` (in `.local/terraforged/oracles/heightmap_graph/`), which builds the real `Heightmap`
+from `GeneratorContext.createNoCache` for four settings variants (horizontal scales 1, 2.5, 0.37 and 4, scaled and
+zero-weight landforms, other levels and control points) and every continent type: the seed cursor after the
+constructor, the provider's variant counts, and every cell field after `apply` over 196 edge points (signed zeros, a
+subnormal, huge values, infinities, NaN) and a 40x40 grid with volcano cells, terrains compared by identity.
+
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives, the biome climate types, the climate settings, the climate module, the climate stage, the continent factory and the generator context. They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives, the biome climate types, the climate settings, the climate module, the climate stage, the continent factory, the generator context and the heightmap. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
