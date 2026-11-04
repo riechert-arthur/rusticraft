@@ -435,34 +435,46 @@ impl Tile {
         size.index_of(x, z)
     }
 
+    /// `iterate(visitor)`: every non-border cell, z rows then x, with its position inside the tile
+    /// (`0..block_size().size` on each axis, the border left out). Panics where Engine throws
+    /// `ArrayIndexOutOfBoundsException`: a negative border puts the first index before the backing.
     pub fn iterate(&self, mut visitor: impl FnMut(&Cell, i32, i32)) {
-        for delta_z in 0..self.block_size.size {
-            let z = self.block_size.border.wrapping_add(delta_z);
-            for delta_x in 0..self.block_size.size {
-                let x = self.block_size.border.wrapping_add(delta_x);
-                let index = self.block_size.index_of(x, z) as usize;
-                visitor(&self.blocks[index], delta_x, delta_z);
-            }
+        for (index, dx, dz) in Self::inner_cells(self.block_size) {
+            visitor(&self.blocks[index], dx, dz);
         }
     }
 
+    /// `generate(Cell.Visitor)`: [`Self::iterate`]'s cells and order, mutably (`computeCell`: the
+    /// port's cells all exist, so it only hands them out). Panics where `iterate` does.
     pub fn generate(&mut self, mut visitor: impl FnMut(&mut Cell, i32, i32)) {
-        for delta_z in 0..self.block_size.size {
-            let z = self.block_size.border.wrapping_add(delta_z);
-            for delta_x in 0..self.block_size.size {
-                let x = self.block_size.border.wrapping_add(delta_x);
-                let index = self.block_size.index_of(x, z) as usize;
-                visitor(&mut self.blocks[index], delta_x, delta_z);
-            }
+        for (index, dx, dz) in Self::inner_cells(self.block_size) {
+            visitor(&mut self.blocks[index], dx, dz);
         }
     }
 
-    pub fn batch_size(batch_count: i32, chunk_size: Size) -> i32 {
-        let mut batch_size = chunk_size.total / batch_count;
+    /// The backing index of each non-border cell with its tile position, in the visitors' order
+    /// (Java `int` math: `indexOf(border + dx, border + dz)`; a negative index becomes one past any
+    /// backing, so the visitor's read panics there).
+    fn inner_cells(size: Size) -> impl Iterator<Item = (usize, i32, i32)> {
+        (0..size.size).flat_map(move |dz| {
+            let z = size.border.wrapping_add(dz);
+            (0..size.size).map(move |dx| {
+                let index = size.index_of(size.border.wrapping_add(dx), z);
+                (usize::try_from(index).unwrap_or(usize::MAX), dx, dz)
+            })
+        })
+    }
+
+    /// `Tile.getBatchSize(batchCount, chunkSize)`: `chunk_size.total / batch_count` rounded up, in
+    /// Java `int` math (`i32::MIN / -1` wraps to `i32::MIN`). Panics where Java throws
+    /// `ArithmeticException`: a zero `batch_count`.
+    pub const fn batch_size(batch_count: i32, chunk_size: Size) -> i32 {
+        let batch_size = chunk_size.total.wrapping_div(batch_count);
         if batch_size.wrapping_mul(batch_count) < chunk_size.total {
-            batch_size = batch_size.wrapping_add(1);
+            batch_size.wrapping_add(1)
+        } else {
+            batch_size
         }
-        batch_size
     }
 
     /// `Tile.getRegionId(regionX, regionZ)`.
@@ -1271,6 +1283,155 @@ mod tests {
         );
     }
 
+    /// Replays the `v` lines of `TileOracle.java`: Engine's `Tile.iterate` on every `TILE_CONFIGS`
+    /// tile with each cell valued by its index (block size first, then a fold of each visit's
+    /// value and tile position, -2 where Java throws), `Tile.generate(Cell.Visitor)` setting every
+    /// visited cell from its position, the whole backing afterwards, and `iterate` again. Tiles
+    /// with a negative border throw before the first visit; a zero block size visits nothing.
+    #[test]
+    fn tile_visitors_match_engine_oracle() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        let terrains = TerrainRegistry::new();
+        let visit = |f: &mut i64, cell: &Cell, dx: i32, dz: i32| {
+            for value in [cell.value as i32, dx, dz] {
+                *f = fold(*f, value);
+            }
+        };
+        let mut out = String::new();
+        for (region_x, region_z, size, border) in TILE_CONFIGS {
+            let mut tile = Tile::new(region_x, region_z, size, border, &terrains);
+            for (index, cell) in tile.blocks.iter_mut().enumerate() {
+                cell.value = index as f32;
+            }
+            let mut folds = [17_i64; 4];
+            let iterate = |tile: &Tile, f: &mut i64| {
+                let run = catch_unwind(AssertUnwindSafe(|| {
+                    tile.iterate(|cell, dx, dz| visit(f, cell, dx, dz));
+                }));
+                if run.is_err() {
+                    *f = fold(*f, -2);
+                }
+            };
+            iterate(&tile, &mut folds[0]);
+            let f = &mut folds[1];
+            let run = catch_unwind(AssertUnwindSafe(|| {
+                tile.generate(|cell, dx, dz| {
+                    visit(f, cell, dx, dz);
+                    cell.value = (-(dx * 1024 + dz) - 1) as f32;
+                });
+            }));
+            if run.is_err() {
+                *f = fold(*f, -2);
+            }
+            for cell in &tile.blocks {
+                folds[2] = fold(folds[2], cell.value as i32);
+            }
+            iterate(&tile, &mut folds[3]);
+            let [a, b, c, d] = folds;
+            let blocks = tile.block_size().size;
+            out += &format!(
+                "v {region_x} {region_z} {size} {border}: {blocks} {a:x} {b:x} {c:x} {d:x}\n"
+            );
+        }
+        assert_eq!(
+            out,
+            "v -2 3 2 1: 64 bd9871a933f78011 bd9871a933f78011 30bad0eee4870a11 e8ad15ba2ae7f811\n\
+             v 0 0 3 2: 128 1c4499d2efde0011 1c4499d2efde0011 9abcf8aae59c2811 fada2730fa1fe011\n\
+             v 5 -7 1 0: 32 ab0f442b4c3de011 ab0f442b4c3de011 567f464821df6011 350f99e14cc5fe11\n\
+             v -2147483648 2147483647 2 1: 64 bd9871a933f78011 bd9871a933f78011 30bad0eee4870a11 e8ad15ba2ae7f811\n\
+             v 1000 -1000 33 1: 32 73508ec4b8bde011 73508ec4b8bde011 3669b4d5ee1e611 350f99e14cc5fe11\n\
+             v 3 -3 -31 1: 32 73508ec4b8bde011 73508ec4b8bde011 3669b4d5ee1e611 350f99e14cc5fe11\n\
+             v 1 1 0 0: 16 ed132e70e2f7811 ed132e70e2f7811 b77da6270c305811 5701e3c993baff91\n\
+             v -1 -1 4 1: 256 54aea0415f780011 54aea0415f780011 d59c965992fba211 a3c9e30f5c7f8011\n\
+             v 7 -9 31 1: 0 11 11 fb68f3984b6b8211 11\n\
+             v 2 2 1 -1: 32 20d 20d 11 20d\n\
+             v -3 4 3 -1: 128 20d 20d 33944da5e6c79211 20d\n\
+             v 305419896 -124076833 2 1: 64 bd9871a933f78011 bd9871a933f78011 30bad0eee4870a11 e8ad15ba2ae7f811\n"
+        );
+    }
+
+    /// Replays the `b` lines of `TileOracle.java`: Engine's `Tile.getBatchSize` over batch counts
+    /// (zero, negative, `i32::MIN`/`MAX`) and chunk sizes (`total`s that are zero, negative,
+    /// `i32::MIN` and wrapped), `x` where Java throws `ArithmeticException`.
+    #[test]
+    fn tile_batch_size_matches_engine_oracle() {
+        let counts = [1, 2, 3, 5, 7, 16, 17, 100, -1, -3, 0, i32::MAX, i32::MIN];
+        let sizes = [
+            (2, 1),
+            (4, 0),
+            (8, 2),
+            (1, 0),
+            (16, 1),
+            (0, 0),
+            (-4, 1),
+            (i32::MIN, 0),
+            (i32::MAX, 0),
+            (0x4000_0000, 0x2000_0000),
+        ];
+        let mut out = String::new();
+        for (size, border) in sizes {
+            out += &format!("b {size} {border}:");
+            for count in counts {
+                let chunk_size = Size::new(size, border);
+                if count == 0 {
+                    assert!(
+                        std::panic::catch_unwind(|| Tile::batch_size(count, chunk_size)).is_err()
+                    );
+                    out += " x";
+                } else {
+                    out += &format!(" {}", Tile::batch_size(count, chunk_size));
+                }
+            }
+            out += "\n";
+        }
+        assert_eq!(
+            out,
+            "b 2 1: 4 2 2 1 1 1 1 1 -4 0 x 1 1\n\
+             b 4 0: 4 2 2 1 1 1 1 1 -4 0 x 1 1\n\
+             b 8 2: 12 6 4 3 2 1 1 1 -12 -4 x 1 1\n\
+             b 1 0: 1 1 1 1 1 1 1 1 -1 1 x 1 1\n\
+             b 16 1: 18 9 6 4 3 2 2 1 -18 -6 x 1 1\n\
+             b 0 0: 0 0 0 0 0 0 0 0 0 0 x 0 0\n\
+             b -4 1: -2 -1 0 0 0 0 0 0 2 0 x 0 0\n\
+             b -2147483648 0: -2147483648 -1073741824 -715827882 -429496729 -306783378 -134217728 -126322567 -21474836 -2147483648 715827882 x -1 1\n\
+             b 2147483647 0: 2147483647 1073741824 715827883 429496730 306783379 134217728 126322568 21474837 -2147483647 -715827881 x 1 1\n\
+             b 1073741824 536870912: -2147483648 -1073741824 -715827882 -429496729 -306783378 -134217728 -126322567 -21474836 -2147483648 715827882 x -1 1\n"
+        );
+    }
+
+    #[test]
+    fn tile_visitors_match_engine_0_3_0() {
+        let mut tile = Tile::new(0, 0, 1, 1, &TerrainRegistry::new());
+        for (index, cell) in tile.blocks.iter_mut().enumerate() {
+            cell.value = index as f32;
+        }
+
+        let mut visited = Vec::new();
+        tile.iterate(|cell, x, z| {
+            if (x == 0 && z == 0) || (x == 31 && z == 31) {
+                visited.push((cell.value, x, z));
+            }
+        });
+        assert_eq!(visited, [(1_040.0, 0, 0), (3_055.0, 31, 31)]);
+
+        let mut count = 0;
+        tile.generate(|cell, x, z| {
+            count += 1;
+            cell.value = (x.wrapping_mul(100).wrapping_add(z)) as f32;
+        });
+        assert_eq!(count, 1_024);
+        assert_eq!(tile.raw_cell(16, 16).unwrap().value, 0.0);
+        assert_eq!(tile.raw_cell(47, 47).unwrap().value, 3_131.0);
+        assert_eq!(tile.raw_cell(15, 16).unwrap().value, 1_039.0);
+
+        let size = Size::new(8, 2);
+        assert_eq!(Tile::batch_size(1, size), 12);
+        assert_eq!(Tile::batch_size(3, size), 4);
+        assert_eq!(Tile::batch_size(5, size), 3);
+        assert_eq!(Tile::batch_size(16, size), 1);
+    }
+
     /// Replays the `w` lines of `TileOracle.java`: Engine's `WorldFilters.apply(tile, optional)` on
     /// tiles with hashed cells (heights, river and erosion masks, continent edges, terrains), built
     /// from two settings groups, with and without borders and the optional filters, at negative
@@ -1497,38 +1658,6 @@ y15 0 0 11 5502ddd13a2410d1 744e9f090aa3f6e3
     /// lines), and `Tile.generate(HeightmapCache, offsetX, offsetZ, zoom)` over
     /// [`HEIGHTMAP_CACHED_ZOOMS`] on the `c`/`r` runs' cache (`y` lines: hits shared with the
     /// unzoomed runs and between zoomed blocks). Floats fold as `floatToIntBits` (NaNs canonical).
-    #[test]
-    fn tile_visitors_match_engine_0_3_0() {
-        let mut tile = Tile::new(0, 0, 1, 1, &TerrainRegistry::new());
-        for (index, cell) in tile.blocks.iter_mut().enumerate() {
-            cell.value = index as f32;
-        }
-
-        let mut visited = Vec::new();
-        tile.iterate(|cell, x, z| {
-            if (x == 0 && z == 0) || (x == 31 && z == 31) {
-                visited.push((cell.value, x, z));
-            }
-        });
-        assert_eq!(visited, [(1_040.0, 0, 0), (3_055.0, 31, 31)]);
-
-        let mut count = 0;
-        tile.generate(|cell, x, z| {
-            count += 1;
-            cell.value = (x.wrapping_mul(100).wrapping_add(z)) as f32;
-        });
-        assert_eq!(count, 1_024);
-        assert_eq!(tile.raw_cell(16, 16).unwrap().value, 0.0);
-        assert_eq!(tile.raw_cell(47, 47).unwrap().value, 3_131.0);
-        assert_eq!(tile.raw_cell(15, 16).unwrap().value, 1_039.0);
-
-        let size = Size::new(8, 2);
-        assert_eq!(Tile::batch_size(1, size), 12);
-        assert_eq!(Tile::batch_size(3, size), 4);
-        assert_eq!(Tile::batch_size(5, size), 3);
-        assert_eq!(Tile::batch_size(16, size), 1);
-    }
-
     #[test]
     fn tile_heightmap_generation_matches_engine_0_3_0() {
         let terrains = Arc::new(TerrainRegistry::new());
