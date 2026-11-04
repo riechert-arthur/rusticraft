@@ -30,7 +30,9 @@
 // (`rivermap.river`) and `Vec2i` (`noise.util.Vec2i`) are the channel segments those generators lay out, and
 // `RiverCarver` (`rivermap.river`) carves one segment's valley, banks and bed into a cell; `LakeCarver`
 // (`rivermap.lake.Lake`) carves a lake and its valley, `WetlandCarver` (`rivermap.wetland.Wetland`) a wetland
-// along a segment, and `Boundsf` (`util.Boundsf`) bounds them.
+// along a segment, and `Boundsf` (`util.Boundsf`) bounds them. `RiverNetwork` (`rivermap.river.Network`) groups a
+// river with its lakes, wetlands and forks, `Rivermap` (`rivermap.Rivermap`) holds one continent's networks, and
+// `BaseRiverGenerator` (`rivermap.river.BaseRiverGenerator`) lays out the forks, lakes and wetlands of a map.
 
 use super::{
     terraforged::{
@@ -39,7 +41,8 @@ use super::{
     },
     terraforged_continent::noise_warp,
     terraforged_engine::{
-        Cell, Lake, Levels, Terrain, TerrainProperties, TerrainRegistry, Wetland,
+        Cell, Lake, Levels, RiverSettings, Terrain, TerrainProperties, TerrainRegistry, Wetland,
+        WorldSettings,
     },
     terraforged_fancy::Vec2f,
     terraforged_landforms::source,
@@ -49,6 +52,7 @@ use horizon_core::{
     jmath,
     random::{LegacyRandom, RandomSource},
 };
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Engine's `rivermap.gen.GenWarp`: the lake and river domain warps a river map carves its networks with.
@@ -133,6 +137,14 @@ impl Variance {
     /// `apply(value, scaler)`.
     pub fn apply_scaled(self, value: f32, scaler: f32) -> f32 {
         self.apply(value) * scaler
+    }
+
+    pub fn next(self, random: &mut LegacyRandom) -> f32 {
+        self.apply(random.next_float())
+    }
+
+    pub fn next_scaled(self, random: &mut LegacyRandom, scaler: f32) -> f32 {
+        self.apply_scaled(random.next_float(), scaler)
     }
 }
 
@@ -1369,6 +1381,387 @@ impl Rivermap {
 
     pub const fn z(&self) -> i32 {
         self.z
+    }
+}
+
+/// The part of Engine's `Continent` the river generators read: `getEdgeValue(x, z)`.
+pub trait ContinentSampler {
+    fn edge_value(&self, x: f32, z: f32) -> f32;
+}
+
+impl ContinentSampler for super::terraforged_fancy::FancyContinentGenerator {
+    fn edge_value(&self, x: f32, z: f32) -> f32 {
+        super::terraforged_fancy::FancyContinentGenerator::edge_value(self, x, z)
+    }
+}
+
+/// Engine's `rivermap.river.BaseRiverGenerator`: the river, fork, lake and wetland configs of a world and the
+/// fork, lake and wetland placement its subclasses share. Engine reads everything from a `GeneratorContext`:
+/// here the caller passes `context.seed.root()`, `context.settings.world`, `context.settings.rivers`,
+/// `context.levels` and the world's terrain registry (whose `river`, `lake` and `wetland` terrains the carvers
+/// tag cells with).
+pub struct BaseRiverGenerator<C> {
+    pub count: i32,
+    pub continent_scale: i32,
+    pub min_edge_value: f32,
+    pub seed: i32,
+    pub lake: LakeConfig,
+    pub main: RiverConfig,
+    pub fork: RiverConfig,
+    pub wetland: WetlandConfig,
+    pub continent: C,
+    pub levels: Levels,
+    pub registry: Arc<TerrainRegistry>,
+}
+
+impl<C: ContinentSampler> BaseRiverGenerator<C> {
+    pub fn new(
+        continent: C,
+        root_seed: i32,
+        world: &WorldSettings,
+        rivers: &RiverSettings,
+        levels: Levels,
+        registry: Arc<TerrainRegistry>,
+    ) -> Self {
+        let main = RiverConfig::builder(levels)
+            .bank_height(
+                rivers.main_rivers.min_bank_height,
+                rivers.main_rivers.max_bank_height,
+            )
+            .bank_width(rivers.main_rivers.bank_width)
+            .bed_width(rivers.main_rivers.bed_width)
+            .bed_depth(rivers.main_rivers.bed_depth)
+            .fade(f64::from(rivers.main_rivers.fade))
+            .length(5000)
+            .main(true)
+            .order(0)
+            .build();
+        let fork = RiverConfig::builder(levels)
+            .bank_height(
+                rivers.branch_rivers.min_bank_height,
+                rivers.branch_rivers.max_bank_height,
+            )
+            .bank_width(rivers.branch_rivers.bank_width)
+            .bed_width(rivers.branch_rivers.bed_width)
+            .bed_depth(rivers.branch_rivers.bed_depth)
+            .fade(f64::from(rivers.branch_rivers.fade))
+            .length(4500)
+            .order(1)
+            .build();
+        Self {
+            count: rivers.river_count,
+            continent_scale: world.continent.continent_scale,
+            min_edge_value: world.control_points.inland,
+            seed: root_seed.wrapping_add(rivers.seed_offset),
+            lake: LakeConfig::new(rivers.lakes, levels),
+            main,
+            fork,
+            wetland: WetlandConfig::new(rivers.wetlands),
+            continent,
+            levels,
+            registry,
+        }
+    }
+
+    /// `generateRivers(x, z, id)`. `roots` is the subclass's `generateRoots(x, z, random, warp)` (Engine's base
+    /// class returns no roots). The roots are shuffled with `Collections.shuffle`, forked (each fork tested for
+    /// overlaps against every root's tree as built so far), then given wetlands.
+    pub fn generate_rivers(
+        &self,
+        x: i32,
+        z: i32,
+        id: i64,
+        roots: impl FnOnce(&Self, i32, i32, &mut LegacyRandom, &GenWarp) -> Vec<RiverNetworkBuilder>,
+    ) -> Rivermap {
+        let mut random = LegacyRandom::new(id.wrapping_add(i64::from(self.seed)));
+        let warp = GenWarp::new(id as i32, self.continent_scale);
+        let mut rivers = roots(self, x, z, &mut random, &warp);
+        java_shuffle(&mut rivers, &mut random);
+        for index in 0..rivers.len() {
+            self.generate_forks(
+                &mut rivers,
+                &[index],
+                River::MAIN_SPACING,
+                self.fork,
+                &mut random,
+                &warp,
+                0,
+            );
+        }
+        for river in &mut rivers {
+            self.generate_wetlands(river, &mut random);
+        }
+        Rivermap::new(
+            x,
+            z,
+            rivers.into_iter().map(RiverNetworkBuilder::build).collect(),
+            warp,
+        )
+    }
+
+    /// `generateForks(parent, spacing, config, random, warp, rivers, depth)`. Engine's `parent` is a builder
+    /// inside `rivers`' trees, which it grows while testing new forks against them; here `parent` is that
+    /// builder's path in `rivers`: its root's index, then a child index per level. Each fork is added to its
+    /// parent before its own forks are generated, as in Engine.
+    // `!(edge < min)` keeps Engine's NaN behavior, which `edge >= min` would not.
+    #[allow(clippy::too_many_arguments, clippy::neg_cmp_op_on_partial_ord)]
+    pub fn generate_forks(
+        &self,
+        rivers: &mut [RiverNetworkBuilder],
+        parent: &[usize],
+        spacing: Variance,
+        config: RiverConfig,
+        random: &mut LegacyRandom,
+        warp: &GenWarp,
+        depth: i32,
+    ) {
+        if depth > 2 {
+            return;
+        }
+        let parent_river = builder_at(rivers, parent).carver.river;
+        let length = 0.44 * parent_river.length;
+        if length < 300.0 {
+            return;
+        }
+        let mut direction: i32 = if random.next_boolean() { 1 } else { -1 };
+        let mut offset = 0.25_f32;
+        while offset < 0.9 {
+            direction = -direction;
+            let parent_angle = parent_river.angle();
+            let fork_angle = direction as f32 * PI2 * River::FORK_ANGLE.next(random);
+            let angle = parent_angle + fork_angle;
+            let dx = sin(angle);
+            let dz = cos(angle);
+            let start = parent_river.pos(offset);
+            let x1 = unpack_left_float(start);
+            let z1 = unpack_right_float(start);
+            // `!(edge < min)`, so a NaN edge value passes, as in Engine.
+            if !(self.continent.edge_value(x1, z1) < self.min_edge_value) {
+                let x2 = x1 - dx * length;
+                let z2 = z1 - dz * length;
+                if !(self.continent.edge_value(x2, z2) < self.min_edge_value) {
+                    let builder = builder_at(rivers, parent);
+                    let fork_config = builder.carver.create_fork_config(offset, self.levels);
+                    let river = River::new(x2, z2, x1, z1);
+                    if !Self::river_overlaps(river, Some(builder), rivers) {
+                        let valley_size =
+                            River::VALLEY_WIDTH as f32 * River::FORK_VALLEY.next(random);
+                        let settings = RiverCarverSettings {
+                            connecting: true,
+                            fade_in: config.fade,
+                            valley_size,
+                            valley_curve: RiverCarver::valley_type(random),
+                        };
+                        let fork_warp = builder.carver.warp.child(0.15, 0.75, 0.65, random);
+                        let fork = RiverCarver::new(
+                            river,
+                            fork_warp,
+                            fork_config,
+                            settings,
+                            self.levels,
+                            &self.registry,
+                        );
+                        let children = &mut builder_at_mut(rivers, parent).children;
+                        children.push(RiverNetwork::builder(fork));
+                        let mut path = parent.to_vec();
+                        path.push(children.len() - 1);
+                        self.generate_forks(
+                            rivers,
+                            &path,
+                            River::FORK_SPACING,
+                            config,
+                            random,
+                            warp,
+                            depth + 1,
+                        );
+                    }
+                }
+            }
+            offset += spacing.next(random);
+        }
+        self.add_lake(builder_at_mut(rivers, parent), random, warp);
+    }
+
+    /// `riverOverlaps(river, parent, rivers)`: whether `river` overlaps any builder in `rivers`' trees, with
+    /// `parent` (compared by identity; `None` is Engine's `null`) tested by `Network.Builder.overlaps`'s
+    /// parent rule.
+    pub fn river_overlaps(
+        river: River,
+        parent: Option<&RiverNetworkBuilder>,
+        rivers: &[RiverNetworkBuilder],
+    ) -> bool {
+        rivers
+            .iter()
+            .any(|other| other.overlaps(river, parent, 250.0))
+    }
+
+    /// `generateAdditionalLakes(x, z, random, roots, rivers, lakes)`. Engine never calls it; as in Engine, every
+    /// lake is placed at angle 0 and `angleVariance` is unused.
+    pub fn generate_additional_lakes(
+        &self,
+        x: i32,
+        z: i32,
+        random: &mut LegacyRandom,
+        roots: &[RiverNetworkBuilder],
+        rivers: &[RiverCarver],
+        lakes: &mut Vec<LakeCarver>,
+    ) {
+        let size = 150.0;
+        let size_variance = Variance::of(1.0, 0.25);
+        let distance_variance = Variance::of(0.6, 0.3);
+        for index in 1..roots.len() {
+            let first = &roots[index - 1];
+            let angle = 0.0;
+            let dx = sin(angle);
+            let dz = cos(angle);
+            let distance = distance_variance.next(random);
+            let lake_x = x as f32 + dx * first.carver.river.length * distance;
+            let lake_z = z as f32 + dz * first.carver.river.length * distance;
+            let variance = size_variance.next(random);
+            let center = Vec2f::new(lake_x, lake_z);
+            if Self::lake_overlaps(center, size, rivers) {
+                continue;
+            }
+            lakes.push(LakeCarver::new(
+                center,
+                size,
+                variance,
+                self.lake,
+                &self.registry,
+            ));
+        }
+    }
+
+    /// `generateWetlands(builder, random)`: one `nextInt(skipSize)`, then, on 0, a wetland along part of the
+    /// river; then the children, depth first.
+    pub fn generate_wetlands(&self, builder: &mut RiverNetworkBuilder, random: &mut LegacyRandom) {
+        let skip = random
+            .next_int_bound(self.wetland.skip_size)
+            .expect("positive wetland skip size");
+        if skip == 0 {
+            let width = self.wetland.width.next(random);
+            let length = self.wetland.length.next(random);
+            let river_length = builder.carver.river.length();
+            let start_pos = random.next_float() * 0.75;
+            let end_pos = start_pos + random.next_float() * (length / river_length);
+            let start = builder.carver.river.pos(start_pos);
+            let end = builder.carver.river.pos(end_pos);
+            let start = Vec2f::new(unpack_left_float(start), unpack_right_float(start));
+            let end = Vec2f::new(unpack_left_float(end), unpack_right_float(end));
+            builder.wetlands.push(WetlandCarver::new(
+                random.next_int(),
+                start,
+                end,
+                width,
+                self.levels,
+                &self.registry,
+            ));
+        }
+        for child in &mut builder.children {
+            self.generate_wetlands(child, random);
+        }
+    }
+
+    /// `addLake(branch, random, warp)`: with the lake chance, a lake at the branch's start unless it overlaps
+    /// one of the branch's lakes. `warp` is unused, as in Engine.
+    pub fn add_lake(
+        &self,
+        branch: &mut RiverNetworkBuilder,
+        random: &mut LegacyRandom,
+        _warp: &GenWarp,
+    ) {
+        if random.next_float() <= self.lake.chance {
+            let center_x = branch.carver.river.x1;
+            let center_z = branch.carver.river.z1;
+            let lake_size = self.lake.size_min + random.next_float() * self.lake.size_range;
+            if Self::lake_overlaps_other(center_x, center_z, lake_size, &branch.lakes) {
+                return;
+            }
+            branch.lakes.push(LakeCarver::new(
+                Vec2f::new(center_x, center_z),
+                lake_size,
+                1.0,
+                self.lake,
+                &self.registry,
+            ));
+        }
+    }
+
+    /// `lakeOverlaps(lake, size, rivers)`: whether a non-main river's box overlaps the lake's square.
+    pub fn lake_overlaps(lake: Vec2f, size: f32, rivers: &[RiverCarver]) -> bool {
+        rivers
+            .iter()
+            .any(|other| !other.main && other.river.overlaps_circle(lake, size))
+    }
+
+    /// `lakeOverlapsOther(x, z, size, lakes)`.
+    pub fn lake_overlaps_other(x: f32, z: f32, size: f32, lakes: &[LakeCarver]) -> bool {
+        let distance2 = size * size;
+        lakes.iter().any(|other| other.overlaps(x, z, distance2))
+    }
+
+    /// `BaseRiverGenerator.create(x1, z1, x2, z2, config, levels, random)` with this generator's levels and
+    /// registry (Engine's static method draws exactly as `RiverCarver::create`).
+    pub fn create_main(
+        &self,
+        x1: f32,
+        z1: f32,
+        x2: f32,
+        z2: f32,
+        config: RiverConfig,
+        random: &mut LegacyRandom,
+    ) -> RiverCarver {
+        RiverCarver::create(x1, z1, x2, z2, config, self.levels, &self.registry, random)
+    }
+
+    /// `BaseRiverGenerator.createFork(x1, z1, x2, z2, valleyWidth, config, levels, random)` with this
+    /// generator's levels and registry: draws the warp (`RiverWarp.create(0.4)`), then the valley curve.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_fork(
+        &self,
+        x1: f32,
+        z1: f32,
+        x2: f32,
+        z2: f32,
+        valley_size: f32,
+        config: RiverConfig,
+        random: &mut LegacyRandom,
+    ) -> RiverCarver {
+        let river = River::new(x1, z1, x2, z2);
+        let warp = RiverWarp::create(0.4, random);
+        let settings = RiverCarverSettings {
+            connecting: true,
+            fade_in: config.fade,
+            valley_size,
+            valley_curve: RiverCarver::valley_type(random),
+        };
+        RiverCarver::new(river, warp, config, settings, self.levels, &self.registry)
+    }
+}
+
+fn builder_at<'a>(rivers: &'a [RiverNetworkBuilder], path: &[usize]) -> &'a RiverNetworkBuilder {
+    let (&root, rest) = path.split_first().expect("non-empty builder path");
+    rest.iter()
+        .fold(&rivers[root], |builder, &child| &builder.children[child])
+}
+
+fn builder_at_mut<'a>(
+    rivers: &'a mut [RiverNetworkBuilder],
+    path: &[usize],
+) -> &'a mut RiverNetworkBuilder {
+    let (&root, rest) = path.split_first().expect("non-empty builder path");
+    rest.iter().fold(&mut rivers[root], |builder, &child| {
+        &mut builder.children[child]
+    })
+}
+
+/// `Collections.shuffle(list, random)`: from the last index down to 1, swap with `nextInt(i + 1)`.
+fn java_shuffle<T>(values: &mut [T], random: &mut LegacyRandom) {
+    for index in (1..values.len()).rev() {
+        let swap = random
+            .next_int_bound((index + 1) as i32)
+            .expect("positive shuffle bound") as usize;
+        values.swap(index, swap);
     }
 }
 
@@ -3370,6 +3763,329 @@ mod tests {
                     (0x3e80_d2df, 0x3a7e_a30b, false, 0), (0x3e7e_137b, 0, true, 7),
                     (0x3e7b_7aa7, 0, true, 7), (0x3e75_392d, 0, true, 7),
                     (0x3e73_cd30, 0x39a7_a000, false, 6), (0x3f19_999a, 0x3f80_0000, false, 0),
+                ]
+            );
+        }
+    }
+
+    /// Engine 0.3.0's `BaseRiverGenerator` against `BaseRiverGeneratorOracle.java` (in the maintainer's
+    /// `.local/terraforged/oracles/river/`), which runs Engine's class through a subclass with radial roots.
+    mod base_river_generator_oracle {
+        use super::lake_oracle::{Fold, fill_from};
+        use super::network_oracle::FILLS;
+        use super::*;
+        use std::sync::Arc;
+
+        struct TestContinent(fn(f32, f32) -> f32);
+
+        impl ContinentSampler for TestContinent {
+            fn edge_value(&self, x: f32, z: f32) -> f32 {
+                (self.0)(x, z)
+            }
+        }
+
+        const EDGES: [fn(f32, f32) -> f32; 4] = [
+            |_, _| 1.0,
+            |x, z| 1.0 - f64::from(x * x + z * z).sqrt() as f32 / 4000.0,
+            |_, _| f32::NAN,
+            |_, _| 0.0,
+        ];
+
+        /// The oracle's `generateRoots`: radial main rivers, every third one from `createFork`, each with a lake.
+        fn roots(
+            generator: &BaseRiverGenerator<TestContinent>,
+            x: i32,
+            z: i32,
+            random: &mut LegacyRandom,
+            warp: &GenWarp,
+        ) -> Vec<RiverNetworkBuilder> {
+            let mut roots = Vec::new();
+            let start = random.next_float();
+            for i in 0..generator.count {
+                let angle =
+                    start + PI2 * i as f32 / generator.count as f32 + random.next_float() * 0.3;
+                let dx = sin(angle);
+                let dz = cos(angle);
+                let length = 1500.0 + random.next_float() * 2500.0;
+                let (x1, z1) = (x as f32 + dx * 300.0, z as f32 + dz * 300.0);
+                let (x2, z2) = (x as f32 + dx * length, z as f32 + dz * length);
+                let carver = if i % 3 == 2 {
+                    generator.create_fork(x1, z1, x2, z2, 200.0, generator.fork, random)
+                } else {
+                    generator.create_main(x1, z1, x2, z2, generator.main, random)
+                };
+                let mut builder = RiverNetwork::builder(carver);
+                generator.add_lake(&mut builder, random, warp);
+                roots.push(builder);
+            }
+            roots
+        }
+
+        fn settings(variant: i32) -> (WorldSettings, RiverSettings) {
+            let mut world = WorldSettings {
+                seed: 12_345,
+                ..WorldSettings::default()
+            };
+            let mut rivers = RiverSettings::default();
+            match variant {
+                1 => {
+                    world.seed = -987_654_321;
+                    rivers.seed_offset = i32::MAX;
+                    rivers.lakes.chance = 1.0;
+                    rivers.wetlands.chance = 1.0;
+                    rivers.river_count = 3;
+                }
+                2 => {
+                    world.properties.world_height = 384;
+                    world.properties.sea_level = 62;
+                    rivers.lakes.chance = 0.0;
+                    world.control_points.inland = 0.75;
+                }
+                3 => {
+                    rivers.lakes.chance = 0.5;
+                    rivers.wetlands.chance = 0.95;
+                    rivers.river_count = 5;
+                    world.continent.continent_scale = 1000;
+                }
+                _ => {}
+            }
+            (world, rivers)
+        }
+
+        fn generator(
+            variant: i32,
+            edge: fn(f32, f32) -> f32,
+            registry: &Arc<TerrainRegistry>,
+        ) -> BaseRiverGenerator<TestContinent> {
+            let (world, rivers) = settings(variant);
+            // `GeneratorContext`: `Seed((int) world.seed)` and `Levels(world)`.
+            let levels = Levels::new(world.properties.world_height, world.properties.sea_level);
+            BaseRiverGenerator::new(
+                TestContinent(edge),
+                world.seed as i32,
+                &world,
+                &rivers,
+                levels,
+                Arc::clone(registry),
+            )
+        }
+
+        fn mix_range(fold: &mut Fold, range: Range) {
+            fold.f(range.min);
+            fold.f(range.max);
+        }
+
+        fn mix_lake(fold: &mut Fold, lake: &LakeCarver) {
+            for v in [
+                lake.valley,
+                lake.lake_distance2,
+                lake.depth,
+                lake.bank_min,
+                lake.bank_max,
+                lake.center.x,
+                lake.center.y,
+            ] {
+                fold.f(v);
+            }
+        }
+
+        fn mix_network(fold: &mut Fold, network: &RiverNetwork) -> i32 {
+            let carver = &network.river_carver;
+            let river = carver.river;
+            for v in [river.x1, river.z1, river.x2, river.z2] {
+                fold.f(v);
+            }
+            fold.b(carver.main);
+            fold.b(carver._connecting);
+            fold.f(carver.fade);
+            for range in [
+                carver.bed_width,
+                carver.banks_width,
+                carver.valley_width,
+                carver.bed_depth,
+                carver.banks_depth,
+            ] {
+                mix_range(fold, range);
+            }
+            let config = carver.config;
+            fold.mix(config.order);
+            fold.b(config.main);
+            fold.mix(config.bed_width);
+            fold.mix(config.bank_width);
+            fold.f(config.bed_height);
+            fold.f(config.min_bank_height);
+            fold.f(config.max_bank_height);
+            fold.mix(config.length);
+            fold.f(config.length2 as f32);
+            fold.f(config.fade);
+            let warp = carver.warp;
+            fold.b(!warp.enabled);
+            for v in [
+                warp.lower,
+                warp.upper,
+                warp.lower_range,
+                warp.upper_range,
+                warp.frequency,
+                warp.scale,
+            ] {
+                fold.f(v);
+            }
+            fold.mix(warp.seed);
+            fold.mix(network.lakes.len() as i32);
+            for lake in &network.lakes {
+                mix_lake(fold, lake);
+            }
+            fold.mix(network.wetlands.len() as i32);
+            for wetland in &network.wetlands {
+                for v in [
+                    wetland.start.x,
+                    wetland.start.y,
+                    wetland.end.x,
+                    wetland.end.y,
+                    wetland.radius,
+                    wetland.bed,
+                    wetland.banks,
+                    wetland.mound_min,
+                    wetland.mound_max,
+                    wetland.mound_shape.value(100.0, 200.0),
+                ] {
+                    fold.f(v);
+                }
+            }
+            fold.mix(network.children.len() as i32);
+            let mut nodes = 1;
+            for child in &network.children {
+                nodes += mix_network(fold, child);
+            }
+            fold.bounds(network.bounds);
+            nodes
+        }
+
+        #[test]
+        fn generates_networks_like_engine() {
+            let registry = Arc::new(TerrainRegistry::new());
+            let ids = [0x1234_5678, -1, 0x7fff_ffff_0000_0005, 0];
+            let mut fold = Fold(17);
+            let (mut applies, mut networks, mut nodes) = (0, 0, 0);
+            for variant in 0..4 {
+                for edge in EDGES {
+                    let generator = generator(variant, edge, &registry);
+                    fold.mix(generator.count);
+                    fold.mix(generator.continent_scale);
+                    fold.f(generator.min_edge_value);
+                    fold.mix(generator.seed);
+                    for (i, id) in (0..).zip(ids) {
+                        let (x, z) = (200 * i - 300, 150 - 100 * i);
+                        let map = generator.generate_rivers(x, z, id, roots);
+                        fold.mix(map.x());
+                        fold.mix(map.z());
+                        fold.mix(map.networks.len() as i32);
+                        networks += map.networks.len();
+                        for network in &map.networks {
+                            nodes += mix_network(&mut fold, network);
+                        }
+                        for px in 0..=50 {
+                            for pz in 0..=50 {
+                                let px = -4500.0 + 180.0 * px as f32 + x as f32;
+                                let pz = -4500.0 + 180.0 * pz as f32 + z as f32;
+                                for fill in [None, Some(0), Some(1)] {
+                                    let mut cell = fill_from(&FILLS, fill, &registry);
+                                    map.apply(&mut cell, px, pz);
+                                    fold.cell(&cell, &registry);
+                                    applies += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            assert_eq!(
+                (applies, networks, nodes, fold.0),
+                (499_392, 384, 1157, -904_012_376)
+            );
+        }
+
+        #[test]
+        fn extra_lakes_and_overlaps_match_engine() {
+            let registry = Arc::new(TerrainRegistry::new());
+            let generator = generator(0, EDGES[0], &registry);
+            let mut random = LegacyRandom::new(42);
+            let warp = GenWarp::new(42, 3000);
+            let roots = roots(&generator, 30, -40, &mut random, &warp);
+            let carvers: Vec<RiverCarver> = roots
+                .iter()
+                .map(|root| {
+                    let c = &root.carver;
+                    RiverCarver::new(
+                        c.river,
+                        c.warp,
+                        c.config,
+                        RiverCarverSettings::default(),
+                        generator.levels,
+                        &registry,
+                    )
+                })
+                .collect();
+            let mut lakes = Vec::new();
+            generator.generate_additional_lakes(30, -40, &mut random, &roots, &carvers, &mut lakes);
+            let mut fold = Fold(17);
+            fold.mix(lakes.len() as i32);
+            for lake in &lakes {
+                mix_lake(&mut fold, lake);
+            }
+            fold.mix(random.next_int());
+            #[rustfmt::skip]
+            let probes = [
+                [0.0, 0.0, 1000.0, 0.0], [5000.0, 5000.0, 5100.0, 5100.0], [-300.0, -300.0, 300.0, 300.0],
+                [2000.0, -2000.0, 2000.0, 2000.0], [f32::NAN, 0.0, 10.0, 10.0],
+            ];
+            type Generator = BaseRiverGenerator<TestContinent>;
+            for [x1, z1, x2, z2] in probes {
+                let river = River::new(x1, z1, x2, z2);
+                fold.b(Generator::river_overlaps(river, None, &roots));
+                fold.b(Generator::river_overlaps(river, Some(&roots[0]), &roots));
+                fold.b(Generator::lake_overlaps(
+                    Vec2f::new(x1, z1),
+                    150.0,
+                    &carvers,
+                ));
+                fold.b(Generator::lake_overlaps_other(x1, z1, 100.0, &lakes));
+            }
+            assert_eq!((lakes.len(), fold.0), (7, 106_237_297));
+        }
+
+        #[test]
+        fn samples_match_engine() {
+            let registry = Arc::new(TerrainRegistry::new());
+            let generator = generator(0, EDGES[0], &registry);
+            let map = generator.generate_rivers(17, -9, 0x1234_5678, roots);
+            #[rustfmt::skip]
+            let samples = [
+                (17.0, -9.0), (500.0, 0.0), (0.0, 1000.0), (-1500.0, 300.0), (1200.0, -1800.0),
+                (-800.0, -2600.0), (2500.0, 2500.0), (3000.0, -200.0), (-3500.0, -100.0), (100.0, 3200.0),
+            ];
+            let applied = samples.map(|(x, z)| {
+                let mut cell = Cell::new(&registry);
+                cell.value = 0.6;
+                cell.river_mask = 1.0;
+                cell.continent_edge = 0.4;
+                map.apply(&mut cell, x, z);
+                (
+                    cell.value.to_bits(),
+                    cell.river_mask.to_bits(),
+                    cell.erosion_mask,
+                    cell.terrain.id(),
+                )
+            });
+            #[rustfmt::skip]
+            assert_eq!(
+                applied,
+                [
+                    (0x3f17_7bf9, 0x3f79_f47d, false, 0), (0x3e84_105d, 0x3c9c_1260, false, 0),
+                    (0x3e6b_306c, 0x3a0e_9800, true, 5), (0x3f19_999a, 0x3f80_0000, false, 0),
+                    (0x3eb4_0d05, 0x3e92_e3fa, false, 0), (0x3f19_999a, 0x3f80_0000, false, 0),
+                    (0x3f19_999a, 0x3f80_0000, false, 0), (0x3f19_999a, 0x3f80_0000, false, 0),
+                    (0x3f19_999a, 0x3f80_0000, false, 0), (0x3f19_999a, 0x3f80_0000, false, 0),
                 ]
             );
         }
