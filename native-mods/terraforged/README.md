@@ -851,7 +851,7 @@ and returns the tile with that batch unfilled). Engine's builder only makes thes
 called with 0 they panic as Engine throws `ArithmeticException`, and with a negative count, which fills no cell, they
 panic where Engine's filters throw `NullPointerException` on the never-created cells. Its tests replay the
 tile-generator oracle's `b`/`y` lines (Engine's real batched and striped generators on a four-thread `ThreadPools` pool,
-batch counts 1, 2, 3, 7 and 100, regular and zoomed, folding the lookups, an order-free sum of the stage calls and every
+batch counts 1, 2, 3, 7 and 100, zoomed for 3 and 100, folding the lookups, an order-free sum of the stage calls and every
 cell; the cells equal the `g`/`z` lines') and `e` lines (counts 0 and -2), and check that one thread or many give the
 same cells and that a panic keeps its payload. Debug and release builds agree.
 

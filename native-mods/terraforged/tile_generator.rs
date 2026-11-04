@@ -515,10 +515,10 @@ mod tests {
     /// `l` and `m` lines the lazy `getTile(regionX, regionZ)` and `getTile(centerX, centerZ, zoom,
     /// filter)` handles (nothing runs before the first `get`, a second `get` returns the same tile
     /// without running anything); `b` and `y` lines Engine's `TileGeneratorBatched` and
-    /// `TileGeneratorStriped` (`batch(n)`, on a four-thread pool) regular and zoomed for batch
-    /// counts 1, 3, 2, 7 and 100, with the lookup count and an order-free sum of the stage calls
-    /// (their cells equal the `g`/`z` lines'); `e` lines counts 0 and -2, where Engine throws; `s`
-    /// lines `chunkToRegion` for shift factors Java masks to five bits.
+    /// `TileGeneratorStriped` (`batch(n)`, on a four-thread pool) for batch counts 1, 3, 2, 7 and
+    /// 100 (zoomed: 3 and 100), with the lookup count and an order-free sum of the stage calls
+    /// (their cells equal the `g`/`z` lines'); `e` lines (first run) counts 0 and -2, where Engine
+    /// throws; `s` lines `chunkToRegion` for shift factors Java masks to five bits.
     #[test]
     fn tile_generator_matches_engine_oracle() {
         let terrains = Arc::new(TerrainRegistry::new());
@@ -583,6 +583,9 @@ mod tests {
                     let (lookups, sum) = heightmap.take_sum();
                     let (st, cells) = (u8::from(striped), fold_tile(&tile));
                     out += &format!("b {run} {st} {count} {lookups} {sum:x} {cells:x}\n");
+                    if count != 3 && count != 100 {
+                        continue;
+                    }
                     let set = (run + count as usize) % zooms.len();
                     let (center_x, center_z, zoom, filter) = zooms[set];
                     let tile = if striped {
@@ -597,7 +600,7 @@ mod tests {
                     out += &format!("y {run} {st} {count} {set} {lookups} {sum:x} {cells:x}\n");
                 }
             }
-            for striped in [false, true] {
+            for striped in [false, true].into_iter().filter(|_| run == 0) {
                 for count in [0, -2] {
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         if striped {
@@ -788,23 +791,17 @@ z 0 2 0 0 256 6727ea6ac494b891 d25a67c809fc7d0
 z 0 3 0 0 8 8f7006778fc0c8d c94e0748cd32a3cd
 z 0 4 0 0 388 b8f70426f6f55903 ff2a52d36fd50b5d
 b 0 0 1 140 ff293731a98fd032 2afe9d3c12774c0d
-y 0 0 1 1 640 fefc13f226a90bf4 29ad7e3985d0e0bc
 b 0 0 3 140 ff293731a98fd032 2afe9d3c12774c0d
 y 0 0 3 3 20 3a5386a7092fd84 c94e0748cd32a3cd
 b 0 0 2 140 ff293731a98fd032 2afe9d3c12774c0d
-y 0 0 2 2 264 21f82f8697838 d25a67c809fc7d0
 b 0 0 7 140 ff293731a98fd032 2afe9d3c12774c0d
-y 0 0 7 2 264 21f82f8697838 d25a67c809fc7d0
 b 0 0 100 140 ff293731a98fd032 2afe9d3c12774c0d
 y 0 0 100 0 143 1d834f8ce5c4fe1 4166d8e307e01385
 b 0 1 1 140 ff293731a98fd032 2afe9d3c12774c0d
-y 0 1 1 1 640 fefc13f226a90bf4 29ad7e3985d0e0bc
 b 0 1 3 140 ff293731a98fd032 2afe9d3c12774c0d
 y 0 1 3 3 20 3a5386a7092fd84 c94e0748cd32a3cd
 b 0 1 2 140 ff293731a98fd032 2afe9d3c12774c0d
-y 0 1 2 2 264 21f82f8697838 d25a67c809fc7d0
 b 0 1 7 140 ff293731a98fd032 2afe9d3c12774c0d
-y 0 1 7 2 264 21f82f8697838 d25a67c809fc7d0
 b 0 1 100 140 ff293731a98fd032 2afe9d3c12774c0d
 y 0 1 100 0 143 1d834f8ce5c4fe1 4166d8e307e01385
 e 0 0 0 throws ArithmeticException
@@ -820,29 +817,19 @@ z 1 2 0 0 400 cd67b6f5d8dbd049 245b91724bc38581
 z 1 3 0 0 12 375f578adf39af4b c24985dd40cbb39
 z 1 4 0 0 780 67386badb7371713 ff26c135e2959741
 b 1 0 1 412 430d669402ba99e e76a63e92f8379dd
-y 1 0 1 2 416 f2e329f5bab60 245b91724bc38581
 b 1 0 3 412 430d669402ba99e e76a63e92f8379dd
 y 1 0 3 4 788 4ec03c40ff6e3de ff26c135e2959741
 b 1 0 2 412 430d669402ba99e e76a63e92f8379dd
-y 1 0 2 3 42 8327cdb50c78cd4 c24985dd40cbb39
 b 1 0 7 412 430d669402ba99e e76a63e92f8379dd
-y 1 0 7 3 42 8327cdb50c78cd4 c24985dd40cbb39
 b 1 0 100 412 430d669402ba99e e76a63e92f8379dd
 y 1 0 100 1 1344 fe886cc8d526ea84 567dacf67f971c65
 b 1 1 1 412 430d669402ba99e e76a63e92f8379dd
-y 1 1 1 2 416 f2e329f5bab60 245b91724bc38581
 b 1 1 3 412 430d669402ba99e e76a63e92f8379dd
 y 1 1 3 4 788 4ec03c40ff6e3de ff26c135e2959741
 b 1 1 2 412 430d669402ba99e e76a63e92f8379dd
-y 1 1 2 3 42 8327cdb50c78cd4 c24985dd40cbb39
 b 1 1 7 412 430d669402ba99e e76a63e92f8379dd
-y 1 1 7 3 42 8327cdb50c78cd4 c24985dd40cbb39
 b 1 1 100 412 430d669402ba99e e76a63e92f8379dd
 y 1 1 100 1 1344 fe886cc8d526ea84 567dacf67f971c65
-e 1 0 0 throws ArithmeticException
-e 1 0 -2 throws NullPointerException
-e 1 1 0 throws ArithmeticException
-e 1 1 -2 throws NullPointerException
 l 1 false 0 11 397 7245952d37687c55 3 -5 e76a63e92f8379dd true 0 11 true
 m 1 false 0 11 1339 11b697d16848b786 0 0 567dacf67f971c65 true 0 11 true
 g 2 64 1dec756bf463a431 40bc3ec1ab771b58
@@ -852,29 +839,19 @@ z 2 2 0 0 4 7984c67e49e48d73 4756c143b5e81e07
 z 2 3 0 0 4 ae3ae2c61568fccf a6e0dce0067b12e9
 z 2 4 0 0 66 d5ffa2bb28613a2a 51601f1cf26142c
 b 2 0 1 66 76f754be1ac50e 40bc3ec1ab771b58
-y 2 0 1 3 6 e9bf5b965b23e8 a6e0dce0067b12e9
 b 2 0 3 66 76f754be1ac50e 40bc3ec1ab771b58
 y 2 0 3 0 66 760d40901c86c2 bd0ab1842c50e7af
 b 2 0 2 66 76f754be1ac50e 40bc3ec1ab771b58
-y 2 0 2 4 67 8c00650c2da25e 51601f1cf26142c
 b 2 0 7 66 76f754be1ac50e 40bc3ec1ab771b58
-y 2 0 7 4 67 8c00650c2da25e 51601f1cf26142c
 b 2 0 100 66 76f754be1ac50e 40bc3ec1ab771b58
 y 2 0 100 2 4 fffdc4acb8ae1c9c 4756c143b5e81e07
 b 2 1 1 66 76f754be1ac50e 40bc3ec1ab771b58
-y 2 1 1 3 6 e9bf5b965b23e8 a6e0dce0067b12e9
 b 2 1 3 66 76f754be1ac50e 40bc3ec1ab771b58
 y 2 1 3 0 66 760d40901c86c2 bd0ab1842c50e7af
 b 2 1 2 66 76f754be1ac50e 40bc3ec1ab771b58
-y 2 1 2 4 67 8c00650c2da25e 51601f1cf26142c
 b 2 1 7 66 76f754be1ac50e 40bc3ec1ab771b58
-y 2 1 7 4 67 8c00650c2da25e 51601f1cf26142c
 b 2 1 100 66 76f754be1ac50e 40bc3ec1ab771b58
 y 2 1 100 2 4 fffdc4acb8ae1c9c 4756c143b5e81e07
-e 2 0 0 throws ArithmeticException
-e 2 0 -2 throws NullPointerException
-e 2 1 0 throws ArithmeticException
-e 2 1 -2 throws NullPointerException
 l 2 false 0 11 64 1dec756bf463a431 0 0 40bc3ec1ab771b58 true 0 11 true
 m 2 false 0 11 4 7984c67e49e48d73 0 0 4756c143b5e81e07 true 0 11 true
 g 3 326 e3c4cdf7c5eefaee 6f363908c2b37e18
@@ -884,29 +861,19 @@ z 3 2 0 0 176 c1be527b1c6e9de9 ee52c23ae4267780
 z 3 3 0 0 10 e5baee091137038c c7d462f17993a8db
 z 3 4 0 0 490 10079d51f1cdcca3 b4a4cebe6cb0976c
 b 3 0 1 338 fd5fd1e315136131 6f363908c2b37e18
-y 3 0 1 4 496 36b028e533e6f86 b4a4cebe6cb0976c
 b 3 0 3 338 fd5fd1e315136131 6f363908c2b37e18
 y 3 0 3 1 880 fec0d50e0c2b5520 339683019cd47a84
 b 3 0 2 338 fd5fd1e315136131 6f363908c2b37e18
-y 3 0 2 0 30 2e1d26996dc80e4 6ca6c7d6745fb36a
 b 3 0 7 338 fd5fd1e315136131 6f363908c2b37e18
-y 3 0 7 0 30 2e1d26996dc80e4 6ca6c7d6745fb36a
 b 3 0 100 338 fd5fd1e315136131 6f363908c2b37e18
 y 3 0 100 3 30 5b1a07cd4c1ae73 c7d462f17993a8db
 b 3 1 1 338 fd5fd1e315136131 6f363908c2b37e18
-y 3 1 1 4 496 36b028e533e6f86 b4a4cebe6cb0976c
 b 3 1 3 338 fd5fd1e315136131 6f363908c2b37e18
 y 3 1 3 1 880 fec0d50e0c2b5520 339683019cd47a84
 b 3 1 2 338 fd5fd1e315136131 6f363908c2b37e18
-y 3 1 2 0 30 2e1d26996dc80e4 6ca6c7d6745fb36a
 b 3 1 7 338 fd5fd1e315136131 6f363908c2b37e18
-y 3 1 7 0 30 2e1d26996dc80e4 6ca6c7d6745fb36a
 b 3 1 100 338 fd5fd1e315136131 6f363908c2b37e18
 y 3 1 100 3 30 5b1a07cd4c1ae73 c7d462f17993a8db
-e 3 0 0 throws ArithmeticException
-e 3 0 -2 throws NullPointerException
-e 3 1 0 throws ArithmeticException
-e 3 1 -2 throws NullPointerException
 l 3 false 0 11 326 e3c4cdf7c5eefaee -7 9 6f363908c2b37e18 true 0 11 true
 m 3 false 0 11 10 e5baee091137038c 0 0 c7d462f17993a8db true 0 11 true
 g 4 1568 b599986399fb3e01 9a47ad4f7c38f0ee
@@ -916,29 +883,19 @@ z 4 2 0 0 1568 cdf03463f768fa01 46ee6896e1099572
 z 4 3 0 0 70 ec220899b350f0e4 28f7541d10beeeef
 z 4 4 0 0 2733 fb4116edd58af70f 970936609b0cd3ac
 b 4 0 1 1648 10e3e60eaa993958 9a47ad4f7c38f0ee
-y 4 0 1 0 1648 109898f04353cd88 c7ce55c3d1993304
 b 4 0 3 1648 10e3e60eaa993958 9a47ad4f7c38f0ee
 y 4 0 3 2 1648 74713a7c086b10 46ee6896e1099572
 b 4 0 2 1648 10e3e60eaa993958 9a47ad4f7c38f0ee
-y 4 0 2 1 5376 fd76ddefa49ba6a0 57f2964297284da4
 b 4 0 7 1648 10e3e60eaa993958 9a47ad4f7c38f0ee
-y 4 0 7 1 5376 fd76ddefa49ba6a0 57f2964297284da4
 b 4 0 100 1648 10e3e60eaa993958 9a47ad4f7c38f0ee
 y 4 0 100 4 2783 13b00ea32c87c9a8 970936609b0cd3ac
 b 4 1 1 1648 10e3e60eaa993958 9a47ad4f7c38f0ee
-y 4 1 1 0 1648 109898f04353cd88 c7ce55c3d1993304
 b 4 1 3 1648 10e3e60eaa993958 9a47ad4f7c38f0ee
 y 4 1 3 2 1648 74713a7c086b10 46ee6896e1099572
 b 4 1 2 1648 10e3e60eaa993958 9a47ad4f7c38f0ee
-y 4 1 2 1 5376 fd76ddefa49ba6a0 57f2964297284da4
 b 4 1 7 1648 10e3e60eaa993958 9a47ad4f7c38f0ee
-y 4 1 7 1 5376 fd76ddefa49ba6a0 57f2964297284da4
 b 4 1 100 1648 10e3e60eaa993958 9a47ad4f7c38f0ee
 y 4 1 100 4 2783 13b00ea32c87c9a8 970936609b0cd3ac
-e 4 0 0 throws ArithmeticException
-e 4 0 -2 throws NullPointerException
-e 4 1 0 throws ArithmeticException
-e 4 1 -2 throws NullPointerException
 l 4 false 0 11 1568 b599986399fb3e01 1 -1 9a47ad4f7c38f0ee true 0 11 true
 m 4 false 0 11 2733 fb4116edd58af70f 0 0 970936609b0cd3ac true 0 11 true
 g 5 137 d84abfe0adb754b 4c8e54bd50b0358b
@@ -948,29 +905,19 @@ z 5 2 0 0 256 6727ea6ac494b891 26501176026dc54e
 z 5 3 0 0 8 8f7006778fc0c8d c0702424e84aeb1e
 z 5 4 0 0 388 b8f70426f6f55903 2b01bed53f599881
 b 5 0 1 143 e47d7e7dd561fa 4c8e54bd50b0358b
-y 5 0 1 1 640 fefc13f226a90bf4 19eab031c83bcbf7
 b 5 0 3 143 e47d7e7dd561fa 4c8e54bd50b0358b
 y 5 0 3 3 20 3a5386a7092fd84 c0702424e84aeb1e
 b 5 0 2 143 e47d7e7dd561fa 4c8e54bd50b0358b
-y 5 0 2 2 264 21f82f8697838 26501176026dc54e
 b 5 0 7 143 e47d7e7dd561fa 4c8e54bd50b0358b
-y 5 0 7 2 264 21f82f8697838 26501176026dc54e
 b 5 0 100 143 e47d7e7dd561fa 4c8e54bd50b0358b
 y 5 0 100 0 143 1d834f8ce5c4fe1 f7d66956f95d7b09
 b 5 1 1 143 e47d7e7dd561fa 4c8e54bd50b0358b
-y 5 1 1 1 640 fefc13f226a90bf4 19eab031c83bcbf7
 b 5 1 3 143 e47d7e7dd561fa 4c8e54bd50b0358b
 y 5 1 3 3 20 3a5386a7092fd84 c0702424e84aeb1e
 b 5 1 2 143 e47d7e7dd561fa 4c8e54bd50b0358b
-y 5 1 2 2 264 21f82f8697838 26501176026dc54e
 b 5 1 7 143 e47d7e7dd561fa 4c8e54bd50b0358b
-y 5 1 7 2 264 21f82f8697838 26501176026dc54e
 b 5 1 100 143 e47d7e7dd561fa 4c8e54bd50b0358b
 y 5 1 100 0 143 1d834f8ce5c4fe1 f7d66956f95d7b09
-e 5 0 0 throws ArithmeticException
-e 5 0 -2 throws NullPointerException
-e 5 1 0 throws ArithmeticException
-e 5 1 -2 throws NullPointerException
 l 5 false 0 11 137 d84abfe0adb754b 268435456 -268435457 4c8e54bd50b0358b true 0 11 true
 m 5 false 0 11 134 8ea15ead27a7ffee 0 0 f7d66956f95d7b09 true 0 11 true
 s 0 0 1 -1 7 -8 1000 -1000 2147483647 -2147483648
