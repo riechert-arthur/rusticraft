@@ -477,6 +477,130 @@ impl Tile {
         }
     }
 
+    /// `generateArea(heightmap, batcher, batchCount)`: the tile-local chunks (border included) cut
+    /// into `batch_count * batch_count` squares of [`Self::batch_size`] chunks a side, at `d *
+    /// batch_size` on each axis (Java `int` math), clipped to the chunk count: Engine's
+    /// `ChunkBatchTask`s, which [`Self::run_batches`] hands to `workers` threads. `drive` is the
+    /// task's `driveOne`, run once per chunk, z rows then x within a batch. Panics where Java throws
+    /// `ArithmeticException` (a zero `batch_count`). A negative count fills nothing, as Engine's
+    /// default synchronous batcher does (its thread-pool batcher waits 60 s for tasks that never
+    /// come, then throws `BatchTimeoutException`).
+    pub fn generate_area(
+        &mut self,
+        batch_count: i32,
+        workers: usize,
+        drive: impl Fn(&mut BatchChunk) + Sync,
+    ) {
+        let batch_size = Tile::batch_size(batch_count, self.chunk_size);
+        let total = self.chunk_size.total;
+        let starts = Self::batch_starts(batch_count, batch_size, total);
+        let mut batches = Vec::new();
+        for start_z in starts.clone() {
+            let max_z = total.min(start_z.wrapping_add(batch_size));
+            for start_x in starts.clone() {
+                let max_x = total.min(start_x.wrapping_add(batch_size));
+                let chunks = (start_z..max_z).flat_map(|z| (start_x..max_x).map(move |x| (x, z)));
+                batches.push(chunks.collect::<Vec<_>>());
+            }
+        }
+        self.run_batches(batches, workers, drive);
+    }
+
+    /// `generateAreaStriped(heightmap, batcher, sections)`: each row of tile-local chunks cut into
+    /// `sections` stripes of [`Self::batch_size`] chunks (`ChunkStripeBatchTask`s), otherwise as
+    /// [`Self::generate_area`]: the same clipping, threads, `drive` per chunk and panics.
+    pub fn generate_area_striped(
+        &mut self,
+        sections: i32,
+        workers: usize,
+        drive: impl Fn(&mut BatchChunk) + Sync,
+    ) {
+        let section_length = Tile::batch_size(sections, self.chunk_size);
+        let total = self.chunk_size.total;
+        let starts = Self::batch_starts(sections, section_length, total);
+        let mut batches = Vec::new();
+        for z in 0..total {
+            for start_x in starts.clone() {
+                let max_x = total.min(start_x.wrapping_add(section_length));
+                batches.push((start_x..max_x).map(|x| (x, z)).collect());
+            }
+        }
+        self.run_batches(batches, workers, drive);
+    }
+
+    /// The first chunk of each batch along one axis, `d * batch_size` for `d` in `0..count`. A batch
+    /// starting at or past the last chunk (and every batch, when the size is not positive) is
+    /// empty in Engine; those are skipped, so a huge count costs no more than the chunk count.
+    fn batch_starts(count: i32, batch_size: i32, total: i32) -> impl Iterator<Item = i32> + Clone {
+        (0..count)
+            .map(move |d| d.wrapping_mul(batch_size))
+            .take_while(move |&start| batch_size > 0 && start < total)
+    }
+
+    /// Engine's batcher: each batch's chunks are taken from the tile on this thread (`computeChunk`,
+    /// as [`Self::chunk_writer`]), with copies of their cells; up to `workers` scoped threads,
+    /// started for this call (Engine keeps a pool), take the batches in order from a queue whose
+    /// lock is held only to take one, and run `drive` on each chunk; the cells go back once every
+    /// batch is done. Chunks of different batches never share cells, so the result is the
+    /// same for any thread count or schedule. A `drive` that panics re-raises its panic here, once
+    /// the other threads finish (Engine's synchronous batcher rethrows too; its thread-pool batcher
+    /// logs the error and returns the tile without that batch). Panics where the heightmap fills
+    /// do for a chunk outside the chunk array or the backing.
+    fn run_batches(
+        &mut self,
+        batches: Vec<Vec<(i32, i32)>>,
+        workers: usize,
+        drive: impl Fn(&mut BatchChunk) + Sync,
+    ) {
+        let mut batches: Vec<Vec<BatchChunk>> = batches
+            .into_iter()
+            .filter(|batch| !batch.is_empty())
+            .map(|batch| {
+                let chunks = batch.into_iter().map(|(x, z)| {
+                    let chunk = self
+                        .chunk_writer(x, z)
+                        .expect("tile-local chunk inside the chunk array")
+                        .chunk;
+                    let cells = BatchChunk::indices(self, chunk)
+                        .map(|index| self.blocks[index].clone())
+                        .collect();
+                    BatchChunk { chunk, cells }
+                });
+                chunks.collect()
+            })
+            .collect();
+        let run = |batch: &mut Vec<BatchChunk>| batch.iter_mut().for_each(&drive);
+        let workers = workers.min(batches.len());
+        if workers <= 1 {
+            batches.iter_mut().for_each(run);
+        } else {
+            let queue = std::sync::Mutex::new(batches.iter_mut());
+            let take = || queue.lock().unwrap_or_else(|e| e.into_inner()).next();
+            let panic = std::thread::scope(|scope| {
+                let threads: Vec<_> = (0..workers)
+                    .map(|_| scope.spawn(|| std::iter::from_fn(take).for_each(run)))
+                    .collect();
+                // Join every thread (a lazy `find` would leave some unjoined) and keep the first panic.
+                let mut panic = None;
+                for thread in threads {
+                    if let Err(payload) = thread.join() {
+                        panic.get_or_insert(payload);
+                    }
+                }
+                panic
+            });
+            if let Some(panic) = panic {
+                std::panic::resume_unwind(panic);
+            }
+        }
+        for BatchChunk { chunk, cells } in batches.into_iter().flatten() {
+            for (i, cell) in (0..).zip(cells) {
+                let index = chunk.index(self, i & 15, i >> 4);
+                self.blocks[index.expect("checked when the chunk was taken")] = cell;
+            }
+        }
+    }
+
     /// `Tile.getRegionId(regionX, regionZ)`.
     pub fn region_id_for(region_x: i32, region_z: i32) -> i64 {
         pack(region_x, region_z)
@@ -588,6 +712,48 @@ impl GenChunk {
         usize::try_from(tile.block_size.index_of(x, z))
             .ok()
             .filter(|&index| index < tile.blocks.len())
+    }
+}
+
+/// One chunk of a batch (Engine's `ChunkBatchTask`/`ChunkStripeBatchTask` reach it through
+/// `getChunkWriter`): its position and a copy of its 16x16 cells, row by row, which a worker
+/// thread fills while the tile waits; [`Tile::generate_area`] writes them back.
+pub struct BatchChunk {
+    chunk: GenChunk,
+    cells: Vec<Cell>,
+}
+
+impl BatchChunk {
+    /// The chunk's position.
+    pub const fn chunk(&self) -> GenChunk {
+        self.chunk
+    }
+
+    /// [`ChunkWriter::generate`] on the copied cells: every cell, row by row, with its position in
+    /// the chunk and in the world (`blockX + dx`, wrapping like Java's `int`).
+    pub fn generate(&mut self, mut visitor: impl FnMut(&mut Cell, i32, i32, i32, i32)) {
+        let (block_x, block_z) = (self.chunk.block_x, self.chunk.block_z);
+        for (i, cell) in (0..).zip(&mut self.cells) {
+            let (dx, dz) = (i & 15, i >> 4);
+            visitor(
+                cell,
+                dx,
+                dz,
+                block_x.wrapping_add(dx),
+                block_z.wrapping_add(dz),
+            );
+        }
+    }
+
+    /// The backing index of each of the chunk's cells, row by row (`genCell`'s); panics where
+    /// `gen_cell` does.
+    fn indices(tile: &Tile, chunk: GenChunk) -> impl Iterator<Item = usize> + '_ {
+        (0..16).flat_map(move |dz| {
+            (0..16).map(move |dx| {
+                let index = chunk.index(tile, dx, dz);
+                index.expect("chunk cell outside the tile backing")
+            })
+        })
     }
 }
 
