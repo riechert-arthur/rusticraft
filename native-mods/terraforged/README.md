@@ -775,8 +775,9 @@ miss runs the base, river-map, river and climate stages on the cell and caches a
 tiles through one Engine `HeightmapCache` (overlapping tiles, so hits and misses mix, and the river map carried across
 hits), then tiles 0-4 again in fresh tiles, where every block hits. Engine's cache holds the tile's own cell objects, so
 a cell refilled later (by a slot holding an aliasing chunk) also changes the block it was first cached for; the port
-caches snapshots, so such a block reads its first values. The oracle leaves out the repeat that would show it, and a
-capacity large enough that nothing is evicted (Engine evicts per map section, whose count is the processor count).
+caches snapshots, so such a block reads its first values. The oracle leaves out the repeat that would show this, and
+its cache is large enough that nothing is evicted (Engine evicts per map section, and the sections follow the processor
+count).
 
 ## Status: development only
 
