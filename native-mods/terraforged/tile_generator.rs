@@ -318,6 +318,13 @@ where
     }
 }
 
+// Engine forces the factory and runs its tile generators and caches on other threads: they must be shareable.
+const _: fn() = || {
+    fn shareable<T: Send + Sync + 'static>() {}
+    shareable::<WorldGeneratorFactory>();
+    shareable::<TileGenerator<Arc<Heightmap>, Arc<WorldFilters>>>();
+};
+
 impl TileGeneratorBuilder<Arc<Heightmap>, Arc<WorldFilters>> {
     /// `factory(factory)` with a real [`WorldGeneratorFactory`]: Engine's `TileGenerator` takes
     /// `factory.get()`; the tiles' cells start from the factory's registry.
