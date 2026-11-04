@@ -678,8 +678,16 @@ zero as in Engine. Nothing uses it yet (`WorldFilters` and the tile map are not 
 smoothing oracle's 14x14 maps for 14 radius, scaler, level and NaN/signed-zero height cases and prints every cell's
 gradient bits folded together.
 
-Beach detection samples coast gradients eight blocks in each cardinal direction and reclassifies only
-low-edge, low-gradient coast cells with the shared beach terrain identity.
+The beach-detection layer adds Engine's `BeachDetect` filter (`filters.rs`, `BeachDetect`). It turns a coast cell
+(coast, beach, or a terrain delegating to one) whose continent edge is below the beach control point into the world
+registry's own beach terrain when its squared height gradient is below 0.275, the gradient being the height
+differences to the cells 8 blocks east and west and 8 blocks north and south, each divided by 17. A neighbour that is
+absent or outside the map is replaced by the cell itself and takes 8 off that distance; neighbours are read like
+Engine's `Tile.getCellRaw`, as for steepness. Invalid control points fall back to the defaults, as Engine's
+`ControlPoints` does. Nothing uses it yet (`WorldFilters` and the tile map are not ported). Its tests replay
+`BeachDetectOracle.java` in `.local/terraforged/oracles/beach/`, which runs Engine's `BeachDetect.apply` on hashed
+8x8 to 33x33 maps (absent cells, NaN, infinite and signed-zero heights, NaN continent edges, valid and invalid beach
+control points) and prints every cell's terrain id folded together with the cells it turned into beach.
 
 ## Status: development only
 
