@@ -462,7 +462,7 @@ impl FancyContinent {
     }
 }
 
-/// Engine's `FancyContinentGenerator` (`ContinentType.EXPERIMENTAL`): one [`FancyContinent`] at the origin,
+/// Engine's `FancyContinentGenerator` (`ContinentType.FANCY`): one [`FancyContinent`] at the origin,
 /// sampled through three summed domain warps, with a [`RiverCache`] of the maps its [`FancyRiverGenerator`] builds.
 pub struct FancyContinentGenerator {
     frequency: f32,

@@ -138,3 +138,10 @@ file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_biome_type"
 source = "biome_type.rs"
 visibility = "pub"
+
+[[module]]
+id = "continent_api"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_continent_api"
+source = "continent_api.rs"
+visibility = "pub"
