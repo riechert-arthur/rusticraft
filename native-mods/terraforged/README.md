@@ -1180,14 +1180,29 @@ from +0 in order, and scaled by 0.99999) and packs a value's band with `PosUtil.
 0. `Object2FloatCache` keeps the mod's preallocated slots: `put` writes slot `size()`, so putting a key again moves
 it into the slot the next new key also takes, a full cache panics where Java throws, and a missing key reads NaN.
 `SpiralIterator` walks square rings outward in wrapping `int` math, with the mod's quirks (a start radius above the
-maximum repeats one position forever; from a negative one, stepping into ring 0 panics where Java divides by zero). The blender itself is not
-ported yet. Its test replays `TerrainBlendUtilOracle.java` (in `.local/terraforged/oracles/terrain_blend_util/`),
+maximum repeats one position forever; from a negative one, stepping into ring 0 panics where Java divides by zero). Its
+test replays `TerrainBlendUtilOracle.java` (in `.local/terraforged/oracles/terrain_blend_util/`),
 which runs these classes from the jar: `rand` over special and hashed `int`s, 15 weight maps (NaN, infinities,
 signed zeros, subnormals, huge and negative weights, short and long weight arrays) read over 26 noises, a cache
 sequence, and 14 spirals with extreme radii and coordinates, bit for bit.
 
-The concrete terrain blender now reproduces TerraForged's warped nine-cell terrain selection,
-minimum-noise bias, identity-cached terrain sampling, and squared border-weight blending.
+The terrain blender (`terrain_blender.rs`, the mod's `TerrainNoise` and `TerrainBlender` as in the 1.18.2-0.3.1
+jar) is the terrain module of the mod's noise generator. A `TerrainNoise` is a terrain, its weight and its noise; a
+noise whose minimum is below 5/255 (compared as a `double`) is raised by it and clamped to 0..1. `TerrainBlender`
+binds the seed when it is built (cells hashed from `(int) seed + 21491124`, warped by two 3-octave simplex noises
+seeded from `(int) seed + 12678`, `int` math wrapping), warps and scales the point into a grid of jittered cells,
+and picks the nearest cell's terrain from the weight map by the cell's hash. Points close to a cell border blend in
+the nine surrounding cells' noises with squared border weights, each terrain sampled once through the
+`Object2FloatCache` (a NaN there is sampled again, as the jar's `isNaN` test does), and the sum is clamped with
+`NoiseUtil.clamp`. Where Java throws, this port panics: when no cell's squared distance is below `Float.MAX_VALUE`
+(NaN, infinite or huge coordinates leave the closest index at -1) or when the weight map has no terrain for a cell
+(NaN weights). Reseeding the noises (`withSeed`) and the nearest-terrain search come with later layers. Its test
+replays `TerrainBlenderOracle.java` (in `.local/terraforged/oracles/terrain_blender/`), which runs the jar's classes
+with stubs for Minecraft's `Holder` and the mod's codec classes: 15 terrain noises (signed zeros, NaN, negative,
+and values one ulp around the 5/255 bound), then nine blenders (seeds with high bits, `Long.MIN_VALUE`, wrapping
+seed sums, negative and tiny scales, zero, negative and huge jitters, NaN, zero and out-of-range blending, NaN and
+zero weights) over 72 points (negative, huge, infinite and NaN coordinates), each value, closest pair and terrain,
+bit for bit.
 
 ## Status: development only
 
