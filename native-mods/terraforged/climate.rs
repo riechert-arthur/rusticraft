@@ -23,10 +23,14 @@
  */
 
 use super::terraforged::{
-    Module, Source, SourceConfig, SourceKind, clamp, copy_sign, map, pow_int, sin,
+    Module, Source, SourceConfig, SourceKind, clamp, copy_sign, java_max, java_min, map, pow_int,
+    sin,
 };
 
-#[derive(Clone, Copy)]
+/// Engine's `ClimateSettings.RangeValue`: one climate axis (temperature or moisture). `Default` is Engine's
+/// no-argument constructor (scale 7, falloff 1, range 0..1, no bias); Engine's field initializers (falloff 2,
+/// bias -0.1) are always overwritten by its constructors. The serializer's `@Range` limits are not enforced.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ClimateRange {
     pub seed_offset: i32,
     pub scale: i32,
@@ -37,6 +41,7 @@ pub struct ClimateRange {
 }
 
 impl ClimateRange {
+    /// Engine's `RangeValue(scale, falloff, min, max, bias)`.
     pub const fn new(scale: i32, falloff: i32, min: f32, max: f32, bias: f32) -> Self {
         Self {
             seed_offset: 0,
@@ -48,22 +53,27 @@ impl ClimateRange {
         }
     }
 
+    /// `getMin`: the smaller bound clamped to 0..1 (`Math.min` and `NoiseUtil.clamp`, so NaN passes through).
     pub fn min(self) -> f32 {
-        self.min.min(self.max).clamp(0.0, 1.0)
+        clamp(java_min(self.min, self.max), 0.0, 1.0)
     }
 
+    /// `getMax`: the larger bound clamped to `getMin()..1`.
     pub fn max(self) -> f32 {
-        self.min.max(self.max).clamp(self.min(), 1.0)
+        clamp(java_max(self.min, self.max), self.min(), 1.0)
     }
 
+    /// `getBias`: the bias clamped to -1..1.
     pub fn bias(self) -> f32 {
-        self.bias.clamp(-1.0, 1.0)
+        clamp(self.bias, -1.0, 1.0)
     }
 
+    /// `apply(Module)`: `module.bias(getBias() / 2).clamp(getMin(), getMax())`.
     pub fn apply(self, module: Module) -> Module {
+        let (min, max, bias) = (self.min(), self.max(), self.bias() / 2.0);
         module
-            .bias(Module::constant(self.bias() / 2.0))
-            .clamp(Module::constant(self.min()), Module::constant(self.max()))
+            .bias(Module::constant(bias))
+            .clamp(Module::constant(min), Module::constant(max))
     }
 }
 
@@ -73,6 +83,7 @@ impl Default for ClimateRange {
     }
 }
 
+/// Engine's `ClimateSettings.BiomeShape`, with Engine's defaults.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BiomeShape {
     pub biome_size: i32,
@@ -82,6 +93,7 @@ pub struct BiomeShape {
 }
 
 impl BiomeShape {
+    /// Engine's `BiomeShape.DEFAULT_BIOME_SIZE`.
     pub const DEFAULT_BIOME_SIZE: i32 = 225;
 }
 
@@ -96,6 +108,10 @@ impl Default for BiomeShape {
     }
 }
 
+/// Engine's `ClimateSettings.BiomeNoise` (the biome-edge noise), with Engine's defaults. `kind` stands for
+/// Engine's `Source` enum: only its octave noises are ported, and Engine's `SIMPLEX_RIDGE` builds a `Simplex2`
+/// noise (its enum entry points at `Builder::simplex2`), so [`SourceKind::SimplexRidge`] does too here.
+/// Engine's enum has no billow entry.
 #[derive(Clone, Copy)]
 pub struct BiomeNoise {
     pub kind: SourceKind,
@@ -107,12 +123,19 @@ pub struct BiomeNoise {
 }
 
 impl BiomeNoise {
+    /// `build(seed)`: `Source.build(seed, scale, octaves).gain(gain).lacunarity(lacunarity).build(type)
+    /// .bias(-0.5)`. A negative octave count builds no octaves here; Engine throws for it
+    /// (`ArrayIndexOutOfBoundsException` in the noise's bound).
     pub fn build(self, seed: i32) -> Module {
+        let kind = match self.kind {
+            SourceKind::SimplexRidge => SourceKind::Simplex2,
+            kind => kind,
+        };
         Module::source(Source::new(
-            self.kind,
+            kind,
             SourceConfig {
                 seed,
-                octaves: self.octaves as usize,
+                octaves: usize::try_from(self.octaves).unwrap_or(0),
                 gain: self.gain,
                 frequency: 1.0 / self.scale as f32,
                 lacunarity: self.lacunarity,
@@ -136,6 +159,7 @@ impl Default for BiomeNoise {
     }
 }
 
+/// Engine's `ClimateSettings`, with Engine's defaults: what the climate module (a later layer) reads.
 #[derive(Clone, Copy)]
 pub struct ClimateSettings {
     pub temperature: ClimateRange,
@@ -345,6 +369,38 @@ n -2147483648 e3ce1d5b8316cb3b e3ce1d5b8316cb3b 3eafc67c4368463e 5a7e2dd13f84614
 s 3f000000 3f000000 3f1b40fc 3efc4e4a 3ef7a125 3ea0d008 3eeb3385 3f78daa6
 ";
 
+    /// Output of `.local/terraforged/oracles/climate_settings/ClimateSettingsOracle.java` (run.sh) against Engine 0.3.0.
+    const SETTINGS_ORACLE: &str = r"
+d t 0 6 2 0 3f7ae148 3d4ccccd
+d m 0 6 1 0 3f800000 0
+d r 0 7 1 0 3f800000 0
+d s 225 225 8 150 80
+d e SIMPLEX 24 2 3f000000 4029999a 14
+v 0 0:0:3c0a7a26ad651e56 80000000:0:3c0a7a26ad651e56 0:3e4ccccd:190f552be4d33d5f 0:3f000000:f5c5198ef07e7278 0:3f4ccccd:b05453da47ae8505 0:3f800000:4ceaf95ed0ea9b89 0:0:3c0a7a26ad651e56 0:3f800000:4ceaf95ed0ea9b89 0:3f800000:4ceaf95ed0ea9b89 0:0:3c0a7a26ad651e56 0:1:62bbb461bab7e796 0:0:3c0a7a26ad651e56 0:3f800000:4ceaf95ed0ea9b89 0:0:3c0a7a26ad651e56 7fc00000:7fc00000:1322b0c2aba351b2
+v 1 80000000:0:3c0a7a26ad651e56 80000000:80000000:3c0a7a26ad651e56 80000000:3e4ccccd:190f552be4d33d5f 80000000:3f000000:f5c5198ef07e7278 80000000:3f4ccccd:b05453da47ae8505 80000000:3f800000:4ceaf95ed0ea9b89 0:80000000:3c0a7a26ad651e56 80000000:3f800000:4ceaf95ed0ea9b89 80000000:3f800000:4ceaf95ed0ea9b89 0:80000000:3c0a7a26ad651e56 80000000:1:62bbb461bab7e796 0:80000000:3c0a7a26ad651e56 80000000:3f800000:4ceaf95ed0ea9b89 0:80000000:3c0a7a26ad651e56 7fc00000:7fc00000:1322b0c2aba351b2
+v 2 0:3e4ccccd:190f552be4d33d5f 80000000:3e4ccccd:190f552be4d33d5f 3e4ccccd:3e4ccccd:583026dc0a7892f6 3e4ccccd:3f000000:34e5eb3f1623c80f 3e4ccccd:3f4ccccd:ef75258a6d53da9c 3e4ccccd:3f800000:6dfe8280632092dc 0:3e4ccccd:190f552be4d33d5f 3e4ccccd:3f800000:6dfe8280632092dc 3e4ccccd:3f800000:6dfe8280632092dc 0:3e4ccccd:190f552be4d33d5f 1:3e4ccccd:46bb887838e1bb3f 0:3e4ccccd:190f552be4d33d5f 3e4ccccd:3f800000:6dfe8280632092dc 0:3e4ccccd:190f552be4d33d5f 7fc00000:7fc00000:1322b0c2aba351b2
+v 3 0:3f000000:f5c5198ef07e7278 80000000:3f000000:f5c5198ef07e7278 3e4ccccd:3f000000:34e5eb3f1623c80f 3f000000:3f000000:ce99afa58d651e56 3f000000:3f4ccccd:8928e9f0e49530e3 3f000000:3f800000:7b246e6da61e923 0:3f000000:f5c5198ef07e7278 3f000000:3f800000:7b246e6da61e923 3f000000:3f800000:7b246e6da61e923 0:3f000000:f5c5198ef07e7278 1:3f000000:23714cdb448cf058 0:3f000000:f5c5198ef07e7278 3f000000:3f800000:7b246e6da61e923 0:3f000000:f5c5198ef07e7278 7fc00000:7fc00000:1322b0c2aba351b2
+v 4 0:3f4ccccd:b05453da47ae8505 80000000:3f4ccccd:b05453da47ae8505 3e4ccccd:3f4ccccd:ef75258a6d53da9c 3f000000:3f4ccccd:8928e9f0e49530e3 3f4ccccd:3f4ccccd:e19188232a7892f6 3f4ccccd:3f800000:601ae51920454b36 0:3f4ccccd:b05453da47ae8505 3f4ccccd:3f800000:601ae51920454b36 3f4ccccd:3f800000:601ae51920454b36 0:3f4ccccd:b05453da47ae8505 1:3f4ccccd:de0087269bbd02e5 0:3f4ccccd:b05453da47ae8505 3f4ccccd:3f800000:601ae51920454b36 0:3f4ccccd:b05453da47ae8505 7fc00000:7fc00000:1322b0c2aba351b2
+v 5 0:3f800000:4ceaf95ed0ea9b89 80000000:3f800000:4ceaf95ed0ea9b89 3e4ccccd:3f800000:6dfe8280632092dc 3f000000:3f800000:7b246e6da61e923 3f4ccccd:3f800000:601ae51920454b36 3f800000:3f800000:134a60491d651e56 0:3f800000:4ceaf95ed0ea9b89 3f800000:3f800000:134a60491d651e56 3f800000:3f800000:134a60491d651e56 0:3f800000:4ceaf95ed0ea9b89 1:3f800000:5c89e41c9189bb25 0:3f800000:4ceaf95ed0ea9b89 3f800000:3f800000:134a60491d651e56 0:3f800000:4ceaf95ed0ea9b89 7fc00000:7fc00000:1322b0c2aba351b2
+v 6 0:0:3c0a7a26ad651e56 0:80000000:3c0a7a26ad651e56 0:3e4ccccd:190f552be4d33d5f 0:3f000000:f5c5198ef07e7278 0:3f4ccccd:b05453da47ae8505 0:3f800000:4ceaf95ed0ea9b89 0:0:3c0a7a26ad651e56 0:3f800000:4ceaf95ed0ea9b89 0:3f800000:4ceaf95ed0ea9b89 0:0:3c0a7a26ad651e56 0:1:62bbb461bab7e796 0:0:3c0a7a26ad651e56 0:3f800000:4ceaf95ed0ea9b89 0:0:3c0a7a26ad651e56 7fc00000:7fc00000:1322b0c2aba351b2
+v 7 0:3f800000:4ceaf95ed0ea9b89 80000000:3f800000:4ceaf95ed0ea9b89 3e4ccccd:3f800000:6dfe8280632092dc 3f000000:3f800000:7b246e6da61e923 3f4ccccd:3f800000:601ae51920454b36 3f800000:3f800000:134a60491d651e56 0:3f800000:4ceaf95ed0ea9b89 3f800000:3f800000:134a60491d651e56 3f800000:3f800000:134a60491d651e56 0:3f800000:4ceaf95ed0ea9b89 1:3f800000:5c89e41c9189bb25 0:3f800000:4ceaf95ed0ea9b89 3f800000:3f800000:134a60491d651e56 0:3f800000:4ceaf95ed0ea9b89 7fc00000:7fc00000:1322b0c2aba351b2
+v 8 0:3f800000:4ceaf95ed0ea9b89 80000000:3f800000:4ceaf95ed0ea9b89 3e4ccccd:3f800000:6dfe8280632092dc 3f000000:3f800000:7b246e6da61e923 3f4ccccd:3f800000:601ae51920454b36 3f800000:3f800000:134a60491d651e56 0:3f800000:4ceaf95ed0ea9b89 3f800000:3f800000:134a60491d651e56 3f800000:3f800000:134a60491d651e56 0:3f800000:4ceaf95ed0ea9b89 1:3f800000:5c89e41c9189bb25 0:3f800000:4ceaf95ed0ea9b89 3f800000:3f800000:134a60491d651e56 0:3f800000:4ceaf95ed0ea9b89 7fc00000:7fc00000:1322b0c2aba351b2
+v 9 0:0:3c0a7a26ad651e56 0:80000000:3c0a7a26ad651e56 0:3e4ccccd:190f552be4d33d5f 0:3f000000:f5c5198ef07e7278 0:3f4ccccd:b05453da47ae8505 0:3f800000:4ceaf95ed0ea9b89 0:0:3c0a7a26ad651e56 0:3f800000:4ceaf95ed0ea9b89 0:3f800000:4ceaf95ed0ea9b89 0:0:3c0a7a26ad651e56 0:1:62bbb461bab7e796 0:0:3c0a7a26ad651e56 0:3f800000:4ceaf95ed0ea9b89 0:0:3c0a7a26ad651e56 7fc00000:7fc00000:1322b0c2aba351b2
+v 10 0:1:62bbb461bab7e796 80000000:1:62bbb461bab7e796 1:3e4ccccd:46bb887838e1bb3f 1:3f000000:23714cdb448cf058 1:3f4ccccd:de0087269bbd02e5 1:3f800000:5c89e41c9189bb25 0:1:62bbb461bab7e796 1:3f800000:5c89e41c9189bb25 1:3f800000:5c89e41c9189bb25 0:1:62bbb461bab7e796 1:1:9067e7ae0ec66576 0:1:62bbb461bab7e796 1:3f800000:5c89e41c9189bb25 0:1:62bbb461bab7e796 7fc00000:7fc00000:1322b0c2aba351b2
+v 11 0:0:3c0a7a26ad651e56 0:80000000:3c0a7a26ad651e56 0:3e4ccccd:190f552be4d33d5f 0:3f000000:f5c5198ef07e7278 0:3f4ccccd:b05453da47ae8505 0:3f800000:4ceaf95ed0ea9b89 0:0:3c0a7a26ad651e56 0:3f800000:4ceaf95ed0ea9b89 0:3f800000:4ceaf95ed0ea9b89 0:0:3c0a7a26ad651e56 0:1:62bbb461bab7e796 0:0:3c0a7a26ad651e56 0:3f800000:4ceaf95ed0ea9b89 0:0:3c0a7a26ad651e56 7fc00000:7fc00000:1322b0c2aba351b2
+v 12 0:3f800000:4ceaf95ed0ea9b89 80000000:3f800000:4ceaf95ed0ea9b89 3e4ccccd:3f800000:6dfe8280632092dc 3f000000:3f800000:7b246e6da61e923 3f4ccccd:3f800000:601ae51920454b36 3f800000:3f800000:134a60491d651e56 0:3f800000:4ceaf95ed0ea9b89 3f800000:3f800000:134a60491d651e56 3f800000:3f800000:134a60491d651e56 0:3f800000:4ceaf95ed0ea9b89 1:3f800000:5c89e41c9189bb25 0:3f800000:4ceaf95ed0ea9b89 3f800000:3f800000:134a60491d651e56 0:3f800000:4ceaf95ed0ea9b89 7fc00000:7fc00000:1322b0c2aba351b2
+v 13 0:0:3c0a7a26ad651e56 0:80000000:3c0a7a26ad651e56 0:3e4ccccd:190f552be4d33d5f 0:3f000000:f5c5198ef07e7278 0:3f4ccccd:b05453da47ae8505 0:3f800000:4ceaf95ed0ea9b89 0:0:3c0a7a26ad651e56 0:3f800000:4ceaf95ed0ea9b89 0:3f800000:4ceaf95ed0ea9b89 0:0:3c0a7a26ad651e56 0:1:62bbb461bab7e796 0:0:3c0a7a26ad651e56 0:3f800000:4ceaf95ed0ea9b89 0:0:3c0a7a26ad651e56 7fc00000:7fc00000:1322b0c2aba351b2
+v 14 7fc00000:7fc00000:1322b0c2aba351b2 7fc00000:7fc00000:1322b0c2aba351b2 7fc00000:7fc00000:1322b0c2aba351b2 7fc00000:7fc00000:1322b0c2aba351b2 7fc00000:7fc00000:1322b0c2aba351b2 7fc00000:7fc00000:1322b0c2aba351b2 7fc00000:7fc00000:1322b0c2aba351b2 7fc00000:7fc00000:1322b0c2aba351b2 7fc00000:7fc00000:1322b0c2aba351b2 7fc00000:7fc00000:1322b0c2aba351b2 7fc00000:7fc00000:1322b0c2aba351b2 7fc00000:7fc00000:1322b0c2aba351b2 7fc00000:7fc00000:1322b0c2aba351b2 7fc00000:7fc00000:1322b0c2aba351b2 7fc00000:7fc00000:1322b0c2aba351b2
+e SIMPLEX 55649b87ccb12fdf fe661d342297ea18 5c2e9112ac0f77b0 1350cad08192e8fd b0518f8e4dbc0c4f 65c963e9b8e7b27 a8555fd4dbc0c4f d0c5fadaaad9371b 21c3def6d7b14b86 26a9e5811d7540c7 151341d070dc1366 38ca48e0a56a9bf5 b0518f8e4dbc0c4f 4d971fbe69f43174 a8555fd4dbc0c4f 28d165df9426f631 c29985eb99562ae1 a2edcb8ca832df88 6855b0fb8655b3e9 e1a27f3966cedcf2 b0518f8e4dbc0c4f 9a17b13762d40baf a8555fd4dbc0c4f 932c8b6c2e73892 781716a7624dcc6c 7ade538b115cc6c9 2e3e984e3cacb0a1 35e0bf104e0a1777 b0518f8e4dbc0c4f 9159f4e308fbc82f a8555fd4dbc0c4f 8318d409310dd7db
+e SIMPLEX2 92f0486baf3d621a 1bf5e148a85fab13 ebbd086d0c62ed3c fe06b74431144600 b0518f8e4dbc0c4f 64d71c2e63903507 a8555fd4dbc0c4f 23047e40621dcc1a 97cc657b5fd2f8d fc8a3e653dc84ea4 cb033f6d51d0db37 deb6f8f0fb7ccd52 b0518f8e4dbc0c4f ab4f117336df2ce5 a8555fd4dbc0c4f 25832cf8842291fd df9117d8fc5ad1ae 261d0122f2b982b 15baecc5e5cc477b cc057d2604e6e82e b0518f8e4dbc0c4f 21e69a33c8b72d79 a8555fd4dbc0c4f b98d0887c79af4cc aaf91200c46d4cab cac409368a1837d6 899abd049a70e6d7 64141deb6522f61f b0518f8e4dbc0c4f 99b539accb071832 a8555fd4dbc0c4f 3dc41d613e483841
+e SIMPLEX_RIDGE 92f0486baf3d621a 1bf5e148a85fab13 ebbd086d0c62ed3c fe06b74431144600 b0518f8e4dbc0c4f 64d71c2e63903507 a8555fd4dbc0c4f 23047e40621dcc1a 97cc657b5fd2f8d fc8a3e653dc84ea4 cb033f6d51d0db37 deb6f8f0fb7ccd52 b0518f8e4dbc0c4f ab4f117336df2ce5 a8555fd4dbc0c4f 25832cf8842291fd df9117d8fc5ad1ae 261d0122f2b982b 15baecc5e5cc477b cc057d2604e6e82e b0518f8e4dbc0c4f 21e69a33c8b72d79 a8555fd4dbc0c4f b98d0887c79af4cc aaf91200c46d4cab cac409368a1837d6 899abd049a70e6d7 64141deb6522f61f b0518f8e4dbc0c4f 99b539accb071832 a8555fd4dbc0c4f 3dc41d613e483841
+e PERLIN b7f2446c18481dae b84e7a2b6fb73c7d ecfd7a1efad0c84f a8555fd4dbc0c4f a8555fd4dbc0c4f 33609da20cfc0c4f a8555fd4dbc0c4f 532fa7dd70d52b3f faa23c51285bb967 c849ed4e0a930b97 497623d9742bd3bc a8555fd4dbc0c4f a8555fd4dbc0c4f 7cd6a932213c0c4f a8555fd4dbc0c4f 62be1b09e1b856ef 1980a6b834a09eda b58a54ba19e2600c 7ce030b54399977d a8555fd4dbc0c4f a8555fd4dbc0c4f 1023a03ac1fc0c4f a8555fd4dbc0c4f 9458668aaee46d25 faa23c51285bb967 c849ed4e0a930b97 497623d9742bd3bc a8555fd4dbc0c4f a8555fd4dbc0c4f 7cd6a932213c0c4f a8555fd4dbc0c4f 62be1b09e1b856ef
+e PERLIN2 82258e0dde580c7f 815f29cf3e08510b 346b1169d1603a a8555fd4dbc0c4f a8555fd4dbc0c4f 92bf751b20bc0c4f a8555fd4dbc0c4f a066b75436100e9 f42cb392ec94312b 5d1cd674aa0495be f3d684cb7df99a25 a8555fd4dbc0c4f a8555fd4dbc0c4f 76ad6c8fc7fc0c4f a8555fd4dbc0c4f ef76bbc826feba4f 2b9bf3b231d0ee9f 419d80f897c48359 11d8e3aac622eddc a8555fd4dbc0c4f a8555fd4dbc0c4f 2811a5af147c0c4f a8555fd4dbc0c4f 2f091cf03ad30bc7 32ad7bfb71eac173 cee9db99f2a1ac76 8b570112b7d16cfb a8555fd4dbc0c4f a8555fd4dbc0c4f f951fb40a7fc0c4f a8555fd4dbc0c4f 4d0ccdf1d490a861
+e RIDGE e8121f1fc52743c6 aaa5239a05d98a2b a65b167ac878a285 a8555fd4dbc0c4f a8555fd4dbc0c4f 8c135cf3326649eb a8555fd4dbc0c4f 36bfb7c81f0db448 5385267355591ae8 249c21607bc07030 d8c96994dc64dc4f a8555fd4dbc0c4f a8555fd4dbc0c4f 7f2e0da55ee02698 a8555fd4dbc0c4f 6057d597657e7d9d fba7d3d9129a2073 535cd356f94b5b5a 94a85b3b9e98751f a8555fd4dbc0c4f a8555fd4dbc0c4f 58cbe454f6c013ae a8555fd4dbc0c4f c761da2aa463afb2 5385267355591ae8 249c21607bc07030 d8c96994dc64dc4f a8555fd4dbc0c4f a8555fd4dbc0c4f 7f2e0da55ee02698 a8555fd4dbc0c4f 6057d597657e7d9d
+e CUBIC acb77117056b46ed 459f7e336ccb6bc5 9f1400aae9db1433 d84379bbcdcb07a1 e3e2ae29fe6c0c4f 7c1d728d8c975406 ea08776ed898cbbe 4e4d891df7a221ed 5acc26681f8e6d1f 359c8e57359352a6 79ae991d26cfe779 67c556caf1ce15bd e3e2ae29fe6c0c4f 6985ee56fc28c219 8ed5e0b6be64c76d be5d23c0ecc5a657 d3db56a1a5c9a20f 40a492fd8ac5ff75 92e8c33bc4419fbd 77a03ff93194bb7d e3e2ae29fe6c0c4f 8ef168908d974296 9f36ac47b9124093 dfd501599d9f75fd 1536edcd5d40ed4d 84ecb84b1a142f4f f13604bf1151da8e d28650050a4f9908 e3e2ae29fe6c0c4f 96a6ab26f58d48bb 35fb37fec91cd6ed fa2c6bc21ba1454d
+x 0 bdd59d54 3e314904 bea34c20 be89fdf4
+";
+
     const V: [f32; 41] = [
         0.0,
         -0.0,
@@ -400,14 +456,18 @@ s 3f000000 3f000000 3f1b40fc 3efc4e4a 3ef7a125 3ea0d008 3eeb3385 3f78daa6
         f.wrapping_mul(31).wrapping_add(i64::from(bits as i32))
     }
 
-    fn all(module: &Module) -> String {
+    fn hash(module: &Module) -> i64 {
         let mut f = fold(fold(17, module.min_value()), module.max_value());
         for x in V {
             for y in V {
                 f = fold(f, module.value(x, y));
             }
         }
-        format!("{:x}", f as u64)
+        f
+    }
+
+    fn all(module: &Module) -> String {
+        format!("{:x}", hash(module) as u64)
     }
 
     /// The oracle's identity lambda, which reports the `Noise` defaults 0..1.
@@ -499,67 +559,148 @@ s 3f000000 3f000000 3f1b40fc 3efc4e4a 3ef7a125 3ea0d008 3eeb3385 3f78daa6
         }
     }
 
-    #[test]
-    fn climate_settings_match_engine_0_3_0() {
-        let settings = ClimateSettings::default();
-        assert_eq!(
-            (
-                settings.temperature.seed_offset,
-                settings.temperature.scale,
-                settings.temperature.falloff,
-                settings.temperature.min.to_bits(),
-                settings.temperature.max.to_bits(),
-                settings.temperature.bias.to_bits(),
-            ),
-            (0, 6, 2, 0x00000000, 0x3f7ae148, 0x3d4ccccd)
-        );
-        assert_eq!(
-            (
-                settings.moisture.seed_offset,
-                settings.moisture.scale,
-                settings.moisture.falloff,
-                settings.moisture.min.to_bits(),
-                settings.moisture.max.to_bits(),
-                settings.moisture.bias.to_bits(),
-            ),
-            (0, 6, 1, 0x00000000, 0x3f800000, 0x00000000)
-        );
-        assert_eq!(settings.biome_shape, BiomeShape::default());
+    /// `Integer.toHexString(Float.floatToIntBits(value))` (NaNs canonical), as the oracle prints it.
+    fn hex(value: f32) -> String {
+        let bits = if value.is_nan() {
+            0x7fc0_0000
+        } else {
+            value.to_bits()
+        };
+        format!("{bits:x}")
+    }
+
+    fn range_line(tag: &str, range: ClimateRange) -> String {
+        format!(
+            "d {tag} {} {} {} {} {} {}",
+            range.seed_offset,
+            range.scale,
+            range.falloff,
+            hex(range.min),
+            hex(range.max),
+            hex(range.bias)
+        )
     }
 
     #[test]
-    fn climate_range_and_edge_noise_match_engine_0_3_0() {
-        let range = ClimateRange {
-            min: 0.8,
-            max: 0.2,
-            bias: 2.0,
-            ..ClimateRange::default()
-        };
-        assert_eq!(
-            bits([range.min(), range.max(), range.bias()]),
-            [0x3e4ccccd, 0x3f4ccccd, 0x3f800000]
-        );
-        assert_eq!(
-            range
-                .apply(Module::constant(0.25))
-                .value(0.0, 0.0)
-                .to_bits(),
-            0x3f400000
-        );
-
+    fn climate_settings_match_engine_oracle() {
+        let mut out = Vec::new();
+        let settings = ClimateSettings::default();
+        out.push(range_line("t", settings.temperature));
+        out.push(range_line("m", settings.moisture));
+        out.push(range_line("r", ClimateRange::default()));
+        let shape = settings.biome_shape;
+        out.push(format!(
+            "d s {} {} {} {} {}",
+            BiomeShape::DEFAULT_BIOME_SIZE,
+            shape.biome_size,
+            shape.macro_noise_size,
+            shape.biome_warp_scale,
+            shape.biome_warp_strength
+        ));
+        let edge = settings.biome_edge_shape;
+        assert!(matches!(edge.kind, SourceKind::Simplex));
+        out.push(format!(
+            "d e SIMPLEX {} {} {} {} {}",
+            edge.scale,
+            edge.octaves,
+            hex(edge.gain),
+            hex(edge.lacunarity),
+            edge.strength
+        ));
+        let nan = f32::NAN;
+        let tiny = f32::from_bits(1);
+        let edges = [
+            0.0,
+            -0.0,
+            0.2,
+            0.5,
+            0.8,
+            1.0,
+            -0.5,
+            1.5,
+            2.0,
+            -2.0,
+            tiny,
+            -tiny,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            nan,
+        ];
+        for (i, min) in edges.into_iter().enumerate() {
+            let cells = edges.map(|max| {
+                let mut range = ClimateRange::new(7, 1, min, max, 0.0);
+                let mut f = 17_i64;
+                for bias in edges {
+                    range.bias = bias;
+                    f = fold(f, range.bias());
+                    f = f.wrapping_mul(31).wrapping_add(hash(&range.apply(id())));
+                }
+                format!("{}:{}:{:x}", hex(range.min()), hex(range.max()), f as u64)
+            });
+            out.push(row(format!("v {i}"), cells));
+        }
+        let kinds = [
+            ("SIMPLEX", SourceKind::Simplex),
+            ("SIMPLEX2", SourceKind::Simplex2),
+            ("SIMPLEX_RIDGE", SourceKind::SimplexRidge),
+            ("PERLIN", SourceKind::Perlin),
+            ("PERLIN2", SourceKind::Perlin2),
+            ("RIDGE", SourceKind::Ridge),
+            ("CUBIC", SourceKind::Cubic),
+        ];
+        // scale, octaves, gain, lacunarity
+        let configs = [
+            (24, 2, 0.5, 2.65),
+            (1, 1, 0.5, 2.0),
+            (500, 5, 5.5, 10.5),
+            (7, 3, 0.0, 0.0),
+            (0, 2, 0.5, 2.65),
+            (-3, 4, -0.7, -1.5),
+            (24, 0, 0.5, 2.65),
+            (13, 8, 0.9, 1.3),
+        ];
+        for (name, kind) in kinds {
+            let hashes = [42, 0, -1, i32::MIN].into_iter().flat_map(|seed| {
+                configs.map(|(scale, octaves, gain, lacunarity)| {
+                    let noise = BiomeNoise {
+                        kind,
+                        scale,
+                        octaves,
+                        gain,
+                        lacunarity,
+                        ..BiomeNoise::default()
+                    };
+                    all(&noise.build(seed))
+                })
+            });
+            out.push(row(format!("e {name}"), hashes));
+        }
         let edge = BiomeNoise::default().build(42);
-        assert_eq!(
-            bits(
-                [
-                    (0.0, 0.0),
-                    (1.0, 2.0),
-                    (24.0, 48.0),
-                    (-10.0, 7.0),
-                    (1000.0, -300.0)
-                ]
-                .map(|(x, y)| edge.value(x, y))
-            ),
-            [0x00000000, 0xbdd59d54, 0x3e314904, 0xbea34c20, 0xbe89fdf4]
-        );
+        let points = [
+            (0.0, 0.0),
+            (1.0, 2.0),
+            (24.0, 48.0),
+            (-10.0, 7.0),
+            (1000.0, -300.0),
+        ];
+        out.push(row("x".into(), points.map(|(x, y)| hex(edge.value(x, y)))));
+        let expected: Vec<&str> = SETTINGS_ORACLE.lines().skip(1).collect();
+        assert_eq!(out.len(), expected.len());
+        for (line, expected) in out.iter().zip(expected) {
+            assert_eq!(line, expected);
+        }
+    }
+
+    /// Engine throws for a negative octave count; the port builds no octaves (the zero-octave noise).
+    #[test]
+    fn negative_biome_noise_octaves_build_no_octaves() {
+        let noise = |octaves| BiomeNoise {
+            octaves,
+            ..BiomeNoise::default()
+        };
+        let (none, negative) = (noise(0).build(42), noise(-1).build(42));
+        for (x, y) in [(0.0, 0.0), (5.0, -3.0)] {
+            assert_eq!(hex(negative.value(x, y)), hex(none.value(x, y)));
+        }
     }
 }
