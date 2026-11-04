@@ -488,6 +488,7 @@ fn cell_vector(seed: i32, x: i32, y: i32) -> [f32; 2] {
     CELL_2D[(hash_2d(seed, x, y) & 255) as usize]
 }
 
+/// Engine's `Ridge.Mode`: how far `Ridge.Noise` lerps from the erosion value back to the source sample.
 #[derive(Clone, Copy)]
 pub enum ErosionMode {
     Constant,
@@ -505,6 +506,8 @@ impl ErosionMode {
     }
 }
 
+/// Engine's erosion `Ridge` (`com.terraforged.engine.module.Ridge`, spec name `Valley`), not the `RidgeNoise` source:
+/// the distance to the nearest segment from a jittered cell point to its lowest-sampled neighbour, over a few octaves.
 #[derive(Clone, Copy)]
 pub struct ErosionRidge {
     seed: i32,
@@ -518,10 +521,13 @@ pub struct ErosionRidge {
 }
 
 impl ErosionRidge {
+    /// `new Ridge(seed, strength, gridSize, blendMode)`: one octave.
     pub fn new(seed: i32, strength: f32, grid_size: f32, blend_mode: ErosionMode) -> Self {
         Self::with_octaves(seed, 1, strength, grid_size, blend_mode)
     }
 
+    /// `new Ridge(seed, octaves, strength, gridSize, blendMode)`: an amplitude of `1 / (octaves + 1)` (the `int` sum
+    /// wraps), a lacunarity of 2.25 and a distance fall-off of 0.75.
     pub fn with_octaves(
         seed: i32,
         octaves: i32,
@@ -541,6 +547,7 @@ impl ErosionRidge {
         )
     }
 
+    /// Engine's full `Ridge` constructor.
     #[allow(clippy::too_many_arguments)]
     pub fn full(
         seed: i32,
@@ -564,10 +571,12 @@ impl ErosionRidge {
         }
     }
 
+    /// `Ridge.wrap(source)`.
     pub fn wrap(self, source: Module) -> Module {
         Module::erosion_ridge(self, source)
     }
 
+    /// `Ridge.getValue(x, y, source)`: the source sample, then the erosion, blended by the mode.
     pub fn value(self, x: f32, y: f32, source: &Module) -> f32 {
         let mut cache = [0.0; 25];
         let value = source.value(x, y);
@@ -579,6 +588,7 @@ impl ErosionRidge {
         )
     }
 
+    /// `Ridge.getErosionValue`: the octaves' gain-weighted mean (NaN for zero or negative octaves).
     pub fn erosion_value(self, x: f32, y: f32, source: &Module) -> f32 {
         self.erosion_value_with_cache(x, y, source, &mut [0.0; 25])
     }

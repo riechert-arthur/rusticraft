@@ -249,13 +249,16 @@ not the `RidgeNoise` source) and its `Ridge.Noise` module (`ErosionRidge::wrap`,
 octave it finds, in each of the 3×3 cells around the point (`NoiseUtil.cell`'s jittered feature points at the octave's
 grid size), the segment from that cell's point to the lowest-sampled point among its own 3×3 neighbours, and takes the
 distance to the nearest such segment over the grid size, clamped to 0..1. Each of an octave's 25 distinct candidate
-points is sampled once. Octaves start at the grid size with a gain of 1; each later one multiplies the gain by
+points is sampled once (a sample of exactly -1, the cache's empty marker, is
+sampled again). Octaves start at the grid size with a gain of 1; each later one multiplies the gain by
 `amplitude`, the grid size by `distanceFallOff` and the coordinates by `lacunarity`, and the weighted sum is divided by
 the summed gains (so zero or negative octaves give NaN, as in Engine). The module then lerps from that erosion to the
 source sample by `1 - strength` (`CONSTANT`), `1 - strength * value` (`INPUT_LINEAR`) or `1 - strength * erosion`
 (`OUTPUT_LINEAR`). The short constructors default to an amplitude of `1 / (octaves + 1)`, a lacunarity of 2.25 and a
 fall-off of 0.75. Like every Engine `Noise` it reports 0..1, whatever its output. Its tests check raw bits against a
-Java oracle.
+Java oracle over a grid of positive, negative and large coordinates and at huge, NaN and infinite points, for all
+three modes, a source sampling -1 or NaN, zero and negative octaves, negative, zero and tiny grid sizes, and the
+`int` wrap of `octaves + 1`.
 
 ## Status: development only
 
