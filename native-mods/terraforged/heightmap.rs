@@ -579,8 +579,10 @@ mod tests {
         assert_eq!((count, fold.0), (7_932, 1_547_846_148));
     }
 
+    /// A miss runs the base, river and climate stages in that order and reuses the caller's matching map; a hit
+    /// runs no stage and returns the caller's map.
     #[test]
-    fn contextual_heightmap_cache_matches_engine_0_3_0() {
+    fn contextual_heightmap_cache_runs_stages_once() {
         let terrains = Arc::new(TerrainRegistry::new());
         let cache = HeightmapCache::with_capacity(Levels::new(256, 63), Arc::clone(&terrains), 16);
         let map = Arc::new(Rivermap::new(17, -9, Vec::new(), GenWarp::direct()));
@@ -624,5 +626,86 @@ mod tests {
         assert!(Arc::ptr_eq(&map, reused.as_ref().unwrap()));
         assert_eq!(cached.river_mask.to_bits(), 0x3e800000);
         assert_eq!(cached.temperature.to_bits(), 0x3f400000);
+    }
+
+    /// Engine 0.3.0's `HeightmapCache.generate` mixed with `get` against `HeightmapGenerateOracle.java` (in the
+    /// maintainer's `.local/terraforged/oracles/heightmap/`), with the heightmap's stages replaced by the same fills
+    /// on both sides and a continent whose `getRivermap` makes a new, counted map: 600 calls over 120 blocks, caller
+    /// cells pre-filled with markers that a miss keeps and a hit's `copyFrom` overwrites (or, for the terrain
+    /// region center, keeps), the current map dropped every 50 calls.
+    #[test]
+    fn contextual_heightmap_cache_matches_engine() {
+        use std::cell::RefCell;
+        let registry = Arc::new(TerrainRegistry::new());
+        let terrains = [3, 4, 8, 0].map(|id| registry.get_by_id(id));
+        let fold = RefCell::new(Fold(17));
+        let mix = |v: i32| fold.borrow_mut().mix(v);
+        let lookups = std::cell::Cell::new(0);
+        let base = |cell: &mut Cell, x: f32, z: f32| {
+            mix(1);
+            let k = (x.to_bits() as i32)
+                .wrapping_mul(31)
+                .wrapping_add(z.to_bits() as i32);
+            cell.terrain = terrains[k.rem_euclid(4) as usize].clone();
+            cell.value = x * 0.25 + z;
+            cell.moisture += x;
+            cell.continent_x = k.rem_euclid(3);
+            cell.continent_z = (k >> 2).rem_euclid(2);
+        };
+        let rivers = |cell: &mut Cell, _: f32, _: f32, map: &Rivermap| {
+            mix(2);
+            cell.river_mask = (map.x() * 10 + map.z()) as f32 + cell.value;
+        };
+        let climate = |cell: &mut Cell, _: f32, z: f32| {
+            mix(3);
+            cell.temperature = z - cell.river_mask;
+        };
+        let lookup = |x: i32, z: i32| {
+            lookups.set(lookups.get() + 1);
+            mix(1000 + lookups.get());
+            Arc::new(Rivermap::new(x, z, Vec::new(), GenWarp::direct()))
+        };
+        let cache =
+            HeightmapCache::with_capacity(Levels::new(256, 63), Arc::clone(&registry), 4096);
+        let mut current: Option<Arc<Rivermap>> = None;
+        for i in 0..600_i32 {
+            let p = (i * 37 + (i / 120) * 11).rem_euclid(120);
+            let (x, z) = ((p % 12) * 13 - 70, (p / 12) * -29 + 100);
+            if i % 7 == 3 {
+                let cell = cache.get(x, z, |cell, x, z| {
+                    mix(4);
+                    base(cell, x, z);
+                    let map = Rivermap::new(
+                        cell.continent_x,
+                        cell.continent_z,
+                        Vec::new(),
+                        GenWarp::direct(),
+                    );
+                    rivers(cell, x, z, &map);
+                    climate(cell, x, z);
+                });
+                fold.borrow_mut().cell(&cell, &registry);
+            } else {
+                let mut cell = Cell::new(&registry);
+                cell.erosion = i as f32 * 0.5;
+                cell.moisture = i as f32;
+                cell.terrain_region_center = 0x1234_5678_9abc_i64.wrapping_mul(i64::from(i));
+                let before = current.clone();
+                current = cache.generate(&mut cell, x, z, current, base, lookup, rivers, climate);
+                mix(current.as_ref().map_or(-1, |map| map.x()));
+                mix(current.as_ref().map_or(-1, |map| map.z()));
+                // Java's `current == before`: the same map, or both null.
+                let same = match (&current, &before) {
+                    (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                    (a, b) => a.is_none() && b.is_none(),
+                };
+                mix(i32::from(same));
+                fold.borrow_mut().cell(&cell, &registry);
+            }
+            if i % 50 == 49 {
+                current = None;
+            }
+        }
+        assert_eq!((lookups.get(), fold.into_inner().0), (72, -383_835_515));
     }
 }
