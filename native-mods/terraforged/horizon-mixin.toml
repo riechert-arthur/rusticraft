@@ -47,3 +47,10 @@ file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_provider"
 source = "provider.rs"
 visibility = "pub"
+
+[[module]]
+id = "blend"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_blend"
+source = "blend.rs"
+visibility = "pub"

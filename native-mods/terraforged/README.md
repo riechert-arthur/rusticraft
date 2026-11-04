@@ -351,9 +351,23 @@ configurations (Engine's defaults; a seed offset, zero and NaN weights, scaled l
 the seed cursor, registered populators, variant and name lookups, both shuffled lists with samples on a grid, and the
 registry's composites; the oracle lives outside Git, in `.local/terraforged/oracles/provider/`.
 
+The heightmap-blending layer adds Engine's `Blender`, `ContinentLerper2` and `ContinentLerper3` (`blend.rs`), the
+three populators Heightmap chains into its root: continent-edge lerps from deep to shallow ocean to coast, and from
+those oceans to land, where a mountain-shape module blends region terrain with mountain chains. Below a range's lower
+bound only the lower populator applies and above its upper bound only the upper one (both bounds belong to the blend);
+inside it both apply to the same cell in turn and `value` is lerped (`ContinentLerper2` linearly by default,
+`ContinentLerper3` with Curve3, `Blender` always linearly). `Blender` keeps the lower populator's terrain while its
+select is below the midpoint the split sets; the lerpers leave the terrain the last populator wrote. NaN selects fall
+through to the blend, as in Java. A `Blender` controlled by a populator reads it as Engine's `getValue` does, on a fresh
+cell of the world's registry; its tag threshold is stored and, as in Engine, never read. Nothing wires them into world
+generation yet. Their tests check every cell field and `getValue` at each boundary, one ulp either side, signed zeros,
+NaN and infinities, degenerate and reversed ranges, populators that read the cell, and Heightmap's root chain over a
+grid, against a Java oracle running Engine's classes on Engine cells; the oracle lives outside Git, in
+`.local/terraforged/oracles/blend/`.
+
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator and its standard terrain provider. They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider and its heightmap blenders. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
