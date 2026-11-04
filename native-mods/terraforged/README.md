@@ -485,12 +485,22 @@ four rivers (zero-length and NaN among them), for degenerate configs (wrapping w
 fades), plus fork configs and random draws, against a Java oracle running Engine's class, `RiverCarverOracle.java`
 in `.local/terraforged/oracles/river/`.
 
-The lake layer adds circular beds, depth blending, shoreline valleys, bank-height interpolation,
-river-mask shaping, overlap checks and the float bounds accumulator used by river networks.
+The lake layer adds Engine's `Lake` (`LakeCarver` in `river.rs`, since `Lake` is the settings struct) and
+`Boundsf`. A lake has a bed of radius `radius * multiplier` inside a valley of radius `275 * multiplier`. In the
+valley, a cell at or above the bank height (the config's bank range, interpolated by the cell's own value) is lowered
+toward it and its `riverMask` lowered; in the bed, `value` is capped at the bank height, lowered toward the lake
+depth and tagged with the world registry's `lake` terrain. `recordBounds` adds the valley's square widened by 20% to
+a `Boundsf.Builder`, whose maxima start at `Float.MIN_VALUE` as in Engine, and `overlaps` tests a point against the
+squared lake radius plus a margin. Engine's `TerrainPopulator` base is not ported, as for the river carver. Nothing
+uses lakes yet: the river networks are not ported. Its tests fold every cell field over 561600 applies of fresh and
+filled cells (NaN, infinite and -0 values and masks) at points inside, on the edge of and outside 30 lakes (zero,
+negative, NaN and infinite sizes), for eight lake configs (wrapping `int` settings, NaN and infinite heights) and three
+`Levels` (TerraForged's swapped `Levels(63, 255)` among them), plus bounds built from NaN, -0 and infinite records,
+against a Java oracle running Engine's classes, `LakeOracle.java` in `.local/terraforged/oracles/river/`.
 
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry and its river carver. They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver and its lakes. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
