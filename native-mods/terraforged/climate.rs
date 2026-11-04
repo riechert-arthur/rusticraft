@@ -22,9 +22,18 @@
  * SOFTWARE.
  */
 
-use super::terraforged::{
-    Module, Source, SourceConfig, SourceKind, clamp, copy_sign, java_max, java_min, map, pow_int,
-    sin,
+use std::sync::Arc;
+
+use super::{
+    terraforged::{
+        CellFunction, DistanceFunction, Domain, EdgeFunction, Module, Source, SourceConfig,
+        SourceKind, cell_vector, clamp, copy_sign, floor, java_max, java_min, map, pow_int, round,
+        sin, value_coord_2d,
+    },
+    terraforged_engine::{
+        BiomeType, Cell, ControlPoints, Seed, Terrain, TerrainProperties, TerrainRegistry,
+        WorldControlPoints,
+    },
 };
 
 /// Engine's `ClimateSettings.RangeValue`: one climate axis (temperature or moisture). `Default` is Engine's
@@ -159,7 +168,7 @@ impl Default for BiomeNoise {
     }
 }
 
-/// Engine's `ClimateSettings`, with Engine's defaults: what the climate module (a later layer) reads.
+/// Engine's `ClimateSettings`, with Engine's defaults: what [`ClimateModule`] reads.
 #[derive(Clone, Copy)]
 pub struct ClimateSettings {
     pub temperature: ClimateRange,
@@ -325,6 +334,260 @@ impl Moisture {
     pub fn module(self) -> Module {
         Module::custom(0.0, 1.0, move |x, y| self.value(x, y))
     }
+}
+
+/// The part of Engine's `Continent` the climate module reads: `getLandValue(x, z)`. Any
+/// `Fn(f32, f32) -> f32` closure is one.
+pub trait LandValue: Send + Sync {
+    fn land_value(&self, x: f32, z: f32) -> f32;
+}
+
+impl<F> LandValue for F
+where
+    F: Fn(f32, f32) -> f32 + Send + Sync,
+{
+    fn land_value(&self, x: f32, z: f32) -> f32 {
+        self(x, z)
+    }
+}
+
+/// Engine's `ClimateModule`: the warped Voronoi biome cells of the climate stage, with their region
+/// id and edge, temperature, moisture, macro-biome noise and biome type.
+pub struct ClimateModule {
+    seed: i32,
+    biome_frequency: f32,
+    warp_strength: f32,
+    warp_x: Module,
+    warp_z: Module,
+    moisture: Module,
+    temperature: Module,
+    macro_biome_noise: Module,
+    continent: Arc<dyn LandValue>,
+    control_points: ControlPoints,
+    coast: Terrain,
+}
+
+impl ClimateModule {
+    /// `new ClimateModule(continent, context)`: draws four seeds from `seed` (the context's seed),
+    /// three from the moisture offset seed and two from the temperature one, in Engine's order. `settings`
+    /// and `control_points` are the context's `settings.climate` and `settings.world.controlPoints`;
+    /// `registry` is the world's, whose `coast` (`TerrainType.COAST`) the coast mask writes.
+    pub fn new(
+        continent: Arc<dyn LandValue>,
+        seed: &mut Seed,
+        settings: &ClimateSettings,
+        control_points: WorldControlPoints,
+        registry: &TerrainRegistry,
+    ) -> Self {
+        let biome_size = settings.biome_shape.biome_size;
+        let temperature_scaler = settings.temperature.scale as f32;
+        let moisture_scaler = settings.moisture.scale as f32 * 2.5;
+        let biome_frequency = 1.0 / biome_size as f32;
+        let moisture_size = moisture_scaler * biome_size as f32;
+        let temperature_size = temperature_scaler * biome_size as f32;
+        let moisture_scale = round(moisture_size * biome_frequency);
+        let temperature_scale = round(temperature_size * biome_frequency);
+        let warp_scale = settings.biome_shape.biome_warp_scale;
+        let module_seed = seed.next();
+        let warp_x = simplex(seed.next(), warp_scale, 2).bias(Module::constant(-0.5));
+        let warp_z = simplex(seed.next(), warp_scale, 2).bias(Module::constant(-0.5));
+
+        let mut moisture_seed = seed.offset(settings.moisture.seed_offset);
+        let moisture = Moisture::new(
+            moisture_seed.next(),
+            moisture_scale,
+            settings.moisture.falloff,
+        );
+        // The warp strengths are Java doubles (`moistScale / 4.0`, `tempScale * 4`) narrowed to float
+        // by `Source.constant`.
+        let moisture = settings
+            .moisture
+            .apply(moisture.module())
+            .warp(perlin_warp(
+                moisture_seed.next(),
+                (moisture_scale / 2).max(1),
+                1,
+                f64::from(moisture_scale) / 4.0,
+            ))
+            .warp(perlin_warp(
+                moisture_seed.next(),
+                (moisture_scale / 6).max(1),
+                2,
+                f64::from(moisture_scale) / 12.0,
+            ));
+
+        let mut temperature_seed = seed.offset(settings.temperature.seed_offset);
+        let temperature =
+            Temperature::new(1.0 / temperature_scale as f32, settings.temperature.falloff);
+        let temperature_scale4 = temperature_scale.wrapping_mul(4);
+        let temperature = settings
+            .temperature
+            .apply(temperature.module())
+            .warp(perlin_warp(
+                temperature_seed.next(),
+                temperature_scale4,
+                2,
+                f64::from(temperature_scale4),
+            ))
+            .warp(perlin_warp(
+                temperature_seed.next(),
+                temperature_scale,
+                1,
+                f64::from(temperature_scale),
+            ));
+
+        // `Source.cell(seed, macroNoiseSize)`: the builder's defaults (cell value, Euclidean,
+        // displacement 1, lookup `Source.ZERO`).
+        let macro_biome_noise = Module::cell_source(
+            SourceConfig {
+                seed: seed.next(),
+                frequency: 1.0 / settings.biome_shape.macro_noise_size as f32,
+                ..SourceConfig::default()
+            },
+            1.0,
+            CellFunction::CellValue,
+            DistanceFunction::Euclidean,
+            Module::constant(0.0),
+        );
+
+        Self {
+            seed: module_seed,
+            biome_frequency,
+            warp_strength: settings.biome_shape.biome_warp_strength as f32,
+            warp_x,
+            warp_z,
+            moisture,
+            temperature,
+            macro_biome_noise,
+            continent,
+            control_points: ControlPoints::new(control_points),
+            coast: registry.get_by_id(3),
+        }
+    }
+
+    /// `apply(cell, x, y)`: [`Self::apply_masked`] with the mask.
+    pub fn apply(&self, cell: &mut Cell, x: f32, z: f32) {
+        self.apply_masked(cell, x, z, true);
+    }
+
+    /// `apply(cell, x, y, mask)`: finds the nearest of the 3x3 jittered cells around the warped point
+    /// and writes, in Engine's order, the region id, moisture, temperature and macro-biome id sampled
+    /// at its centre; with `mask` also the region edge and the coast mask (an overground terrain that
+    /// doesn't override coasts becomes `coast` where the land value is at most the coast marker); then
+    /// the continent-adjusted moisture and the biome type. Panics where Engine throws: a temperature
+    /// or moisture whose biome-map index is outside 0..=255 (see [`BiomeType::get_curve`]).
+    pub fn apply_masked(&self, cell: &mut Cell, mut x: f32, mut z: f32, mask: bool) {
+        let offset_x = self.warp_x.value(x, z) * self.warp_strength;
+        let offset_z = self.warp_z.value(x, z) * self.warp_strength;
+        x = (x + offset_x) * self.biome_frequency;
+        z = (z + offset_z) * self.biome_frequency;
+        let x_region = floor(x);
+        let z_region = floor(z);
+        let mut cell_x = x_region;
+        let mut cell_z = z_region;
+        let mut center_x = x;
+        let mut center_z = z;
+        let mut edge_distance = 999_999.0;
+        let mut edge_distance2 = 999_999.0;
+        for delta_z in -1_i32..=1 {
+            for delta_x in -1_i32..=1 {
+                let candidate_x = x_region.wrapping_add(delta_x);
+                let candidate_z = z_region.wrapping_add(delta_z);
+                let vector = cell_vector(self.seed, candidate_x, candidate_z);
+                let candidate_center_x = candidate_x as f32 + vector[0];
+                let candidate_center_z = candidate_z as f32 + vector[1];
+                let distance = DistanceFunction::Euclidean
+                    .apply(candidate_center_x - x, candidate_center_z - z);
+                if distance < edge_distance {
+                    edge_distance2 = edge_distance;
+                    edge_distance = distance;
+                    center_x = candidate_center_x;
+                    center_z = candidate_center_z;
+                    cell_x = candidate_x;
+                    cell_z = candidate_z;
+                } else if distance < edge_distance2 {
+                    edge_distance2 = distance;
+                }
+            }
+        }
+
+        cell.biome_region_id = map(value_coord_2d(self.seed, cell_x, cell_z), -1.0, 1.0, 2.0);
+        cell.moisture = self.moisture.value(center_x, center_z);
+        cell.temperature = self.temperature.value(center_x, center_z);
+        cell.macro_biome_id = self.macro_biome_noise.value(center_x, center_z);
+        let position_x = floor(center_x / self.biome_frequency);
+        let position_z = floor(center_z / self.biome_frequency);
+        let continent_edge = self
+            .continent
+            .land_value(position_x as f32, position_z as f32);
+        if mask {
+            cell.biome_region_edge = edge_value(edge_distance, edge_distance2);
+            self.modify_terrain(cell, continent_edge);
+        }
+        modify_moisture(cell, continent_edge);
+        cell.biome = BiomeType::at_climate(cell.temperature, cell.moisture);
+    }
+
+    fn modify_terrain(&self, cell: &mut Cell, continent_edge: f32) {
+        // `cell.terrain = TerrainType.COAST`: the world registry's own coast.
+        if cell.terrain.is_overground()
+            && !cell.terrain.overrides_coast()
+            && continent_edge <= self.control_points.coast_marker
+        {
+            cell.terrain = self.coast.clone();
+        }
+    }
+}
+
+/// `modifyMoisture`: wetter below a land value of 0.75 (clamped to 0..1), drier above it.
+fn modify_moisture(cell: &mut Cell, continent_edge: f32) {
+    let limit = 0.75;
+    let range = 1.0 - limit;
+    if continent_edge < limit {
+        let alpha = (limit - continent_edge) / range;
+        let multiplier = 1.0 + alpha * range;
+        cell.moisture = clamp(cell.moisture * multiplier, 0.0, 1.0);
+    } else {
+        let alpha = (continent_edge - limit) / range;
+        let multiplier = 1.0 - alpha * range;
+        cell.moisture *= multiplier;
+    }
+}
+
+/// `edgeValue`: `1 - DISTANCE_2_DIV` mapped from its bounds. Engine's `edgeClamp`/`edgeScale` (both
+/// 1) are never read.
+fn edge_value(distance: f32, distance2: f32) -> f32 {
+    let edge = EdgeFunction::Distance2Div;
+    let (min, max, range) = edge.bounds();
+    1.0 - map(edge.apply(distance, distance2), min, max, range)
+}
+
+/// `Source.simplex(seed, scale, octaves)`.
+fn simplex(seed: i32, scale: i32, octaves: usize) -> Module {
+    source(SourceKind::Simplex, seed, scale, octaves)
+}
+
+/// `Module.warp(seed, scale, octaves, strength)`: a `DomainWarp` by two Perlin sources (`seed` and
+/// `seed + 1`) and `Source.constant(strength)`.
+fn perlin_warp(seed: i32, scale: i32, octaves: usize, strength: f64) -> Domain {
+    Domain::domain_warp(
+        source(SourceKind::Perlin, seed, scale, octaves),
+        source(SourceKind::Perlin, seed.wrapping_add(1), scale, octaves),
+        Module::constant(strength as f32),
+    )
+}
+
+/// `Source.build(seed, scale, octaves).build(kind)`.
+fn source(kind: SourceKind, seed: i32, scale: i32, octaves: usize) -> Module {
+    Module::source(Source::new(
+        kind,
+        SourceConfig {
+            seed,
+            octaves,
+            frequency: 1.0 / scale as f32,
+            ..SourceConfig::default()
+        },
+    ))
 }
 
 #[cfg(test)]
@@ -702,5 +965,320 @@ x 0 bdd59d54 3e314904 bea34c20 be89fdf4
         for (x, y) in [(0.0, 0.0), (5.0, -3.0)] {
             assert_eq!(hex(negative.value(x, y)), hex(none.value(x, y)));
         }
+    }
+
+    /// Output of `.local/terraforged/oracles/climate_module/ClimateModuleOracle.java` (run.sh) against Engine 0.3.0.
+    const MODULE_ORACLE: &str = r"
+s 0 0 4
+e 0 1bf2a510bf7ff19d
+g 0 9c3cf6b13db9e89d
+f 0 aa49e4e0c9950f67
+h 0 84dfa57615552864
+x 0 4
+p 0 0 0 0 3e185a4c 3f19d275 3f6687ed 3f061eb9 3e7aac1a 4 3 c2b20000 41600000
+p 0 0 0 1 3e185a4c 3e000000 3f6687ed 3f061eb9 3e7aac1a 4 8 c2b20000 41600000
+p 0 41440000 c2c58000 0 3de1c6f0 3f532640 3f0b9a40 3ef67559 3ea6991c 4 3 42600000 c3450000
+p 0 41440000 c2c58000 1 3de1c6f0 3e000000 3f0b9a40 3ef67559 3ea6991c 4 8 42600000 c3450000
+p 0 c5800400 46000100 0 3e2ebd08 3f7b8753 3f800000 3d33bf66 3f27bc80 9 3 c57df000 46001c00
+p 0 c5800400 46000100 1 3e2ebd08 3e000000 3f800000 3d33bf66 3f27bc80 9 8 c57df000 46001c00
+p 0 47c35000 c7c35000 0 3ea7429e 3ea8ce98 3eecd1dc 3f7ae148 3df97230 1 3 47c38800 c7c35c80
+p 0 47c35000 c7c35000 1 3ea7429e 3e000000 3eecd1dc 3f7ae148 3df97230 1 8 47c38800 c7c35c80
+s 1 1234 1238
+e 1 90278581372f6191
+g 1 58b34ee671c284c7
+f 1 f340d1ffafcee7e8
+h 1 5d9c5413c3562df
+x 1 6
+p 1 0 0 0 3f1ca982 3e271000 3f4925a7 3f0694a9 3f7847c6 4 3 c31f0000 c1b80000
+p 1 0 0 1 3f1ca982 3e000000 3f4925a7 3f0694a9 3f7847c6 4 8 c31f0000 c1b80000
+p 1 41440000 c2c58000 0 3f1ca982 3da128c0 3f4925a7 3f0694a9 3f7847c6 4 3 c31f0000 c1b80000
+p 1 41440000 c2c58000 1 3f1ca982 3e000000 3f4925a7 3f0694a9 3f7847c6 4 8 c31f0000 c1b80000
+p 1 c5800400 46000100 0 3effacc8 3e269bd8 3f42180a 3f065de6 3eb78122 4 3 c582c000 45fcb000
+p 1 c5800400 46000100 1 3effacc8 3e000000 3f42180a 3f065de6 3eb78122 4 8 c582c000 45fcb000
+p 1 47c35000 c7c35000 0 3e2fd59e 3f4be9bb 3f800000 3f69dff4 3f25bb1a 0 3 47c32400 c7c36000
+p 1 47c35000 c7c35000 1 3e2fd59e 3e000000 3f800000 3f69dff4 3f25bb1a 0 8 47c32400 c7c36000
+s 2 -1 3
+e 2 8678ccb34da6cedd
+g 2 4f00721ddb0bcb17
+f 2 29adc4f1734f2098
+h 2 8000b5e7d70f563d
+x 2 0
+s 3 -1698898192 -1698898188
+e 3 ffdec253ff37de12
+g 3 5a18f826b470a76d
+f 3 762d6826e90f29e4
+h 3 8e2a95f9d0991440
+x 3 6
+s 4 2147483647 -2147483645
+e 4 e5af313820230565
+g 4 38315aab8b1de7f8
+f 4 384ce40411de157e
+h 4 254e324e1e97ab89
+x 4 2
+s 5 -2147483648 -2147483644
+e 5 60a1b9aa3988bb34
+g 5 420fd5b860e6f19e
+f 5 392281c1a91ec32b
+h 5 3493d5427e7c4027
+x 5 0
+";
+
+    /// The oracle's edge-case coordinates.
+    const C: [f32; 25] = [
+        0.0,
+        -0.0,
+        0.5,
+        -0.5,
+        1.0,
+        -1.0,
+        12.25,
+        -98.75,
+        224.9,
+        -225.1,
+        4096.5,
+        -4096.5,
+        1e5,
+        -1e5,
+        3e7,
+        -3e7,
+        1e9,
+        -1e9,
+        1e10,
+        3e38,
+        -3e38,
+        f32::from_bits(1),
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        f32::NAN,
+    ];
+    /// The oracle continent's land values, around 0.75 and the default coast marker 0.475, and 9 (a
+    /// negative moisture, whose biome lookup throws).
+    const LAND: [f32; 16] = [
+        0.0,
+        9.0,
+        0.5,
+        0.6,
+        0.74,
+        0.75,
+        0.76,
+        0.9,
+        1.0,
+        1.2,
+        -0.1,
+        f32::NAN,
+        0.47,
+        0.475,
+        0.4751,
+        -0.0,
+    ];
+
+    /// The oracle's settings `i`: `(world seed, climate settings, control points)`.
+    fn module_settings(i: usize) -> (i64, ClimateSettings, WorldControlPoints) {
+        let mut climate = ClimateSettings::default();
+        let mut points = WorldControlPoints::default();
+        let seed = match i {
+            0 => 0,
+            1 => 1234,
+            2 => {
+                climate.biome_shape = BiomeShape {
+                    biome_size: 1,
+                    macro_noise_size: 1,
+                    biome_warp_scale: 1,
+                    biome_warp_strength: 0,
+                };
+                climate.temperature = ClimateRange::new(1, 0, 0.0, 1.0, 0.0);
+                climate.temperature.seed_offset = 7;
+                climate.moisture = ClimateRange::new(1, 3, 0.0, 1.0, 0.0);
+                climate.moisture.seed_offset = -3;
+                -1
+            }
+            3 => {
+                climate.biome_shape = BiomeShape {
+                    biome_size: 600,
+                    macro_noise_size: 20,
+                    biome_warp_scale: 400,
+                    biome_warp_strength: 300,
+                };
+                climate.temperature = ClimateRange::new(13, 4, 0.2, 0.8, 0.3);
+                climate.temperature.seed_offset = i32::MAX;
+                climate.moisture = ClimateRange::new(5, 2, 0.1, 0.9, -0.2);
+                climate.moisture.seed_offset = i32::MIN;
+                points.inland = 2.0;
+                0x1234_5678_9abc_def0
+            }
+            4 => {
+                climate.biome_shape.biome_size = 7;
+                climate.moisture = ClimateRange::new(0, 1, 0.0, 1.0, 0.0);
+                climate.temperature = ClimateRange::new(3, -2, 0.0, 1.0, 0.1);
+                points.coast = 0.3;
+                points.inland = 0.6;
+                i64::from(i32::MAX)
+            }
+            _ => {
+                climate.biome_shape.biome_size = 3;
+                climate.biome_shape.biome_warp_strength = -80;
+                climate.temperature = ClimateRange::new(7, 3, 0.98, 0.02, 0.0);
+                climate.moisture = ClimateRange::new(11, 2, 0.0, 1.0, 0.4);
+                i64::from(i32::MIN)
+            }
+        };
+        (seed, climate, points)
+    }
+
+    /// The oracle's continent: a land value picked by a hash of its arguments, which it records.
+    fn module_continent(last: &Arc<std::sync::Mutex<(f32, f32)>>) -> Arc<dyn LandValue> {
+        let last = Arc::clone(last);
+        Arc::new(move |x: f32, z: f32| {
+            *last.lock().unwrap() = (x, z);
+            let index = (x.to_bits() as i32)
+                .wrapping_mul(31)
+                .wrapping_add(z.to_bits() as i32)
+                & 15;
+            LAND[index as usize]
+        })
+    }
+
+    /// Engine's climate stage samples one `ClimateModule` from every tile-generation thread.
+    #[test]
+    fn climate_module_is_shared_between_threads() {
+        fn shareable<T: Send + Sync>() {}
+        shareable::<ClimateModule>();
+    }
+
+    #[test]
+    fn climate_module_matches_engine_oracle() {
+        let registry = TerrainRegistry::new();
+        let lines: Vec<Vec<&str>> = MODULE_ORACLE
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(|line| line.split(' ').collect())
+            .collect();
+        let expect = |kind: &str, i: usize| -> String {
+            let line = lines
+                .iter()
+                .find(|line| line[0] == kind && line[1] == i.to_string())
+                .unwrap_or_else(|| panic!("no {kind} {i} line"));
+            line[2..].join(" ")
+        };
+        let last = Arc::new(std::sync::Mutex::new((0.0, 0.0)));
+        for i in 0..6 {
+            let (world_seed, climate, points) = module_settings(i);
+            let mut seed = Seed::from_long(world_seed);
+            let module = ClimateModule::new(
+                module_continent(&last),
+                &mut seed,
+                &climate,
+                points,
+                &registry,
+            );
+            assert_eq!(
+                format!("{} {}", seed.root(), seed.get()),
+                expect("s", i),
+                "seed draws {i}"
+            );
+            let mut sample = 0;
+            let mut dead = 0;
+            let mut run = |f: i64, x: f32, z: f32, mask: bool| -> i64 {
+                let mut cell = Cell::new(&registry);
+                cell.biome_region_edge = 0.125;
+                cell.terrain = registry.get_by_id(sample & 15);
+                sample += 1;
+                *last.lock().unwrap() = (7.0, 7.0);
+                let applied = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    module.apply_masked(&mut cell, x, z, mask);
+                }));
+                if applied.is_err() {
+                    dead += 1;
+                    return f.wrapping_mul(31).wrapping_add(0xdead);
+                }
+                let (last_x, last_z) = *last.lock().unwrap();
+                let mut f = f;
+                for value in [
+                    cell.biome_region_id,
+                    cell.biome_region_edge,
+                    cell.moisture,
+                    cell.temperature,
+                    cell.macro_biome_id,
+                ] {
+                    f = fold(f, value);
+                }
+                f = f.wrapping_mul(31).wrapping_add(i64::from(cell.biome.id()));
+                // `cell.terrain` by identity: one of the world registry's own terrains.
+                let id = cell.terrain.id();
+                assert!(cell.terrain.is_same(&registry.get_by_id(id)));
+                f = f.wrapping_mul(31).wrapping_add(i64::from(id));
+                fold(fold(f, last_x), last_z)
+            };
+            for (kind, grid, mask) in [
+                ("e", false, true),
+                ("g", true, true),
+                ("f", false, false),
+                ("h", true, false),
+            ] {
+                let mut f = 17;
+                if grid {
+                    for gz in (-2000..=2000).step_by(211) {
+                        for gx in (-2000..=2000).step_by(211) {
+                            f = run(f, gx as f32 + 0.3, gz as f32 - 0.7, mask);
+                        }
+                    }
+                } else {
+                    for x in C {
+                        for z in C {
+                            f = run(f, x, z, mask);
+                        }
+                    }
+                }
+                assert_eq!(format!("{f:x}"), expect(kind, i), "{kind} {i}");
+            }
+            assert_eq!(dead.to_string(), expect("x", i), "throws {i}");
+            for line in lines
+                .iter()
+                .filter(|line| line[0] == "p" && line[1] == i.to_string())
+            {
+                let x = f32::from_bits(u32::from_str_radix(line[2], 16).unwrap());
+                let z = f32::from_bits(u32::from_str_radix(line[3], 16).unwrap());
+                let mut cell = Cell::new(&registry);
+                cell.biome_region_edge = 0.125;
+                cell.terrain = registry.get_by_id(8);
+                module.apply_masked(&mut cell, x, z, line[4] == "0");
+                let (last_x, last_z) = *last.lock().unwrap();
+                let got: Vec<String> = [
+                    cell.biome_region_id,
+                    cell.biome_region_edge,
+                    cell.moisture,
+                    cell.temperature,
+                    cell.macro_biome_id,
+                ]
+                .iter()
+                .map(|value| format!("{:x}", value.to_bits()))
+                .chain([cell.biome.id().to_string(), cell.terrain.id().to_string()])
+                .chain(
+                    [last_x, last_z]
+                        .iter()
+                        .map(|value| format!("{:x}", value.to_bits())),
+                )
+                .collect();
+                assert_eq!(got.join(" "), line[5..].join(" "), "{}", line.join(" "));
+                assert!(cell.terrain.is_same(&registry.get_by_id(cell.terrain.id())));
+            }
+        }
+        // `apply(cell, x, y)` is the masked form.
+        let (_, climate, points) = module_settings(1);
+        let module = ClimateModule::new(
+            module_continent(&last),
+            &mut Seed::new(1234),
+            &climate,
+            points,
+            &registry,
+        );
+        let mut cell = Cell::new(&registry);
+        cell.biome_region_edge = 0.125;
+        cell.terrain = registry.get_by_id(8);
+        module.apply(&mut cell, 12.25, -98.75);
+        assert_eq!(cell.biome_region_edge.to_bits(), 0x3da1_28c0);
+        assert!(cell.terrain.is_same(&registry.get_by_id(3)));
+        // Another registry's coast is not `TerrainType.COAST`.
+        assert!(!cell.terrain.is_same(&TerrainRegistry::new().get_by_id(3)));
     }
 }
