@@ -1124,8 +1124,22 @@ first), what the factory shares, cells of the factory's, a direct and the lazy h
 tiles, `TileGenerator.builder().factory(factory)` regions (plain and batched) and a zoomed region with the real
 heightmap and filters, every backing cell compared bit for bit.
 
-The mod terrain-level layer now preserves TerraForged's configurable build, sea-floor, sea-level, and
-base-height bounds plus exact automatic horizontal-frequency and normalized-height transforms.
+The terrain-level layer adds TerraForged's own (the mod's, not Engine's) `TerrainLevels` and `NoiseLevels`
+(`terrain_levels.rs`): the world's build bounds in block Y and the noise fractions derived from them. `max_y` is the
+exclusive top block and the height every fraction divides by, counted from block 0; `sea_level` is the highest water
+block. They are separate from Engine's `Levels`, which TerraForged's terrains build themselves (`ModTerrains`' `new
+Levels(63, 255)`, kept as is). The constructor clamps as TerraForged does: `min_y` to -2032..0 and `max_y` to
+128..4064 (1.18.2's `DimensionType` limits, the same in 26.3), the sea level to 32..half the `max_y` *argument*
+(before `max_y` is clamped, so a small or negative `max_y` gives a lower sea level), then the sea floor and the base
+height, with `MathUtil.clamp`'s order when a bound pair is inverted. `copy()` re-clamps, the no-argument
+`unconfigured()` keeps Java's `min_y` of +64, and `height`, `floor` and `ceil` use `NoiseUtil.floor` (one lower for
+negative whole numbers, -1 for NaN). The defaults are TerraForged's, not vanilla 26.3's: `max_y` 480 (the 26.3
+overworld ends at 320), sea level 62 (water up to Y 62, as vanilla's sea level 63), base height 128, sea floor 22,
+automatic horizontal frequency `194 / (max_y - sea_level) * scale`. The settings codec and `getWaterLevel` (it reads
+`TerrainData`, the next layer) are not ported. Its test replays `TerrainLevelsOracle.java` (in
+`.local/terraforged/oracles/terrain_levels/`), which runs TerraForged's own classes from the mod jar, stubbing only
+`DimensionType` and the logger: 19 constructed levels and their copies, the default and no-argument levels,
+`calcFrequency` and every transform over signed zeros, subnormals, huge values, infinities and NaN, bit for bit.
 
 ## Status: development only
 
