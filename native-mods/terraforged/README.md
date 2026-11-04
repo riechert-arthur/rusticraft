@@ -1135,14 +1135,30 @@ height, with `MathUtil.clamp`'s order when a bound pair is inverted. `copy()` re
 `unconfigured()` keeps Java's `min_y` of +64, and `height`, `floor` and `ceil` use `NoiseUtil.floor` (one lower for
 negative whole numbers, -1 for NaN). The defaults are TerraForged's, not vanilla 26.3's: `max_y` 480 (the 26.3
 overworld ends at 320), sea level 62 (water up to Y 62, as vanilla's sea level 63), base height 128, sea floor 22,
-automatic horizontal frequency `194 / (max_y - sea_level) * scale`. The settings codec and `getWaterLevel` (it reads
-`TerrainData`, the next layer) are not ported. Its test replays `TerrainLevelsOracle.java` (in
+automatic horizontal frequency `194 / (max_y - sea_level) * scale`. The settings codec is not ported; `getWaterLevel` (it reads
+`TerrainData`) came with the next layer. Its test replays `TerrainLevelsOracle.java` (in
 `.local/terraforged/oracles/terrain_levels/`), which runs TerraForged's own classes from the mod jar, stubbing only
 `DimensionType` and the logger: 19 constructed levels and their copies, the default and no-argument levels,
 `calcFrequency` and every transform over signed zeros, subnormals, huge values, infinities and NaN, bit for bit.
 
-Bordered noise maps and chunk terrain data now preserve TerraForged's coordinate indexing, sampled
-height, base, river, terrain, gradient, and extrema conversion from the current source implementation.
+The terrain-data layer (`terrain_data.rs`, again the mod's classes) adds the per-chunk storage TerraForged's
+generator fills: `Index` (`CHUNK` masks x and z into the chunk, so world coordinates of any chunk, negative ones
+included, read the right cell; a bordered index offsets and wraps in Java `int` math), `FloatMap` and `ObjectMap`,
+`NoiseSample` and `NoiseData` (one chunk's height, base, river noise and terrain with a one-cell border), and
+`TerrainData`, which `accept`s a `NoiseData`: heights and base levels scaled by `TerrainLevels`, the clamped
+gradient from the four neighbours (the border cells), river noise, terrains, and the extrema with `Math.max`/`min`
+(a NaN height makes them NaN; they start at `Float.MAX_VALUE`/`Float.MIN_VALUE`). `TerrainLevels::water_level` is
+`getWaterLevel`: a river or lake cell whose river noise is exactly zero fills to its base height, the rest to the
+sea level given. Heights are TerraForged's block Y, `floor(noise * max_y)` counted from block 0 with
+`TerrainLevels`' `max_y` (480 by default), not clamped to 26.3's -64..320: fitting them into a 26.3 world is the
+generator's job. Samples and noise data take the world's `TerrainRegistry`, so the default terrain is that
+registry's `none`; unset cells have no terrain (Java's null), and `getWaterLevel` panics on one where Java throws.
+What fills `NoiseData` (TerraForged's `NoiseGenerator`) is not ported yet. Its test replays `TerrainDataOracle.java`
+(in `.local/terraforged/oracles/terrain_data/`), which runs these classes from the mod jar (stubbing
+`DimensionType`, the logger and the mod's registry-backed `TerrainType` wrapper of Engine's `none`): indices over
+negative and huge coordinates and borders, four chunks (smooth, random, special values with NaN, infinities,
+signed zeros and subnormals, and one with unset cells) read with four `TerrainLevels`, every element, height,
+gradient and water level, bit for bit.
 
 ## Status: development only
 
