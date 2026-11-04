@@ -527,8 +527,8 @@ bounds, against a Java oracle running Engine's classes, `NetworkOracle.java` in 
 The rivermap layer adds Engine's `Rivermap` (`river.rs`): one continent's river networks, its `GenWarp` and the
 continent cell (`x`, `z`) it belongs to. `apply` warps a point with the river warp, takes the lake warp's offset at the
 warped point and carves, in order, every network whose bounds contain the warped point. The timestamp is
-`System.currentTimeMillis()` at creation, as Engine's rivermap cache reads it; the cache and Engine's static
-`Rivermap.get` (reuse a map or ask the heightmap's continent) are not ported. Only the base and fancy river
+`System.currentTimeMillis()` at creation, as Engine's river cache (below) reads it; Engine's static `Rivermap.get`
+(reuse a map or ask the heightmap's continent) is not ported. Only the base and fancy river
 generators below build river maps, and nothing calls them yet. Its tests fold every cell field over 304380 applies of fresh and filled cells at a grid of
 points (plus -0, NaN, infinite and huge ones) for `NetworkOracle`'s networks, four `GenWarp`s (one whose seeds wrap,
 and `GenWarp.EMPTY`) and three `Levels`, plus direct samples, against a Java oracle running Engine's class,
@@ -557,18 +557,28 @@ endpoints in evenly spaced directions, extends each in steps of 0.075 radii whil
 (`getValueId`) until the continent value falls below 0.1, and skips those that overlap a network (root or fork)
 already placed on that island. Each root is added before its forks are generated, so they are tested against it with Engine's parent rule,
 then given its wetlands, all in Engine's draw order. Engine's `FancyContinent` builds the generator and its river
-cache asks it for maps; here the generator owns the continent generator, and nothing calls it yet. Its tests fold
+cache asks it for maps; here it borrows the continent generator, and the river-cache layer below asks it for maps. Its tests fold
 every built network and 151290 applies of the resulting river maps on a grid for five settings variants (a wrapping
 seed offset with chance-1 lakes and wetlands, a 384/62 world, continent scales 1000 and 777), two continent seeds and
 three ids, plus the first roots and direct samples, against a Java oracle running Engine's classes,
 `FancyRiverGeneratorOracle.java` in `.local/terraforged/oracles/river/`.
 
-The river-cache layer memoizes packed continent coordinates with TerraForged's five-minute expiry,
-preserves the legacy seed layout, and exposes cached fancy-continent rivermaps through shared handles.
+The river-cache layer adds Engine's `RiverCache` and `LegacyRiverCache` (`river.rs`) and the fancy continent's
+`getRivermap` (`fancy.rs`). A cache keeps one river map per continent cell, generated on first use with the id
+`PosUtil.pack(x, z)` (`LegacyRiverCache`, the simple continent's: `NoiseUtil.seed(x, z)`, z in the high half) and
+shared as an `Arc`. Like Engine's `StampedLongMap`, hits take a read lock and a miss generates under the write lock,
+so each map is made once. Maps expire once they are more than five minutes old; Engine sweeps them from a scheduler
+thread every minute, the port sweeps on a miss at most once a minute (a regenerated map is the same, so this changes
+nothing but memory). `FancyContinentGenerator` now takes what Engine's `FancyContinent` builds its river generator
+from: the context's seed root, river settings, levels and the world's terrain registry. The simple and advanced
+continents' river generator is not ported yet, and nothing calls the caches yet. Its tests check the ids, the single
+generation and the cached instance for negative and extreme cells, and fold the fancy continent's river maps for five
+settings variants and six cells, against a Java oracle running Engine's classes, `RiverCacheOracle.java` in
+`.local/terraforged/oracles/river/`, plus the expiry.
 
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator and the fancy river generator. They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator and its river caches. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
