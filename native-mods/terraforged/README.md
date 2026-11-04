@@ -782,7 +782,9 @@ count).
 `generate_zoomed_heightmap` is Engine's `Tile.generate(Heightmap, offsetX, offsetZ, zoom)`: the same fill as
 `generate_heightmap`, but the stages get each cell's world block position scaled by the zoom and shifted by the offset
 less half the zoomed tile width (`block * zoom + offset - size * zoom / 2`, in Engine's `float` order). Its cached
-variant and the tile generator's zoomed region are later layers (#78, #80).
+variant and the tile generator's zoomed region are later layers (#78, #80). Its tests replay the same oracle's zoomed
+runs: thirteen offset and zoom pairs over the six tiles, with fractional, unit, large, negative, signed-zero, NaN and
+overflowing zooms and NaN and infinite offsets, compared bit for bit (NaNs folded as Java's `floatToIntBits`).
 
 ## Status: development only
 
