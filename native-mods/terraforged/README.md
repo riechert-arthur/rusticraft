@@ -582,7 +582,13 @@ spreads the world's river count of main rivers around the continent centre at ev
 random start, each with a random offset of up to 3/8 of the spacing either way), each from a random 5% to 50% of
 the distance to the ocean (at least 400 blocks) out to the ocean, with both ends truncated to whole blocks, gives
 each a valley, warp and lake in Engine's draw order, then hands them to the base generator's shuffle, forks and
-wetlands. Nothing calls it yet.
+wetlands. As in Engine, the start distance is `Math.max(400, ...)` (a NaN distance to the ocean stays NaN). One
+difference: Engine throws for a negative river count (`new ArrayList(count)`); the port builds no roots. Nothing
+calls it yet: the continents' river caches come with a later layer. Its tests fold every built network and 345960
+applies of the resulting river maps on a grid for the multi, single and advanced continents, five settings variants
+(a wrapping seed offset with chance-1 lakes and wetlands, a 384/62 world, continent scale 1000, one to eight rivers),
+two continent seeds and four cells each, plus direct samples, against
+a Java oracle running Engine's classes, `SimpleRiverGeneratorOracle.java` in `.local/terraforged/oracles/river/`.
 
 ## Status: development only
 
