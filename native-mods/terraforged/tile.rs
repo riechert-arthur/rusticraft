@@ -25,6 +25,7 @@
 use super::{
     terraforged_engine::{Cell, TerrainRegistry},
     terraforged_filters::Filterable,
+    terraforged_heightmap::HeightmapCache,
     terraforged_river::Rivermap,
     terraforged_util::{pack, unpack_left, unpack_right},
 };
@@ -252,27 +253,57 @@ impl Tile {
         mut apply_climate: impl FnMut(&mut Cell, f32, f32),
     ) {
         let mut current = None;
+        self.fill_cells(|cell, x, z| {
+            let (x, z) = (x as f32, z as f32);
+            apply_base(cell, x, z);
+            let rivermap = Rivermap::get_for_cell(cell, current.take(), &mut lookup);
+            apply_rivers(cell, x, z, &rivermap);
+            apply_climate(cell, x, z);
+            current = Some(rivermap);
+        });
+    }
+
+    /// `generate(HeightmapCache)`: the same chunk and cell order as [`Self::generate_heightmap`],
+    /// but each cell goes through [`HeightmapCache::generate`] at its world block position
+    /// (`int`, the cache key `PosUtil.pack(x, z)`): a cached block is copied into the cell and
+    /// keeps the river map carried so far; a miss runs the stages on the cell (the river map
+    /// reused or looked up as in `generate_heightmap`) and caches it. The river map is carried
+    /// from the tile's first cell to its last, across hits. Engine caches the tile's own cell
+    /// objects, so a cell that a later chunk refills (a slot holding an aliasing chunk) changes the
+    /// block cached first; the port caches snapshots (see [`HeightmapCache::generate`]).
+    pub fn generate_cached_heightmap(
+        &mut self,
+        cache: &HeightmapCache,
+        mut apply_base: impl FnMut(&mut Cell, f32, f32),
+        mut lookup: impl FnMut(i32, i32) -> Arc<Rivermap>,
+        mut apply_rivers: impl FnMut(&mut Cell, f32, f32, &Rivermap),
+        mut apply_climate: impl FnMut(&mut Cell, f32, f32),
+    ) {
+        let mut current = None;
+        self.fill_cells(|cell, x, z| {
+            current = cache.generate(
+                cell,
+                x,
+                z,
+                current.take(),
+                &mut apply_base,
+                &mut lookup,
+                &mut apply_rivers,
+                &mut apply_climate,
+            );
+        });
+    }
+
+    /// The loop both heightmap fills share: every tile-local chunk, z rows then x (border
+    /// included), taken as [`Self::chunk_writer`] does (`computeChunk`), then its cells in
+    /// [`ChunkWriter::generate`]'s order with their world block position.
+    fn fill_cells(&mut self, mut fill: impl FnMut(&mut Cell, i32, i32)) {
         let total = self.chunk_size.total;
         for chunk_z in 0..total {
             for chunk_x in 0..total {
-                let mut chunk = self
-                    .chunk_writer(chunk_x, chunk_z)
-                    .expect("tile-local chunk inside the chunk array");
-                let GenChunk {
-                    block_x, block_z, ..
-                } = chunk.chunk;
-                for dz in 0..16 {
-                    for dx in 0..16 {
-                        let x = block_x.wrapping_add(dx) as f32;
-                        let z = block_z.wrapping_add(dz) as f32;
-                        let cell = chunk.gen_cell(dx, dz);
-                        apply_base(cell, x, z);
-                        let rivermap = Rivermap::get_for_cell(cell, current.take(), &mut lookup);
-                        apply_rivers(cell, x, z, &rivermap);
-                        apply_climate(cell, x, z);
-                        current = Some(rivermap);
-                    }
-                }
+                self.chunk_writer(chunk_x, chunk_z)
+                    .expect("tile-local chunk inside the chunk array")
+                    .generate(|cell, _, _, x, z| fill(cell, x, z));
             }
         }
     }
@@ -547,6 +578,7 @@ impl ChunkWriter<'_> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::terraforged_engine::Levels;
     use super::super::terraforged_filters::java_cell_raw;
     use super::super::terraforged_river::GenWarp;
     use super::*;
@@ -1245,6 +1277,17 @@ h 2 4 8f581bc24f772753 ae8d5f770c7cf611 e6a262e262c7fb09
 h 3 326 818e2be4c3bf53ee 173ca2a1adf97291 3491e8a4a9b0d6af
 h 4 397 ee81d23a3022096c 3d61aa1f75ddd511 d5f772aa44118431
 h 5 394 a824e4624bec2cf6 a63ce1c7f0e710c1 53f9d0616309a431
+c 0 137 c579e321cc64ef46 7822c03163bbbc11 607ea5d406ecf6e3
+c 1 392 c0e0a699c90ced0d 2981a38add7f911 53f9d0616309a431
+c 2 2 fd28976be4c0c612 ae8d5f770c7cf611 e6a262e262c7fb09
+c 3 230 47100b8cd34dabbe 173ca2a1adf97291 3491e8a4a9b0d6af
+c 4 262 cbc232019b55f74f 3d61aa1f75ddd511 d5f772aa44118431
+c 5 4 d7c7d9a9730594b3 3c74c270245f10c1 53f9d0616309a431
+r 0 0 11 7822c03163bbbc11 607ea5d406ecf6e3
+r 1 0 11 2981a38add7f911 53f9d0616309a431
+r 2 0 11 ae8d5f770c7cf611 e6a262e262c7fb09
+r 3 0 11 173ca2a1adf97291 3491e8a4a9b0d6af
+r 4 0 11 3d61aa1f75ddd511 d5f772aa44118431
 ";
 
     /// The tiles `TileHeightmapOracle.java` fills: region x and z, size factor, border chunks,
@@ -1259,108 +1302,137 @@ h 5 394 a824e4624bec2cf6 a63ce1c7f0e710c1 53f9d0616309a431
     ];
 
     /// Replays `TileHeightmapOracle.java` (`.local/terraforged/oracles/tile_heightmap/`): Engine
-    /// 0.3.0's `Tile.generate(Heightmap)` over a heightmap whose stages are deterministic fills and
-    /// whose continent makes a new empty river map per lookup. Folds the stage trace (stage,
-    /// coordinate bits, the map each cell gets), every backing cell and `getChunk` over every
-    /// tile-local chunk position.
+    /// 0.3.0's `Tile.generate(Heightmap)` (`h` lines) over a heightmap whose stages are
+    /// deterministic fills and whose continent makes a new empty river map per lookup, then
+    /// `Tile.generate(HeightmapCache)` through one real `HeightmapCache` shared by the six tiles in
+    /// order (`c` lines: overlapping tiles mix hits and misses) and over tiles 0-4 again in fresh
+    /// tiles (`r` lines: all hits). Folds the stage trace (stage, coordinate bits, the map each cell
+    /// gets), every backing cell and `getChunk` over every tile-local chunk position. Tile 5 is
+    /// not repeated: Engine's cache holds the tile's cell objects, which its aliasing chunk refills.
     #[test]
     fn tile_heightmap_generation_matches_engine_0_3_0() {
-        let terrains = TerrainRegistry::new();
+        let terrains = Arc::new(TerrainRegistry::new());
+        let cache =
+            HeightmapCache::with_capacity(Levels::new(256, 63), Arc::clone(&terrains), 1 << 20);
         let mut out = String::new();
-        for (run, &(region_x, region_z, size, border, writers)) in
-            HEIGHTMAP_TILES.iter().enumerate()
-        {
-            let mut tile = Tile::new(region_x, region_z, size, border, &terrains);
-            for &(chunk_x, chunk_z) in writers {
-                assert!(tile.chunk_writer(chunk_x, chunk_z).is_some());
-            }
-            // The stages share the trace, as Engine's oracle mixes into one fold.
-            let trace = std::cell::Cell::new(17_i64);
-            let mix = |value: i32| trace.set(fold(trace.get(), value));
-            let mix_point = |stage: i32, x: f32, z: f32| {
-                mix(stage);
-                mix(x.to_bits() as i32);
-                mix(z.to_bits() as i32);
-            };
-            let lookups = std::cell::Cell::new(0);
-            tile.generate_heightmap(
-                |cell, x, z| {
-                    mix_point(1, x, z);
-                    cell.value = x * 0.25 + z;
-                    cell.moisture += x;
-                    cell.continent_x = (x as i32).div_euclid(24);
-                    cell.continent_z = (z as i32).div_euclid(40);
-                },
-                |x, z| {
-                    lookups.set(lookups.get() + 1);
-                    mix(1000);
-                    mix(x);
-                    mix(z);
-                    Arc::new(Rivermap::new(x, z, Vec::new(), GenWarp::direct()))
-                },
-                |cell, x, z, map| {
-                    mix_point(2, x, z);
-                    mix(map.x());
-                    mix(map.z());
-                    cell.river_mask = (map.x() * 10 + map.z()) as f32 + cell.value;
-                },
-                |cell, x, z| {
-                    mix_point(3, x, z);
-                    cell.temperature = z - cell.river_mask;
-                    cell.erosion += 1.0;
-                },
-            );
-            let mut cells = 17_i64;
-            for cell in &tile.blocks {
-                for value in [
-                    cell.value,
-                    cell.erosion,
-                    cell.sediment,
-                    cell.gradient,
-                    cell.moisture,
-                    cell.temperature,
-                    cell.continent_id,
-                    cell.continent_edge,
-                    cell.terrain_region_id,
-                    cell.terrain_region_edge,
-                    cell.biome_region_id,
-                    cell.biome_region_edge,
-                    cell.macro_biome_id,
-                    cell.river_mask,
-                ] {
-                    cells = fold(cells, value.to_bits() as i32);
-                }
-                for value in [
-                    cell.continent_x,
-                    cell.continent_z,
-                    i32::from(cell.erosion_mask),
-                    cell.terrain.id(),
-                ] {
-                    cells = fold(cells, value);
-                }
-            }
-            let mut chunks = 17_i64;
-            let total = tile.chunk_size.total;
-            for chunk_z in -1..=total {
-                for chunk_x in -1..=total {
-                    let world_x = tile.chunk_x.wrapping_add(chunk_x).wrapping_sub(border);
-                    let world_z = tile.chunk_z.wrapping_add(chunk_z).wrapping_sub(border);
-                    let reader = tile.chunk(world_x, world_z).unwrap();
-                    let chunk = reader.chunk();
-                    for value in [
-                        chunk.chunk_x(),
-                        chunk.chunk_z(),
-                        chunk.block_x(),
-                        chunk.block_z(),
-                        reader.cell(3, 5).value.to_bits() as i32,
-                    ] {
-                        chunks = fold(chunks, value);
-                    }
-                }
-            }
-            let (lookups, trace) = (lookups.get(), trace.get());
-            out += &format!("h {run} {lookups} {trace:x} {cells:x} {chunks:x}\n");
+        for run in 0..HEIGHTMAP_TILES.len() {
+            out += &replay_heightmap(&terrains, "h", run, None);
+        }
+        for run in 0..HEIGHTMAP_TILES.len() {
+            out += &replay_heightmap(&terrains, "c", run, Some(&cache));
+        }
+        for run in 0..5 {
+            out += &replay_heightmap(&terrains, "r", run, Some(&cache));
         }
         assert_eq!(out, ORACLE_HEIGHTMAP);
+    }
+
+    /// One line of `TileHeightmapOracle.java`: fills tile `run` of [`HEIGHTMAP_TILES`] with
+    /// `generate_heightmap`, or `generate_cached_heightmap` on `cache`, and folds it.
+    fn replay_heightmap(
+        terrains: &TerrainRegistry,
+        tag: &str,
+        run: usize,
+        cache: Option<&HeightmapCache>,
+    ) -> String {
+        let (region_x, region_z, size, border, writers) = HEIGHTMAP_TILES[run];
+        let mut tile = Tile::new(region_x, region_z, size, border, terrains);
+        for &(chunk_x, chunk_z) in writers {
+            assert!(tile.chunk_writer(chunk_x, chunk_z).is_some());
+        }
+        // The stages share the trace, as Engine's oracle mixes into one fold.
+        let trace = std::cell::Cell::new(17_i64);
+        let mix = |value: i32| trace.set(fold(trace.get(), value));
+        let mix_point = |stage: i32, x: f32, z: f32| {
+            mix(stage);
+            mix(x.to_bits() as i32);
+            mix(z.to_bits() as i32);
+        };
+        let lookups = std::cell::Cell::new(0);
+        let apply_base = |cell: &mut Cell, x: f32, z: f32| {
+            mix_point(1, x, z);
+            cell.value = x * 0.25 + z;
+            cell.moisture += x;
+            cell.continent_x = (x as i32).div_euclid(24);
+            cell.continent_z = (z as i32).div_euclid(40);
+        };
+        let lookup = |x, z| {
+            lookups.set(lookups.get() + 1);
+            mix(1000);
+            mix(x);
+            mix(z);
+            Arc::new(Rivermap::new(x, z, Vec::new(), GenWarp::direct()))
+        };
+        let apply_rivers = |cell: &mut Cell, x: f32, z: f32, map: &Rivermap| {
+            mix_point(2, x, z);
+            mix(map.x());
+            mix(map.z());
+            cell.river_mask = (map.x() * 10 + map.z()) as f32 + cell.value;
+        };
+        let apply_climate = |cell: &mut Cell, x: f32, z: f32| {
+            mix_point(3, x, z);
+            cell.temperature = z - cell.river_mask;
+            cell.erosion += 1.0;
+        };
+        match cache {
+            None => tile.generate_heightmap(apply_base, lookup, apply_rivers, apply_climate),
+            Some(cache) => tile.generate_cached_heightmap(
+                cache,
+                apply_base,
+                lookup,
+                apply_rivers,
+                apply_climate,
+            ),
+        }
+        let mut cells = 17_i64;
+        for cell in &tile.blocks {
+            for value in [
+                cell.value,
+                cell.erosion,
+                cell.sediment,
+                cell.gradient,
+                cell.moisture,
+                cell.temperature,
+                cell.continent_id,
+                cell.continent_edge,
+                cell.terrain_region_id,
+                cell.terrain_region_edge,
+                cell.biome_region_id,
+                cell.biome_region_edge,
+                cell.macro_biome_id,
+                cell.river_mask,
+            ] {
+                cells = fold(cells, value.to_bits() as i32);
+            }
+            for value in [
+                cell.continent_x,
+                cell.continent_z,
+                i32::from(cell.erosion_mask),
+                cell.terrain.id(),
+            ] {
+                cells = fold(cells, value);
+            }
+        }
+        let mut chunks = 17_i64;
+        let total = tile.chunk_size.total;
+        for chunk_z in -1..=total {
+            for chunk_x in -1..=total {
+                let world_x = tile.chunk_x.wrapping_add(chunk_x).wrapping_sub(border);
+                let world_z = tile.chunk_z.wrapping_add(chunk_z).wrapping_sub(border);
+                let reader = tile.chunk(world_x, world_z).unwrap();
+                let chunk = reader.chunk();
+                for value in [
+                    chunk.chunk_x(),
+                    chunk.chunk_z(),
+                    chunk.block_x(),
+                    chunk.block_z(),
+                    reader.cell(3, 5).value.to_bits() as i32,
+                ] {
+                    chunks = fold(chunks, value);
+                }
+            }
+        }
+        let (lookups, trace) = (lookups.get(), trace.get());
+        format!("{tag} {run} {lookups} {trace:x} {cells:x} {chunks:x}\n")
     }
 }
