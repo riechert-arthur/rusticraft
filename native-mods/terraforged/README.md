@@ -271,12 +271,22 @@ and `0.645` times the global vertical scale, computed in double. The landform gr
 oracle for every settings case, with fancy mountains on and off, including mountain scales whose `Math.round` gives 0
 or keeps an odd integer above 2^23 and vertical scales whose `scale(1)` leaves the graph unscaled.
 
-The cell-model layer adds TerraForged's complete terrain sample state, Java defaults, copy/reset and
-absent-cell behavior, plus the ordered biome-type identities carried by each sample.
+The cell layer adds Engine's `Cell` (`engine.rs`), the per-column sample the later stages fill in: its height value,
+erosion, sediment, gradient, moisture and temperature, continent, terrain-region and biome-region ids and edges, the
+terrain region's packed centre (a `long`), macro-biome id, river mask, continent cell coordinates, erosion mask,
+terrain and biome type, with Engine's defaults (moisture and temperature 0.5, biome-region edge and river mask 1, the
+`none` terrain, `GRASSLAND`). As in Engine, `copy_from` copies every field except the terrain region's centre, and
+`reset` copies the defaults the same way, so the centre survives it; an empty cell (`Cell.empty()`) stays absent
+through both. Engine's default terrain is the static `TerrainType.NONE`; here `Cell::new`, `Cell::empty` and `reset`
+take the world's `TerrainRegistry` and use its `none`. Engine's `Cell.empty()` is one shared mutable object and its
+cells come from per-thread pools; here `empty` returns a new cell and callers own their cells. It also adds
+`BiomeType`'s eleven types in Engine's order with their ids and `isExtreme`; their colours and the climate ranges and
+lookup map Engine loads from TerraForged's biome-type image come later. Its test checks every field's bits after
+construction, `copy_from` and `reset` against a Java oracle.
 
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings and its first landforms. They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms and its cell model. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development

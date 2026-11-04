@@ -142,52 +142,6 @@ pub enum TerrainCategory {
     Highland,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u8)]
-pub enum BiomeType {
-    TropicalRainforest,
-    Savanna,
-    Desert,
-    TemperateRainforest,
-    TemperateForest,
-    Grassland,
-    ColdSteppe,
-    Steppe,
-    Taiga,
-    Tundra,
-    Alpine,
-}
-
-impl BiomeType {
-    pub const RESOLUTION: i32 = 256;
-    pub const MAX: i32 = 255;
-    pub const VALUES: [Self; 11] = [
-        Self::TropicalRainforest,
-        Self::Savanna,
-        Self::Desert,
-        Self::TemperateRainforest,
-        Self::TemperateForest,
-        Self::Grassland,
-        Self::ColdSteppe,
-        Self::Steppe,
-        Self::Taiga,
-        Self::Tundra,
-        Self::Alpine,
-    ];
-
-    pub const fn id(self) -> i32 {
-        self as i32
-    }
-
-    pub fn get(id: i32) -> Self {
-        Self::VALUES[id as usize]
-    }
-
-    pub const fn is_extreme(self) -> bool {
-        matches!(self, Self::Tundra | Self::Desert)
-    }
-}
-
 impl TerrainCategory {
     pub const VALUES: [Self; 11] = [
         Self::None,
@@ -768,6 +722,70 @@ fn single_case_mapping(mut mapped: impl Iterator<Item = char>, c: char) -> char 
     }
 }
 
+/// Engine's `BiomeType` identities: the eleven climate types in Engine's order, with their ids
+/// (the ordinals) and `isExtreme`. Their colours and the temperature/moisture ranges and lookup
+/// map that Engine loads from TerraForged's biome-type image are not part of this layer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum BiomeType {
+    TropicalRainforest,
+    Savanna,
+    Desert,
+    TemperateRainforest,
+    TemperateForest,
+    Grassland,
+    ColdSteppe,
+    Steppe,
+    Taiga,
+    Tundra,
+    Alpine,
+}
+
+impl BiomeType {
+    pub const RESOLUTION: i32 = 256;
+    pub const MAX: i32 = 255;
+    pub const VALUES: [Self; 11] = [
+        Self::TropicalRainforest,
+        Self::Savanna,
+        Self::Desert,
+        Self::TemperateRainforest,
+        Self::TemperateForest,
+        Self::Grassland,
+        Self::ColdSteppe,
+        Self::Steppe,
+        Self::Taiga,
+        Self::Tundra,
+        Self::Alpine,
+    ];
+
+    /// `getId`: the ordinal.
+    pub const fn id(self) -> i32 {
+        self as i32
+    }
+
+    /// `BiomeType.get(int)`. Panics where Engine throws: an id outside 0..=10.
+    pub fn get(id: i32) -> Self {
+        usize::try_from(id)
+            .ok()
+            .and_then(|id| Self::VALUES.get(id).copied())
+            .unwrap_or_else(|| panic!("BiomeType id {id} out of range"))
+    }
+
+    pub const fn is_extreme(self) -> bool {
+        matches!(self, Self::Tundra | Self::Desert)
+    }
+}
+
+/// Engine's `Cell`: the per-column sample that the heightmap, region, climate, river and erosion
+/// stages fill in.
+///
+/// Engine's default terrain is the static `TerrainType.NONE`; here a cell takes `none` from the
+/// world's [`TerrainRegistry`] (so `is_same` against that registry's built-ins works), and
+/// [`Cell::reset`] takes the same registry. As in Engine, `copy_from` and `reset` (which copies
+/// Engine's defaults) leave `terrain_region_center` and the absent flag alone. `Clone` copies
+/// every field. Engine's `Cell.empty()` is one shared, mutable object; [`Cell::empty`] returns a
+/// new absent cell each time. Engine's per-thread cell pools (`getResource`) are not ported: Rust
+/// callers own their cells.
 #[derive(Clone)]
 pub struct Cell {
     pub value: f32,
@@ -794,13 +812,43 @@ pub struct Cell {
 }
 
 impl Cell {
-    pub fn empty() -> Self {
+    /// `new Cell()`, with `registry`'s `none` terrain.
+    pub fn new(registry: &TerrainRegistry) -> Self {
         Self {
-            absent: true,
-            ..Self::default()
+            value: 0.0,
+            erosion: 0.0,
+            sediment: 0.0,
+            gradient: 0.0,
+            moisture: 0.5,
+            temperature: 0.5,
+            continent_id: 0.0,
+            continent_edge: 0.0,
+            terrain_region_id: 0.0,
+            terrain_region_edge: 0.0,
+            terrain_region_center: 0,
+            biome_region_id: 0.0,
+            biome_region_edge: 1.0,
+            macro_biome_id: 0.0,
+            river_mask: 1.0,
+            continent_x: 0,
+            continent_z: 0,
+            erosion_mask: false,
+            terrain: registry.get_by_id(0),
+            biome: BiomeType::Grassland,
+            absent: false,
         }
     }
 
+    /// `Cell.empty()`: a default cell whose `is_absent` is true.
+    pub fn empty(registry: &TerrainRegistry) -> Self {
+        Self {
+            absent: true,
+            ..Self::new(registry)
+        }
+    }
+
+    /// `copyFrom`: every field but `terrain_region_center` (and the absent flag, which is the
+    /// object's class in Engine).
     pub fn copy_from(&mut self, other: &Self) {
         self.value = other.value;
         self.continent_x = other.continent_x;
@@ -823,41 +871,14 @@ impl Cell {
         self.terrain = other.terrain.clone();
     }
 
-    pub fn reset(&mut self) -> &mut Self {
-        self.copy_from(&Self::default());
+    /// `reset`: `copyFrom` the defaults, with `registry`'s `none` terrain.
+    pub fn reset(&mut self, registry: &TerrainRegistry) -> &mut Self {
+        self.copy_from(&Self::new(registry));
         self
     }
 
     pub const fn is_absent(&self) -> bool {
         self.absent
-    }
-}
-
-impl Default for Cell {
-    fn default() -> Self {
-        Self {
-            value: 0.0,
-            erosion: 0.0,
-            sediment: 0.0,
-            gradient: 0.0,
-            moisture: 0.5,
-            temperature: 0.5,
-            continent_id: 0.0,
-            continent_edge: 0.0,
-            terrain_region_id: 0.0,
-            terrain_region_edge: 0.0,
-            terrain_region_center: 0,
-            biome_region_id: 0.0,
-            biome_region_edge: 1.0,
-            macro_biome_id: 0.0,
-            river_mask: 1.0,
-            continent_x: 0,
-            continent_z: 0,
-            erosion_mask: false,
-            terrain: TerrainRegistry::new().get_by_id(0),
-            biome: BiomeType::Grassland,
-            absent: false,
-        }
     }
 }
 
@@ -1206,31 +1227,89 @@ mod tests {
             | u16::from(terrain.is_volcano()) << 12
     }
 
+    /// A cell's fields as Engine's `Cell` oracle prints them: float bits, ints, the terrain id and
+    /// whether it is the registry's `none`, the biome and the absent flag.
+    fn cell_fields(cell: &Cell, registry: &TerrainRegistry) -> String {
+        let floats = [
+            cell.value,
+            cell.erosion,
+            cell.sediment,
+            cell.gradient,
+            cell.moisture,
+            cell.temperature,
+            cell.continent_id,
+            cell.continent_edge,
+            cell.terrain_region_id,
+            cell.terrain_region_edge,
+        ];
+        let more = [
+            cell.biome_region_id,
+            cell.biome_region_edge,
+            cell.macro_biome_id,
+            cell.river_mask,
+        ];
+        let hex = |values: &[f32]| {
+            values
+                .iter()
+                .map(|v| format!("{:08x}", v.to_bits()))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        format!(
+            "{} {} {} {} {} {} {}:{} {:?} {}",
+            hex(&floats),
+            cell.terrain_region_center,
+            hex(&more),
+            cell.continent_x,
+            cell.continent_z,
+            cell.erosion_mask,
+            cell.terrain.id(),
+            cell.terrain.is_same(&registry.get_by_id(0)),
+            cell.biome,
+            cell.is_absent()
+        )
+    }
+
     #[test]
     fn cell_model_matches_engine_0_3_0() {
         assert_eq!(
             BiomeType::VALUES.map(BiomeType::id),
             [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
         );
-        assert_eq!(BiomeType::get(5), BiomeType::Grassland);
-        assert!(BiomeType::Desert.is_extreme());
-        assert!(BiomeType::Tundra.is_extreme());
-        assert!(!BiomeType::Alpine.is_extreme());
+        for biome in BiomeType::VALUES {
+            assert_eq!(BiomeType::get(biome.id()), biome);
+            assert_eq!(
+                biome.is_extreme(),
+                matches!(biome, BiomeType::Desert | BiomeType::Tundra)
+            );
+        }
+        assert!(std::panic::catch_unwind(|| BiomeType::get(11)).is_err());
+        assert!(std::panic::catch_unwind(|| BiomeType::get(-1)).is_err());
 
-        let defaults = Cell::default();
-        assert_eq!(defaults.value.to_bits(), 0);
-        assert_eq!(defaults.erosion.to_bits(), 0);
-        assert_eq!(defaults.sediment.to_bits(), 0);
-        assert_eq!(defaults.gradient.to_bits(), 0);
-        assert_eq!(defaults.moisture.to_bits(), 0x3f000000);
-        assert_eq!(defaults.temperature.to_bits(), 0x3f000000);
-        assert_eq!(defaults.biome_region_edge.to_bits(), 0x3f800000);
-        assert_eq!(defaults.river_mask.to_bits(), 0x3f800000);
-        assert_eq!(defaults.terrain.id(), 0);
-        assert_eq!(defaults.biome, BiomeType::Grassland);
-        assert!(!defaults.is_absent());
+        // Engine 0.3.0's Cell, printed by the oracle kept outside Git: a default cell and a cell
+        // copied from `source` below, each with a given terrainRegionCenter and absent flag.
+        let default = |center: i64, absent: bool| {
+            format!(
+                "00000000 00000000 00000000 00000000 3f000000 3f000000 00000000 00000000 00000000 \
+                 00000000 {center} 00000000 3f800000 00000000 3f800000 0 0 false 0:true Grassland \
+                 {absent}"
+            )
+        };
+        let copied = |center: i64, absent: bool| {
+            format!(
+                "3f400000 3e800000 3e000000 3f600000 3e4ccccd 3f4ccccd 3dcccccd 3f666666 3e99999a \
+                 3f333333 {center} 3ecccccd 3f19999a 3f0ccccd 3ee66666 -123 456 true 12:false Alpine \
+                 {absent}"
+            )
+        };
 
-        let mut source = Cell::default();
+        let registry = TerrainRegistry::new();
+        assert_eq!(
+            cell_fields(&Cell::new(&registry), &registry),
+            default(0, false)
+        );
+
+        let mut source = Cell::new(&registry);
         source.value = 0.75;
         source.erosion = 0.25;
         source.sediment = 0.125;
@@ -1249,35 +1328,29 @@ mod tests {
         source.continent_x = -123;
         source.continent_z = 456;
         source.erosion_mask = true;
-        source.terrain = TerrainRegistry::new().get_by_id(12);
+        source.terrain = registry.get_by_id(12);
         source.biome = BiomeType::Alpine;
 
-        let mut copied = Cell::default();
-        copied.terrain_region_center = -99;
-        copied.copy_from(&source);
-        assert_eq!(copied.value.to_bits(), source.value.to_bits());
-        assert_eq!(copied.erosion.to_bits(), source.erosion.to_bits());
-        assert_eq!(copied.sediment.to_bits(), source.sediment.to_bits());
-        assert_eq!(copied.gradient.to_bits(), source.gradient.to_bits());
-        assert_eq!(copied.moisture.to_bits(), source.moisture.to_bits());
-        assert_eq!(copied.temperature.to_bits(), source.temperature.to_bits());
-        assert_eq!(copied.continent_x, source.continent_x);
-        assert_eq!(copied.continent_z, source.continent_z);
-        assert_eq!(copied.terrain_region_center, -99);
-        assert!(copied.erosion_mask);
-        assert_eq!(copied.terrain.id(), 12);
-        assert_eq!(copied.biome, BiomeType::Alpine);
+        // copyFrom keeps the target's terrainRegionCenter; reset (copyFrom the defaults) too.
+        let mut copied_cell = Cell::new(&registry);
+        copied_cell.terrain_region_center = -99;
+        copied_cell.copy_from(&source);
+        assert_eq!(cell_fields(&copied_cell, &registry), copied(-99, false));
+        assert!(copied_cell.terrain.is_same(&source.terrain));
+        copied_cell.reset(&registry);
+        assert_eq!(cell_fields(&copied_cell, &registry), default(-99, false));
 
-        copied.reset();
-        assert_eq!(copied.value.to_bits(), 0);
-        assert_eq!(copied.terrain_region_center, -99);
-        assert_eq!(copied.terrain.id(), 0);
-        assert_eq!(copied.biome, BiomeType::Grassland);
-
-        let mut empty = Cell::empty();
-        assert!(empty.is_absent());
-        empty.reset();
-        assert!(empty.is_absent());
+        // The empty cell stays absent through copyFrom and reset; copying it does not make another
+        // cell absent.
+        let mut empty = Cell::empty(&registry);
+        assert_eq!(cell_fields(&empty, &registry), default(0, true));
+        empty.copy_from(&source);
+        assert_eq!(cell_fields(&empty, &registry), copied(0, true));
+        empty.reset(&registry);
+        assert_eq!(cell_fields(&empty, &registry), default(0, true));
+        let mut from_empty = Cell::new(&registry);
+        from_empty.copy_from(&Cell::empty(&registry));
+        assert_eq!(cell_fields(&from_empty, &registry), default(0, false));
     }
 
     #[test]
