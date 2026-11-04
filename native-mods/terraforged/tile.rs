@@ -25,8 +25,10 @@
 use super::{
     terraforged_engine::{Cell, TerrainRegistry},
     terraforged_filters::Filterable,
+    terraforged_river::Rivermap,
     terraforged_util::{pack, unpack_left, unpack_right},
 };
+use std::sync::Arc;
 
 /// Engine 0.3.0's tile `Size` (`com.terraforged.engine.tile.Size`): `size` cells per edge plus
 /// `border` on each side (`total`), stored in a `total * total` array. `mask` assumes `size` is a
@@ -223,6 +225,56 @@ impl Tile {
         let x = size.border.wrapping_add(size.mask(block_x));
         let z = size.border.wrapping_add(size.mask(block_z));
         size.index_of(x, z) as usize
+    }
+
+    /// `generate(Heightmap)`, the fill `TileGenerator.generateRegion` runs before the filters: for
+    /// every tile-local chunk, z rows then x (border included), the chunk at that slot
+    /// (`computeChunk`, as [`Self::chunk_writer`]: a slot already holding a chunk keeps it, so its
+    /// cells are the ones filled), then for each of its cells, z rows then x, `apply_base`
+    /// (`heightmap.applyBase`), the river map of the cell's continent cell, reusing the previous
+    /// cell's map when it matches (`Rivermap.get(cell, rivermap, heightmap)`, with `lookup` as
+    /// `heightmap.getContinent().getRivermap`), `apply_rivers` (`heightmap.applyRivers(cell, x, z,
+    /// rivermap)`, i.e. [`HeightmapRivers::apply`]) and `apply_climate` (`heightmap.applyClimate`).
+    /// The stages get the cell's world block position (`chunk block + d`, Java `int` math) as
+    /// floats. The map is carried across chunks, from the tile's first cell to its last.
+    ///
+    /// `Heightmap` itself is not ported yet, so its stages are closures. Panics where Engine
+    /// throws: a slot holding a chunk past the tile's edge whose cells fall outside the backing, or
+    /// a size factor so large that the chunk array's Java `int` length wrapped (Engine already
+    /// throws building such a tile). A stage that panics leaves the tile partly filled.
+    ///
+    /// [`HeightmapRivers::apply`]: super::terraforged_heightmap::HeightmapRivers::apply
+    pub fn generate_heightmap(
+        &mut self,
+        mut apply_base: impl FnMut(&mut Cell, f32, f32),
+        mut lookup: impl FnMut(i32, i32) -> Arc<Rivermap>,
+        mut apply_rivers: impl FnMut(&mut Cell, f32, f32, &Rivermap),
+        mut apply_climate: impl FnMut(&mut Cell, f32, f32),
+    ) {
+        let mut current = None;
+        let total = self.chunk_size.total;
+        for chunk_z in 0..total {
+            for chunk_x in 0..total {
+                let mut chunk = self
+                    .chunk_writer(chunk_x, chunk_z)
+                    .expect("tile-local chunk inside the chunk array");
+                let GenChunk {
+                    block_x, block_z, ..
+                } = chunk.chunk;
+                for dz in 0..16 {
+                    for dx in 0..16 {
+                        let x = block_x.wrapping_add(dx) as f32;
+                        let z = block_z.wrapping_add(dz) as f32;
+                        let cell = chunk.gen_cell(dx, dz);
+                        apply_base(cell, x, z);
+                        let rivermap = Rivermap::get_for_cell(cell, current.take(), &mut lookup);
+                        apply_rivers(cell, x, z, &rivermap);
+                        apply_climate(cell, x, z);
+                        current = Some(rivermap);
+                    }
+                }
+            }
+        }
     }
 
     /// `getCell(blockX, blockZ)`: the non-border cell at a world block position, wrapped into the
@@ -496,6 +548,7 @@ impl ChunkWriter<'_> {
 #[cfg(test)]
 mod tests {
     use super::super::terraforged_filters::java_cell_raw;
+    use super::super::terraforged_river::GenWarp;
     use super::*;
 
     #[test]
@@ -1182,5 +1235,132 @@ mod tests {
     fn tiles_are_shared_between_threads() {
         fn shareable<T: Send + Sync>() {}
         shareable::<Tile>();
+    }
+
+    /// `TileHeightmapOracle.java`'s output (`h <tile> <lookups> <trace> <cells> <chunks>`).
+    const ORACLE_HEIGHTMAP: &str = "\
+h 0 137 c579e321cc64ef46 7822c03163bbbc11 607ea5d406ecf6e3
+h 1 392 c0e0a699c90ced0d 2981a38add7f911 53f9d0616309a431
+h 2 4 8f581bc24f772753 ae8d5f770c7cf611 e6a262e262c7fb09
+h 3 326 818e2be4c3bf53ee 173ca2a1adf97291 3491e8a4a9b0d6af
+h 4 397 ee81d23a3022096c 3d61aa1f75ddd511 d5f772aa44118431
+h 5 394 a824e4624bec2cf6 a63ce1c7f0e710c1 53f9d0616309a431
+";
+
+    /// The tiles `TileHeightmapOracle.java` fills: region x and z, size factor, border chunks,
+    /// then the tile-local chunk writers made before `generate` (aliasing slots past the edge).
+    const HEIGHTMAP_TILES: [(i32, i32, i32, i32, &[(i32, i32)]); 6] = [
+        (0, 0, 1, 1, &[]),
+        (-2, 3, 2, 1, &[]),
+        (1, -1, 1, 0, &[]),
+        (-1, -1, 0, 2, &[]),
+        (0x1000_0000, -0x1000_0001, 2, 1, &[]),
+        (-2, 3, 2, 1, &[(-1, 1), (6, 0), (12, 3)]),
+    ];
+
+    /// Replays `TileHeightmapOracle.java` (`.local/terraforged/oracles/tile_heightmap/`): Engine
+    /// 0.3.0's `Tile.generate(Heightmap)` over a heightmap whose stages are deterministic fills and
+    /// whose continent makes a new empty river map per lookup. Folds the stage trace (stage,
+    /// coordinate bits, the map each cell gets), every backing cell and `getChunk` over every
+    /// tile-local chunk position.
+    #[test]
+    fn tile_heightmap_generation_matches_engine_0_3_0() {
+        let terrains = TerrainRegistry::new();
+        let mut out = String::new();
+        for (run, &(region_x, region_z, size, border, writers)) in
+            HEIGHTMAP_TILES.iter().enumerate()
+        {
+            let mut tile = Tile::new(region_x, region_z, size, border, &terrains);
+            for &(chunk_x, chunk_z) in writers {
+                assert!(tile.chunk_writer(chunk_x, chunk_z).is_some());
+            }
+            // The stages share the trace, as Engine's oracle mixes into one fold.
+            let trace = std::cell::Cell::new(17_i64);
+            let mix = |value: i32| trace.set(fold(trace.get(), value));
+            let mix_point = |stage: i32, x: f32, z: f32| {
+                mix(stage);
+                mix(x.to_bits() as i32);
+                mix(z.to_bits() as i32);
+            };
+            let lookups = std::cell::Cell::new(0);
+            tile.generate_heightmap(
+                |cell, x, z| {
+                    mix_point(1, x, z);
+                    cell.value = x * 0.25 + z;
+                    cell.moisture += x;
+                    cell.continent_x = (x as i32).div_euclid(24);
+                    cell.continent_z = (z as i32).div_euclid(40);
+                },
+                |x, z| {
+                    lookups.set(lookups.get() + 1);
+                    mix(1000);
+                    mix(x);
+                    mix(z);
+                    Arc::new(Rivermap::new(x, z, Vec::new(), GenWarp::direct()))
+                },
+                |cell, x, z, map| {
+                    mix_point(2, x, z);
+                    mix(map.x());
+                    mix(map.z());
+                    cell.river_mask = (map.x() * 10 + map.z()) as f32 + cell.value;
+                },
+                |cell, x, z| {
+                    mix_point(3, x, z);
+                    cell.temperature = z - cell.river_mask;
+                    cell.erosion += 1.0;
+                },
+            );
+            let mut cells = 17_i64;
+            for cell in &tile.blocks {
+                for value in [
+                    cell.value,
+                    cell.erosion,
+                    cell.sediment,
+                    cell.gradient,
+                    cell.moisture,
+                    cell.temperature,
+                    cell.continent_id,
+                    cell.continent_edge,
+                    cell.terrain_region_id,
+                    cell.terrain_region_edge,
+                    cell.biome_region_id,
+                    cell.biome_region_edge,
+                    cell.macro_biome_id,
+                    cell.river_mask,
+                ] {
+                    cells = fold(cells, value.to_bits() as i32);
+                }
+                for value in [
+                    cell.continent_x,
+                    cell.continent_z,
+                    i32::from(cell.erosion_mask),
+                    cell.terrain.id(),
+                ] {
+                    cells = fold(cells, value);
+                }
+            }
+            let mut chunks = 17_i64;
+            let total = tile.chunk_size.total;
+            for chunk_z in -1..=total {
+                for chunk_x in -1..=total {
+                    let world_x = tile.chunk_x.wrapping_add(chunk_x).wrapping_sub(border);
+                    let world_z = tile.chunk_z.wrapping_add(chunk_z).wrapping_sub(border);
+                    let reader = tile.chunk(world_x, world_z).unwrap();
+                    let chunk = reader.chunk();
+                    for value in [
+                        chunk.chunk_x(),
+                        chunk.chunk_z(),
+                        chunk.block_x(),
+                        chunk.block_z(),
+                        reader.cell(3, 5).value.to_bits() as i32,
+                    ] {
+                        chunks = fold(chunks, value);
+                    }
+                }
+            }
+            let (lookups, trace) = (lookups.get(), trace.get());
+            out += &format!("h {run} {lookups} {trace:x} {cells:x} {chunks:x}\n");
+        }
+        assert_eq!(out, ORACLE_HEIGHTMAP);
     }
 }
