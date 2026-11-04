@@ -105,4 +105,158 @@ mod tests {
         assert_eq!(Size::chunks(3, 2), Size::new(8, 2));
         assert_eq!(Size::blocks(3, 2), Size::new(128, 32));
     }
+    const VALUES: [i32; 27] = [
+        0,
+        1,
+        -1,
+        2,
+        -2,
+        15,
+        16,
+        17,
+        -15,
+        -16,
+        -17,
+        31,
+        63,
+        64,
+        127,
+        -272,
+        1000,
+        -1000,
+        0x07FF_FFFF,
+        0x0800_0000,
+        -0x0800_0000,
+        -0x0800_0001,
+        0x4000_0000,
+        i32::MAX,
+        i32::MIN,
+        i32::MAX - 1,
+        i32::MIN + 1,
+    ];
+
+    fn fold(fold: i64, value: i32) -> i64 {
+        fold.wrapping_mul(31).wrapping_add(i64::from(value))
+    }
+
+    fn fold_fields(mut f: i64, size: Size) -> i64 {
+        for value in [
+            size.size,
+            size.total,
+            size.border,
+            size.array_size,
+            size.lower_border,
+            size.upper_border,
+            size.mask(-1),
+        ] {
+            f = fold(f, value);
+        }
+        f
+    }
+
+    /// Replays `SizeOracle.java` (`.local/terraforged/oracles/size/`) on Engine 0.3.0's `Size`.
+    /// `n` lines: for each size (0, negative, powers of two, `i32::MIN`/`MAX`...), a fold over eight
+    /// borders (negative and overflowing ones included) of every field and of `mask` and `indexOf` over
+    /// `VALUES` (every pair). `c`: `chunkToBlock`/`blockToChunk` of each value. `k`: a fold of `count`
+    /// over every four values. `f` lines: `chunks`/`blocks` for factors that Java's `<<` masks to five
+    /// bits (negative, 31, 32, 64, `i32::MIN`/`MAX`), with seven border counts each.
+    #[test]
+    fn size_matches_engine_oracle() {
+        let mut out = String::new();
+        let borders = [16, 0, 1, -1, -16, 0x4000_0000, i32::MAX, i32::MIN];
+        for size in [64, 1, 0, -1, 16, 512, 0x4000_0000, i32::MAX, i32::MIN, -64] {
+            let mut f = 17;
+            for border in borders {
+                let s = Size::new(size, border);
+                f = fold_fields(f, s);
+                for a in VALUES {
+                    f = fold(f, s.mask(a));
+                    for b in VALUES {
+                        f = fold(f, s.index_of(a, b));
+                    }
+                }
+            }
+            out += &format!("n {size} {f:x}\n");
+        }
+        out += "c";
+        for v in VALUES {
+            out += &format!(" {}:{}", Size::chunk_to_block(v), Size::block_to_chunk(v));
+        }
+        let mut f = 17;
+        for a in VALUES {
+            for b in VALUES {
+                for c in VALUES {
+                    for d in VALUES {
+                        f = fold(f, Size::count(a, b, c, d));
+                    }
+                }
+            }
+        }
+        out += &format!("\nk {f:x}\n");
+        for factor in [
+            -33,
+            -32,
+            -31,
+            -1,
+            0,
+            1,
+            2,
+            3,
+            4,
+            26,
+            27,
+            28,
+            30,
+            31,
+            32,
+            33,
+            63,
+            64,
+            i32::MAX,
+            i32::MIN,
+        ] {
+            let (mut c, mut b) = (17, 17);
+            for border in [0, 1, 2, -1, 0x0800_0000, i32::MAX, i32::MIN] {
+                c = fold_fields(c, Size::chunks(factor, border));
+                b = fold_fields(b, Size::blocks(factor, border));
+            }
+            let s = Size::blocks(factor, 2);
+            out += &format!("f {factor} {} {} {c:x} {b:x}\n", s.size, s.total);
+        }
+        assert_eq!(
+            out,
+            "n 64 1f9a174438cfacd8\n\
+             n 1 24d3f09de5153adc\n\
+             n 0 d60f3a4d8492cbd8\n\
+             n -1 553bc285fe93ead4\n\
+             n 16 6bd4ecc9ef6c3418\n\
+             n 512 f0d931fd1befd3d8\n\
+             n 1073741824 9c923efc8492cbd8\n\
+             n 2147483647 9a5aed22fe93ead4\n\
+             n -2147483648 b50666338492cbd8\n\
+             n -64 70352a0964c5ead8\n\
+             c 0:0 16:0 -16:-1 32:0 -32:-1 240:0 256:1 272:1 -240:-1 -256:-1 -272:-2 496:1 1008:3 1024:4 2032:7 -4352:-17 16000:62 -16000:-63 2147483632:8388607 -2147483648:8388608 -2147483648:-8388608 2147483632:-8388609 0:67108864 -16:134217727 0:-134217728 -32:134217727 16:-134217728\n\
+             k c8c83b7d4b32800f\n\
+             f -33 0 64 6d2e3e641d4afca7 d4fbe486a8eaa67e\n\
+             f -32 16 80 5402ebd2dfd3889a f468072fbb4bd97e\n\
+             f -31 32 96 fbce2a0d72fc4a8b 30b1f1a96de30a7e\n\
+             f -1 0 64 6d2e3e641d4afca7 d4fbe486a8eaa67e\n\
+             f 0 16 80 5402ebd2dfd3889a f468072fbb4bd97e\n\
+             f 1 32 96 fbce2a0d72fc4a8b 30b1f1a96de30a7e\n\
+             f 2 64 128 4b295dbb0b2e7067 ffdf1e0eb3b3667e\n\
+             f 3 128 192 845deeb203154407 f89ed4a0c1dc067e\n\
+             f 4 256 320 779ec3f810ed0ae7 53b3b8e2e84ce67e\n\
+             f 26 1073741824 1073741888 c43d6d23ed4afca7 d33d8986a8eaa67e\n\
+             f 27 -2147483648 -2147483584 f0264ee7bd4afca7 8b67754aa8eaa67e\n\
+             f 28 0 64 bfc7d2905d4afca7 d4fbe486a8eaa67e\n\
+             f 30 0 64 969630601d4afca7 d4fbe486a8eaa67e\n\
+             f 31 0 64 6d2e3e641d4afca7 d4fbe486a8eaa67e\n\
+             f 32 16 80 5402ebd2dfd3889a f468072fbb4bd97e\n\
+             f 33 32 96 fbce2a0d72fc4a8b 30b1f1a96de30a7e\n\
+             f 63 0 64 6d2e3e641d4afca7 d4fbe486a8eaa67e\n\
+             f 64 16 80 5402ebd2dfd3889a f468072fbb4bd97e\n\
+             f 2147483647 0 64 6d2e3e641d4afca7 d4fbe486a8eaa67e\n\
+             f -2147483648 16 80 5402ebd2dfd3889a f468072fbb4bd97e\n"
+        );
+    }
 }
