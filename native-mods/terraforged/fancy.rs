@@ -605,6 +605,12 @@ impl<'a> FancyRiverGenerator<'a> {
         }
     }
 
+    /// The `BaseRiverGenerator` part: the count, seed and the river, fork, lake and wetland configs Engine builds
+    /// from the context's river settings.
+    pub const fn base(&self) -> &BaseRiverGenerator<&'a FancyContinentGenerator> {
+        &self.base
+    }
+
     /// `generateRivers(x, z, id)`: no shuffle and no second fork pass, unlike the base class; every island's
     /// roots become networks in placement order.
     pub fn generate_rivers(&self, x: i32, z: i32, id: i64) -> Rivermap {

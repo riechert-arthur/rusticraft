@@ -121,7 +121,8 @@ pub fn create_continent(
 #[cfg(test)]
 mod tests {
     use super::super::terraforged_climate::{Climate, ClimateSettings};
-    use super::super::terraforged_engine::{ContinentShape, WorldSettings};
+    use super::super::terraforged_engine::{ContinentShape, Lake, River, Wetland, WorldSettings};
+    use super::super::terraforged_river::{BaseRiverGenerator, RiverConfig};
     use super::*;
 
     struct Fold(i32);
@@ -205,6 +206,28 @@ mod tests {
                 continent.continent_shape = ContinentShape::Natural;
                 continent.continent_noise_octaves = 2;
                 rivers.lakes.chance = 0.5;
+            }
+            6 => {
+                rivers.seed_offset = -123_457;
+                rivers.river_count = 14;
+                rivers.main_rivers = River::new(7, 3, 9, 31, 11, 0.6);
+                // `bankHeight(min, max)` sorts them: the branch's 6 and 2 become 2..6.
+                rivers.branch_rivers = River::new(2, 6, 2, 9, 3, 0.4);
+                rivers.lakes = Lake {
+                    chance: 0.85,
+                    min_start_distance: 0.1,
+                    max_start_distance: 0.4,
+                    depth: 17,
+                    size_min: 40,
+                    size_max: 320,
+                    min_bank_height: 3,
+                    max_bank_height: 7,
+                };
+                rivers.wetlands = Wetland {
+                    chance: 0.9,
+                    size_min: 60,
+                    size_max: 480,
+                };
             }
             4 => {
                 world.seed = 0x1_2345_6789;
@@ -408,6 +431,150 @@ FANCY 5 FancyContinentGenerator draws 4 samples 47c9dbaf rivers e385b589 maps 1
                     out += &format!(" climate {climate_draws} {:08x}", fold.0);
                 }
                 out.push('\n');
+            }
+        }
+        assert_eq!(out, EXPECTED);
+    }
+
+    /// The oracle's river-generator fold: count, continent scale, min edge value and seed; the main and fork
+    /// `RiverConfig`s; `LakeConfig`; `WetlandConfig` (each `Variance` as `apply` at 0, 0.5 and 1).
+    fn fold_river_generator<C>(g: &BaseRiverGenerator<C>) -> String {
+        let mut base = Fold(17);
+        base.mix(g.count);
+        base.mix(g.continent_scale);
+        base.f(g.min_edge_value);
+        base.mix(g.seed);
+        let river = |r: &RiverConfig| {
+            let mut fold = Fold(17);
+            fold.mix(r.order);
+            fold.mix(i32::from(r.main));
+            fold.mix(r.bed_width);
+            fold.mix(r.bank_width);
+            fold.f(r.bed_height);
+            fold.f(r.min_bank_height);
+            fold.f(r.max_bank_height);
+            fold.mix(r.length);
+            fold.mix(r.length2);
+            fold.f(r.fade);
+            fold.0
+        };
+        let l = &g.lake;
+        let mut lake = Fold(17);
+        for v in [
+            l.depth,
+            l.chance,
+            l.size_min,
+            l.size_max,
+            l.size_range,
+            l.bank_min,
+            l.bank_max,
+            l.distance_min,
+            l.distance_max,
+        ] {
+            lake.f(v);
+        }
+        let mut wetland = Fold(17);
+        wetland.mix(g.wetland.skip_size);
+        for t in [0.0, 0.5, 1.0] {
+            wetland.f(g.wetland.length.apply(t));
+            wetland.f(g.wetland.width.apply(t));
+        }
+        format!(
+            "base {:08x} main {:08x} fork {:08x} lake {:08x} wetland {:08x}",
+            base.0,
+            river(&g.main),
+            river(&g.fork),
+            lake.0,
+            wetland.0
+        )
+    }
+
+    /// Engine 0.3.0 with every river setting changed (variant 6) against Engine's defaults (variant 0), from
+    /// `ContinentFactoryOracle.java`'s `RIVERS` lines: the river generator each continent builds from the context's
+    /// river settings has Engine's count, seed and main, fork, lake and wetland configs bit for bit, and the
+    /// factory's continent carves the same cells (`getRivermap(cell)` then `Rivermap.apply`) over a dense grid.
+    #[test]
+    fn continent_river_settings_match_engine() {
+        const EXPECTED: &str = "\
+RIVERS MULTI 0 base a22f3fa8 main 39493726 fork 4eacb877 lake 11198ac4 wetland 145827d3 carve 535120f9 masked 768 river 0 lake 0 wetland 0
+RIVERS MULTI 6 base a23017a1 main daeee328 fork 6a3669a7 lake efcf61d5 wetland b5f73610 carve 3718bd38 masked 3030 river 0 lake 2 wetland 0
+RIVERS SINGLE 0 base a22f3fa8 main 39493726 fork 4eacb877 lake 11198ac4 wetland 145827d3 carve 0ce4f21d masked 1027 river 0 lake 10 wetland 0
+RIVERS SINGLE 6 base a23017a1 main daeee328 fork 6a3669a7 lake efcf61d5 wetland b5f73610 carve 232a3c4f masked 1703 river 0 lake 238 wetland 0
+RIVERS MULTI_IMPROVED 0 base a22f3fa8 main 39493726 fork 4eacb877 lake 11198ac4 wetland 145827d3 carve 646c4b45 masked 2785 river 0 lake 19 wetland 0
+RIVERS MULTI_IMPROVED 6 base a23017a1 main daeee328 fork 6a3669a7 lake efcf61d5 wetland b5f73610 carve ecfb5b90 masked 3736 river 0 lake 50 wetland 0
+RIVERS FANCY 0 base a22f3fa8 main 39493726 fork 4eacb877 lake 11198ac4 wetland 145827d3 carve d324601b masked 6428 river 0 lake 51 wetland 0
+RIVERS FANCY 6 base a23017a1 main daeee328 fork 6a3669a7 lake efcf61d5 wetland b5f73610 carve eebf5e24 masked 5661 river 0 lake 1106 wetland 0
+";
+        let names = ["MULTI", "SINGLE", "MULTI_IMPROVED", "FANCY"];
+        let mut out = String::new();
+        for kind in ContinentType::VALUES {
+            for variant in [0, 6] {
+                let (world, rivers) = settings(kind, variant);
+                let registry = Arc::new(TerrainRegistry::new());
+                let levels = Levels::from_properties(world.properties);
+                let (mut factory_seed, mut direct_seed) =
+                    (Seed::from_long(world.seed), Seed::from_long(world.seed));
+                let root = factory_seed.root();
+                let continent = create_continent(
+                    kind,
+                    &mut factory_seed,
+                    root,
+                    world,
+                    rivers,
+                    levels,
+                    Arc::clone(&registry),
+                );
+                // The generator each continent's own `river_generator` builds (Engine's river cache holds it).
+                let (seed, reg) = (&mut direct_seed, Arc::clone(&registry));
+                let generator = match kind {
+                    ContinentType::Multi => fold_river_generator(
+                        &SimpleContinentGenerator::multi(seed, root, world, rivers, levels, reg)
+                            .river_generator()
+                            .base,
+                    ),
+                    ContinentType::Single => fold_river_generator(
+                        &SimpleContinentGenerator::single(seed, root, world, rivers, levels, reg)
+                            .river_generator()
+                            .base,
+                    ),
+                    ContinentType::MultiImproved => fold_river_generator(
+                        &AdvancedContinentGenerator::new(seed, root, world, rivers, levels, reg)
+                            .river_generator()
+                            .base,
+                    ),
+                    ContinentType::Fancy => fold_river_generator(
+                        FancyContinentGenerator::new(seed, root, world, rivers, levels, reg)
+                            .river_generator()
+                            .base(),
+                    ),
+                };
+                let terrain = |name| registry.get_by_name(name).expect(name);
+                let (river, lake, wetland) =
+                    (terrain("river"), terrain("lake"), terrain("wetland"));
+                let mut fold = Fold(17);
+                let mut counts = [0; 4];
+                for i in 0..=150 {
+                    for j in 0..=150 {
+                        let (x, z) = (-3500.0 + 47.0 * i as f32, -3200.0 + 43.0 * j as f32);
+                        let mut cell = Cell::new(&registry);
+                        continent.apply(&mut cell, x, z);
+                        continent.rivermap_for_cell(&cell).apply(&mut cell, x, z);
+                        fold.cell(&cell, &registry);
+                        counts[0] += usize::from(cell.river_mask < 1.0);
+                        counts[1] += usize::from(cell.terrain.is_same(&river));
+                        counts[2] += usize::from(cell.terrain.is_same(&lake));
+                        counts[3] += usize::from(cell.terrain.is_same(&wetland));
+                    }
+                }
+                out += &format!(
+                    "RIVERS {} {variant} {generator} carve {:08x} masked {} river {} lake {} wetland {}\n",
+                    names[kind.index() as usize],
+                    fold.0,
+                    counts[0],
+                    counts[1],
+                    counts[2],
+                    counts[3]
+                );
             }
         }
         assert_eq!(out, EXPECTED);
