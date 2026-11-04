@@ -425,7 +425,7 @@ through three summed domain warps (Simplex at half the continent scale, then Per
 value from 0.2..0.4, writes only `continentEdge` (and 0 to `continentX`, `continentZ` and `continentId`), and its
 `getValue` is Engine's default: the scratch cell's `value`, always 0. As in Engine, `getNearestCenter` ignores its
 arguments and returns half of `getMax - getMin` in blocks, and `getMax` takes the largest island *minimum*, starting
-at `Float.MIN_VALUE`. The river map it holds (`FancyRiverGenerator`) is not ported. Its tests fold every island's
+at `Float.MIN_VALUE`. The river map it holds (`FancyRiverGenerator`) comes with the fancy-river layer below. Its tests fold every island's
 geometry, `getMin`/`getMax`, the continent's values over a grid in continent units and every cell field and lookup
 over the block grid for seven configs (continent scale 0, 1, 2, -3001 and `Integer.MAX_VALUE`, seeds at the `int`
 edges, custom control points), against a fourth Java oracle in `.local/terraforged/oracles/continent/`.
@@ -603,12 +603,20 @@ checking that a second lookup returns the cached map, against `RiverCacheOracle.
 `.local/terraforged/oracles/river/`, which calls Engine's `getRivermap`; the simple-river layer's extreme-cell test
 now also goes through the caches.
 
-The heightmap-river stage applies a continent's cached rivermap and then performs TerraForged's
-volcano-pipe demotion for submerged or river-cut terrain.
+The heightmap-river layer adds the river stage of Engine's `Heightmap` (`heightmap.rs`, `HeightmapRivers`):
+`apply` is `applyRivers(cell, x, z, rivermap)`, which applies the river map to the cell and then turns a volcano pipe
+back into a volcano when its value is below the water level or its river mask below 0.85
+(`VolcanoPopulator.modifyVolcanoType`); `apply_continent` is the private `applyRivers(cell, x, z)` that
+`Heightmap.apply` runs, which takes the river map of the cell's continent cell (`Continent.getRivermap(cell)`). The
+rest of `Heightmap` is not ported, so nothing calls the stage yet. Its tests check the pipe demotion at the 0.85
+boundary and with NaN values and masks, and fold every cell field over 522060 applies through the multi, single,
+advanced and fancy continents' river caches (five settings variants each, a block grid plus NaN, infinite and -0
+points, fresh cells and six fills of value, river mask and terrain), against `HeightmapRiversOracle.java` in
+`.local/terraforged/oracles/heightmap/`, which calls Engine's `Heightmap.applyRivers`.
 
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator and the continents' river caches. They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches and the heightmap's river stage. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
