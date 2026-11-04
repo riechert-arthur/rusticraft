@@ -25,6 +25,7 @@
 use std::sync::{Arc, RwLock};
 
 use super::terraforged::{clamp, java_max, java_min, lerp, map, pack_seed, round};
+use super::terraforged_context::GeneratorContext;
 use super::terraforged_engine::{
     Cell, ControlPoints, Levels, Terrain, TerrainProperties, TerrainRegistry, WorldControlPoints,
 };
@@ -883,6 +884,18 @@ pub struct WorldFilters {
 }
 
 impl WorldFilters {
+    /// Engine's `new WorldFilters(context)`: [`Self::new`] with the context's root seed, filter settings,
+    /// levels and control points, and the world's registry. Draws no seed (Engine reads only `seed.root()`).
+    pub fn from_context(context: &GeneratorContext) -> Self {
+        Self::new(
+            context.seed.root(),
+            context.settings.filters,
+            context.levels,
+            context.settings.world.control_points,
+            &context.terrain,
+        )
+    }
+
     /// `new WorldFilters(context)`: `root_seed` is `context.seed.root()`, `settings` is
     /// `context.settings.filters`, `levels` is `context.levels`, `control_points` is
     /// `context.settings.world.controlPoints` and `terrains` is the world's registry (whose

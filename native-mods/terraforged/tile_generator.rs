@@ -23,9 +23,12 @@
  */
 
 use super::{
+    terraforged_climate::Climate,
     terraforged_concurrent::{Cache, CacheEntry, DisposeListener, LazyCallable, ThreadPool},
+    terraforged_context::GeneratorContext,
     terraforged_engine::{Cell, TerrainRegistry},
     terraforged_filters::WorldFilters,
+    terraforged_heightmap::Heightmap,
     terraforged_river::{Rivermap, current_time_millis},
     terraforged_tile::{BatchChunk, ChunkReader, GenChunk, Tile},
 };
@@ -52,6 +55,24 @@ pub trait HeightmapSource {
     fn apply_climate(&self, cell: &mut Cell, x: f32, z: f32);
 }
 
+impl<H: HeightmapSource + ?Sized> HeightmapSource for Arc<H> {
+    fn apply_base(&self, cell: &mut Cell, x: f32, z: f32) {
+        (**self).apply_base(cell, x, z);
+    }
+
+    fn rivermap(&self, x: i32, z: i32) -> Arc<Rivermap> {
+        (**self).rivermap(x, z)
+    }
+
+    fn apply_rivers(&self, cell: &mut Cell, x: f32, z: f32, rivermap: &Rivermap) {
+        (**self).apply_rivers(cell, x, z, rivermap);
+    }
+
+    fn apply_climate(&self, cell: &mut Cell, x: f32, z: f32) {
+        (**self).apply_climate(cell, x, z);
+    }
+}
+
 /// What `postProcess` runs on a filled tile: Engine's `WorldFilters.apply(tile, optionalFilters)`.
 pub trait TileFilters {
     fn apply(&self, tile: &mut Tile, optional: bool);
@@ -60,6 +81,12 @@ pub trait TileFilters {
 impl TileFilters for WorldFilters {
     fn apply(&self, tile: &mut Tile, optional: bool) {
         self.apply_tile(tile, optional);
+    }
+}
+
+impl<F: TileFilters + ?Sized> TileFilters for Arc<F> {
+    fn apply(&self, tile: &mut Tile, optional: bool) {
+        (**self).apply(tile, optional);
     }
 }
 
@@ -83,6 +110,73 @@ impl<H, F> WorldGenerator<H, F> {
     /// `getFilters()`.
     pub const fn filters(&self) -> &F {
         &self.filters
+    }
+}
+
+/// The [`WorldGenerator`] a [`WorldGeneratorFactory`] supplies: its shared heightmap and filters.
+pub type TerraForgedWorldGenerator = WorldGenerator<Arc<Heightmap>, Arc<WorldFilters>>;
+
+/// Engine 0.3.0's `WorldGeneratorFactory` (`com.terraforged.engine.world`, a `Supplier<WorldGenerator>`): the
+/// world's [`Heightmap`] and [`WorldFilters`], built once from the generator context and shared by every
+/// [`WorldGenerator`] [`Self::get`] returns, plus the world's registry (Engine's static `TerrainType`) that the
+/// heightmap registered its composite terrains into and that the tiles' cells start from.
+///
+/// [`Self::new`] is `new WorldGeneratorFactory(context)`; Engine's lazy `context.worldGenerator` is
+/// [`GeneratorContext::world_generator`]. Engine's other lazy supplier, `context.cache` (`createCache`:
+/// `TileGenerator.builder().pool(ThreadPools.createDefault()).factory(factory).size(3, 1).build().cached()`), is
+/// not ported: only Engine's `WorldLookup` reads it.
+pub struct WorldGeneratorFactory {
+    terrains: Arc<TerrainRegistry>,
+    heightmap: Arc<Heightmap>,
+    filters: Arc<WorldFilters>,
+}
+
+impl WorldGeneratorFactory {
+    /// `new WorldGeneratorFactory(context)`: `new Heightmap(context)`, which draws from `context.seed` (17 draws,
+    /// 20 for `MULTI_IMPROVED` continents) and registers its composite terrains into `context.terrain`, then
+    /// `new WorldFilters(context)`, which draws nothing.
+    ///
+    /// # Panics
+    ///
+    /// As [`Heightmap::new`], if anything else already holds `context.terrain`.
+    pub fn new(context: &mut GeneratorContext) -> Self {
+        let heightmap = Heightmap::new(context);
+        Self::with_heightmap(context, heightmap)
+    }
+
+    /// `new WorldGeneratorFactory(context, heightmap)`: the given heightmap (built from this context, so that it
+    /// registered into `context.terrain`) and `new WorldFilters(context)`.
+    pub fn with_heightmap(context: &GeneratorContext, heightmap: Heightmap) -> Self {
+        Self {
+            terrains: Arc::clone(&context.terrain),
+            heightmap: Arc::new(heightmap),
+            filters: Arc::new(WorldFilters::from_context(context)),
+        }
+    }
+
+    /// The world's registry (the context's), for [`TileGeneratorBuilder::factory`].
+    pub fn terrains(&self) -> &Arc<TerrainRegistry> {
+        &self.terrains
+    }
+
+    /// `getHeightmap()`.
+    pub fn heightmap(&self) -> &Arc<Heightmap> {
+        &self.heightmap
+    }
+
+    /// `getClimate()`: `getHeightmap().getClimate()`.
+    pub fn climate(&self) -> &Climate {
+        self.heightmap.climate()
+    }
+
+    /// `getFilters()`.
+    pub fn filters(&self) -> &Arc<WorldFilters> {
+        &self.filters
+    }
+
+    /// `get()`: `new WorldGenerator(heightmap, filters)`, sharing this factory's heightmap and filters.
+    pub fn get(&self) -> TerraForgedWorldGenerator {
+        WorldGenerator::new(Arc::clone(&self.heightmap), Arc::clone(&self.filters))
     }
 }
 
@@ -221,6 +315,22 @@ where
             generator,
             listener: RwLock::new(None),
         }
+    }
+}
+
+// Engine forces the factory and runs its tile generators and caches on other threads: they must be shareable.
+const _: fn() = || {
+    fn shareable<T: Send + Sync + 'static>() {}
+    shareable::<WorldGeneratorFactory>();
+    shareable::<TileGenerator<Arc<Heightmap>, Arc<WorldFilters>>>();
+};
+
+impl TileGeneratorBuilder<Arc<Heightmap>, Arc<WorldFilters>> {
+    /// `factory(factory)` with a real [`WorldGeneratorFactory`]: Engine's `TileGenerator` takes
+    /// `factory.get()`; the tiles' cells start from the factory's registry.
+    #[must_use]
+    pub fn world_factory(self, factory: &WorldGeneratorFactory) -> Self {
+        self.factory(Arc::clone(factory.terrains()), factory.get())
     }
 }
 
@@ -1034,6 +1144,286 @@ mod tests {
             f = fold(f, value);
         }
         f
+    }
+
+    /// Replays `WorldGeneratorFactoryOracle.java` (`.local/terraforged/oracles/world_generator_factory/`),
+    /// Engine 0.3.0's real `WorldGeneratorFactory` for four settings variants, one per continent type
+    /// (seeds, horizontal scales, volcano weight, levels, control points, filter settings): `SEED` the
+    /// context cursor before and after `new WorldGeneratorFactory(createNoCache(s))` and after a direct
+    /// `new Heightmap` (equal), and on contexts that drew `pre` times first, the cursor before and after
+    /// `context.worldGenerator.get()` (unchanged) and after `new WorldGeneratorFactory(context)`;
+    /// `FILTERS`/`CLIMATE`/`GEN` what the factory shares; `POINT` every cell field from the factory's
+    /// heightmap, then whether a direct heightmap and the lazy factory's give the same cell; `DRAWN` the
+    /// direct factory on the pre-drawn context. `TILE`/`ZOOM`: the first end-to-end tiles, `TileGenerator
+    /// .builder().factory(lazy factory).size(f, b).batch(n).build()`'s `generateRegion(rx, rz)` and zoomed
+    /// `generateRegion(cx, cz, zoom, filter)` with the real heightmap and filters (erosion, smoothing,
+    /// steepness, beach), a fold of every backing cell field and two whole cells.
+    #[test]
+    fn world_generator_factory_matches_engine_0_3_0() {
+        const EXPECTED: &str = "\
+SEED 0 MULTI 1234 1251 1251 2 1236 1236 1253
+FILTERS 0 MULTI 135 1
+CLIMATE 0 MULTI true
+GEN 0 MULTI true true
+POINT 0 MULTI 00000000 00000000 3e9cbe9b 00000000 00000000 00000000 3f3114ca 3f0f73ca 3ef611d2 3ebc1f57 3e8448e4 3ed9c8bf 674309864963 3f76864c 3f530f9e 3e93f3fc 3f800000 -4522 2316 false coast 4 # true true
+DRAWN 0 MULTI 00000000 00000000 3ddd62b6 00000000 00000000 00000000 3f520844 3f133d65 3e1c2432 3d06d4e6 3e8448e4 3ed9c8bf 674309864963 3ecf3b60 3f302d3f 3f330580 3f800000 4909 -4087 false deep_ocean 4
+POINT 0 MULTI 41440000 c2c58000 3ee61fcc 00000000 00000000 00000000 3f405523 3f0592db 3ef611d2 3eea3a5a 3e8448e4 3f800000 674309864963 3f0904b4 3e8f2866 3d50a340 3f800000 -4522 2316 false flats-hills 4 # true true
+DRAWN 0 MULTI 41440000 c2c58000 3e023b8f 00000000 00000000 00000000 3f6e4f1e 3f1330de 3e1c2432 3cde66de 3e8448e4 3f800000 674309864963 3f3de617 3ccc9980 3f26617b 3f800000 4909 -4087 false deep_ocean 4
+POINT 0 MULTI c5800400 46000100 3d9892c5 00000000 00000000 00000000 3f2d29e9 3f12ae96 3ef611d2 00000000 3f6f44c9 3f0bfd8b -18687402696900 3f52d50e 3ee54db4 3da08f1c 3f800000 -4522 2316 false deep_ocean 4 # true true
+DRAWN 0 MULTI c5800400 46000100 3e56aa0e 00000000 00000000 00000000 3f149c15 3f139447 3f321320 3e69b69e 3f6f44c9 3f0bfd8b -18687402696900 3f13b0c3 3f43a5f0 3e9e6a88 3f800000 -10920 6333 false ocean 4
+POINT 0 MULTI 47c35000 c7c35000 3eebd0e1 00000000 00000000 00000000 3f800000 3f732250 3f400000 3f12c169 3f5b3d2a 3f3466bf 429767312440093 3edcee44 3eefaf1a 3e5af518 3f800000 96576 -102723 false mountain_chain 0 # true true
+DRAWN 0 MULTI 47c35000 c7c35000 3eebd0e1 00000000 00000000 00000000 3f721433 3f72b708 3f632a4a 3f4efe68 3f5b3d2a 3f3466bf 429767312440093 3f7c5aa1 3e80f110 3eb1704c 3f800000 97687 -100975 false mountain_chain 0
+POINT 0 MULTI cbe4e1c0 44016000 3e539576 00000000 00000000 00000000 3f1b1b89 3f5f96e7 3dd44ed4 3e69230d 3f2a4308 3e29cbd4 -128845600086032018 3eacbd1a 3e740e14 3f04843c 3f800000 -29995418 439 false ocean 1 # true true
+DRAWN 0 MULTI cbe4e1c0 44016000 3ec9644d 00000000 00000000 00000000 3e9aa1d9 3f5ca0f3 3ee1c8a6 3f76cf99 3f2a4308 3e29cbd4 -128845600086032018 3d0e6170 3d060270 3f38f5ac 3f800000 -29998614 1676 false mountain_chain 1
+TILE 0 MULTI 1 0 0 0 0 fold bb40a70e37961c0e | 3e9c52b5 ba57caba 00000000 3f4e2372 3f3114ca 3f0f73ca 3ef611d2 3ebc1f57 3e8448e4 3ed9c8bf 674309864963 3f76864c 3f530f9e 3e93f3fc 3f800000 -4522 2316 false coast 4 | 3e925dd3 bb46b4fb 00000000 3ea11490 3f3114ca 3f108452 3ef611d2 3ebbbf53 3e8448e4 3e8d5013 674309864963 3f76864c 3f4bdc2a 3e93f3fc 3f800000 -4522 2316 false coast 4
+ZOOM 0 MULTI 1 0 0 0 0 fold 4701428ce3099489 | 3e991257 b9de3d68 00000000 3f172caa 3ce1b7d0 3f1b3f6a 3ef611d2 3f3eebf9 3ec9ef7e 3e2476c6 -9676561317208 3f3af398 3e64e9e4 3f74a641 3f26b5d6 -4522 2316 false hills 7 | 3e9a5aec bb9e1967 00000000 3e3c3e8c 3ce1b7d0 3f1acf8d 3ef611d2 3f3f0803 3ec9ef7e 3e4c3209 -9676561317208 3f3af398 3c7d3080 3f74a641 3f27ff9f -4522 2316 false hills 7
+SEED 1 SINGLE -987654321 -987654304 -987654304 3 -987654318 -987654318 -987654301
+FILTERS 1 SINGLE 17 2
+CLIMATE 1 SINGLE true
+GEN 1 SINGLE true true
+POINT 1 SINGLE 00000000 00000000 3ddd62b6 00000000 00000000 00000000 3f55df19 3f12e6c0 3f1c1301 00000000 3e044f30 3da659e9 -2422361554835 3f4a271e 3cef7360 3f32f641 3f800000 1701 -4963 false deep_ocean 4 # true true
+DRAWN 1 SINGLE 00000000 00000000 3e8fd857 00000000 00000000 00000000 3f179dc1 3f120a43 3ec0b800 3f1b2b25 3e044f30 3da659e9 -2422361554835 3f32f641 3f3f6c9b 3ed2e37a 3f800000 3302 -4128 false flats 4
+POINT 1 SINGLE 41440000 c2c58000 3de094e0 00000000 00000000 00000000 3f55df19 3f12e6c0 00000000 00000000 3e6fd77e 3d275032 450971566710 3f4a271e 3f4b9c1e 3f32f641 3b92d480 0 0 false deep_ocean 4 # true true
+DRAWN 1 SINGLE 41440000 c2c58000 3e9543bf 00000000 00000000 00000000 3ed4500e 3f0bf3db 3ec0b800 3f253e2f 3e6fd77e 3d275032 450971566710 3f272e9c 3deeaf40 3ed2e37a 3f800000 3302 -4128 false badlands-hills 4
+POINT 1 SINGLE c5800400 46000100 3d90535b 00000000 00000000 00000000 3f800000 3f0377f0 00000000 00000000 3f21a1fe 3f800000 -19164144066764 3f473caa 3f1e5d7d 3dd25330 3f800000 0 0 false deep_ocean 4 # true true
+DRAWN 1 SINGLE c5800400 46000100 3da0961c 00000000 00000000 00000000 3f27b864 3f0bb06e 00000000 00000000 3f21a1fe 3f800000 -19164144066764 3eb99c40 3ed66968 3f3fb581 3f800000 0 0 false deep_ocean 4
+POINT 1 SINGLE 47c35000 c7c35000 3dd14a44 00000000 00000000 00000000 3ebae2a6 3f800000 00000000 00000000 3ebc6a32 3f800000 428401512839399 3e7a2188 3ee53fd6 3f6fb8cb 3f800000 0 0 false deep_ocean 1 # true true
+DRAWN 1 SINGLE 47c35000 c7c35000 3dddf805 00000000 00000000 00000000 3e21f111 3f800000 00000000 00000000 3ebc6a32 3f800000 428401512839399 3f065d6a 3f36fc64 3f7eb6e6 3f800000 0 0 false deep_ocean 2
+POINT 1 SINGLE cbe4e1c0 44016000 3d9055c2 00000000 00000000 00000000 3f57a0b8 3f1c8f31 00000000 00000000 3d070dc8 3e09d567 -128851046104563514 3eda8c31 3ed58a5a 3f143e1d 3f800000 0 0 false deep_ocean 3 # true true
+DRAWN 1 SINGLE cbe4e1c0 44016000 3dee6aa2 00000000 00000000 00000000 3f615b75 3f23d859 00000000 00000000 3d070dc8 3e09d567 -128851046104563514 3f72b43a 3f39ac68 3f0b8332 3f800000 0 0 false deep_ocean 3
+TILE 1 SINGLE 2 1 0 -1 2 fold 30cfc7d024a8f6d5 | 3db68c48 00000000 00000000 3f800000 3f726c0a 3f189264 3f1c1301 00000000 3e044f30 3f1547dd -2422361554835 3e6f6f32 3f161d6c 3f32f641 3f800000 1701 -4963 false deep_ocean 4 | 3df31547 00000000 00000000 3f800000 3f726c0a 3f189264 3f1c1301 00000000 3e044f30 3eab3ab6 -2422361554835 3e6f6f32 3f5b1d96 3f32f641 3f800000 1701 -4963 false deep_ocean 4
+ZOOM 1 SINGLE 2 1 0 0 0 fold dbffff58686b1f22 | 3e016283 00000000 00000000 3f800000 3f800000 3f131b98 00000000 00000000 3e044f30 3f363cfc -2422361554835 3f525c72 3ee1edc8 3c7fa300 3f800000 0 0 false deep_ocean 4 | 3dd38b7a 00000000 00000000 3f800000 3f800000 3f131b98 00000000 00000000 3e044f30 3f800000 -2422361554835 3f525c72 3e3b450c 3c7fa300 3f788c7c 0 0 false deep_ocean 4
+SEED 2 MULTI_IMPROVED 591751049 591751069 591751069 4 591751053 591751053 591751073
+FILTERS 2 MULTI_IMPROVED 135 1
+CLIMATE 2 MULTI_IMPROVED true
+GEN 2 MULTI_IMPROVED true true
+POINT 2 MULTI_IMPROVED 00000000 00000000 3d9135bc 00000000 00000000 00000000 3f58348b 3f129ac0 3f66f0b6 3d01d729 3f633346 3f800000 343597383934 3e99487c 3d5d4050 3f746c90 3f800000 2181 -6614 false deep_ocean 4 # true true
+DRAWN 2 MULTI_IMPROVED 00000000 00000000 3d9135bc 00000000 00000000 00000000 3f655f63 3f1293d5 3f2697a0 00000000 3f633346 3f800000 343597383934 3f698712 3ec28ccc 3ed6a425 3f800000 1198 -6609 false deep_ocean 4
+POINT 2 MULTI_IMPROVED 41440000 c2c58000 3d9dc100 00000000 00000000 00000000 3f800000 3f11946a 3f66f0b6 3d4b1cef 3f633346 3ea75211 343597383934 3ed8f061 3ef49c86 3f746c90 3f800000 2181 -6614 false deep_ocean 4 # true true
+DRAWN 2 MULTI_IMPROVED 41440000 c2c58000 3daa19a5 00000000 00000000 00000000 3f6ce80f 3f12f025 3f2697a0 3d787302 3f633346 3ea75211 343597383934 3e34dee2 3f7daade 3ed6a425 3f800000 1198 -6609 false deep_ocean 4
+POINT 2 MULTI_IMPROVED c5800400 46000100 3da3a164 00000000 00000000 00000000 3f59e71b 3f171bbb 3f56624c 00000000 3f24c6db 3d4e3c4c -17587891068550 3f48696c 3ef7ea64 3f6581df 3f800000 3271 6171 false deep_ocean 4 # true true
+DRAWN 2 MULTI_IMPROVED c5800400 46000100 3e12c3ea 00000000 00000000 00000000 3f3994a2 3f19fd54 3f513dec 3e8a6919 3f24c6db 3d4e3c4c -17587891068550 3e995fa6 3f4aeef7 3efe81c2 3f800000 1522 6006 false ocean 3
+POINT 2 MULTI_IMPROVED 47c35000 c7c35000 3e561664 00000000 00000000 00000000 3f665fae 3f800000 3b26f680 3f3679d0 3d25e5a0 3f00d0c7 429011398196019 3dee0754 3f059194 3f391480 3f800000 102088 -104853 false plateau-hills 0 # true true
+DRAWN 2 MULTI_IMPROVED 47c35000 c7c35000 3dbd952f 00000000 00000000 00000000 3f800000 3f7eafbd 3f0303a8 00000000 3d25e5a0 3f00d0c7 429011398196019 3ddf2a34 3f392662 3d294990 3f800000 98094 -92762 false deep_ocean 0
+POINT 2 MULTI_IMPROVED cbe4e1c0 44016000 3e309629 00000000 00000000 00000000 3e39ce65 3f64a1cc 3ec303c7 3ea2a5a3 3e96fc86 3f4874bd -128847343842753764 3f74fc9c 3ecc7860 3ccca290 3f800000 -30006124 5099 false coast 1 # true true
+DRAWN 2 MULTI_IMPROVED cbe4e1c0 44016000 3da0fe0b 00000000 00000000 00000000 3e4cf63c 3f73ae3a 3d94186c 00000000 3e96fc86 3f4874bd -128847343842753764 3f571700 3f5b20d6 3e8f86dd 3f800000 -29997736 5435 false deep_ocean 2
+TILE 2 MULTI_IMPROVED 1 1 2 3 -2 fold b4f51bbe8a26b8e9 | 3db89dc9 00000000 00000000 3f800000 3f5c28a8 3f1222fc 3f66f0b6 3d5ea571 3f633346 3ebaa592 343597383934 3ebdce35 3ebe0a48 3f746c90 3f800000 2181 -6614 false deep_ocean 4 | 3dcd144f 00000000 00000000 3f800000 3f5c28a8 3f1222fc 3f66f0b6 3d56c784 3f633346 3f0600ba 343597383934 3ebdce35 3efa5628 3f746c90 3f800000 2181 -6614 false deep_ocean 4
+ZOOM 2 MULTI_IMPROVED 1 1 2 0 0 fold f4d621a0e079083e | 3d53a763 00000000 00000000 3f800000 3f800000 3eca9dab 3f66f0b6 3de51881 3f0d6825 3f800000 1924145348205 3eee3836 3f5b59ce 3f746c90 3f800000 2181 -6614 false ocean 8 | 3d8d48c2 00000000 00000000 3f800000 3f800000 3ee80969 3f66f0b6 3ddf111b 3f0d6825 3f800000 1924145348205 3e98fa04 3f0cf5d2 3f746c90 3f800000 2181 -6614 false ocean 8
+SEED 3 FANCY 7 24 24 5 12 12 29
+FILTERS 3 FANCY 0 1
+CLIMATE 3 FANCY true
+GEN 3 FANCY true true
+POINT 3 FANCY 00000000 00000000 3e86e047 00000000 00000000 00000000 3ef0ed92 3f15400d 00000000 3f800000 3f6fd080 3eefb728 1705102016554 3f42d102 3f27326a 3e923354 3dafac70 0 0 false hills 4 # true true
+DRAWN 3 FANCY 00000000 00000000 3eaadf5e 00000000 00000000 00000000 3ea13e77 3f0cf638 00000000 3f800000 3f6fd080 3eefb728 1705102016554 3f2b5834 3f3952b2 3f31d83e 3f71f3ce 0 0 false hills 4
+POINT 3 FANCY 41440000 c2c58000 3e564b6f 00000000 00000000 00000000 3e2e00d2 3f0a8b2c 00000000 3f800000 3f6fd080 3f35a9d1 1705102016554 3eabaab1 3e8de0da 3e923354 3dfba760 0 0 false lake 5 # true true
+DRAWN 3 FANCY 41440000 c2c58000 3eba1215 00000000 00000000 00000000 3ea13e77 3f0b1932 00000000 3f800000 3f6fd080 3f35a9d1 1705102016554 3f2b5834 3f4e6de2 3f31d83e 3f7fe9a6 0 0 false hills 4
+POINT 3 FANCY c5800400 46000100 3d72f5ac 00000000 00000000 00000000 3f800000 3e0f616d 00000000 00000000 3e108520 3e8ac7d3 -19408957202156 3dfdf2cc 3f4d7310 3eba02e0 3f800000 0 0 false deep_ocean 9 # true true
+DRAWN 3 FANCY c5800400 46000100 3dd92aef 00000000 00000000 00000000 3f800000 3e131f51 00000000 00000000 3e108520 3e8ac7d3 -19408957202156 3f483cf6 3e2a271c 3f137516 3f800000 0 0 false deep_ocean 9
+POINT 3 FANCY 47c35000 c7c35000 3e00af1d 00000000 00000000 00000000 3f0a89e6 3f800000 00000000 00000000 3e111492 3f800000 428826714601779 3f13c0a8 3f0b06f2 3d33ed68 3f800000 0 0 false deep_ocean 1 # true true
+DRAWN 3 FANCY 47c35000 c7c35000 3e012f14 00000000 00000000 00000000 3f408aff 3f800000 00000000 00000000 3e111492 3f800000 428826714601779 3eb49e09 3f14e2ac 3f5a10bb 3f800000 0 0 false deep_ocean 0
+POINT 3 FANCY cbe4e1c0 44016000 3e1e9799 00000000 00000000 00000000 3f3db39e 3f2c5e84 00000000 00000000 3f676dd6 3e95b1be -128845703165247209 3d258af0 3f4d7ee9 3eb52dec 3f800000 0 0 false deep_ocean 3 # true true
+DRAWN 3 FANCY cbe4e1c0 44016000 3de69f07 00000000 00000000 00000000 3f4f2621 3f295299 00000000 00000000 3f676dd6 3e95b1be -128845703165247209 3eb537c4 3deb1428 3ea53ce0 3f800000 0 0 false deep_ocean 3
+TILE 3 FANCY 0 2 0 -5 -7 fold cbc71257fc7b63b9 | 3e8031bd 00000000 00000000 3e29d9cc 3e99339b 3f124ef6 00000000 3f800000 3f6fd080 3d2e0747 1705102016554 3e0907f2 3f3370a1 3e923354 3b0208df 0 0 false hills 5 | 3e6f1341 00000000 00000000 3f800000 3e99339b 3f1293d5 00000000 3f800000 3f6fd080 3e0f60a0 1705102016554 3e0907f2 3f252187 3e923354 3d3ab0f0 0 0 false lake 5
+ZOOM 3 FANCY 0 2 0 0 0 fold b2db9103551c1464 | 3e5bffa8 00000000 00000000 3f800000 3d1c39bc 3ee237ff 00000000 3e7fa999 3ecc461c 3f1be1dd 8486855375989 3f7496e5 3e2e1070 3f36e656 3f800000 0 0 false ocean 6 | 3ea1f136 00000000 00000000 3f800000 3dd7079a 3eecccbe 00000000 3ed51637 3ec19ebb 3d05d835 5712306503856 3cf5b130 3e9f4c64 3e3b05ec 3f800000 0 0 false coast 6
+";
+        use super::super::terraforged_context::GeneratorSettings;
+        use super::super::terraforged_engine::ContinentType;
+        let bits = |v: f32| format!("{:08x}", v.to_bits());
+        /// `String.hashCode` of an ASCII name.
+        fn hash(name: &str) -> i32 {
+            name.bytes()
+                .fold(0_i32, |h, b| h.wrapping_mul(31).wrapping_add(i32::from(b)))
+        }
+        let floats = |c: &Cell| {
+            [
+                c.value,
+                c.erosion,
+                c.sediment,
+                c.gradient,
+                c.moisture,
+                c.temperature,
+                c.continent_id,
+                c.continent_edge,
+                c.terrain_region_id,
+                c.terrain_region_edge,
+                c.biome_region_id,
+                c.biome_region_edge,
+                c.macro_biome_id,
+                c.river_mask,
+            ]
+        };
+        let line = |c: &Cell| {
+            let f = floats(c).map(|v| bits(if v.is_nan() { f32::NAN } else { v }));
+            format!(
+                "{} {} {} {} {} {} {} {}",
+                f[..10].join(" "),
+                c.terrain_region_center,
+                f[10..].join(" "),
+                c.continent_x,
+                c.continent_z,
+                c.erosion_mask,
+                c.terrain.name(),
+                c.biome as i32,
+            )
+        };
+        let fold_all = |cell: &Cell, f: i64| {
+            let mut f = floats(cell).into_iter().fold(f, |f, v| {
+                fold(
+                    f,
+                    if v.is_nan() {
+                        0x7fc0_0000
+                    } else {
+                        v.to_bits() as i32
+                    },
+                )
+            });
+            let center = cell.terrain_region_center;
+            for v in [
+                center as i32,
+                (center as u64 >> 32) as i32,
+                cell.continent_x,
+                cell.continent_z,
+                i32::from(cell.erosion_mask),
+                hash(cell.terrain.name()),
+                cell.biome as i32,
+            ] {
+                f = fold(f, v);
+            }
+            f
+        };
+        let tile_line = |tag: String, tile: &Tile| {
+            let total = tile.block_size().total;
+            let at = |i: i32| tile.raw_cell(i % total, i / total).expect("backing cell");
+            let f = (0..total * total).fold(17, |f, i| fold_all(at(i), f));
+            format!(
+                "{tag} {} {} fold {f:016x} | {} | {}\n",
+                tile.region_x(),
+                tile.region_z(),
+                line(at(0)),
+                line(at(total * total / 2 + 7))
+            )
+        };
+        let point = |map: &Heightmap, terrains: &TerrainRegistry, x: f32, z: f32| {
+            let mut cell = Cell::new(terrains);
+            map.apply(&mut cell, x, z);
+            line(&cell)
+        };
+        let points = [
+            (0.0, 0.0),
+            (12.25, -98.75),
+            (-4096.5, 8192.25),
+            (100_000.0, -100_000.0),
+            (-3.0e7, 517.5),
+        ];
+        let tiles = [
+            (1, 0, 0, 0, 0),
+            (2, 1, -1, 2, 0),
+            (1, 1, 3, -2, 2),
+            (0, 2, -5, -7, 0),
+        ];
+        let names = ["MULTI", "SINGLE", "MULTI_IMPROVED", "FANCY"];
+        let mut out = String::new();
+        for variant in 0..4 {
+            let mut s = GeneratorSettings::default();
+            s.world.continent.continent_type = ContinentType::VALUES[variant];
+            match variant {
+                0 => s.world.seed = 1234,
+                1 => {
+                    s.world.seed = -987_654_321;
+                    s.terrain.general.global_horizontal_scale = 2.5;
+                    s.filters.erosion.droplets_per_chunk = 17;
+                    s.filters.smoothing.iterations = 2;
+                }
+                2 => {
+                    s.world.seed = 0x1_2345_6789;
+                    s.terrain.general.global_horizontal_scale = 0.37;
+                    s.terrain.volcano.weight = 20.0;
+                    s.world.properties.world_height = 384;
+                    s.world.properties.sea_level = 62;
+                    s.world.control_points.inland = 0.6;
+                }
+                _ => {
+                    s.world.seed = 7;
+                    s.filters.erosion.droplets_per_chunk = 0;
+                    s.filters.smoothing.smoothing_radius = 3.5;
+                }
+            }
+            let tag = format!("{variant} {}", names[variant]);
+            let mut direct = GeneratorContext::create_no_cache(s);
+            let start = direct.seed.get();
+            let factory = WorldGeneratorFactory::new(&mut direct);
+            let mut plain = GeneratorContext::create_no_cache(s);
+            let heightmap = Heightmap::new(&mut plain);
+            let pre = variant as i32 + 2;
+            let (mut lazy_context, mut drawn) =
+                (GeneratorContext::new(s), GeneratorContext::new(s));
+            for _ in 0..pre {
+                lazy_context.seed.next();
+                drawn.seed.next();
+            }
+            let lazy_before = lazy_context.seed.get();
+            let lazy = lazy_context.world_generator();
+            let drawn_factory = WorldGeneratorFactory::new(&mut drawn);
+            out += &format!(
+                "SEED {tag} {start} {} {} {pre} {lazy_before} {} {}\n",
+                direct.seed.get(),
+                plain.seed.get(),
+                lazy_context.seed.get(),
+                drawn.seed.get()
+            );
+            // The factory's registry is the context's, the one its heightmap registered into.
+            assert!(Arc::ptr_eq(factory.terrains(), &direct.terrain));
+            assert!(Arc::ptr_eq(lazy.terrains(), &lazy_context.terrain));
+            let settings = factory.filters().settings();
+            out += &format!(
+                "FILTERS {tag} {} {}\n",
+                settings.erosion.droplets_per_chunk, settings.smoothing.iterations
+            );
+            let same_climate = std::ptr::eq(factory.climate(), factory.heightmap().climate());
+            out += &format!("CLIMATE {tag} {same_climate}\n");
+            let (first, second) = (factory.get(), factory.get());
+            out += &format!(
+                "GEN {tag} {} {}\n",
+                Arc::ptr_eq(first.heightmap(), second.heightmap()),
+                Arc::ptr_eq(first.filters(), factory.filters())
+            );
+            for (x, z) in points {
+                let got = point(factory.heightmap(), factory.terrains(), x, z);
+                out += &format!(
+                    "POINT {tag} {} {} {got} # {} {}\n",
+                    bits(x),
+                    bits(z),
+                    point(&heightmap, &plain.terrain, x, z) == got,
+                    point(lazy.heightmap(), lazy.terrains(), x, z) == got
+                );
+                out += &format!(
+                    "DRAWN {tag} {} {} {}\n",
+                    bits(x),
+                    bits(z),
+                    point(drawn_factory.heightmap(), drawn_factory.terrains(), x, z)
+                );
+            }
+            let (factor, border, rx, rz, batch) = tiles[variant];
+            let generator = TileGenerator::builder()
+                .world_factory(&lazy)
+                .size(factor, border)
+                .batch(batch)
+                .build();
+            let label = format!("{tag} {factor} {border} {batch}");
+            out += &tile_line(format!("TILE {label}"), &generator.generate_region(rx, rz));
+            let v = variant as f32;
+            let zoomed = generator.generate_zoomed_region(
+                -1500.5 + 977.0 * v,
+                250.25 - 311.0 * v,
+                1.0 + 1.5 * v,
+                variant % 2 == 0,
+            );
+            out += &tile_line(format!("ZOOM {label}"), &zoomed);
+        }
+        for (got, want) in out.lines().zip(EXPECTED.lines()) {
+            assert_eq!(got, want);
+        }
+        assert_eq!(out.lines().count(), EXPECTED.lines().count());
     }
 
     /// Replays `TileGeneratorOracle.java` (`.local/terraforged/oracles/tile_generator/`): Engine

@@ -31,6 +31,7 @@ use super::{
         Levels, RiverSettings, Seed, TerrainRegistry, TerrainSettings, WorldSettings,
     },
     terraforged_filters::FilterSettings,
+    terraforged_tile_generator::WorldGeneratorFactory,
 };
 
 /// Engine's `Settings`: the world, climate, terrain, river and filter settings, with Engine's defaults.
@@ -53,7 +54,8 @@ pub struct GeneratorSettings {
 ///
 /// Engine's context also holds a `TerrainProviderFactory` (always `StandardTerrainProvider::new` here) and two lazy
 /// suppliers, the `WorldGeneratorFactory` and, on the `create` path, the tile cache built from it. Neither is
-/// forced while the context is built, so they draw no seed; they come with the world generator factory layer.
+/// forced while the context is built, so they draw no seed. The first is [`Self::world_generator`], built when
+/// called; the tile cache is not ported (see [`WorldGeneratorFactory`]).
 pub struct GeneratorContext {
     pub seed: Seed,
     pub levels: Levels,
@@ -72,9 +74,10 @@ const _: fn() = || {
 };
 
 impl GeneratorContext {
-    /// Engine's `new GeneratorContext(settings)` (the `create` path, whose world generator and tile cache are
-    /// lazy and not ported yet), with a new world registry: the seed is `new Seed(settings.world.seed)` (the
-    /// long's low 32 bits, no draws) and the levels are `new Levels(settings.world)`.
+    /// Engine's `new GeneratorContext(settings)` (the `create` path, whose lazy world generator is
+    /// [`Self::world_generator`] and whose lazy tile cache is not ported), with a new world registry: the seed is
+    /// `new Seed(settings.world.seed)` (the long's low 32 bits, no draws) and the levels are
+    /// `new Levels(settings.world)`.
     pub fn new(settings: GeneratorSettings) -> Self {
         Self::with_terrain(settings, Arc::new(TerrainRegistry::new()))
     }
@@ -137,6 +140,37 @@ impl GeneratorContext {
             self.levels,
             Arc::clone(&self.terrain),
         )
+    }
+
+    /// Engine's `context.worldGenerator.get()`: the factory `createFactory` supplies lazily, `new
+    /// WorldGeneratorFactory(context.copy())`. The copy's seed restarts at the root, so the heightmap draws from
+    /// `root` on whatever `self.seed` drew before, and `self.seed` is left as it was; the levels, settings and
+    /// registry are this context's, and the provider's composite terrains go into this context's registry, the
+    /// instance every identity check of the world uses.
+    ///
+    /// Engine's copy shares the registry (a static global in Java), but here registering needs it unshared, so
+    /// the factory is built on this context with its seed swapped for the copy's rather than on a `copy()` (which
+    /// would hold a second `Arc` and make [`Heightmap::new`] panic). Engine memoizes the factory in a
+    /// `LazySupplier` that copies share; this builds a new one per call, so build it once and share that (a
+    /// second call panics: the first factory holds the registry).
+    ///
+    /// # Panics
+    ///
+    /// If anything else already holds `self.terrain` (a `copy`/`split`, a continent, a climate, an earlier
+    /// factory...), before drawing anything.
+    ///
+    /// [`Heightmap::new`]: super::terraforged_heightmap::Heightmap::new
+    pub fn world_generator(&mut self) -> WorldGeneratorFactory {
+        assert!(
+            Arc::get_mut(&mut self.terrain).is_some(),
+            "GeneratorContext::world_generator registers composite terrains: the context's registry must not be \
+             shared yet"
+        );
+        let copy = self.seed.split();
+        let own = std::mem::replace(&mut self.seed, copy);
+        let factory = WorldGeneratorFactory::new(self);
+        self.seed = own;
+        factory
     }
 
     /// Engine's `new Climate(continent, context)`: draws from the context's own seed and compares terrains with
@@ -389,5 +423,29 @@ SEEDS seed() 4242 4243 4242 seed(5) 4247 4247 parent 4247
             assert_eq!(a.moisture.to_bits(), b.moisture.to_bits());
             assert!(a.terrain.is_same(&b.terrain));
         }
+    }
+
+    /// `world_generator` registers into the context's registry: with the registry shared (a copy, or the first
+    /// factory) it panics before drawing, leaving the context's seed where it was.
+    #[test]
+    fn world_generator_needs_an_unshared_registry() {
+        let mut settings = GeneratorSettings::default();
+        settings.world.seed = 99;
+        let mut context = GeneratorContext::new(settings);
+        context.seed.next();
+        let copy = context.copy();
+        let build = |context: &mut GeneratorContext| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                context.world_generator();
+            }))
+        };
+        assert!(build(&mut context).is_err());
+        assert_eq!((context.seed.root(), context.seed.get()), (99, 100));
+        drop(copy);
+        let factory = context.world_generator();
+        assert_eq!(context.seed.get(), 100);
+        assert!(build(&mut context).is_err());
+        assert_eq!(context.seed.get(), 100);
+        drop(factory);
     }
 }
