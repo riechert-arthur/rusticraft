@@ -1345,8 +1345,9 @@ pub struct Rivermap {
     timestamp: i64,
 }
 
-/// `System.currentTimeMillis()`.
-fn current_time_millis() -> i64 {
+/// `System.currentTimeMillis()`: milliseconds since the Unix epoch (negative before it), saturating at the
+/// `i64` range. Shared by every Engine timestamp (`Rivermap`, the cache entries in concurrent.rs).
+pub fn current_time_millis() -> i64 {
     match SystemTime::now().duration_since(UNIX_EPOCH) {
         Ok(since) => i64::try_from(since.as_millis()).unwrap_or(i64::MAX),
         Err(before) => i64::try_from(before.duration().as_millis()).map_or(i64::MIN, |ms| -ms),

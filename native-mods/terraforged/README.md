@@ -869,9 +869,23 @@ order. Like Engine's, the builder checks no argument; `build()` panics without a
 the class, `generateRegion`, the lazy tile and the zoomed `generateRegion`, with Engine's stage trace when no pool runs
 them) and `d`/`n` lines (defaults, overriding calls, no factory); debug and release builds agree.
 
+The cache-entry layer adds Engine's `ExpiringEntry` and `CacheEntry` (`concurrent.rs`), the entries the tile cache (a
+later layer) will hold. A `CacheEntry` is a `LazyCallable` over a task that runs on the first `get` or `call`, on the
+calling thread (Engine's asynchronous `computeAsync` and `then` are a later layer), plus the time of its last access:
+`System.currentTimeMillis()` (river.rs's `current_time_millis`, an `i64` like Java's `long`) at construction and at the
+start of every `get`, before the task runs; `call` and `is_done` leave it, as in Engine, which overrides only `get`.
+`is_done` is Engine's `task.isDone()`: it answers at once (it does not wait for another thread's task) and is `true` once
+the task ended, even by panicking. As with a failed Engine `Future`, the task never runs twice: after it panicked, every
+`get` and `call` panics again. `cancel` and `is_cancelled` return `false`. Engine's `close` closes a closeable value (a
+`Tile` hands its cells back to resource pools that are not ported); here it does nothing and the value is dropped with
+the entry. When an entry expires is Engine's `Cache`'s rule, also a later layer. Its test replays `CacheEntryOracle.java`
+in `.local/terraforged/oracles/cache_entry/` (flags before and after `get`, where the timestamp is set, a throwing task, 16
+concurrent getters with one run, `isDone` during another thread's run) with an injected clock in place of the oracle's
+sleeps; debug and release builds agree.
+
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation and its builder. They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder and the tile cache's entries. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
