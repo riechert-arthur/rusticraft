@@ -333,9 +333,27 @@ config, a small one and overflowing seeds, plus `modifyVolcanoType` at its edges
 volcanoes, against a Java oracle running Engine's classes on Engine cells; the oracle lives outside Git, in
 `.local/terraforged/oracles/volcano/`.
 
+The standard-provider layer adds Engine's `StandardTerrainProvider` (`provider.rs`): it registers Engine's default
+landforms in Engine's order, each drawing its seeds from the provider's seed (the world seed offset by
+`terrainSeedOffset`): steppe and plains as mixable flats, dales, both hills and torridonian as mixable hills, plateau and
+badlands as mixable, then a second badlands, the three mountains and the volcano as unmixable. Each landform becomes a
+`TerrainPopulator`, or a `ScaledPopulator` when its settings scale it, on the land base. `getPopulators` keeps the
+mixable populators with a weight above 0 (so a NaN weight drops one too), adds a composite for every pair of them (a
+Perlin control at half the region size, warped by a Perlin warp, blending the two variances; registering
+`lower-higher` composite terrains, or the terrain itself for two populators of one terrain, and drawing two seeds
+each), then the unmixable populators, and shuffles them as `Collections.shuffle` does with a `java.util.Random`
+seeded from the next seed; every call draws new seeds and so returns a different order. Composites go into the
+world's registry, which the caller passes in, so populator terrains are the world's own (`is_same`). Variant lookups
+fall back to the default populator for a negative variant or an unregistered terrain and cap high variants at the
+last one; name lookups compare like Java's `equalsIgnoreCase`. Engine's `GeneratorContext` is not ported: the
+provider takes the world seed, levels and terrain settings directly. Its tests rebuild a Java oracle's text over two
+configurations (Engine's defaults; a seed offset, zero and NaN weights, scaled landforms and a negative long seed):
+the seed cursor, registered populators, variant and name lookups, both shuffled lists with samples on a grid, and the
+registry's composites; the oracle lives outside Git, in `.local/terraforged/oracles/provider/`.
+
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions and its volcano populator. They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator and its standard terrain provider. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
