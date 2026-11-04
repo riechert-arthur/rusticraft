@@ -723,6 +723,12 @@ mod tests {
     }
 
     #[test]
+    fn gen_warp_is_shareable_across_workers() {
+        fn shareable<T: Send + Sync>(_: &T) {}
+        shareable(&GenWarp::new(12_345, 3000));
+    }
+
+    #[test]
     fn scale_mega_warp_rounds_like_engine() {
         let scales = [
             0,
