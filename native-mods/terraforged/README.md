@@ -830,7 +830,8 @@ zoom, filter)` the zoomed `getTile` (a `CallableZoomTile`). Nothing runs until t
 again, and `is_done` also waits, then reports whether a tile was stored. A generation that panics (Engine: throws)
 stores nothing, so the next caller, or one already waiting, generates it again. `cancel` and `is_cancelled` always
 return `false`. Dropping a handle drops its tile; `LazyCallable` disposes of nothing in Engine either. Its adapters
-(`adapt`, `adaptComplete`, `callAsync`, `then`), the timed `get` and `LazySupplier` are not ported. Its tests replay
+`adapt` and `adaptComplete`, the timed `get` and `LazySupplier` are not ported; `callAsync` and `then` are
+`CacheEntry::compute_async` and `CacheEntry::then` (see the async layers below). Its tests replay
 `LazyCallableOracle.java` in `.local/terraforged/oracles/lazy_callable/` (one creation for 16 concurrent callers, all
 seeing the same value; retry after a throwing creation; `isDone` and `get` waiting on another thread's creation and
 seeing its outcome) and the tile-generator oracle's `l`/`m` lines (each handle's fold equals the eager generation, no

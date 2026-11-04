@@ -40,8 +40,9 @@ use std::thread;
 /// its own callable never returns (Engine's `StampedLock` hangs there too; std's `Mutex` may
 /// instead panic). Engine's `create` may not return null (`Objects.requireNonNull`); here it always
 /// returns a value. Dropping the callable drops the value: Engine's `LazyCallable` disposes of
-/// nothing either. Its adapters (`adapt`, `adaptComplete`, `callAsync`, `then`) and the timed
-/// `get` are not ported.
+/// nothing either. Its adapters `adapt` and `adaptComplete` and the timed `get` are not ported;
+/// `callAsync` and `then` are [`CacheEntry::compute_async`] and [`CacheEntry::then`] (the async
+/// tile factory's `getTile` uses the first).
 pub struct LazyCallable<T, F> {
     lock: Mutex<()>,
     value: OnceLock<T>,
