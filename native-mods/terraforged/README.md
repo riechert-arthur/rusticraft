@@ -614,9 +614,21 @@ advanced and fancy continents' river caches (five settings variants each, a bloc
 points, fresh cells and six fills of value, river mask and terrain), against `HeightmapRiversOracle.java` in
 `.local/terraforged/oracles/heightmap/`, which calls Engine's `Heightmap.applyRivers`.
 
+The heightmap-cache layer adds Engine's `HeightmapCache.get` (`heightmap.rs`, `HeightmapCache`): it keeps up to 4096
+cells keyed by packed block coordinates and, on a miss, runs the heightmap on a new cell and turns a coast whose value
+is above the water level and at most five blocks over it into a beach (the correction `WorldLookup` also makes). As
+`Heightmap.apply` is not ported, `get` takes it as a closure; it returns a copy of the cached cell where Engine returns
+the shared object. A full cache drops its oldest cell, and misses are computed outside the cache's lock (Engine splits
+it into sections and computes under a section's lock); neither changes the cells returned. Engine's `generate` (the
+tile path) is not ported. Its tests check hits, eviction, sharing between threads and the coast identity check, and
+fold every returned cell field over 7932 lookups (a deterministic fill of values around the water and beach levels,
+four terrains, three height / sea level variants, extreme blocks, caches of 4096 and 16 cells) against
+`HeightmapCacheOracle.java` in `.local/terraforged/oracles/heightmap/`, which calls Engine's `HeightmapCache.get` on a
+`Heightmap` whose `apply` is that fill.
+
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches and the heightmap's river stage. They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage and the heightmap cache. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
