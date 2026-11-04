@@ -1242,10 +1242,10 @@ impl RiverNetworkBuilder {
     }
 
     pub fn add_bounds(&mut self, river: River) {
-        self._min_x = self._min_x.min(river.x1).min(river.x2);
-        self._min_z = self._min_z.min(river.z1).min(river.z2);
-        self._max_x = self._max_x.max(river.x1).max(river.x2);
-        self._max_z = self._max_z.max(river.z1).max(river.z2);
+        self._min_x = java_min(java_min(self._min_x, river.x1), river.x2);
+        self._min_z = java_min(java_min(self._min_z, river.z1), river.z2);
+        self._max_x = java_max(java_max(self._max_x, river.x1), river.x2);
+        self._max_z = java_max(java_max(self._max_z, river.z1), river.z2);
     }
 
     pub fn overlaps(
@@ -2962,68 +2962,229 @@ mod tests {
         }
     }
 
-    #[test]
-    fn river_network_matches_engine_0_3_0() {
-        let registry = TerrainRegistry::new();
-        let levels = Levels::new(256, 63);
-        let make_carver = |x1, z1, x2, z2, main| {
-            let config = RiverConfig::builder(levels)
+    /// Engine 0.3.0's `Network` and `Network.Builder` against `NetworkOracle.java` (in the maintainer's
+    /// `.local/terraforged/oracles/river/`), which runs Engine's classes with real carvers, lakes and wetlands.
+    mod network_oracle {
+        use super::lake_oracle::{Fold, fill_from, levels};
+        use super::*;
+
+        const NAN: f32 = f32::NAN;
+        const INF: f32 = f32::INFINITY;
+        /// `WetlandOracle`'s fills: value, river mask, terrain id (erosion mask: even fills).
+        #[rustfmt::skip]
+        const FILLS: [(f32, f32, i32); 14] = [
+            (0.6, 1.0, 0), (0.3, 0.5, 7), (0.2, NAN, 5), (0.0, -0.0, 6), (1.0, 1.0, 12), (NAN, 1.0, 0),
+            (0.24, 0.75, 8), (0.25, 1.0, 7), (-0.5, 1.0, 11), (-0.0, 2.0, 0), (INF, -1.0, 0),
+            (0.242_187_5, 0.25, 3), (0.236_328_125, 0.5, 0), (0.257_812_5, 1.0, 10),
+        ];
+        #[rustfmt::skip]
+        const PROBES: [[f32; 4]; 11] = [
+            [500.0, -100.0, 500.0, 100.0], [2000.0, 2000.0, 2100.0, 2100.0], [-100.0, 0.0, 100.0, 0.0],
+            [1050.0, 10.0, 1300.0, 10.0], [510.0, 300.0, 900.0, 300.0], [-0.0, -0.0, -0.0, -0.0],
+            [0.0, NAN, 10.0, 10.0], [-INF, 300.0, INF, 300.0], [-200.0, 200.0, 0.0, 200.0],
+            [500.0, -520.0, 480.0, -700.0], [5.0, 5.0, 5.0, 20.0],
+        ];
+        const EXTENDS: [f32; 6] = [0.0, 50.0, 250.0, -10.0, NAN, INF];
+
+        fn carver(
+            [x1, z1, x2, z2]: [f32; 4],
+            main: bool,
+            warp: RiverWarp,
+            levels: Levels,
+            registry: &TerrainRegistry,
+        ) -> RiverCarver {
+            let mut config = RiverConfig::builder(levels)
                 .main(main)
-                .bed_width(8)
-                .bank_width(20)
-                .bed_depth(5)
-                .bank_height(2, 6)
                 .fade(0.75)
-                .build();
+                .length(1000);
+            if main {
+                config = config
+                    .bed_width(8)
+                    .bank_width(20)
+                    .bed_depth(5)
+                    .bank_height(2, 6);
+            }
             RiverCarver::new(
                 River::new(x1, z1, x2, z2),
-                RiverWarp::none(),
-                config,
+                warp,
+                config.build(),
                 RiverCarverSettings::default(),
                 levels,
-                &registry,
+                registry,
             )
-        };
-        let mut root = RiverNetwork::builder(make_carver(0.0, 0.0, 1000.0, 0.0, true));
-        root.lakes.push(LakeCarver::new(
-            Vec2f::new(200.0, 100.0),
-            75.0,
-            0.8,
-            LakeConfig::new(DefaultRiverSettings::default().lakes, levels),
-            &registry,
-        ));
-        root.wetlands.push(WetlandCarver::new(
-            12_345,
-            Vec2f::new(600.0, -100.0),
-            Vec2f::new(900.0, -100.0),
-            80.0,
-            levels,
-            &registry,
-        ));
-        root.children.push(RiverNetwork::builder(make_carver(
-            500.0, -500.0, 500.0, 500.0, false,
-        )));
-        let network = root.build();
-        assert_eq!(
-            [
-                (0.0, 0.0),
-                (500.0, 500.0),
-                (1000.0, 1000.0),
-                (200.0, 100.0),
-                (750.0, -100.0)
-            ]
-            .map(|(x, z)| network.contains(x, z)),
-            [true, true, true, true, true]
-        );
-        assert_eq!(
-            [
-                (500.0, 0.0, 0.0, 0.0),
-                (200.0, 100.0, 0.0, 0.0),
-                (750.0, -100.0, 0.0, 0.0),
-                (500.0, 100.0, 20.0, -10.0),
-                (1100.0, 0.0, 0.0, 0.0)
-            ]
-            .map(|(x, z, lake_x, lake_z)| {
+        }
+
+        fn mix_builder(fold: &mut Fold, b: &RiverNetworkBuilder) {
+            for v in [b._min_x, b._min_z, b._max_x, b._max_z] {
+                fold.f(v);
+            }
+        }
+
+        fn mix_bounds(fold: &mut Fold, n: &RiverNetwork) {
+            fold.bounds(n.bounds);
+            for child in &n.children {
+                mix_bounds(fold, child);
+            }
+        }
+
+        /// `NetworkOracle.roots`: networks a, b and c.
+        fn roots(
+            fold: &mut Fold,
+            levels: Levels,
+            registry: &TerrainRegistry,
+        ) -> [RiverNetworkBuilder; 3] {
+            let lakes = LakeConfig::new(Lake::default(), levels);
+            let lake = |x, z, radius, multiplier| {
+                LakeCarver::new(Vec2f::new(x, z), radius, multiplier, lakes, registry)
+            };
+            let wetland = |seed, [ax, az, bx, bz]: [f32; 4], radius| {
+                WetlandCarver::new(
+                    seed,
+                    Vec2f::new(ax, az),
+                    Vec2f::new(bx, bz),
+                    radius,
+                    levels,
+                    registry,
+                )
+            };
+            let carver = |line, main, warp| carver(line, main, warp, levels, registry);
+            let mut a = RiverNetwork::builder(carver(
+                [0.0, 0.0, 1000.0, 0.0],
+                true,
+                RiverWarp::new(12_345, 0.15, 0.85, 0.001, 150.0),
+            ));
+            a.lakes.push(lake(200.0, 100.0, 75.0, 0.8));
+            a.lakes.push(lake(0.0, 0.0, 40.0, 1.0));
+            a.wetlands
+                .push(wetland(12_345, [600.0, -100.0, 900.0, -100.0], 80.0));
+            let mut a1 = RiverNetwork::builder(carver(
+                [500.0, -500.0, 500.0, 500.0],
+                false,
+                RiverWarp::new(-7, 0.15, 0.75, 0.0015, 90.0),
+            ));
+            a1.lakes.push(lake(500.0, -500.0, 50.0, 1.0));
+            let mut a11 = RiverNetwork::builder(carver(
+                [500.0, 200.0, 800.0, 450.0],
+                false,
+                RiverWarp::none(),
+            ));
+            a11.wetlands
+                .push(wetland(-1, [520.0, 250.0, 700.0, 400.0], 60.0));
+            mix_builder(fold, &a11);
+            a11.add_bounds(River::new(-5000.0, 0.0, 0.0, 9000.0));
+            mix_builder(fold, &a11);
+            a1.children.push(a11);
+            a.children.push(a1);
+            let a2 = RiverNetwork::builder(carver(
+                [900.0, 0.0, 1200.0, -300.0],
+                false,
+                RiverWarp::new(0, 0.0, 0.0, 0.0, 0.0),
+            ));
+            a.children.push(a2);
+            let mut b = RiverNetwork::builder(carver(
+                [100.0, -50.0, -300.0, 400.0],
+                true,
+                RiverWarp::new(i32::MAX, 0.3, 0.7, 0.002, 60.0),
+            ));
+            b.wetlands
+                .push(wetland(i32::MAX - 1, [-300.0, 0.0, 200.0, 300.0], 100.0));
+            b.wetlands
+                .push(wetland(77, [-250.0, 300.0, 150.0, -20.0], 90.0));
+            b.lakes.push(lake(-50.0, 150.0, 60.0, 1.0));
+            b.lakes.push(lake(0.0, 120.0, 90.0, 0.5));
+            let mut c =
+                RiverNetwork::builder(carver([5.0, 5.0, 5.0, 5.0], false, RiverWarp::none()));
+            c.lakes.push(lake(NAN, 0.0, 30.0, 1.0));
+            c.wetlands.push(wetland(3, [0.0, 0.0, INF, 0.0], 50.0));
+            c.children.push(RiverNetwork::builder(carver(
+                [0.0, NAN, 10.0, 10.0],
+                false,
+                RiverWarp::new(5, 0.2, 0.8, 0.001, 100.0),
+            )));
+            c.add_bounds(River::new(NAN, -3.0, 2.0, NAN));
+            let roots = [a, b, c];
+            for builder in all_builders(&roots) {
+                mix_builder(fold, builder);
+            }
+            roots
+        }
+
+        /// The oracle's `builders` list: a, a1, a11, a2, b, c, c1.
+        fn all_builders(roots: &[RiverNetworkBuilder; 3]) -> [&RiverNetworkBuilder; 7] {
+            let [a, b, c] = roots;
+            let a1 = &a.children[0];
+            [a, a1, &a1.children[0], &a.children[1], b, c, &c.children[0]]
+        }
+
+        #[test]
+        fn carves_every_cell_field_like_engine() {
+            let registry = TerrainRegistry::new();
+            let mut fold = Fold(17);
+            let mut carves = 0;
+            let probes = PROBES.map(|[x1, z1, x2, z2]| River::new(x1, z1, x2, z2));
+            let mut points = Vec::new();
+            for i in 0..=44 {
+                for j in 0..=28 {
+                    points.push((-600.0 + 50.0 * i as f32, -700.0 + 50.0 * j as f32));
+                }
+            }
+            for e in [-0.0, NAN, INF, -INF, 1e20] {
+                points.push((e, 0.0));
+                points.push((500.0, e));
+            }
+            for levels in levels() {
+                let roots = roots(&mut fold, levels, &registry);
+                let builders = all_builders(&roots);
+                for builder in builders {
+                    for probe in probes {
+                        for extend in EXTENDS {
+                            fold.b(builder.overlaps(probe, None, extend));
+                            for parent in builders {
+                                fold.b(builder.overlaps(probe, Some(parent), extend));
+                            }
+                        }
+                    }
+                }
+                let networks = roots.map(RiverNetworkBuilder::build);
+                for network in &networks {
+                    mix_bounds(&mut fold, network);
+                    for probe in probes {
+                        for extend in EXTENDS {
+                            fold.b(network.overlaps(probe, extend));
+                        }
+                    }
+                }
+                for &(x, z) in &points {
+                    for network in &networks {
+                        fold.b(network.contains(x, z));
+                        for (lake_x, lake_z) in [(0.0, 0.0), (20.0, -10.0), (NAN, -0.0)] {
+                            for i in std::iter::once(None).chain((0..FILLS.len()).map(Some)) {
+                                let mut cell = fill_from(&FILLS, i, &registry);
+                                network.carve(&mut cell, x, z, lake_x, lake_z);
+                                fold.cell(&cell, &registry);
+                                carves += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            assert_eq!((carves, fold.0), (532_575, 362_163_377));
+        }
+
+        #[test]
+        fn samples_match_engine() {
+            let registry = TerrainRegistry::new();
+            let [a, b, _] = roots(&mut Fold(0), levels()[0], &registry);
+            let (a, b) = (a.build(), b.build());
+            #[rustfmt::skip]
+            let samples = [
+                (&a, 500.0, 0.0, 0.0, 0.0), (&a, 200.0, 100.0, 0.0, 0.0), (&a, 750.0, -100.0, 0.0, 0.0),
+                (&a, 500.0, 100.0, 20.0, -10.0), (&a, 1100.0, 0.0, 0.0, 0.0), (&a, 520.0, 300.0, 0.0, 0.0),
+                (&a, 650.0, 330.0, 0.0, 0.0), (&a, 500.0, -480.0, 0.0, 0.0), (&a, 300.0, 40.0, 0.0, 0.0),
+                (&a, 2000.0, 2000.0, 0.0, 0.0), (&b, -30.0, 130.0, 0.0, 0.0), (&b, -10.0, 140.0, 5.0, 5.0),
+                (&b, -100.0, 170.0, 0.0, 0.0),
+            ];
+            let carved = samples.map(|(network, x, z, lake_x, lake_z)| {
                 let mut cell = Cell::new(&registry);
                 cell.value = 0.6;
                 cell.river_mask = 1.0;
@@ -3035,23 +3196,23 @@ mod tests {
                     cell.erosion_mask,
                     cell.terrain.id(),
                 )
-            }),
-            [
-                (0x3e69b6db, 0, true, 5),
-                (0x3e500000, 0, false, 6),
-                (0x3e7b5555, 0, true, 7),
-                (0x3e66db6e, 0, true, 5),
-                (0x3eaa199f, 0x3e4bf690, false, 0),
-            ]
-        );
-        assert_eq!(
-            [
-                River::new(500.0, -100.0, 500.0, 100.0),
-                River::new(2000.0, 2000.0, 2100.0, 2100.0),
-                River::new(-100.0, 0.0, 100.0, 0.0)
-            ]
-            .map(|river| network.overlaps(river, 50.0)),
-            [true, false, true]
-        );
+            });
+            #[rustfmt::skip]
+            assert_eq!(
+                carved,
+                [
+                    (0x3e7c_0000, 0, false, 0), (0x3e80_7b26, 0x3954_37dc, false, 0), (0x3e7e_1cab, 0, true, 7),
+                    (0x3e7c_0000, 0, false, 0), (0x3e8f_6356, 0x3e4b_f690, false, 0), (0x3e7f_f56e, 0, true, 7),
+                    (0x3e81_97b8, 0x3d38_2050, false, 0), (0x3e50_2f12, 0x3958_f000, false, 6),
+                    (0x3e6f_9e2e, 0x3920_e000, true, 5), (0x3f19_999a, 0x3f80_0000, false, 0),
+                    (0x3e7c_a476, 0, true, 7), (0x3e60_b4ba, 0, true, 6), (0x3e7e_dcfe, 0, true, 7),
+                ]
+            );
+            let bounds = a.bounds;
+            assert_eq!(
+                [bounds.min_x, bounds.min_y, bounds.max_x, bounds.max_y].map(f32::to_bits),
+                [0xc409_8000, 0xc483_4000, 0x44da_c000, 0x4483_4000]
+            );
+        }
     }
 }
