@@ -28,7 +28,10 @@ use super::{
     terraforged_river::Rivermap,
     terraforged_util::pack,
 };
-use std::{collections::HashMap, sync::Arc, sync::Mutex};
+use std::{
+    collections::{HashMap, VecDeque},
+    sync::{Arc, Mutex},
+};
 
 /// The river stage of Engine 0.3.0's `Heightmap` (`applyRivers`): it carves a continent's river map into a cell,
 /// then turns volcano pipes that ended up under water or in a river back into volcanoes.
@@ -73,6 +76,12 @@ impl HeightmapRivers {
 /// `get` returns the shared cached `Cell` object; this returns a copy (every field, as `Clone`), so callers cannot
 /// change what the cache holds. Engine's `generate(cell, x, z, rivermap)` (the tile path, which caches the
 /// caller's own cell and does not apply the beach correction) is not ported.
+///
+/// Engine's `LoadBalanceLongMap` splits the cache into per-thread-count sections, each dropping its oldest entry
+/// when full, and computes misses under a section's write lock. Here one map drops its oldest entry once it holds
+/// `capacity` cells, and misses are computed outside the lock, so threads don't wait on each other's heightmap
+/// work (two threads missing the same block may both compute it; the cells are equal). Which cells stay cached
+/// never changes what `get` returns.
 pub struct HeightmapCache {
     water_level: f32,
     beach_level: f32,
@@ -80,7 +89,13 @@ pub struct HeightmapCache {
     coast: Terrain,
     beach: Terrain,
     capacity: usize,
-    cells: Mutex<HashMap<i64, Cell>>,
+    cells: Mutex<Cells>,
+}
+
+/// The cached cells and their keys, oldest first.
+struct Cells {
+    map: HashMap<i64, Cell>,
+    order: VecDeque<i64>,
 }
 
 impl HeightmapCache {
@@ -102,7 +117,10 @@ impl HeightmapCache {
             beach: terrains.get_by_id(4),
             terrains,
             capacity,
-            cells: Mutex::new(HashMap::with_capacity(capacity)),
+            cells: Mutex::new(Cells {
+                map: HashMap::with_capacity(capacity),
+                order: VecDeque::with_capacity(capacity),
+            }),
         }
     }
 
@@ -110,12 +128,8 @@ impl HeightmapCache {
     /// `heightmap.apply`, with the block coordinates as floats) and the beach correction.
     pub fn get(&self, x: i32, z: i32, apply: impl FnOnce(&mut Cell, f32, f32)) -> Cell {
         let id = pack(x, z);
-        let mut cells = self.cells.lock().unwrap_or_else(|error| error.into_inner());
-        if let Some(cell) = cells.get(&id) {
+        if let Some(cell) = self.lock().map.get(&id) {
             return cell.clone();
-        }
-        if cells.len() >= self.capacity {
-            cells.clear();
         }
         let mut cell = Cell::new(&self.terrains);
         apply(&mut cell, x as f32, z as f32);
@@ -126,8 +140,25 @@ impl HeightmapCache {
         {
             cell.terrain = self.beach.clone();
         }
-        cells.insert(id, cell.clone());
+        let mut cells = self.lock();
+        if !cells.map.contains_key(&id) {
+            // A capacity of 0 keeps one cell (Engine's map throws on its first miss).
+            while cells.map.len() >= self.capacity.max(1) {
+                let Some(oldest) = cells.order.pop_front() else {
+                    break;
+                };
+                cells.map.remove(&oldest);
+            }
+            cells.map.insert(id, cell.clone());
+            cells.order.push_back(id);
+        }
         cell
+    }
+
+    /// The cells. `apply` runs outside the lock, so a poisoned lock (a panic while inserting) still guards a
+    /// consistent map.
+    fn lock(&self) -> std::sync::MutexGuard<'_, Cells> {
+        self.cells.lock().unwrap_or_else(|error| error.into_inner())
     }
 }
 
@@ -403,6 +434,35 @@ mod tests {
             cell.value = levels.water(3);
         });
         assert!(foreign.terrain.is_same(&other.get_by_id(3)));
+    }
+
+    /// A full cache drops its oldest cell first, and threads sharing it get equal cells.
+    #[test]
+    fn heightmap_cache_evicts_oldest_and_is_shared() {
+        let terrains = Arc::new(TerrainRegistry::new());
+        let cache = HeightmapCache::with_capacity(Levels::new(256, 63), Arc::clone(&terrains), 2);
+        let calls = AtomicUsize::new(0);
+        let fill = |cell: &mut Cell, x: f32, _: f32| {
+            calls.fetch_add(1, Ordering::Relaxed);
+            cell.value = x;
+        };
+        for x in [1, 2, 3, 2, 1] {
+            assert_eq!(cache.get(x, 0, fill).value, x as f32);
+        }
+        // 1, 2, 3 (drops 1), 2 (hit), 1 (drops 2).
+        assert_eq!(calls.load(Ordering::Relaxed), 4);
+
+        let cache = HeightmapCache::new(Levels::new(256, 63), Arc::clone(&terrains));
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| {
+                    for x in -300..300 {
+                        let cell = cache.get(x, -x, |cell, x, z| cell.value = x * 0.5 + z);
+                        assert_eq!(cell.value.to_bits(), (x as f32 * 0.5 - x as f32).to_bits());
+                    }
+                });
+            }
+        });
     }
 
     /// Engine 0.3.0's `HeightmapCache.get` against `HeightmapCacheOracle.java` (in the maintainer's
