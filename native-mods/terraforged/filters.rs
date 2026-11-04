@@ -28,6 +28,7 @@ use super::terraforged::{clamp, java_max, java_min, lerp, map, pack_seed, round}
 use super::terraforged_engine::{
     Cell, ControlPoints, Levels, Terrain, TerrainProperties, TerrainRegistry, WorldControlPoints,
 };
+use super::terraforged_tile::Tile;
 
 /// Engine's `FilterSettings.Smoothing` (defaults: one iteration, radius 1.8, rate 0.9). Engine's
 /// `@Range` limits (iterations and radius 0 to 5, rate 0 to 1) are only enforced by its settings UI,
@@ -727,7 +728,7 @@ impl Steepness {
 
 /// `Tile.getCellRaw(x, z)` with Java `int` coordinates: the index `z * total + x` wraps like Java's,
 /// and an index outside the backing array is `Cell.empty()` (`None`).
-fn java_cell_raw(map: &impl Filterable, x: i32, z: i32) -> Option<&Cell> {
+pub fn java_cell_raw(map: &impl Filterable, x: i32, z: i32) -> Option<&Cell> {
     let index = z.wrapping_mul(map.total_size() as i32).wrapping_add(x);
     usize::try_from(index)
         .ok()
@@ -915,13 +916,20 @@ impl WorldFilters {
         &self.settings
     }
 
-    /// `apply(tile, optionalFilters)`: `map` is `tile.filterable()` and the seeds are the tile's
-    /// region coordinates.
+    /// `apply(tile, optionalFilters)` on any `Filterable`: `map` stands for `tile.filterable()` and
+    /// the seeds are the tile's region coordinates. [`Self::apply_tile`] takes the tile itself.
     pub fn apply(&self, map: &mut impl Filterable, region_x: i32, region_z: i32, optional: bool) {
         if optional {
             self.apply_optional(map, region_x, region_z);
         }
         self.apply_required(map, region_x, region_z);
+    }
+
+    /// `apply(tile, optionalFilters)`: the filters over the tile's `filterable()`, seeded with its
+    /// region coordinates.
+    pub fn apply_tile(&self, tile: &mut Tile, optional: bool) {
+        let (region_x, region_z) = (tile.region_x(), tile.region_z());
+        self.apply(&mut tile.filterable(), region_x, region_z, optional);
     }
 
     /// `applyRequiredFilters`: steepness, then beach detection, one pass each.

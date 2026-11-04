@@ -716,10 +716,10 @@ The world-filters layer adds Engine's filter chain (`WorldFilters`, `filters.rs`
 the world's root seed, filter settings, levels, control points and terrain registry as Engine builds it from its
 `GeneratorContext`. `apply(map, region_x, region_z, optional)` runs, when `optional` is set, erosion (built for the
 map's total size and kept in a `WorldErosion` until the size changes; `erosion.droplets_per_chunk` iterations) then
-smoothing (`smoothing.iterations` passes), and always steepness (radius 1, scaler 10) then beach detection. Nothing
-calls it yet: the tile map Engine runs it on is a later layer. Its test replays `WorldFiltersOracle.java` in
-`.local/terraforged/oracles/world_filters/`, which builds Engine's `WorldFilters` from a `GeneratorContext` for four
-settings groups (long seeds, other levels, droplet counts and smoothing passes including 0, radii, rates, beach
+smoothing (`smoothing.iterations` passes), and always steepness (radius 1, scaler 10) then beach detection;
+`apply_tile` (the tile layer, below) runs it on a tile. Nothing calls them yet: the tile generator is a later layer.
+Its test replays `WorldFiltersOracle.java` in `.local/terraforged/oracles/world_filters/`, which builds Engine's
+`WorldFilters` from a `GeneratorContext` for four settings groups (long seeds, other levels, droplet counts and smoothing passes including 0, radii, rates, beach
 points, lifetimes) and runs each over several maps in turn (borders, negative positions, the optional filters on and
 off, cache reuse and rebuilds, NaN and infinite heights), folding every cell's value, erosion, sediment, gradient and
 terrain.
@@ -727,13 +727,24 @@ terrain.
 The tile-size layer adds Engine's `Size` (`tile.rs`), the first part of its tile map: a tile's edge length and border
 (`chunks(factor, border)` for `1 << factor` chunks, `blocks` for the same tile in blocks), the total edge and array size,
 `mask`, `indexOf` and the chunk/block conversions, all in Java `int` math (wrapping sums and products, shift counts
-modulo 32, arithmetic `>>`). Nothing uses it yet; `Filterable` still stands in for the tile map. Its test replays
-`SizeOracle.java` in `.local/terraforged/oracles/size/` over negative, overflowing and `i32::MIN`/`MAX` sizes,
-borders, coordinates and shift factors.
+modulo 32, arithmetic `>>`). Its test replays `SizeOracle.java` in `.local/terraforged/oracles/size/` over negative,
+overflowing and `i32::MIN`/`MAX` sizes, borders, coordinates and shift factors.
+
+The tile layer adds Engine's `Tile` (`tile.rs`) without its chunk views and generation: a region's chunk and block
+position (`region << size`, then `<< 4`), its region id (`PosUtil.pack`), and its bordered block backing, every cell
+built from the world's registry. `cell(x, z)` is Engine's `getCell` (masked into the tile, past the border) and
+`raw_cell(x, z)` its `getRawCell` (`None` where Java throws). `filterable()` is Engine's `FilterRegion`, the
+`Filterable` the filters read: its block position, block size and backing, with `getCellRaw`'s index in Java `int`
+math and `Cell.empty()` outside the backing. `WorldFilters::apply_tile(tile, optional)` is Engine's `apply(tile,
+optionalFilters)`: the filters over that region, seeded with the tile's region coordinates. Nothing builds tiles yet:
+the tile generator is a later layer. Its tests replay `TileOracle.java` in `.local/terraforged/oracles/tile/` over
+negative and wrapping region positions, shift factors Java masks to five bits, missing and negative borders, and
+negative, border and overflowing coordinates, and run Engine's `WorldFilters.apply` on its own tiles (hashed cells,
+borders and the optional filters on and off) against `apply_tile`.
 
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain and the tile sizes. They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes and the tiles' cells with their filter region. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
