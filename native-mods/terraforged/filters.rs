@@ -97,4 +97,60 @@ mod tests {
         assert!(!Arc::ptr_eq(&first, &resized));
         assert_eq!(builds.load(Ordering::Relaxed), 2);
     }
+    /// Replays `WorldErosionOracle.java` (`.local/terraforged/oracles/world_erosion/`), which calls Engine's
+    /// `WorldErosion.get` with a validator that accepts any cached size at least as large as the context:
+    /// each line is the context, the returned size, its build number and the factory and validator calls.
+    #[test]
+    fn world_erosion_calls_match_engine_oracle() {
+        let calls = std::sync::Mutex::new(Vec::new());
+        let builds = AtomicUsize::new(0);
+        let cache = WorldErosion::new(
+            |size: i32| {
+                calls.lock().unwrap().push(format!("build {size}"));
+                (size, builds.fetch_add(1, Ordering::Relaxed))
+            },
+            |value: &(i32, usize), context| {
+                calls
+                    .lock()
+                    .unwrap()
+                    .push(format!("validate {} {context}", value.0));
+                value.0 >= context
+            },
+        );
+        let mut out = String::new();
+        for context in [
+            4096,
+            4096,
+            1024,
+            8192,
+            8192,
+            4096,
+            -1,
+            i32::MIN,
+            i32::MAX,
+            0,
+        ] {
+            let value = cache.get(context);
+            let calls = std::mem::take(&mut *calls.lock().unwrap());
+            out += &format!(
+                "{context} -> {} #{} [{}]\n",
+                value.0,
+                value.1,
+                calls.join(", ")
+            );
+        }
+        assert_eq!(
+            out,
+            "4096 -> 4096 #0 [build 4096]\n\
+             4096 -> 4096 #0 [validate 4096 4096]\n\
+             1024 -> 4096 #0 [validate 4096 1024]\n\
+             8192 -> 8192 #1 [validate 4096 8192, validate 4096 8192, build 8192]\n\
+             8192 -> 8192 #1 [validate 8192 8192]\n\
+             4096 -> 8192 #1 [validate 8192 4096]\n\
+             -1 -> 8192 #1 [validate 8192 -1]\n\
+             -2147483648 -> 8192 #1 [validate 8192 -2147483648]\n\
+             2147483647 -> 2147483647 #2 [validate 8192 2147483647, validate 8192 2147483647, build 2147483647]\n\
+             0 -> 2147483647 #2 [validate 2147483647 0]\n"
+        );
+    }
 }
