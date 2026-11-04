@@ -30,6 +30,7 @@ use super::{
     terraforged_engine::Cell,
     terraforged_landforms::java_round,
     terraforged_populator::Populator,
+    terraforged_util::pack_float,
 };
 use std::sync::Arc;
 
@@ -148,7 +149,8 @@ impl Populator for RegionModule {
         }
         cell.terrain_region_id = self.cell_value(cell_x, cell_y);
         cell.terrain_region_edge = self.edge_value(edge_distance, edge_distance2);
-        cell.terrain_region_center = pack(center_x / self.frequency, center_y / self.frequency);
+        cell.terrain_region_center =
+            pack_float(center_x / self.frequency, center_y / self.frequency);
     }
 }
 
@@ -256,13 +258,6 @@ impl Populator for RegionLerper {
         let upper_value = cell.value;
         cell.value = lerp(lower_value, upper_value, alpha);
     }
-}
-
-/// `PosUtil.pack(float, float)`: both halves truncated like Java's `(int)` (saturating, NaN to 0).
-fn pack(left: f32, right: f32) -> i64 {
-    let left = left as i32;
-    let right = right as i32;
-    (i64::from(left) << 32) | (i64::from(right) & 0xffff_ffff)
 }
 
 #[cfg(test)]
