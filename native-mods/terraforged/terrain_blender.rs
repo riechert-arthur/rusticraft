@@ -455,7 +455,7 @@ fn weight(distance: f32, origin: f32, blend_range: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::super::terraforged_engine::TerrainRegistry;
+    use super::super::terraforged_engine::{TerrainCategory, TerrainRegistry};
     use super::*;
     use std::fmt::Write;
     use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -530,7 +530,7 @@ mod tests {
     }
 
     /// `{terrain, weight, noise}` per terrain noise, per set.
-    const SETS: [&[(usize, f32, usize)]; 7] = [
+    const SETS: [&[(usize, f32, usize)]; 8] = [
         &[(0, 2.0, 0), (1, 3.0, 1), (2, 5.0, 2)],
         &[(3, 1.0, 3), (4, 1.0, 4), (5, 1.0, 5), (6, 2.0, 6)],
         &[(7, 1.0, 7), (0, 1.0, 8), (1, 1.0, 9), (2, 1.0, 10)],
@@ -538,6 +538,7 @@ mod tests {
         &[(6, 1.0, 6)],
         &[(0, 0.0, 0), (1, 1.0, 9), (2, 3.0, 7)],
         &[(0, f32::NAN, 0), (1, 1.0, 1)],
+        &[(1, 1.0, 0), (1, 2.0, 1), (2, 1.0, 2)],
     ];
 
     const SEEDS: [i64; 9] = [
@@ -664,5 +665,148 @@ mod tests {
         assert_eq!(lines[20], "P 0 4 throw -1 -1 throw");
         assert_eq!(lines[380], "B 5 -2125992525");
         assert_eq!(fnv(&out), 0x14b1_fe45_32e6_a8ff);
+    }
+
+    /// The search runs' start points.
+    const SEARCH_POINTS: [(f32, f32); 13] = [
+        (0.0, 0.0),
+        (-0.0, -0.0),
+        (37.25, -91.5),
+        (-240.0, 118.75),
+        (-1e5, -3e4),
+        (1e7, -1e7),
+        (3e9, 1.0),
+        (1e20, -1e20),
+        (f32::MAX, 1.0),
+        (f32::INFINITY, 0.0),
+        (f32::NAN, 5.0),
+        (5.0, f32::NAN),
+        (f32::NEG_INFINITY, f32::NEG_INFINITY),
+    ];
+    /// `{minRadius, maxRadius}`: ring 0 (empty), several rings, one ring, none, a negative start (Java divides by
+    /// zero) and wrapping ring sizes.
+    const RADII: [(i32, i32); 6] = [
+        (0, 3),
+        (1, 8),
+        (4, 6),
+        (0, 0),
+        (-1, 3),
+        (i32::MAX - 1, i32::MAX),
+    ];
+
+    /// The lines `TerrainBlenderOracle.search` prints: per blender (the nine above, then one over set 7, whose
+    /// first two noises are both named "hills") and start point, the cells `iterator(x, z, 1, 2)` visits, then per
+    /// query terrain and radii four finder steps (`hasNext`, then `next`'s packed floats) or "null"/"throw".
+    fn search_lines() -> String {
+        let registry = TerrainRegistry::new();
+        // Same name as the registry's hills, another instance and id; a name differing only in case; a terrain in no set.
+        let hills_copy = Terrain::new(99, "hills", TerrainCategory::Flatland);
+        let hills_case = Terrain::new(98, "Hills", TerrainCategory::Flatland);
+        let river = registry.get_by_name("river").unwrap();
+        let mut out = String::new();
+        for s in 0..=SEEDS.len() {
+            let (config, set) = if s == SEEDS.len() {
+                (0, 7)
+            } else {
+                (s, SET_OF[s])
+            };
+            let terrains = SETS[set]
+                .iter()
+                .map(|&(t, weight, n)| terrain(&registry, t, weight, n))
+                .collect();
+            let blender = TerrainBlender::new(
+                SEEDS[config],
+                SCALES[config],
+                JITTERS[config],
+                BLENDINGS[config],
+                terrains,
+            );
+            let name = |index: usize| registry.get_by_name(TERRAINS[SETS[set][index].0]).unwrap();
+            let queries = [
+                name(0),
+                name(SETS[set].len() - 1),
+                hills_copy.clone(),
+                hills_case.clone(),
+                river.clone(),
+            ];
+            for (p, &(x, z)) in SEARCH_POINTS.iter().enumerate() {
+                write!(out, "I {s} {p}").unwrap();
+                for position in blender.iterator(x, z, 1, 2) {
+                    write!(out, " {},{}", unpack_left(position), unpack_right(position)).unwrap();
+                }
+                out.push('\n');
+                for (q, query) in queries.iter().enumerate() {
+                    for (r, &(min, max)) in RADII.iter().enumerate() {
+                        write!(out, "F {s} {p} {q} {r}").unwrap();
+                        let Some(mut finder) = blender.find_nearest(x, z, min, max, query) else {
+                            out.push_str(" null\n");
+                            continue;
+                        };
+                        for _ in 0..4 {
+                            let more = finder.has_next();
+                            let Ok(position) = catch_unwind(AssertUnwindSafe(|| finder.next()))
+                            else {
+                                out.push_str(" throw");
+                                break;
+                            };
+                            assert_eq!(
+                                position.is_some(),
+                                more,
+                                "next is None exactly when has_next is false"
+                            );
+                            let position = position.unwrap_or(0);
+                            write!(
+                                out,
+                                " {}:{},{}",
+                                u8::from(more),
+                                h(unpack_left_float(position)),
+                                h(unpack_right_float(position)),
+                            )
+                            .unwrap();
+                        }
+                        out.push('\n');
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn nearest_terrain_search_matches_the_jar() {
+        let out = search_lines();
+        let lines: Vec<_> = out.lines().collect();
+        assert_eq!(lines.len(), 4030);
+        // Ring 1 then ring 2 around the warped cell, each from its (-r, -r) corner along +x, +z, -x, -z.
+        assert_eq!(
+            lines[0],
+            "I 0 0 -1,-1 0,-1 1,-1 1,0 1,1 0,1 -1,1 -1,0 -2,-2 -1,-2 0,-2 1,-2 2,-2 2,-1 2,0 2,1 2,2 1,2 0,2 \
+             -1,2 -2,2 -2,1 -2,0 -2,-1"
+        );
+        // Ring 0 is empty, so radii 0..3 and 1..8 find the same cells; each step resumes the walk.
+        assert_eq!(
+            lines[1],
+            "F 0 0 0 0 1:41af898b,c2003568 1:42c66aa0,c2d9ddaa 1:4304a861,40c9a94d 1:42cb37c4,431dfa6d"
+        );
+        assert_eq!(lines[2][9..], lines[1][9..]);
+        // No rings; a negative start radius divides by zero; a miss on the last ring returns Java's 0L / frequency.
+        assert_eq!(
+            lines[4],
+            "F 0 0 0 3 0:00000000,00000000 0:00000000,00000000 0:00000000,00000000 0:00000000,00000000"
+        );
+        assert_eq!(lines[5], "F 0 0 0 4 throw");
+        assert_eq!(
+            lines[6],
+            "F 0 0 0 5 1:00000000,00000000 0:00000000,00000000 0:00000000,00000000 0:00000000,00000000"
+        );
+        // A negative frequency (scale -50) turns that 0L into -0.0.
+        assert!(out.contains(
+            "\nF 6 0 0 5 1:80000000,80000000 0:00000000,00000000 0:00000000,00000000 0:00000000,00000000\n"
+        ));
+        // Names match with `String.equals`: another instance named "hills" finds the first "hills" noise's band.
+        assert_eq!(lines[3702][9..], lines[3690][9..]);
+        assert!(lines[3702].starts_with("F 9 2 2 0 1:4191054f,c32f21e7"));
+        assert_eq!(lines.iter().filter(|l| l.ends_with(" null")).count(), 1794);
+        assert_eq!(fnv(&out), 0xb76e_5dcb_6b68_055a);
     }
 }
