@@ -598,9 +598,10 @@ the advanced continent a `RiverCache` (ids `PosUtil.pack(x, z)`), each over the 
 `SimpleRiverGenerator`. Like `FancyContinentGenerator`, their constructors now take what Engine builds that
 generator from: the context's seed root, river settings, levels and the world's terrain registry. Nothing calls the
 caches yet. Its tests fold the river maps of the three continents through their caches for five settings variants
-and nine cells (six fixed, extreme and negative ones and the centres nearest three points), checking each second
-lookup returns the cached map, against `RiverCacheOracle.java` in `.local/terraforged/oracles/river/`, which calls
-Engine's `getRivermap`.
+and nine cells each (six fixed cells, among them extreme and negative ones, plus the centres nearest three points),
+checking that a second lookup returns the cached map, against `RiverCacheOracle.java` in
+`.local/terraforged/oracles/river/`, which calls Engine's `getRivermap`; the simple-river layer's extreme-cell test
+now also goes through the caches.
 
 ## Status: development only
 
