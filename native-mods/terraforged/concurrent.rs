@@ -199,7 +199,10 @@ impl ThreadPool {
 
     /// `submit(callable)` on the task threads, starting one more if not all exist yet.
     fn submit(tasks: &TaskThreads, job: Job) {
-        tasks.queue.send(job).expect("the task threads hold the queue");
+        tasks
+            .queue
+            .send(job)
+            .expect("the task threads hold the queue");
         let mut started = tasks.started.lock().unwrap_or_else(PoisonError::into_inner);
         if *started < tasks.threads {
             *started += 1;
@@ -225,10 +228,10 @@ impl ThreadPool {
 ///
 /// From [`Self::new`], the task runs on the first `get`/`call`, on the calling thread, like Engine's
 /// `CacheEntry` over a task its first `task.get()` runs; [`Self::compute_async`] and [`Self::then`]
-/// run it on a [`ThreadPool`]. As in
-/// [`LazyCallable`], callers arriving while it runs wait for it and all see the same value. The
-/// task runs at most once: like a failed Engine `Future`, a task that panicked makes every later
-/// `get`/`call` panic too, without running it again, and `is_done` reports it done.
+/// run it on a [`ThreadPool`]. As in [`LazyCallable`], callers arriving while it runs wait for it
+/// and all see the same value. Except on [`ThreadPool::NONE`], the task runs at most once: like a
+/// failed Engine `Future`, a task that panicked makes every later `get`/`call` panic too, without
+/// running it again, and `is_done` reports it done.
 /// A task that calls `get` or `call` on its own entry never returns, as with [`LazyCallable`].
 ///
 /// The timestamp is `System.currentTimeMillis()` (`river.rs`'s [`current_time_millis`]) at
@@ -313,7 +316,10 @@ impl<T: Send + 'static> CacheEntry<'static, T> {
     /// [`ThreadPool::NONE`] (Engine's `adaptComplete`) `is_done` is `true` at once, the task runs on
     /// the first `get`/`call`'s thread, and a task that panicked runs again on the next one. The
     /// timestamp is the clock after the submit, then each `get`'s, as for [`Self::new`].
-    pub fn compute_async(task: impl Fn() -> T + Send + Sync + 'static, executor: &ThreadPool) -> Self {
+    pub fn compute_async(
+        task: impl Fn() -> T + Send + Sync + 'static,
+        executor: &ThreadPool,
+    ) -> Self {
         Self::compute_async_with_clock(task, executor, current_time_millis)
     }
 
@@ -347,7 +353,10 @@ impl<T: Send + 'static> CacheEntry<'static, T> {
         // after a panic, which then repeats the task's failure.
         let create = move || {
             failed.rethrow();
-            let result = receiver.lock().unwrap_or_else(PoisonError::into_inner).recv();
+            let result = receiver
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .recv();
             match result {
                 Ok(result) => result.unwrap_or_else(|payload| resume_unwind(payload)),
                 Err(_) => {
@@ -1238,18 +1247,28 @@ p 6 0 3 10
             )
         });
         NOW.store(100, Ordering::SeqCst);
-        let other = cache.compute_if_absent(2, |_| CacheEntry::compute_async_with_clock(|| 7, &pool, now));
+        let other = cache.compute_if_absent(2, |_| {
+            CacheEntry::compute_async_with_clock(|| 7, &pool, now)
+        });
         assert!(cache.get(1).is_none());
         assert!(!held.is_done());
         release.send(()).unwrap();
         assert_eq!(*held.get(), 42);
         assert_eq!(*other.get(), 7);
-        let again = cache.compute_if_absent(1, |_| CacheEntry::compute_async_with_clock(|| 43, &pool, now));
+        let again = cache.compute_if_absent(1, |_| {
+            CacheEntry::compute_async_with_clock(|| 43, &pool, now)
+        });
         assert_eq!(*again.get(), 43);
 
-        assert_eq!(ThreadPool::create(i32::MAX).size(), (i32::MAX / 2).wrapping_add(i32::MAX));
+        assert_eq!(
+            ThreadPool::create(i32::MAX).size(),
+            (i32::MAX / 2).wrapping_add(i32::MAX)
+        );
         assert_eq!(ThreadPool::create(i32::MIN).size(), 3);
-        assert_eq!(*CacheEntry::compute_async(|| 5, &ThreadPool::create(i32::MAX)).get(), 5);
+        assert_eq!(
+            *CacheEntry::compute_async(|| 5, &ThreadPool::create(i32::MAX)).get(),
+            5
+        );
     }
     /// `CacheOracle.java`'s `Entry`: a fixed timestamp and a count of its `close` calls.
     struct TestEntry {
