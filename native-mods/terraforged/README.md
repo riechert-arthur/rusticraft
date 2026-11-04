@@ -387,8 +387,19 @@ and NaN coordinates for six configs (all three shapes, jitter 0, 1 and NaN, scal
 control points), against a Java oracle running Engine's classes on Engine cells; the oracle lives outside Git, in
 `.local/terraforged/oracles/continent/`.
 
-The advanced-continent layer adds variable-size warped Voronoi continents, skipping, corrected
-centers, cliff and bay shaping, and exact iterative edge and ocean-distance searches.
+The advanced-continent layer adds Engine's `AdvancedContinentGenerator` (`advanced_continent.rs`), the generator
+of Engine's default continent type: continents are jittered cells of a lattice (frequency `1 / (4 * continentScale)`)
+sampled through a Perlin2 domain warp built from the continent noise octaves, gain and lacunarity, and their edge
+is the distance to the nearest cell bisector, scaled per continent by `continentSizeVariance`, remapped and shaped
+by cliff and bay noise near the coast. `apply` writes only `continentId`, `continentEdge`, `continentX` and
+`continentZ` (the centre pulled 35% towards its neighbours' mean), and nothing at all for a continent that
+`continentSkipping` skips (never the one at cell 0, 0), so `getEdgeValue` and `getNearestCenter` read 0 there. Engine
+does not override `getValue`, so it reads the scratch cell's untouched `value`: always 0. The edge and ocean distance
+searches rivers use are ported; the river map is not. One difference: Engine throws for a negative
+`continentNoiseOctaves` (an octave table lookup out of bounds); the port uses 0 octaves. Its tests fold every cell
+field and every lookup over the simple-continent grid for six configs (skipping and size variance off, 1 and NaN,
+scale 0, 1, 2 and `Integer.MAX_VALUE`, jitter 0 and NaN, zero octaves with a negative gain, custom control
+points), against a second Java oracle in `.local/terraforged/oracles/continent/`.
 
 ## Status: development only
 
