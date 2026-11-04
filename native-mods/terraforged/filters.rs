@@ -1896,6 +1896,13 @@ mod tests {
         );
     }
 
+    /// Engine shares one `WorldFilters` between its tile-generation threads.
+    #[test]
+    fn world_filters_are_shared_between_threads() {
+        fn shareable<T: Send + Sync>() {}
+        shareable::<WorldFilters>();
+    }
+
     #[test]
     fn world_erosion_reuses_until_the_size_changes() {
         let builds = AtomicUsize::new(0);
