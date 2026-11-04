@@ -43,8 +43,17 @@ where
         }
     }
 
+    /// Engine's `get(ctx)`: returns the cached value when the validator accepts it for `context`;
+    /// otherwise takes the write lock, checks again (another thread may have rebuilt it) and builds
+    /// a new value with the factory, which replaces the cached one.
     pub fn get(&self, context: i32) -> Arc<T> {
-        if let Some(value) = self.read_valid(context) {
+        // Engine's readValue: the read lock only covers taking the value; it is validated outside.
+        let current = self
+            .value
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        if let Some(value) = current.filter(|value| (self.validator)(value, context)) {
             return value;
         }
         let mut slot = self
@@ -60,15 +69,6 @@ where
         let value = Arc::new((self.factory)(context));
         *slot = Some(Arc::clone(&value));
         value
-    }
-
-    fn read_valid(&self, context: i32) -> Option<Arc<T>> {
-        self.value
-            .read()
-            .unwrap_or_else(|error| error.into_inner())
-            .as_ref()
-            .filter(|value| (self.validator)(value, context))
-            .map(Arc::clone)
     }
 }
 
@@ -100,6 +100,25 @@ mod tests {
     /// Replays `WorldErosionOracle.java` (`.local/terraforged/oracles/world_erosion/`), which calls Engine's
     /// `WorldErosion.get` with a validator that accepts any cached size at least as large as the context:
     /// each line is the context, the returned size, its build number and the factory and validator calls.
+    #[test]
+    fn world_erosion_builds_once_across_threads() {
+        let builds = AtomicUsize::new(0);
+        let cache = WorldErosion::new(
+            |size| {
+                builds.fetch_add(1, Ordering::Relaxed);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                size
+            },
+            |value, size| *value == size,
+        );
+        let values: Vec<Arc<i32>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8).map(|_| scope.spawn(|| cache.get(4_096))).collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        assert_eq!(builds.load(Ordering::Relaxed), 1);
+        assert!(values.iter().all(|value| Arc::ptr_eq(value, &values[0])));
+    }
+
     #[test]
     fn world_erosion_calls_match_engine_oracle() {
         let calls = std::sync::Mutex::new(Vec::new());
