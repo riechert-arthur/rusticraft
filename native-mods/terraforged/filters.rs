@@ -25,7 +25,9 @@
 use std::sync::{Arc, RwLock};
 
 use super::terraforged::{java_max, java_min, lerp, map, round};
-use super::terraforged_engine::{Cell, Levels, TerrainProperties};
+use super::terraforged_engine::{
+    Cell, ControlPoints, Levels, Terrain, TerrainProperties, TerrainRegistry, WorldControlPoints,
+};
 
 /// Engine's `FilterSettings.Smoothing` (defaults: one iteration, radius 1.8, rate 0.9). Engine's
 /// `@Range` limits (iterations and radius 0 to 5, rate 0 to 1) are only enforced by its settings UI,
@@ -272,6 +274,83 @@ fn java_cell_raw(map: &impl Filterable, x: i32, z: i32) -> Option<&Cell> {
     usize::try_from(index)
         .ok()
         .and_then(|index| map.backing().get(index))
+}
+
+/// Engine's `BeachDetect` filter: turns a coast cell (`isCoast`: coast, beach, or a terrain
+/// delegating to one) whose continent edge is below the beach control point into the world's
+/// beach terrain when the squared height gradient across the cells 8 blocks to the east and west
+/// and to the north and south is below 0.275. A neighbour that is absent or outside the map
+/// (`Tile.getCellRaw`'s `Cell.empty()`) is replaced by the cell itself and shortens the distance
+/// from 17 by 8. Engine's unused `grad2` field is not kept.
+#[derive(Clone, Debug)]
+pub struct BeachDetect {
+    transition: ControlPoints,
+    beach: Terrain,
+}
+
+impl BeachDetect {
+    const RADIUS: i32 = 8;
+    const DIAMETER: i32 = 17;
+
+    /// `new BeachDetect(context)`: `points` is `context.settings.world.controlPoints` (validated by
+    /// `ControlPoints`, which falls back to the defaults); `terrains` is the world's registry, whose
+    /// built-in `beach` the filter assigns.
+    pub fn new(points: WorldControlPoints, terrains: &TerrainRegistry) -> Self {
+        Self {
+            transition: ControlPoints::new(points),
+            beach: terrains.get_by_id(4),
+        }
+    }
+
+    /// `apply(map, seedX, seedZ, iterations)`: one pass over every cell, row by row (Engine's
+    /// `Filter.iterate`); the seeds and the iteration count are unused, as in Engine.
+    pub fn apply(&self, map: &mut impl Filterable, _seed_x: i32, _seed_z: i32, _iterations: i32) {
+        let total = map.total_size();
+        for z in 0..total {
+            for x in 0..total {
+                let cell = map
+                    .cell_raw(x, z)
+                    .expect("filter coordinates are in bounds");
+                // `!(a && b)`, not `edge >= beach`: a NaN edge fails Engine's `<` test.
+                if !(cell.terrain.is_coast() && cell.continent_edge < self.transition.beach) {
+                    continue;
+                }
+                // Java `int` arithmetic: `dz - 8` and so on, then `z * total + x`.
+                let (cx, cz) = (x as i32, z as i32);
+                let north = java_cell_raw(map, cx, cz.wrapping_sub(Self::RADIUS));
+                let south = java_cell_raw(map, cx, cz.wrapping_add(Self::RADIUS));
+                let east = java_cell_raw(map, cx.wrapping_add(Self::RADIUS), cz);
+                let west = java_cell_raw(map, cx.wrapping_sub(Self::RADIUS), cz);
+                let gradient_x = Self::gradient(east, west, cell);
+                let gradient_z = Self::gradient(north, south, cell);
+                if gradient_x * gradient_x + gradient_z * gradient_z < 0.275 {
+                    map.cell_raw_mut(x, z)
+                        .expect("filter coordinates are in bounds")
+                        .terrain = self.beach.clone();
+                }
+            }
+        }
+    }
+
+    /// `grad(a, b, def)`.
+    fn gradient(first: Option<&Cell>, second: Option<&Cell>, default: &Cell) -> f32 {
+        let mut distance = Self::DIAMETER;
+        let first = match first {
+            Some(cell) if !cell.is_absent() => cell,
+            _ => {
+                distance -= Self::RADIUS;
+                default
+            }
+        };
+        let second = match second {
+            Some(cell) if !cell.is_absent() => cell,
+            _ => {
+                distance -= Self::RADIUS;
+                default
+            }
+        };
+        (first.value - second.value) / distance as f32
+    }
 }
 
 /// Engine's `WorldErosion<T>`: a lazily built value shared between threads, rebuilt by `factory`
@@ -565,6 +644,129 @@ mod tests {
         for (index, bits) in expected {
             assert_eq!(map.cells[index].gradient.to_bits(), bits, "cell {index}");
         }
+    }
+
+    /// Replays `BeachDetectOracle.java` (`.local/terraforged/oracles/beach/`), which runs Engine's
+    /// `BeachDetect.apply` on hashed maps of coast, beach and other terrains with absent cells,
+    /// NaN, infinite and signed-zero heights, NaN continent edges, maps smaller than the radius and
+    /// valid and invalid beach control points. Per case: a fold of every cell's terrain id, the
+    /// number of beach cells, the number of cells turned into beach and the first eight of them.
+    #[test]
+    fn beach_detection_matches_engine_oracle() {
+        let registry = TerrainRegistry::new();
+        // COAST, COAST, COAST, BEACH, NONE, SHALLOW_OCEAN, FLATS, RIVER
+        let terrains = [3, 3, 3, 4, 0, 2, 8, 5].map(|id| registry.get_by_id(id));
+        let beach = registry.get_by_id(4);
+        let cases = [
+            (20, 1.0_f32, false, 0.327_f32),
+            (20, 4.0, false, 0.327),
+            (20, 12.0, false, 0.327),
+            (20, 30.0, true, 0.327),
+            (17, 9.0, false, 0.4),
+            (9, 9.0, false, 0.327),
+            (8, 6.0, true, 0.327),
+            (24, 9.0, true, 0.3),
+            (16, 9.0, false, 0.9),
+            (33, 20.0, true, 0.44),
+        ];
+        let mut out = String::new();
+        for (case, (total, scale, specials, beach_point)) in cases.into_iter().enumerate() {
+            let cells = (0..total * total)
+                .map(|index| {
+                    let mut h = (index as i32)
+                        .wrapping_mul(7919)
+                        .wrapping_add((case as i32).wrapping_mul(104_729));
+                    h ^= ((h as u32) >> 13) as i32;
+                    h = h.wrapping_mul(0x5bd1_e995);
+                    h ^= ((h as u32) >> 15) as i32;
+                    let mut cell = if h & 31 == 3 {
+                        Cell::empty(&registry)
+                    } else {
+                        Cell::new(&registry)
+                    };
+                    let bits = h as u32;
+                    cell.value = ((bits >> 8) & 0xffff) as f32 / 65_536.0 * scale - scale * 0.5;
+                    cell.terrain = terrains[((bits >> 24) & 7) as usize].clone();
+                    cell.continent_edge = ((bits >> 4) & 0x3ff) as f32 / 1_600.0;
+                    if specials && index % 37 == 4 {
+                        cell.value = f32::NAN;
+                    }
+                    if specials && index % 29 == 7 {
+                        cell.continent_edge = f32::NAN;
+                    }
+                    if specials && index % 13 == 6 {
+                        cell.value = -0.0;
+                    }
+                    if specials && index % 11 == 2 {
+                        cell.value = f32::INFINITY;
+                    }
+                    cell
+                })
+                .collect::<Vec<_>>();
+            let before = cells
+                .iter()
+                .map(|cell| cell.terrain.is_same(&beach))
+                .collect::<Vec<_>>();
+            let mut map = TestMap { total, cells };
+            let points = WorldControlPoints {
+                beach: beach_point,
+                ..WorldControlPoints::default()
+            };
+            BeachDetect::new(points, &registry).apply(&mut map, 123, -456, 99);
+            let mut fold = 17_i64;
+            let mut beaches = 0;
+            let mut turned = Vec::new();
+            for (index, cell) in map.cells.iter().enumerate() {
+                fold = fold
+                    .wrapping_mul(31)
+                    .wrapping_add(i64::from(cell.terrain.id()));
+                if cell.terrain.is_same(&beach) {
+                    beaches += 1;
+                    if !before[index] {
+                        turned.push(index);
+                    }
+                }
+            }
+            let first = turned.iter().take(8).map(|index| format!(" {index}"));
+            out += &format!(
+                "{case} {fold:016x} {beaches} {}{}\n",
+                turned.len(),
+                first.collect::<String>()
+            );
+        }
+        assert_eq!(
+            out,
+            "0 a16232084b282657 129 80 0 14 15 17 24 33 48 50\n\
+             1 523cf84637a15ed8 135 87 2 4 5 8 16 19 21 23\n\
+             2 698133c6de0a2998 100 53 9 12 15 25 32 34 35 37\n\
+             3 24a27b1ea817910c 51 5 28 284 309 320 367\n\
+             4 c2298533b0ec2087 83 42 11 13 21 40 41 45 47 54\n\
+             5 e3a2b4be1ab85643 22 11 7 20 27 29 44 50 51 53\n\
+             6 c0b62d4973d97357 12 4 28 29 31 34\n\
+             7 67a94bc7beee2b79 111 44 14 37 77 84 110 119 127 161\n\
+             8 0fb25686d56c8179 67 38 0 12 13 15 32 49 53 56\n\
+             9 1ba7e55f2c89924d 213 58 20 34 51 67 88 114 136 140\n"
+        );
+    }
+
+    /// The filter assigns the registry's own beach (`is_same`), so later identity checks see it.
+    #[test]
+    fn beach_detection_assigns_the_world_beach() {
+        let registry = TerrainRegistry::new();
+        let total = 3;
+        let mut cells = (0..total * total)
+            .map(|_| Cell::new(&registry))
+            .collect::<Vec<_>>();
+        cells[4].terrain = registry.get_by_id(3);
+        let mut map = TestMap { total, cells };
+        BeachDetect::new(WorldControlPoints::default(), &registry).apply(&mut map, 0, 0, 0);
+        assert!(map.cells[4].terrain.is_same(&registry.get_by_id(4)));
+        assert!(
+            !map.cells[4]
+                .terrain
+                .is_same(&TerrainRegistry::new().get_by_id(4))
+        );
+        assert!(map.cells[0].terrain.is_same(&registry.get_by_id(0)));
     }
 
     #[test]
