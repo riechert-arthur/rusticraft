@@ -528,8 +528,8 @@ The rivermap layer adds Engine's `Rivermap` (`river.rs`): one continent's river 
 continent cell (`x`, `z`) it belongs to. `apply` warps a point with the river warp, takes the lake warp's offset at the
 warped point and carves, in order, every network whose bounds contain the warped point. The timestamp is
 `System.currentTimeMillis()` at creation, as Engine's rivermap cache reads it; the cache and Engine's static
-`Rivermap.get` (reuse a map or ask the heightmap's continent) are not ported. Only the base river generator below
-builds river maps, and nothing calls it yet. Its tests fold every cell field over 304380 applies of fresh and filled cells at a grid of
+`Rivermap.get` (reuse a map or ask the heightmap's continent) are not ported. Only the base and fancy river
+generators below build river maps, and nothing calls them yet. Its tests fold every cell field over 304380 applies of fresh and filled cells at a grid of
 points (plus -0, NaN, infinite and huge ones) for `NetworkOracle`'s networks, four `GenWarp`s (one whose seeds wrap,
 and `GenWarp.EMPTY`) and three `Levels`, plus direct samples, against a Java oracle running Engine's class,
 `RivermapOracle.java` in `.local/terraforged/oracles/river/`.
@@ -550,12 +550,22 @@ wetlands, a 384/62 world) and four ids, plus the additional lakes, overlap tests
 oracle running Engine's class through a subclass with radial roots, `BaseRiverGeneratorOracle.java` in
 `.local/terraforged/oracles/river/`.
 
-The fancy-river layer projects roots from island segments and endpoints, extends them through matching
-island IDs, and immediately generates their branches and wetlands in the original Java random order.
+The fancy-river layer adds Engine's `FancyRiverGenerator` (`fancy.rs`), the river generator of the fancy continents.
+It seeds the random and the `GenWarp` like the base class but neither shuffles nor forks afterwards: per island, in
+order, it projects main rivers across each segment (fewer on the end segments and on later islands) and out of both
+endpoints in evenly spaced directions, extends each in steps of 0.075 radii while the point stays on the same island
+(`getValueId`) until the continent value falls below 0.1, and skips those that overlap a network (root or fork)
+already placed on that island. Each root is added before its forks are generated, so they are tested against it with Engine's parent rule,
+then given its wetlands, all in Engine's draw order. Engine's `FancyContinent` builds the generator and its river
+cache asks it for maps; here the generator owns the continent generator, and nothing calls it yet. Its tests fold
+every built network and 151290 applies of the resulting river maps on a grid for five settings variants (a wrapping
+seed offset with chance-1 lakes and wetlands, a 384/62 world, continent scales 1000 and 777), two continent seeds and
+three ids, plus the first roots and direct samples, against a Java oracle running Engine's classes,
+`FancyRiverGeneratorOracle.java` in `.local/terraforged/oracles/river/`.
 
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps and its base river generator. They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator and the fancy river generator. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
