@@ -621,8 +621,8 @@ is above the water level and at most five blocks over it into a beach (the corre
 `Heightmap.apply` is not ported, `get` takes it as a closure; it returns a copy of the cached cell where Engine returns
 the shared object. A full cache drops its oldest cell, and misses are computed outside the cache's lock (Engine splits
 it into sections and computes under a section's lock); neither changes the cells returned. Engine's `generate` (the
-tile path) is not ported. Its tests check hits, eviction, sharing between threads and the coast identity check, and
-fold every returned cell field over 7932 lookups (a deterministic fill of values around the water and beach levels,
+tile path) is the contextual layer's, below. Its tests check hits, eviction, sharing between threads and the coast
+identity check, and fold every returned cell field over 7932 lookups (a deterministic fill of values around the water and beach levels,
 four terrains, three height / sea level variants, extreme blocks, caches of 4096 and 16 cells) against
 `HeightmapCacheOracle.java` in `.local/terraforged/oracles/heightmap/`, which calls Engine's `HeightmapCache.get` on a
 `Heightmap` whose `apply` is that fill.
@@ -643,8 +643,11 @@ cell's continent cell), caches the cell and returns the map it used; on a hit it
 caller's (`copyFrom`, which leaves `terrain_region_center` alone) and returns the caller's map unchanged. It shares
 the cells of `get`, but makes no beach correction. Engine caches the caller's `Cell` object itself, so later changes
 to that tile cell reach the cache; this caches a snapshot taken after the climate stage. Nothing calls it yet (the
-tile code is not ported). Its test checks the stage order, the map reuse, that a hit runs no stage and copies the
-cached fields, and that `get` and `generate` share cells.
+tile code is not ported). Its tests check that a hit runs no stage, and fold 600 `generate` and `get` calls over 120
+blocks (every returned cell field, the order the stages run in, the returned map and whether it is the caller's, the
+lookups) against `HeightmapGenerateOracle.java` in `.local/terraforged/oracles/heightmap/`, which calls Engine's
+`HeightmapCache.generate` and `get` on a `Heightmap` whose stages are the same fills; the caller cells carry markers
+that show what a miss keeps and what a hit's `copyFrom` overwrites.
 
 ## Status: development only
 
