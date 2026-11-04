@@ -1334,8 +1334,8 @@ impl RiverNetworkBuilder {
 
 /// Engine's `rivermap.Rivermap`: one continent's river networks (at continent cell `x`, `z`) with the
 /// `GenWarp` they are carved through, and its creation time for the rivermap cache (`ExpiringEntry`).
-/// Engine's static `Rivermap.get` (reuse an instance or ask the heightmap's continent) comes with the
-/// heightmap wiring.
+/// Engine's static `Rivermap.get` (reuse an instance or ask the heightmap's continent) is
+/// [`Rivermap::get_or_lookup`] / [`Rivermap::get_for_cell`].
 pub struct Rivermap {
     x: i32,
     z: i32,
