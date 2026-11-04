@@ -670,12 +670,13 @@ prints every cell's value bits folded together.
 
 The steepness layer adds Engine's `Steepness` filter (`filters.rs`, `Steepness`), which `WorldFilters` builds with
 radius 1 and scaler 10. It sets each cell's gradient to `min(1, scaler * Σ |height - max(neighbour, sea level)| /
-radius)` over the 15 cells at `(dx, dz) * radius` for `dx, dz` in -1..2 (Engine's neighbourhood is asymmetric),
-skipping absent cells and those outside the map; like Engine's `Tile.getCellRaw`, a neighbour past the left or right
-edge is read from the previous or next row while it stays inside the backing array. Radius 0 divides by zero as in
-Engine. Nothing uses it yet (`WorldFilters` and the tile map are not ported). Its tests replay `SteepnessOracle.java`
-in `.local/terraforged/oracles/steepness/`, which runs Engine's `Steepness.apply` on the smoothing oracle's 14x14 maps
-for 14 radius, scaler, level and NaN/signed-zero height cases and prints every cell's gradient bits folded together.
+radius)` over the 15 cells at `(dx, dz) * radius` for `dx` and `dz` from -1 to 2 (Engine's neighbourhood is
+asymmetric), skipping absent cells and those outside the map; like Engine's `Tile.getCellRaw`, a neighbour past the
+left or right edge is read from the previous or next row while it stays inside the backing array. Radius 0 divides by
+zero as in Engine. Nothing uses it yet (`WorldFilters` and the tile map are not ported). Its tests replay
+`SteepnessOracle.java` in `.local/terraforged/oracles/steepness/`, which runs Engine's `Steepness.apply` on the
+smoothing oracle's 14x14 maps for 14 radius, scaler, level and NaN/signed-zero height cases and prints every cell's
+gradient bits folded together.
 
 ## Status: development only
 

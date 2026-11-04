@@ -536,6 +536,8 @@ mod tests {
         );
     }
 
+    /// `WorldFilters`' radius 1 and scaler 10 on a 6x6 map of heights just above sea level, with no
+    /// absent cells: edge, corner and interior cells against Engine's gradient bits.
     #[test]
     fn steepness_matches_engine_0_3_0() {
         let registry = TerrainRegistry::new();
