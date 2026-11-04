@@ -157,6 +157,8 @@ where
     /// `pool(ThreadPools.create(size))`: the batches run on `max(2, size)` threads, the batch
     /// threads of Engine's `BatchingThreadPool.of(size)`. Without a pool (Engine's
     /// `ThreadPools.NONE`, a synchronous batcher) every batch runs on the calling thread, in order.
+    /// The tile cache's entries ([`TileGenerator::cached`]) run on `ThreadPool::create(size)`, else
+    /// on `ThreadPool::NONE`.
     #[must_use]
     pub const fn pool(mut self, size: i32) -> Self {
         self.pool = Some(size);

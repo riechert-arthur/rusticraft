@@ -814,7 +814,7 @@ is `createEmptyRegion`, and `generate_region(region_x, region_z)` is `generateRe
 every cell, border included, only after the fill. `generate_zoomed_region(center_x, center_z, zoom, filter)` is the
 zoomed `generateRegion`: region (0, 0) filled by the uncached `generate_zoomed_heightmap` with the center as offset,
 then the filters, the optional ones only when `filter` is set. Lazy tiles and the batched and striped generators are the
-next layers, then the builder; the async wrapper, the tile cache and tile disposal are later layers or not ported.
+next layers, then the builder and the tile cache; the async wrapper and tile disposal are later layers.
 Its test replays `TileGeneratorOracle.java` in `.local/terraforged/oracles/tile_generator/`: Engine's `generateRegion`
 with a `WorldGeneratorFactory` over a stub heightmap that hashes heights, continent edges, terrains and erosion and
 river masks, for two filter settings groups and six sizes and regions (borderless, wide-border, negative and wrapping),
@@ -870,7 +870,7 @@ the class, `generateRegion`, the lazy tile and the zoomed `generateRegion`, with
 them) and `d`/`n` lines (defaults, overriding calls, no factory); debug and release builds agree.
 
 The cache-entry layer adds Engine's `ExpiringEntry` and `CacheEntry` (`concurrent.rs`), the entries the tile cache (a
-later layer) will hold. A `CacheEntry` is a `LazyCallable` over a task that runs on the first `get` or `call`, on the
+later layer) holds. A `CacheEntry` is a `LazyCallable` over a task that runs on the first `get` or `call`, on the
 calling thread (the async-entry layer below adds `computeAsync` and `then`), plus the time of its last access:
 `System.currentTimeMillis()` (river.rs's `current_time_millis`, an `i64` like Java's `long`) at construction and at the
 start of every `get`, before the task runs; `call` and `is_done` leave it, as in Engine, which overrides only `get`.
