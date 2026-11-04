@@ -437,7 +437,7 @@ impl Tile {
 
     /// `iterate(visitor)`: every non-border cell, z rows then x, with its position inside the tile
     /// (`0..block_size().size` on each axis, the border left out). Panics where Engine throws
-    /// `ArrayIndexOutOfBoundsException`: a negative border puts the first index before the backing.
+    /// `ArrayIndexOutOfBoundsException`: a negative border can put an index outside the backing.
     pub fn iterate(&self, mut visitor: impl FnMut(&Cell, i32, i32)) {
         for (index, dx, dz) in Self::inner_cells(self.block_size) {
             visitor(&self.blocks[index], dx, dz);
@@ -1286,8 +1286,9 @@ mod tests {
     /// Replays the `v` lines of `TileOracle.java`: Engine's `Tile.iterate` on every `TILE_CONFIGS`
     /// tile with each cell valued by its index (block size first, then a fold of each visit's
     /// value and tile position, -2 where Java throws), `Tile.generate(Cell.Visitor)` setting every
-    /// visited cell from its position, the whole backing afterwards, and `iterate` again. Tiles
-    /// with a negative border throw before the first visit; a zero block size visits nothing.
+    /// visited cell from its position, the whole backing afterwards, and `iterate` again. The
+    /// config tiles with a negative border throw before the first visit, a zero block size visits
+    /// nothing, and one more tile has a negative border whose wrapped indices stay in the backing.
     #[test]
     fn tile_visitors_match_engine_oracle() {
         use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -1299,7 +1300,8 @@ mod tests {
             }
         };
         let mut out = String::new();
-        for (region_x, region_z, size, border) in TILE_CONFIGS {
+        // A negative border whose indices stay inside the backing: Engine visits its cells.
+        for (region_x, region_z, size, border) in TILE_CONFIGS.into_iter().chain([(4, -4, 0, -1)]) {
             let mut tile = Tile::new(region_x, region_z, size, border, &terrains);
             for (index, cell) in tile.blocks.iter_mut().enumerate() {
                 cell.value = index as f32;
@@ -1347,7 +1349,8 @@ mod tests {
              v 7 -9 31 1: 0 11 11 fb68f3984b6b8211 11\n\
              v 2 2 1 -1: 32 20d 20d 11 20d\n\
              v -3 4 3 -1: 128 20d 20d 33944da5e6c79211 20d\n\
-             v 305419896 -124076833 2 1: 64 bd9871a933f78011 bd9871a933f78011 30bad0eee4870a11 e8ad15ba2ae7f811\n"
+             v 305419896 -124076833 2 1: 64 bd9871a933f78011 bd9871a933f78011 30bad0eee4870a11 e8ad15ba2ae7f811\n\
+             v 4 -4 0 -1: 16 d43b76da412f7811 d43b76da412f7811 d6133333d0805811 5701e3c993baff91\n"
         );
     }
 

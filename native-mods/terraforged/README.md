@@ -796,8 +796,13 @@ the cached runs: unit, halved and doubled zooms over tile 0's cached blocks, the
 the aliasing tile (with tile 1's unit pair shifted off the blocks whose cached cells that tile's aliasing chunks
 refilled, the snapshot difference above), and a repeat where every block hits; debug and release builds agree.
 
-Tile-wide visitors now traverse only the unbordered generation area with local coordinates, while the
-generation visitor exposes mutable cells and tile batch sizing preserves TerraForged's ceil division.
+`Tile::iterate` and `Tile::generate` are Engine's tile visitors, `Tile.iterate(Cell.Visitor)` and
+`Tile.generate(Cell.Visitor)`: every non-border cell, z rows then x, with its position inside the tile (0 to the block
+size, the border left out); `generate` hands the cells out mutably. With a negative border the indices are Engine's
+(Java `int` math): where one leaves the backing the port panics, as Engine throws, and a zero block size visits nothing. `Tile::batch_size` is Engine's
+`Tile.getBatchSize`, the chunk count per side divided by the batch count and rounded up (for positive counts) in Java
+`int` math, which the batched tile generation (#82) uses. `TileOracle.java`'s `v` and `b` lines check both on the same
+tiles and on zero, negative and overflowing sizes and counts; debug and release builds agree.
 
 ## Status: development only
 
