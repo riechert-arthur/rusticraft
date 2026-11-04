@@ -213,12 +213,23 @@ a 1-octave cubic at scale 500 (times 0.6, plus 0.3), plus the top, goes through 
 upper curve 0.15, lower height 0.35, blend 0.4); a 3-octave Perlin surface at scale 20 (times 0.05, warped at scale
 40, 2 octaves, strength 20) is added and the sum is scaled by `0.475 * globalVerticalScale`, computed in double as in
 Engine. The grid test covers it with the same settings cases, a start seed where the surface warp's second axis seed
-wraps, and a vertical scale whose product with 0.475 is exactly 1. The other landforms, the ocean and land bases, and
-TerraForged's `RandSeed` (ModTerrains builds its landforms from a `SplittableRandom` seed rather than Engine's
-counter) are not ported yet.
+wraps, and a vertical scale whose product with 0.475 is exactly 1.
 
-The terraced LandForms layer adds badlands and torridonian graphs with masks, dual step detail,
-modulation, linear and Curve3 slopes, advanced terracing and final boost shaping.
+The terraced LandForms layer adds `badlands` and `torridonian`; both ignore the settings. `badlands` draws six seeds.
+Its hills, a 4-octave Ridge at scale 275 (the builder's ridge gain of 0.975) warped twice (scale 400, 2 octaves,
+strength 100; scale 18, 1 octave, strength 20), are multiplied by a 3-octave Perlin mask at scale 270 clamped to
+0.35..0.65 and mapped to 0..1. Its detail adds two step layers, the hills in 4 and in 10 linear steps (slope 0.6..0.7)
+times 0.6, each plus the hills warped once more (scale 100, 1 octave, strength 50) times 0.4. Its shape is the hills in
+4 Curve3 steps (slope 0.65..0.75) times 0.6, plus the hills times a 3-octave Perlin at scale 200 times 0.4, all times
+0.6. The shape times the detail at alpha 0.5 is scaled by 0.55 and raised by 0.025. `torridonian` draws nine: a
+3-octave Perlin at scale 200 blends linearly (midpoint 0.6, range 0.6) from plains, a 3-octave Perlin at scale 100
+warped twice (scale 300, 1 octave, strength 150; scale 20, 1 octave, strength 40) times 0.15, to boosted hills, a
+4-octave Perlin at scale 150 warped twice (scale 300, 1 octave, strength 200; scale 20, 2 octaves, strength 20). The
+blend goes through an advanced terrace (modulation: a 1-octave Perlin at scale 120 times 0.25; mask: a 1-octave Perlin
+at scale 200 times 0.5 plus 0.5; slope 0.5, blend 0..0.3, 6 steps, 1 octave), is boosted again and scaled by 0.5. The
+grid test covers both with the same cases, whose start seeds include ones where a warp's second axis seed wraps. The
+other landforms, the ocean and land bases, and TerraForged's `RandSeed` (ModTerrains builds its landforms from a
+`SplittableRandom` seed rather than Engine's counter) are not ported yet.
 
 ## Status: development only
 
