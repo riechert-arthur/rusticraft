@@ -27,14 +27,18 @@
 // `BaseRiverGenerator` builds them from `RiverSettings`; TerraForged 0.3.1 itself carves rivers with its own
 // continent river config instead, which this module does not port. `GenWarp` (`rivermap.gen.GenWarp`) holds the
 // lake and river domain warps Engine's river generators build per continent. `River`, `RiverWarp`
-// (`rivermap.river`) and `Vec2i` (`noise.util.Vec2i`) are the channel segments those generators lay out.
+// (`rivermap.river`) and `Vec2i` (`noise.util.Vec2i`) are the channel segments those generators lay out, and
+// `RiverCarver` (`rivermap.river`) carves one segment's valley, banks and bed into a cell.
 
 use super::{
     terraforged::{
-        Domain, Line, PI2, SourceKind, clamp, cos, java_max, java_min, map, round, simplex, sin,
+        CurveFunction, Domain, Line, PI2, SourceKind, clamp, cos, java_max, java_min, lerp, map,
+        round, simplex, sin,
     },
     terraforged_continent::noise_warp,
-    terraforged_engine::{Lake, Levels, Wetland},
+    terraforged_engine::{
+        Cell, Lake, Levels, Terrain, TerrainProperties, TerrainRegistry, Wetland,
+    },
     terraforged_fancy::Vec2f,
     terraforged_util::{pack_floats, unpack_left_float, unpack_right_float},
 };
@@ -408,6 +412,258 @@ impl RiverWarp {
     fn wiggle_alpha(self, distance: f32) -> f32 {
         map(distance, 0.0, 0.075, 0.075)
     }
+}
+
+/// Engine's `RiverCarver.Settings`: the valley radius in blocks, the fraction of the river over which
+/// widths and depths taper in, and the valley's falloff curve.
+#[derive(Clone, Copy)]
+pub struct RiverCarverSettings {
+    pub valley_size: f32,
+    pub fade_in: f32,
+    pub connecting: bool,
+    pub valley_curve: CurveFunction,
+}
+
+impl Default for RiverCarverSettings {
+    fn default() -> Self {
+        Self {
+            valley_size: 275.0,
+            fade_in: 0.7,
+            connecting: false,
+            valley_curve: CurveFunction::s_curve(2.0, -0.5),
+        }
+    }
+}
+
+/// Engine's `RiverCarver`: carves one river segment's valley, banks and bed into a cell's `value`,
+/// `river_mask`, `erosion_mask` and `terrain` (nothing else).
+///
+/// Engine's class extends `TerrainPopulator` (terrain `RIVER`, zero sources, weight 1) only to be
+/// typed as one: its `apply` does nothing and nothing reads its populator fields, so they are not
+/// ported. Its `compareTo` (by `config.order`) has no caller in Engine and is not ported either.
+pub struct RiverCarver {
+    pub main: bool,
+    /// Engine keeps it but only tests it in an empty `if`.
+    _connecting: bool,
+    fade: f32,
+    fade_inv: f32,
+    bed_width: Range,
+    banks_width: Range,
+    valley_width: Range,
+    bed_depth: Range,
+    banks_depth: Range,
+    water_line: f32,
+    /// `TerrainType.RIVER`, from the world's registry so `is_same` checks against its built-ins hold.
+    river_terrain: Terrain,
+    pub river: River,
+    pub warp: RiverWarp,
+    pub config: RiverConfig,
+    pub valley_curve: CurveFunction,
+}
+
+impl RiverCarver {
+    /// `new RiverCarver(river, warp, config, settings, levels)`. `registry` is the world's terrain
+    /// registry: the carver tags cells with its `river` terrain.
+    pub fn new(
+        river: River,
+        warp: RiverWarp,
+        config: RiverConfig,
+        settings: RiverCarverSettings,
+        levels: Levels,
+        registry: &TerrainRegistry,
+    ) -> Self {
+        let valley_size2 = settings.valley_size * settings.valley_size;
+        Self {
+            main: config.main,
+            _connecting: settings.connecting,
+            fade: settings.fade_in,
+            fade_inv: 1.0 / settings.fade_in,
+            // `int * int`, wrapping, then widened to `float`.
+            bed_width: Range::new(0.25, config.bed_width.wrapping_mul(config.bed_width) as f32),
+            banks_width: Range::new(
+                1.5625,
+                config.bank_width.wrapping_mul(config.bank_width) as f32,
+            ),
+            valley_width: Range::new(valley_size2, valley_size2),
+            bed_depth: Range::new(levels.water, config.bed_height),
+            banks_depth: Range::new(config.min_bank_height, config.max_bank_height),
+            water_line: levels.water,
+            river_terrain: registry.get_by_id(5),
+            river,
+            warp,
+            config,
+            valley_curve: settings.valley_curve,
+        }
+    }
+
+    /// `carve(cell, px, pz, pt, x, z, t)`: `(px, pz)` at `pt` is the previous sample along the river,
+    /// `(x, z)` at `t` this one.
+    #[allow(clippy::too_many_arguments)]
+    pub fn carve(
+        &self,
+        cell: &mut Cell,
+        previous_x: f32,
+        previous_z: f32,
+        previous_t: f32,
+        x: f32,
+        z: f32,
+        t: f32,
+    ) {
+        let distance2 = self.distance2(x, z, t);
+        let previous_distance2 = self.distance2(previous_x, previous_z, previous_t);
+        let mut valley_alpha = self.distance_alpha(
+            previous_t,
+            java_min(distance2, previous_distance2),
+            self.valley_width,
+        );
+        if valley_alpha == 0.0 {
+            return;
+        }
+        let bank_height = self.scaled_size(t, self.banks_depth);
+        valley_alpha = self.valley_curve.apply(valley_alpha);
+        cell.river_mask = java_min(cell.river_mask, 1.0 - valley_alpha);
+        cell.value = java_min(lerp(cell.value, bank_height, valley_alpha), cell.value);
+
+        let mouth_modifier = Self::mouth_modifier(cell);
+        let bed_height = self.scaled_size(t, self.bed_depth);
+        let banks_alpha = self.distance_alpha(t, distance2 * mouth_modifier, self.banks_width);
+        if banks_alpha == 0.0 {
+            return;
+        }
+        if cell.value > bed_height {
+            cell.value = java_min(lerp(cell.value, bed_height, banks_alpha), cell.value);
+            self.tag(cell, bed_height);
+        }
+        let bed_alpha = self.distance_alpha(t, distance2, self.bed_width);
+        if bed_alpha != 0.0 && cell.value > bed_height {
+            cell.value = lerp(cell.value, bed_height, bed_alpha);
+            self.tag(cell, bed_height);
+        }
+    }
+
+    /// `createForkConfig(t, levels)`: a fork sized like this river's bed and banks at `t`.
+    pub fn create_fork_config(&self, t: f32, levels: Levels) -> RiverConfig {
+        let bed_height = levels.scale_value(self.scaled_size(t, self.bed_depth));
+        let bed_width =
+            java_round_double(f64::from(self.scaled_size(t, self.bed_width)).sqrt() * 0.75);
+        let bank_width =
+            java_round_double(f64::from(self.scaled_size(t, self.banks_width)).sqrt() * 0.75);
+        let bed_width = bed_width.max(1);
+        let bank_width = bank_width.max(bed_width.wrapping_add(1));
+        self.config
+            .create_fork_sized(bed_height, bed_width, bank_width, levels)
+    }
+
+    /// `getValleyType(random)`: one `nextInt(100)`.
+    pub fn valley_type(random: &mut LegacyRandom) -> CurveFunction {
+        let value = random.next_int_bound(100).expect("positive bound");
+        if value < 5 {
+            CurveFunction::s_curve(0.4, 1.0)
+        } else if value < 30 {
+            CurveFunction::s_curve(4.0, 5.0)
+        } else if value < 50 {
+            CurveFunction::s_curve(3.0, 0.25)
+        } else {
+            CurveFunction::s_curve(2.0, -0.5)
+        }
+    }
+
+    /// `RiverCarver.create`: draws the warp (`RiverWarp.create(0.35)`), the valley width
+    /// (`MAIN_VALLEY`, one `nextFloat`), then the valley curve, in that order.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create(
+        x1: f32,
+        z1: f32,
+        x2: f32,
+        z2: f32,
+        config: RiverConfig,
+        levels: Levels,
+        registry: &TerrainRegistry,
+        random: &mut LegacyRandom,
+    ) -> Self {
+        let river = River::new(x1, z1, x2, z2);
+        let warp = RiverWarp::create(0.35, random);
+        let valley_size = 275.0 * River::MAIN_VALLEY.apply(random.next_float());
+        let valley_curve = Self::valley_type(random);
+        let settings = RiverCarverSettings {
+            valley_size,
+            fade_in: config.fade,
+            connecting: false,
+            valley_curve,
+        };
+        Self::new(river, warp, config, settings, levels, registry)
+    }
+
+    fn distance2(&self, x: f32, z: f32, t: f32) -> f32 {
+        if t <= 0.0 {
+            Line::dist2(x, z, self.river.x1, self.river.z1)
+        } else if t >= 1.0 {
+            Line::dist2(x, z, self.river.x2, self.river.z2)
+        } else {
+            Line::dist2(
+                x,
+                z,
+                self.river.x1 + t * self.river.dx,
+                self.river.z1 + t * self.river.dz,
+            )
+        }
+    }
+
+    fn distance_alpha(&self, t: f32, distance2: f32, range: Range) -> f32 {
+        let size2 = self.scaled_size(t, range);
+        if distance2 >= size2 {
+            0.0
+        } else {
+            1.0 - distance2 / size2
+        }
+    }
+
+    /// `getScaledSize`, in Engine's order of tests (`min == max` returns `min` before `t >= fade`).
+    fn scaled_size(&self, t: f32, range: Range) -> f32 {
+        if t < 0.0 {
+            range.min
+        } else if t > 1.0 {
+            range.max
+        } else if range.min == range.max {
+            range.min
+        } else if t >= self.fade {
+            range.max
+        } else {
+            lerp(range.min, range.max, t * self.fade_inv)
+        }
+    }
+
+    fn tag(&self, cell: &mut Cell, bed_height: f32) {
+        if cell.terrain.overrides_river()
+            && (cell.value < bed_height || cell.value > self.water_line)
+        {
+            return;
+        }
+        cell.erosion_mask = true;
+        if cell.value <= self.water_line {
+            cell.terrain = self.river_terrain.clone();
+        }
+    }
+
+    fn mouth_modifier(cell: &Cell) -> f32 {
+        let modifier = map(cell.continent_edge, 0.0, 0.5, 0.5);
+        modifier * modifier
+    }
+}
+
+/// `(int) Math.round(double)`: rounds half up (exactly, unlike `floor(x + 0.5)`), saturates to a
+/// `long` (NaN is 0), then keeps the low 32 bits.
+fn java_round_double(value: f64) -> i32 {
+    if value.is_nan() {
+        return 0;
+    }
+    let floor = value.floor();
+    let rounded = if value - floor >= 0.5 {
+        floor + 1.0
+    } else {
+        floor
+    };
+    (rounded as i64) as i32
 }
 
 /// Engine's `RiverConfig`: widths in blocks, heights normalized by `Levels`.
@@ -1423,6 +1679,350 @@ mod tests {
                 fold.mix(random.next_int());
             }
             assert_eq!(fold.0, 2_004_787_916);
+        }
+    }
+
+    /// Runs `RiverCarver` exactly as `RiverCarverOracle.java` (`.local/terraforged/oracles/river/`) runs
+    /// Engine 0.3.0's class: fresh and filled cells (wetland, river, lake, mountain and hill terrains, NaN
+    /// values, masks and edges) at points on, beside, before and past four rivers (zero-length and NaN among
+    /// them), for degenerate configs and settings (wrapping widths, NaN heights, zero and NaN fades), folding
+    /// every cell field after each carve; plus `createForkConfig`, `getValleyType` and `create`'s draws.
+    mod carver_oracle {
+        use super::*;
+
+        const NAN: f32 = f32::NAN;
+        const INF: f32 = f32::INFINITY;
+        const RIVERS: [[f32; 4]; 4] = [
+            [0.0, 0.0, 1000.0, 0.0],
+            [100.0, -50.0, -300.0, 400.0],
+            [5.0, 5.0, 5.0, 5.0],
+            [0.0, 0.0, NAN, 10.0],
+        ];
+        #[rustfmt::skip]
+        const T: [f32; 16] = [
+            -0.25, -0.0, 0.0, 0.05, 0.2, 0.35, 0.5, 0.7, 0.75, 0.9, 1.0, 1.000_000_1, 1.25, NAN, INF, -INF,
+        ];
+        #[rustfmt::skip]
+        const OFFS: [f32; 15] = [
+            0.0, -0.0, 0.4, 1.0, 2.5, 4.0, 7.0, 12.0, 19.0, 30.0, 80.0, 150.0, 260.0, 400.0, NAN,
+        ];
+        /// value, river mask, continent edge, terrain id, erosion mask.
+        const FILLS: [(f32, f32, f32, i32, bool); 10] = [
+            (0.6, 1.0, 0.4, 0, false),
+            (0.3, 0.5, 0.0, 7, false),
+            (0.2, NAN, 0.1, 7, true),
+            (0.0, -0.0, 0.25, 5, false),
+            (1.0, 1.0, 1.0, 12, false),
+            (NAN, 1.0, NAN, 6, false),
+            (0.24, 0.75, 0.5, 0, false),
+            (0.25, 1.0, 0.3, 7, false),
+            (-0.5, 1.0, 0.45, 11, false),
+            (0.6, 1.0, -1.0, 7, false),
+        ];
+
+        struct Fold(i32);
+
+        impl Fold {
+            fn mix(&mut self, v: i32) {
+                self.0 = self.0.wrapping_mul(31).wrapping_add(v);
+            }
+            fn b(&mut self, v: bool) {
+                self.mix(i32::from(v));
+            }
+            /// `Float.floatToIntBits`: every NaN folds as 0x7fc00000.
+            fn f(&mut self, v: f32) {
+                self.mix(if v.is_nan() {
+                    0x7fc0_0000
+                } else {
+                    v.to_bits() as i32
+                });
+            }
+            fn cell(&mut self, c: &Cell, registry: &TerrainRegistry) {
+                for v in [
+                    c.value,
+                    c.erosion,
+                    c.sediment,
+                    c.gradient,
+                    c.moisture,
+                    c.temperature,
+                    c.continent_id,
+                    c.continent_edge,
+                    c.terrain_region_id,
+                    c.terrain_region_edge,
+                    c.biome_region_id,
+                    c.biome_region_edge,
+                    c.macro_biome_id,
+                    c.river_mask,
+                ] {
+                    self.f(v);
+                }
+                self.mix(c.terrain_region_center as i32);
+                self.mix((c.terrain_region_center as u64 >> 32) as i32);
+                self.mix(c.continent_x);
+                self.mix(c.continent_z);
+                self.b(c.erosion_mask);
+                // Engine compares terrains by identity: the cell's must be the world registry's own.
+                assert!(c.terrain.is_same(&registry.get_by_id(c.terrain.id())));
+                self.mix(c.terrain.id());
+                self.mix(c.biome as i32);
+            }
+            fn config(&mut self, c: &RiverConfig) {
+                self.b(c.main);
+                self.mix(c.order);
+                self.mix(c.bed_width);
+                self.mix(c.bank_width);
+                self.f(c.bed_height);
+                self.f(c.min_bank_height);
+                self.f(c.max_bank_height);
+                self.mix(c.length);
+                self.mix(c.length2);
+                self.f(c.fade);
+            }
+            fn carver(&mut self, k: &RiverCarver) {
+                self.b(k.main);
+                self.b(k._connecting);
+                self.f(k.fade);
+                self.f(k.fade_inv);
+                for r in [
+                    k.bed_width,
+                    k.banks_width,
+                    k.valley_width,
+                    k.bed_depth,
+                    k.banks_depth,
+                ] {
+                    self.f(r.min);
+                    self.f(r.max);
+                }
+                self.f(k.water_line);
+                self.config(&k.config);
+                for v in [0.0, 0.25, 0.5, 1.0] {
+                    self.f(k.valley_curve.apply(v));
+                }
+                let w = k.warp;
+                self.mix(w.seed);
+                for v in [
+                    w.lower,
+                    w.upper,
+                    w.lower_range,
+                    w.upper_range,
+                    w.frequency,
+                    w.scale,
+                ] {
+                    self.f(v);
+                }
+            }
+        }
+
+        fn levels() -> [Levels; 2] {
+            [Levels::new(256, 63), Levels::new(63, 255)]
+        }
+
+        fn configs(levels: Levels) -> [RiverConfig; 4] {
+            let direct =
+                |main, order, bed_width, bank_width, bed, min, max, length, length2, fade| {
+                    RiverConfig {
+                        main,
+                        order,
+                        bed_width,
+                        bank_width,
+                        bed_height: bed,
+                        min_bank_height: min,
+                        max_bank_height: max,
+                        length,
+                        length2,
+                        fade,
+                    }
+                };
+            [
+                RiverConfig::builder(levels)
+                    .main(true)
+                    .bed_width(8)
+                    .bank_width(20)
+                    .bed_depth(5)
+                    .bank_height(2, 6)
+                    .fade(0.75)
+                    .length(1000)
+                    .build(),
+                RiverConfig::builder(levels).build(),
+                direct(false, 2, 46341, 3, NAN, 0.3, 0.2, 500, 250_000, 0.0),
+                direct(true, 7, 1, 1, 0.5, 0.5, 0.5, 100, 10_000, 1.0),
+            ]
+        }
+
+        fn settings() -> [RiverCarverSettings; 4] {
+            let with = |valley_size, fade_in, connecting, valley_curve| RiverCarverSettings {
+                valley_size,
+                fade_in,
+                connecting,
+                valley_curve,
+            };
+            [
+                RiverCarverSettings::default(),
+                with(100.0, 0.0, true, CurveFunction::s_curve(4.0, 5.0)),
+                with(NAN, NAN, false, CurveFunction::s_curve(0.4, 1.0)),
+                with(-50.0, 0.35, false, CurveFunction::s_curve(3.0, 0.25)),
+            ]
+        }
+
+        fn fill(i: Option<usize>, registry: &TerrainRegistry) -> Cell {
+            let mut c = Cell::new(registry);
+            let Some(i) = i else { return c };
+            let (value, river_mask, continent_edge, terrain, erosion_mask) = FILLS[i];
+            c.value = value;
+            c.river_mask = river_mask;
+            c.continent_edge = continent_edge;
+            c.terrain = registry.get_by_id(terrain);
+            c.erosion_mask = erosion_mask;
+            c.erosion = 0.125;
+            c.sediment = 0.25;
+            c.gradient = 0.5;
+            c.moisture = 0.75;
+            c.temperature = 0.375;
+            c.continent_id = 0.625;
+            c.terrain_region_id = 0.875;
+            c.terrain_region_edge = 0.0625;
+            c.terrain_region_center = 0x0123_4567_89ab_cdef;
+            c.biome_region_id = 0.3;
+            c.biome_region_edge = 0.7;
+            c.macro_biome_id = 0.9;
+            c.continent_x = -7;
+            c.continent_z = 9;
+            c
+        }
+
+        #[test]
+        fn carves_every_cell_field_like_engine() {
+            let registry = TerrainRegistry::new();
+            let mut fold = Fold(17);
+            let mut carves = 0;
+            for levels in levels() {
+                for config in configs(levels) {
+                    for settings in settings() {
+                        for [x1, z1, x2, z2] in RIVERS {
+                            let river = River::new(x1, z1, x2, z2);
+                            let k = RiverCarver::new(
+                                river,
+                                RiverWarp::none(),
+                                config,
+                                settings,
+                                levels,
+                                &registry,
+                            );
+                            fold.carver(&k);
+                            for t in T {
+                                let pt = t - 0.05;
+                                for off in OFFS {
+                                    let x = river.x1 + t * river.dx + off * river.norm_x;
+                                    let z = river.z1 + t * river.dz + off * river.norm_z;
+                                    let px = river.x1 + pt * river.dx + off * 0.5 * river.norm_x;
+                                    let pz = river.z1 + pt * river.dz + off * 0.5 * river.norm_z;
+                                    for i in std::iter::once(None).chain((0..FILLS.len()).map(Some))
+                                    {
+                                        let mut c = fill(i, &registry);
+                                        k.carve(&mut c, px, pz, pt, x, z, t);
+                                        fold.cell(&c, &registry);
+                                        carves += 1;
+                                    }
+                                }
+                                fold.config(&k.create_fork_config(t, levels));
+                            }
+                        }
+                    }
+                }
+            }
+            assert_eq!((carves, fold.0), (337_920, 1_013_655_601));
+        }
+
+        #[test]
+        fn samples_match_engine() {
+            let registry = TerrainRegistry::new();
+            let levels = levels()[0];
+            let k = RiverCarver::new(
+                River::new(0.0, 0.0, 1000.0, 0.0),
+                RiverWarp::none(),
+                configs(levels)[0],
+                RiverCarverSettings::default(),
+                levels,
+                &registry,
+            );
+            let sample = |[px, pz, pt, x, z, t]: [f32; 6]| {
+                let mut c = fill(Some(0), &registry);
+                k.carve(&mut c, px, pz, pt, x, z, t);
+                assert!(c.terrain.is_same(&registry.get_by_id(c.terrain.id())));
+                (
+                    c.value.to_bits(),
+                    c.river_mask.to_bits(),
+                    c.erosion_mask,
+                    c.terrain.id(),
+                )
+            };
+            assert_eq!(
+                [
+                    [450.0, 0.0, 0.45, 500.0, 0.0, 0.5],
+                    [450.0, 10.0, 0.45, 500.0, 10.0, 0.5],
+                    [450.0, 100.0, 0.45, 500.0, 100.0, 0.5],
+                    [450.0, 300.0, 0.45, 500.0, 300.0, 0.5],
+                    [40.0, 5.0, 0.04, 50.0, 5.0, 0.05],
+                    [1050.0, 0.0, 1.05, 1100.0, 0.0, 1.1],
+                    [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                    [1000.0, 0.0, 1.0, 1000.0, 0.0, 1.0],
+                ]
+                .map(sample),
+                [
+                    (0x3e69b6db, 0, true, 5),
+                    (0x3e71688f, 0x3b020100, true, 5),
+                    (0x3ea84507, 0x3e4bf690, false, 0),
+                    (0x3f19999a, 0x3f800000, false, 0),
+                    (0x3e7c4cbc, 0x3a01fc00, true, 0),
+                    (0x3e908257, 0x3d4b9540, false, 0),
+                    (0x3e780000, 0, true, 5),
+                    (0x3e640000, 0, true, 5),
+                ]
+            );
+            // A NaN distance or `t` makes every alpha NaN: `Math.min` keeps the NaN in the mask and value.
+            for p in [
+                [NAN, 0.0, 0.5, 500.0, 0.0, 0.5],
+                [500.0, 0.0, NAN, 500.0, 0.0, NAN],
+            ] {
+                let (value, mask, erosion_mask, terrain) = sample(p);
+                assert!(f32::from_bits(value).is_nan() && f32::from_bits(mask).is_nan());
+                assert_eq!((erosion_mask, terrain), (false, 0));
+            }
+        }
+
+        #[test]
+        fn draws_like_engine() {
+            let registry = TerrainRegistry::new();
+            let levels = levels()[0];
+            let mut fold = Fold(17);
+            let seeds = [0, 1, 2, 3, 4, 12_345, -1, i64::MAX, i64::MIN];
+            for seed in seeds {
+                let mut random = LegacyRandom::new(seed);
+                let curve = RiverCarver::valley_type(&mut random);
+                fold.f(curve.apply(0.5));
+                fold.mix(random.next_int());
+            }
+            for seed in 0..64 {
+                fold.f(RiverCarver::valley_type(&mut LegacyRandom::new(seed)).apply(0.3));
+            }
+            for seed in seeds {
+                let mut random = LegacyRandom::new(seed);
+                for config in configs(levels) {
+                    let k = RiverCarver::create(
+                        10.0,
+                        -20.0,
+                        900.0,
+                        300.0,
+                        config,
+                        levels,
+                        &registry,
+                        &mut random,
+                    );
+                    fold.carver(&k);
+                }
+                fold.mix(random.next_int());
+            }
+            assert_eq!(fold.0, 1_277_683_933);
         }
     }
 }
