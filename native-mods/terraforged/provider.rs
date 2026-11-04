@@ -41,8 +41,8 @@ use std::sync::Arc;
 ///
 /// Engine takes a `GeneratorContext`; here its parts are passed in: the context's (world) seed,
 /// its levels and terrain settings. Engine registers composites into its static `TerrainType`
-/// registry; here they go into the world's registry, which must be the one `registry` (at
-/// construction) and [`populators`](Self::populators) get, so terrains compare by identity
+/// registry; here they go into the world's registry. Pass that same registry to [`new`](Self::new)
+/// and to every [`populators`](Self::populators) call, so terrains compare by identity
 /// (`is_same`) with the world's built-ins as Engine's `==` does.
 pub struct StandardTerrainProvider {
     mixable: Vec<Arc<dyn TerrainPopulatorLike>>,
