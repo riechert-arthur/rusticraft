@@ -411,4 +411,78 @@ mod tests {
         );
         assert_eq!(fnv(&out), 0xec71_67f2_41b9_b0a2);
     }
+
+    /// Chunk generation shares one generator (and its pool) across worker threads, as the mod's chunk
+    /// generator does: every thread gets the same data as a lone caller.
+    #[test]
+    fn terrain_generator_is_shareable_across_threads() {
+        fn shareable<T: Send + Sync>() {}
+        shareable::<TerrainGenerator<Noise>>();
+        shareable::<ObjectPool<TerrainData, TerrainDataFactory>>();
+
+        let terrains = Arc::new(TerrainRegistry::new());
+        let levels = TerrainLevels::default();
+        let generator = TerrainGenerator::new(
+            levels,
+            Noise {
+                levels,
+                kind: 0,
+                terrains: Arc::clone(&terrains),
+                generated: AtomicI32::new(0),
+            },
+        );
+        let snapshot = |data: &TerrainData| {
+            let mut out = format!("{} {} {}", data.min(), data.max(), data.max_base());
+            for z in 0..16 {
+                for x in 0..16 {
+                    let terrain = data.terrain().get(x, z).unwrap();
+                    write!(
+                        out,
+                        " {},{},{}",
+                        h(data.height().get(x, z)),
+                        h(data.gradient().get(x, z)),
+                        terrain.id()
+                    )
+                    .unwrap();
+                }
+            }
+            out
+        };
+        let chunks: Vec<(i32, i32)> = (-4..4).flat_map(|z| (-4..4).map(move |x| (x, z))).collect();
+        let expected: Vec<String> = chunks
+            .iter()
+            .map(|&(x, z)| {
+                let data = generator.generate(x, z);
+                let text = snapshot(&data);
+                generator.restore(data);
+                text
+            })
+            .collect();
+        std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..4)
+                .map(|_| {
+                    scope.spawn(|| {
+                        chunks
+                            .iter()
+                            .map(|&(x, z)| {
+                                let data = generator.generate(x, z);
+                                let text = snapshot(&data);
+                                generator.restore(data);
+                                text
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            for worker in workers {
+                assert_eq!(worker.join().unwrap(), expected);
+            }
+        });
+        assert_eq!(
+            generator.noise_generator().generated.load(Ordering::SeqCst),
+            5 * 64
+        );
+        let state = generator.terrain_data_pool.state.lock().unwrap();
+        assert!(state.pool.len() <= usize::try_from(available_processors()).unwrap());
+    }
 }
