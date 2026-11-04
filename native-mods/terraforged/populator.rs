@@ -41,7 +41,7 @@ pub trait Populator: Send + Sync {
     fn apply(&self, cell: &mut Cell, x: f32, z: f32);
 
     /// The weight when this is one of Engine's `TerrainPopulator`s (or a subclass:
-    /// `ScaledPopulator`, later `VolcanoPopulator`), else `None`. `RegionSelector` weights a
+    /// `ScaledPopulator`, `VolcanoPopulator`), else `None`. `RegionSelector` weights a
     /// populator by it where Engine checks `instanceof TerrainPopulator`, so every
     /// [`TerrainPopulatorLike`] must return `Some(weight())`.
     fn terrain_weight(&self) -> Option<f32> {
@@ -56,7 +56,7 @@ pub trait Populator: Send + Sync {
     }
 }
 
-/// The methods of Engine's `TerrainPopulator` class that its subclasses (`ScaledPopulator`, later
+/// The methods of Engine's `TerrainPopulator` class that its subclasses (`ScaledPopulator`,
 /// `VolcanoPopulator`) inherit; Engine's lists of `TerrainPopulator` hold any of them.
 pub trait TerrainPopulatorLike: Populator {
     fn weight(&self) -> f32;
