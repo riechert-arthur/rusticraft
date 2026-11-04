@@ -1346,4 +1346,40 @@ GRID 3 FANCY fold cf31de76 volcanoes 15 throws 0
             }
         }
     }
+
+    /// `getPopulator`: a registered terrain's variants (capped at the last), and the heightmap itself (Engine's
+    /// default populator) for a negative variant or a terrain the provider never registered.
+    #[test]
+    fn heightmap_populator_falls_back_to_itself() {
+        use super::super::terraforged_context::GeneratorSettings;
+        let mut context = GeneratorContext::create_no_cache(GeneratorSettings::default());
+        let map = Heightmap::new(&mut context);
+        let registry = Arc::clone(&context.terrain);
+        let address = |p: &dyn Populator| p as *const dyn Populator as *const ();
+        let this = &map as *const Heightmap as *const ();
+        let (hills, river) = (registry.get_by_id(11), registry.get_by_id(5));
+        let provider = map.terrain_provider();
+        assert_eq!(provider.variant_count(&hills), 4);
+        assert_eq!(address(map.populator(&river, 0)), this);
+        assert_eq!(address(map.populator(&hills, -1)), this);
+        assert_eq!(
+            address(map.populator(&hills, 9)),
+            address(provider.populator(&hills, 3))
+        );
+        assert_ne!(address(map.populator(&hills, 0)), this);
+        // Registered after `getPopulators`: the mountain chain and the three ocean populators.
+        for id in [13, 1, 2, 3] {
+            assert_eq!(provider.variant_count(&registry.get_by_id(id)), 1);
+        }
+    }
+
+    /// The provider registers its composite terrains into the context's registry, so it must not be shared yet.
+    #[test]
+    #[should_panic(expected = "must not be shared yet")]
+    fn heightmap_needs_an_unshared_registry() {
+        use super::super::terraforged_context::GeneratorSettings;
+        let mut context = GeneratorContext::create_no_cache(GeneratorSettings::default());
+        let _copy = context.copy();
+        Heightmap::new(&mut context);
+    }
 }
