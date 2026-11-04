@@ -491,36 +491,25 @@ mod tests {
     const BLENDINGS: [f32; 9] = [0.65, 0.0, 1.0, 0.4, 0.9, f32::NAN, 0.5, 2.0, -0.5];
     const SET_OF: [usize; 9] = [0, 1, 2, 3, 4, 5, 2, 6, 1];
 
+    const S: f32 = f32::from_bits(1);
+    const SPECIAL_POINTS: [(f32, f32); 12] = [
+        (0.0, 0.0),
+        (-0.0, -0.0),
+        (1e7, -1e7),
+        (-3e9, 2.5),
+        (1e20, -1e20),
+        (f32::MAX, 1.0),
+        (f32::INFINITY, 0.0),
+        (f32::NAN, 5.0),
+        (S, -S),
+        (-1e-3, f32::NEG_INFINITY),
+        (16_777_217.0, -16_777_216.0),
+        (-123_456.78, 98_765.43),
+    ];
+
+    /// The oracle's points: the special ones, then 60 spread over about ±3400 x ±2100.
     fn points() -> Vec<(f32, f32)> {
-        let special_x = [
-            0.0,
-            -0.0,
-            1e7,
-            -3e9,
-            1e20,
-            f32::MAX,
-            f32::INFINITY,
-            f32::NAN,
-            f32::from_bits(1),
-            -1e-3,
-            16_777_217.0,
-            -123_456.78,
-        ];
-        let special_z = [
-            0.0,
-            -0.0,
-            -1e7,
-            2.5,
-            -1e20,
-            1.0,
-            0.0,
-            5.0,
-            -f32::from_bits(1),
-            f32::NEG_INFINITY,
-            -16_777_216.0,
-            98_765.43,
-        ];
-        let mut points: Vec<_> = special_x.into_iter().zip(special_z).collect();
+        let mut points = SPECIAL_POINTS.to_vec();
         points.extend((0..60).map(|i: i32| {
             (
                 ((i * 7919) % 2003 - 1001) as f32 * 3.37,
