@@ -468,7 +468,8 @@ nodes), and samples positions, angles, segment intersections (optionally extende
 and shortened copies (`NoiseUtil.round`). A `RiverWarp` bends a river sideways by simplex noise, faded in over
 `0..lower` and out over `upper..1`, plus a wiggle of 2 to 45 blocks faded in over the first 7.5% of the river;
 its `create` and `createChild` draw from `java.util.Random` in Engine's order. Engine compares `RiverWarp.NONE` by
-identity; the port marks it with a flag. Nothing uses these yet: the river generators are not ported. Its tests
+identity; the port marks it with a flag. Only the river generators below use them, and nothing in world generation
+calls those yet. Its tests
 fold every field and method over 2560 segments (zero-length, NaN, infinite and -0 ends, odd radii), every pair's
 intersections and overlaps, and warps with degenerate and NaN fades over distances outside 0..1, against a Java
 oracle running Engine's classes, `RiverGeometryOracle.java` in `.local/terraforged/oracles/river/`.
@@ -480,8 +481,8 @@ cell's continent edge is below 0.5) and then the bed lower `value` to the bed he
 level, the world registry's `river` terrain, except over wetland-style terrains that override rivers outside
 bed-to-water heights. Widths and depths taper in over the first `fade` of the river. `createForkConfig` sizes a fork
 from the bed and banks at a point, `getValleyType` and `create` draw from `java.util.Random` in Engine's order. Its
-`TerrainPopulator` base (an empty `apply`) and its unused `compareTo` are not ported. Nothing uses the carver yet:
-the river generators are not ported. Its tests fold every cell field over 337920 carves of fresh and filled cells
+`TerrainPopulator` base (an empty `apply`) and its unused `compareTo` are not ported. Only the river networks below use the
+carver, and nothing in world generation calls them yet. Its tests fold every cell field over 337920 carves of fresh and filled cells
 (river, wetland, lake and mountain terrains, NaN values, masks and edges) at points on, beside, before and past
 four rivers (zero-length and NaN among them), for degenerate configs (wrapping widths, NaN heights, zero and NaN
 fades), plus fork configs and random draws, against a Java oracle running Engine's class, `RiverCarverOracle.java`
@@ -530,7 +531,7 @@ The rivermap layer adds Engine's `Rivermap` (`river.rs`): one continent's river 
 continent cell (`x`, `z`) it belongs to. `apply` warps a point with the river warp, takes the lake warp's offset at the
 warped point and carves, in order, every network whose bounds contain the warped point. The timestamp is
 `System.currentTimeMillis()` at creation, as Engine's river cache (below) reads it; Engine's static `Rivermap.get`
-(reuse a map or ask the heightmap's continent) is not ported. Only the base, fancy and simple river
+comes with the rivermap-reuse layer below. Only the base, fancy and simple river
 generators below build river maps, and nothing calls them yet. Its tests fold every cell field over 304380 applies of fresh and filled cells at a grid of
 points (plus -0, NaN, infinite and huge ones) for `NetworkOracle`'s networks, four `GenWarp`s (one whose seeds wrap,
 and `GenWarp.EMPTY`) and three `Levels`, plus direct samples, against a Java oracle running Engine's class,
@@ -626,12 +627,17 @@ four terrains, three height / sea level variants, extreme blocks, caches of 4096
 `HeightmapCacheOracle.java` in `.local/terraforged/oracles/heightmap/`, which calls Engine's `HeightmapCache.get` on a
 `Heightmap` whose `apply` is that fill.
 
-Contextual heightmap sampling now reuses a current rivermap while the continent center is unchanged
-and resolves a replacement only when sampling crosses into another continent.
+The rivermap-reuse layer adds Engine's static `Rivermap.get` (`river.rs`, `Rivermap::get_or_lookup` and
+`Rivermap::get_for_cell`, which reads the cell's continent cell): it returns the current river map when it belongs to
+the requested continent cell (both `x` and `z` equal) and otherwise asks for the map of that cell. As `Heightmap` is
+not ported, the lookup Engine makes (`heightmap.getContinent().getRivermap(x, z)`) is a closure, which callers give a
+continent's `rivermap`. Engine's tile and chunk tasks and `HeightmapCache.generate` call it; none of them is ported,
+so nothing calls it yet. Its test checks that a matching map is returned without a lookup and that a different `x`,
+a different `z`, swapped coordinates or no current map run exactly one lookup for the requested cell.
 
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage and the heightmap cache. They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache and the river-map reuse. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
