@@ -75,7 +75,8 @@ impl AdvancedContinentGenerator {
         let variance_seed = seed.next();
         let warp_scale = round(tectonic_scale as f32 * 0.225);
         let strength = round(tectonic_scale as f32 * 0.33) as f32;
-        let octaves = continent.continent_noise_octaves as usize;
+        // Engine indexes an octave table with a negative octave count and throws; it is clamped to 0 here.
+        let octaves = usize::try_from(continent.continent_noise_octaves).unwrap_or(0);
         let warp_axis = |seed: i32| {
             source(
                 SourceKind::Perlin2,
