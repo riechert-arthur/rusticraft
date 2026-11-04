@@ -27,9 +27,10 @@ use super::{
     terraforged_engine::{Levels, Seed, TerrainSettings},
 };
 
-/// Engine's `LandForms`: builds each landform's noise graph from the terrain settings. Only `steppe`, `plains`,
-/// `hills1`, `hills2`, `dales`, `plateau`, `badlands` and `torridonian` are ported so far, so Engine's `levels` and
-/// `ground` constructor arguments are not taken yet.
+/// Engine's `LandForms`: builds each landform's noise graph from the terrain settings, the world's `Levels` (only
+/// `deepOcean` reads them, through their `water` level) and the `ground` module (`getLandBase`). Only `deepOcean`,
+/// `steppe`, `plains`, `hills1`, `hills2`, `dales`, `plateau`, `badlands` and `torridonian` and the two bases are
+/// ported so far.
 pub struct LandForms {
     settings: TerrainSettings,
     terrain_vertical_scale: f32,
@@ -47,14 +48,19 @@ impl LandForms {
         }
     }
 
+    /// `LandForms.getOceanBase()`: `Source.ZERO`.
     pub fn ocean_base(&self) -> Module {
         Module::constant(0.0)
     }
 
+    /// `LandForms.getLandBase()`: the `ground` module the forms were built with.
     pub fn land_base(&self) -> Module {
         self.ground.clone()
     }
 
+    /// `LandForms.deepOcean(int)`: takes a plain `int` seed rather than a `Seed`, pre-increments it six times (wrapping
+    /// like Java's `int`) and scales by the water level, `(double) seaLevel * 0.7` in `f64` and `seaLevel * 0.2f` /
+    /// `0.15f` in `f32` as in Engine.
     pub fn deep_ocean(&self, mut seed: i32) -> Module {
         seed = seed.wrapping_add(1);
         let hills_source = perlin(seed, 150, 3, 2.0)
@@ -612,38 +618,55 @@ mod tests {
         }
     }
 
+    /// `LandFormsOracle`'s `deepOcean` rows: per `Levels` (height, sea level) and start seed, the `water` level, the
+    /// bounds and the grid hash. `ModTerrains` keeps TerraForged's swapped `new Levels(63, 255)`.
+    #[allow(clippy::type_complexity)]
+    #[rustfmt::skip]
+    const OCEAN_ORACLE: [(i32, i32, i32, u32, u32, u32, u64); 9] = [
+        (256, 63, 100, 0x3e780000, 0x00000000, 0x3e5f3334, 0xb85445c555f5652f),
+        (256, 63, 2147483642, 0x3e780000, 0x00000000, 0x3e5f3334, 0x5cdf2edc9464eb00),
+        (256, 63, 2147483647, 0x3e780000, 0x00000000, 0x3e5f3334, 0xc16b397355e0ba7c),
+        (480, 62, 9712416, 0x3e022222, 0x00000000, 0x3dea3d70, 0x4f7a67d26ada5729),
+        (63, 255, -998877, 0x3f800000, 0x00000000, 0x3f666666, 0x04ab013fa3eae1f2),
+        (320, 71, 2147483644, 0x3e600000, 0x00000000, 0x3e49999a, 0xbd3a753beeba2b6b),
+        (256, 0, 42, 0xbb800000, 0x80000000, 0xbb59999a, 0xa53198f05149b731),
+        (0, 1, 7, 0x00000000, 0x00000000, 0x00000000, 0x2c1b93daafb34265),
+        (256, i32::MIN, -1, 0x3f800000, 0x00000000, 0x3f666666, 0x90428e57aa7a8b1c),
+    ];
+
+    /// The oracle's hash of a module's raw sample bits over `GRID` x `GRID`.
+    fn grid_hash(module: &Module) -> u64 {
+        let mut fnv = 0xcbf2_9ce4_8422_2325_u64;
+        for x in GRID {
+            for y in GRID {
+                for byte in module.value(x, y).to_bits().to_le_bytes() {
+                    fnv = (fnv ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
+                }
+            }
+        }
+        fnv
+    }
+
     #[test]
     fn deep_ocean_matches_engine_0_3_0() {
-        let forms = LandForms::new(
-            TerrainSettings::default(),
-            Levels::new(256, 63),
-            Module::constant(0.375),
-        );
-        let ocean_base = forms.ocean_base();
-        assert_eq!(ocean_base.min_value().to_bits(), 0);
-        assert_eq!(ocean_base.max_value().to_bits(), 0);
-        assert_eq!(bits(&ocean_base), [0; 4]);
-        let land_base = forms.land_base();
-        assert_eq!(bits(&land_base), [0x3ec00000; 4]);
+        for (height, sea_level, start, water, min, max, hash) in OCEAN_ORACLE {
+            let levels = Levels::new(height, sea_level);
+            assert_eq!(levels.water.to_bits(), water, "{height} {sea_level}");
+            let forms = LandForms::new(TerrainSettings::default(), levels, Module::constant(0.375));
+            let module = forms.deep_ocean(start);
+            let got = (
+                module.min_value().to_bits(),
+                module.max_value().to_bits(),
+                grid_hash(&module),
+            );
+            assert_eq!(got, (min, max, hash), "{height} {sea_level} {start}");
 
-        let deep_ocean = forms.deep_ocean(100);
-        assert_eq!(deep_ocean.min_value().to_bits(), 0x00000000);
-        assert_eq!(deep_ocean.max_value().to_bits(), 0x3e5f3334);
-        assert_eq!(
-            bits(&deep_ocean),
-            [0x3ddd62b6, 0x3e096a9f, 0x3d61020a, 0x3dc84380]
-        );
-
-        let custom = LandForms::new(
-            TerrainSettings::default(),
-            Levels::new(320, 71),
-            Module::constant(0.625),
-        )
-        .deep_ocean(i32::MAX - 3);
-        assert_eq!(custom.max_value().to_bits(), 0x3e49999a);
-        assert_eq!(
-            bits(&custom),
-            [0x3dc7f60f, 0x3e04cb64, 0x3d99ff3c, 0x3da6d606]
-        );
+            // `getOceanBase` is `Source.ZERO`; `getLandBase` is the ground module passed in.
+            let ocean_base = forms.ocean_base();
+            assert_eq!(ocean_base.min_value().to_bits(), 0);
+            assert_eq!(ocean_base.max_value().to_bits(), 0);
+            assert_eq!(grid_hash(&ocean_base), 0x2c1b93daafb34265);
+            assert_eq!(bits(&forms.land_base()), [0x3ec00000; 4]);
+        }
     }
 }
