@@ -742,12 +742,23 @@ negative and wrapping region positions, shift factors Java masks to five bits, m
 negative, border and overflowing coordinates, and run Engine's `WorldFilters.apply` on its own tiles (hashed cells,
 borders and the optional filters on and off) against `apply_tile`.
 
-Chunk views reproduce TerraForged's masked chunk lookup, world and region block coordinates, sixteen by
-sixteen cell iteration, and mutable generation visitor contract over the tile backing.
+The tile-chunk layer adds the tile's chunk array and its chunk views. `chunk_writer(x, z)` is Engine's `getChunkWriter`:
+the `GenChunk` at that tile-local chunk position (border included), created there if the slot is empty; as in Engine a
+slot keeps its first chunk, so a position past the tile's edge that aliases a filled slot returns that slot's chunk,
+and an index outside the array gives `None` where Java throws. `chunk(x, z)` is `getChunk`: the chunk at a world chunk
+position masked into the tile past the border, `None` where Engine throws a `NullPointerException` because no writer
+has created it yet. Each chunk knows its world chunk and block position (`tile chunk + local chunk - border`) and
+reads its 16x16 cells from the tile backing at `local chunk << 4` plus the block position `& 15`. `ChunkReader` ports
+`getCell`, `iterate` and `visit`, with Engine's bugs (`visit` returns early when `maxZ` is past the chunk and runs `z`
+up to the clamped `maxX` and `x` up to the clamped `maxZ`); `ChunkWriter` ports `genCell` and `generate`, which also
+passes each cell's world block position. Engine's `open`/`close` counting belongs to tile disposal, not ported. Its tests
+replay the `k` lines of `TileOracle.java` on the same tiles: readers before any chunk exists, writers at negative,
+edge, aliasing and out-of-range positions, Engine's `generate(Consumer)` loop, readers over negative, border and
+overflowing chunk positions, and `visit` over rectangles around chunks.
 
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes and the tiles' cells with their filter region. They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region and the tiles' chunk views. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
