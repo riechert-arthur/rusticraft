@@ -407,9 +407,7 @@ mod tests {
         assert!(!Arc::ptr_eq(&first, &resized));
         assert_eq!(builds.load(Ordering::Relaxed), 2);
     }
-    /// Replays `WorldErosionOracle.java` (`.local/terraforged/oracles/world_erosion/`), which calls Engine's
-    /// `WorldErosion.get` with a validator that accepts any cached size at least as large as the context:
-    /// each line is the context, the returned size, its build number and the factory and validator calls.
+
     #[test]
     fn world_erosion_builds_once_across_threads() {
         let builds = AtomicUsize::new(0);
@@ -429,6 +427,9 @@ mod tests {
         assert!(values.iter().all(|value| Arc::ptr_eq(value, &values[0])));
     }
 
+    /// Replays `WorldErosionOracle.java` (`.local/terraforged/oracles/world_erosion/`), which calls Engine's
+    /// `WorldErosion.get` with a validator that accepts any cached size at least as large as the context:
+    /// each line is the context, the returned size, its build number and the factory and validator calls.
     #[test]
     fn world_erosion_calls_match_engine_oracle() {
         let calls = std::sync::Mutex::new(Vec::new());
