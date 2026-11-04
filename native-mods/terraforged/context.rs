@@ -59,9 +59,17 @@ pub struct GeneratorContext {
     pub levels: Levels,
     pub settings: GeneratorSettings,
     /// The world's terrain registry; continents, the climate, heightmap caches and tiles compare terrains by
-    /// identity with its built-ins, so every layer of the world gets this same instance.
+    /// identity with its built-ins, so every layer of the world gets this same instance. Registering into it
+    /// (`&mut`, e.g. the provider's composite terrains) works through `Arc::get_mut` only while nothing else holds
+    /// it: before any `copy`/`split`, continent or climate, which is where Engine's `Heightmap` registers them.
     pub terrain: Arc<TerrainRegistry>,
 }
+
+// Engine builds the world generator from a context on other threads (its lazy suppliers): it must be shareable.
+const _: fn() = || {
+    fn shareable<T: Send + Sync>() {}
+    shareable::<GeneratorContext>();
+};
 
 impl GeneratorContext {
     /// Engine's `new GeneratorContext(settings)` (the `create` path, whose world generator and tile cache are
