@@ -781,14 +781,24 @@ count).
 
 `generate_zoomed_heightmap` is Engine's `Tile.generate(Heightmap, offsetX, offsetZ, zoom)`: the same fill as
 `generate_heightmap`, but the stages get each cell's world block position scaled by the zoom and shifted by the offset
-less half the zoomed tile width (`block * zoom + offset - size * zoom / 2`, in Engine's `float` order). Its cached
-variant and the tile generator's zoomed region are later layers (#78, #80). Its tests replay the same oracle's zoomed
-runs: thirteen offset and zoom pairs over the six tiles, with fractional, unit, large, negative, signed-zero, NaN and
-overflowing zooms and NaN and infinite offsets, compared bit for bit (NaNs folded as Java's `floatToIntBits`).
+less half the zoomed tile width (`block * zoom + offset - size * zoom / 2`, in Engine's `float` order). The tile
+generator's zoomed region is a later layer (#80). Its tests replay the same oracle's zoomed runs: thirteen offset and
+zoom pairs over the six tiles, with fractional, unit, large, negative, signed-zero, NaN and overflowing zooms and NaN
+and infinite offsets, compared bit for bit (NaNs folded as Java's `floatToIntBits`).
+
+`generate_cached_zoomed_heightmap` is Engine's `Tile.generate(HeightmapCache, offsetX, offsetZ, zoom)`: the zoomed
+positions, floored with Engine's `NoiseUtil.floor` (`(int) f`, minus 1 below zero: a NaN sample gives -1, infinite
+and huge samples saturate or wrap to `Integer.MAX_VALUE`, and a negative whole sample such as -16.0 gives -17), go
+through `HeightmapCache::generate` as the cached fill's block positions do. The stages get that floored position, as
+Engine's cache computes a cell from its key, and zoomed blocks that floor to the same position share one cached cell,
+also with the unzoomed cached fills on the same cache. The oracle runs sixteen offset and zoom pairs on the cache of
+the cached runs: unit, halved and doubled zooms over tile 0's cached blocks, the zoomed runs' pairs except the one on
+the aliasing tile (with tile 1's unit pair shifted off the blocks whose cached cells that tile's aliasing chunks
+refilled, the snapshot difference above), and a repeat where every block hits; debug and release builds agree.
 
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views and the tile heightmap fill (direct, through the heightmap cache and zoomed). They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views and the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache). They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
