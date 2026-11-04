@@ -23,13 +23,16 @@
  */
 
 use super::{
-    terraforged_concurrent::{Cache, CacheEntry, LazyCallable, ThreadPool},
+    terraforged_concurrent::{Cache, CacheEntry, DisposeListener, LazyCallable, ThreadPool},
     terraforged_engine::{Cell, TerrainRegistry},
     terraforged_filters::WorldFilters,
     terraforged_river::{Rivermap, current_time_millis},
     terraforged_tile::{BatchChunk, ChunkReader, GenChunk, Tile},
 };
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError, RwLock, Weak};
+
+/// A tile's dispose listener ([`TileGenerator::set_listener`]).
+type TileListener = Weak<dyn DisposeListener<Tile>>;
 
 /// The stages of Engine's `Heightmap` that `Tile.generate(Heightmap ...)` calls, in the order the
 /// tile fills run them: `applyBase`, `getContinent().getRivermap(x, z)` (when the cell's continent
@@ -89,7 +92,7 @@ impl<H, F> WorldGenerator<H, F> {
 /// generator classes it is ([`Self::builder`] picks it as `Builder.build()` does; [`Self::new`]
 /// makes the plain one). Engine's `TileGeneratorBatched` and `TileGeneratorStriped` are also the
 /// `generate_batched_*` and `generate_striped_*` methods; [`Self::cached`] is its `cached()`. The
-/// async wrapper and tile disposal are not ported.
+/// async wrapper is not ported.
 pub struct TileGenerator<H, F> {
     factor: i32,
     border: i32,
@@ -102,6 +105,8 @@ pub struct TileGenerator<H, F> {
     pool: ThreadPool,
     terrains: Arc<TerrainRegistry>,
     generator: WorldGenerator<H, F>,
+    /// Engine's `listener`, which every new tile takes ([`Self::set_listener`]).
+    listener: RwLock<Option<TileListener>>,
 }
 
 /// The Engine class `TileGenerator.Builder.build()` returns, which decides what `generateRegion`
@@ -214,6 +219,7 @@ where
             pool,
             terrains,
             generator,
+            listener: RwLock::new(None),
         }
     }
 }
@@ -245,6 +251,7 @@ where
             pool: ThreadPool::NONE,
             terrains,
             generator,
+            listener: RwLock::new(None),
         }
     }
 
@@ -471,9 +478,32 @@ where
     }
 
     /// `createEmptyRegion(regionX, regionZ)`: a fresh tile of the generator's size factor and
-    /// border, its cells from the world's registry.
+    /// border, its cells from the world's registry, with the generator's current listener (zoomed
+    /// tiles too, as region (0, 0)).
     pub fn create_empty_region(&self, region_x: i32, region_z: i32) -> Tile {
-        Tile::new(region_x, region_z, self.factor, self.border, &self.terrains)
+        let listener = self
+            .listener
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        Tile::with_listener(
+            region_x,
+            region_z,
+            self.factor,
+            self.border,
+            &self.terrains,
+            listener,
+        )
+    }
+
+    /// `setListener(listener)`: the dispose listener of the tiles made from now on (tiles already
+    /// made keep theirs). [`TileCache::new`] sets itself; without it, a tile's `dispose` tells no
+    /// one.
+    pub fn set_listener(&self, listener: TileListener) {
+        *self
+            .listener
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = Some(listener);
     }
 
     /// The batch threads: the builder's pool, else Engine's default pool ([`batch_workers`]).
@@ -503,17 +533,34 @@ where
 /// is generated once (on [`ThreadPool::NONE`], on the first `get`'s thread). The tasks own the
 /// generator through an `Arc` (Engine's `CallableTile` keeps a reference to it).
 ///
-/// [`Self::get_chunk`] is `TileProvider.getChunk`. Not ported: the generator's dispose listener
-/// (`onDispose`, which removes a disposed tile's entry), a later layer. Expiry drops a tile without closing it (Engine's
-/// sweep does not close either); Engine's `Tile.close`, run by `Cache.remove`, hands the tile's
-/// cells back to `TileResources` pools, which are not ported: here the cells are freed when the
-/// last holder of the entry drops it.
+/// [`Self::get_chunk`] is `TileProvider.getChunk`. The cache is its generator's dispose listener
+/// (`generator.setListener(this)`): a tile made after that, once disposed ([`Tile::dispose`]),
+/// runs `onDispose`, `cache.remove(tile.getRegionId())`, which removes whatever entry the region
+/// has now (a newer tile's too) and closes it ([`Tile::close`]) outside the cache's lock. Expiry
+/// and eviction drop an entry without closing it or telling the listener, as Engine's do. Engine's
+/// `Tile.close` hands the tile's cells back to `TileResources` pools, which are not ported: here
+/// the cells are freed when the last holder of the entry drops it.
 pub struct TileCache<H, F> {
     can_queue: bool,
     generator: Arc<TileGenerator<H, F>>,
     thread_pool: ThreadPool,
-    cache: Cache<CacheEntry<'static, Tile>>,
+    cache: Arc<Cache<CacheEntry<'static, Tile>>>,
     clock: fn() -> i64,
+}
+
+/// `TileCache.onDispose(tile)`: `cache.remove(tile.getRegionId())`.
+impl DisposeListener<Tile> for Cache<CacheEntry<'static, Tile>> {
+    fn on_dispose(&self, tile: &Tile) {
+        self.remove(tile.region_id());
+    }
+}
+
+/// `TileCache.onDispose(tile)`, public in Engine (`TileProvider` is a `Disposable.Listener`): the
+/// cache's own, which its generator's tiles call.
+impl<H: Send + Sync, F: Send + Sync> DisposeListener<Tile> for TileCache<H, F> {
+    fn on_dispose(&self, tile: &Tile) {
+        self.cache.on_dispose(tile);
+    }
 }
 
 impl<H, F> TileCache<H, F>
@@ -524,7 +571,8 @@ where
     /// `QUEUING_MIN_POOL_SIZE`: [`Self::queue_region`] runs only on pools larger than this.
     pub const QUEUING_MIN_POOL_SIZE: i32 = 4;
 
-    /// `new TileCache(generator, threadPool)`: queues only when `threadPool.size() > 4`.
+    /// `new TileCache(generator, threadPool)`: queues only when `threadPool.size() > 4`, and
+    /// becomes the generator's dispose listener ([`TileGenerator::set_listener`]).
     pub fn new(generator: Arc<TileGenerator<H, F>>, thread_pool: ThreadPool) -> Self {
         Self::with_clock(generator, thread_pool, current_time_millis)
     }
@@ -536,11 +584,14 @@ where
         thread_pool: ThreadPool,
         clock: fn() -> i64,
     ) -> Self {
+        let cache = Arc::new(Cache::with_clock("TileCache", 256, 60_000, 20_000, clock));
+        let listener = Arc::downgrade(&cache);
+        generator.set_listener(listener);
         Self {
             can_queue: thread_pool.size() > Self::QUEUING_MIN_POOL_SIZE,
             generator,
             thread_pool,
-            cache: Cache::with_clock("TileCache", 256, 60_000, 20_000, clock),
+            cache,
             clock,
         }
     }
@@ -611,7 +662,8 @@ where
 
     /// `getChunk(chunkX, chunkZ)`: `getTile(chunkToRegion(chunkX), chunkToRegion(chunkZ))`, which
     /// stamps the region's entry and waits for (or, on [`ThreadPool::NONE`], runs) its tile, then
-    /// that tile's `getChunk(chunkX, chunkZ)` ([`Tile::chunk`]). `None` where Engine throws a
+    /// that tile's `getChunk(chunkX, chunkZ)` ([`Tile::chunk`]), which opens the chunk
+    /// ([`Tile::open_chunk`]; [`CachedChunk::close`] closes it). `None` where Engine throws a
     /// `NullPointerException`: the tile has no chunk in that slot (every tile the generator makes
     /// fills all its slots, so this does not happen here). Panics where [`Tile::chunk`] does.
     pub fn get_chunk(&self, chunk_x: i32, chunk_z: i32) -> Option<CachedChunk> {
@@ -619,6 +671,7 @@ where
         let region_z = self.chunk_to_region(chunk_z);
         let tile = self.get_tile_at(region_x, region_z);
         let chunk = tile.call().chunk(chunk_x, chunk_z)?.chunk();
+        tile.call().open_chunk();
         Some(CachedChunk {
             tile,
             chunk_x,
@@ -637,6 +690,7 @@ where
             &self.thread_pool,
             self.clock,
         )
+        .closing(Tile::close)
     }
 }
 
@@ -644,7 +698,9 @@ where
 /// `Tile`, so the reader keeps the tile alive after the cache drops it; this one holds the
 /// tile's cache entry. [`Self::reader`] reads it as [`Tile::chunk`]'s [`ChunkReader`] does
 /// (`getCell`, `iterate`, `visit` with Engine's swapped bounds), without stamping the entry, as
-/// Engine's reads do not. Engine's `open`/`close` count belongs to tile disposal, not ported.
+/// Engine's reads do not. It is open from [`TileCache::get_chunk`] until [`Self::close`], which, as
+/// in Engine, is up to the caller: a reader dropped unclosed keeps its tile from closing (Engine's
+/// `WorldLookup` never closes its readers either).
 pub struct CachedChunk {
     tile: Arc<CacheEntry<'static, Tile>>,
     chunk_x: i32,
@@ -667,6 +723,17 @@ impl CachedChunk {
     pub fn reader(&self) -> ChunkReader<'_> {
         let chunk = self.tile().chunk(self.chunk_x, self.chunk_z);
         chunk.expect("a cached tile keeps its chunks")
+    }
+
+    /// `close()`: `GenChunk.close`, one open reader of the tile fewer ([`Tile::close_chunk`]).
+    /// Like Engine's, it does not check whether this reader was closed already.
+    pub fn close(&self) {
+        self.tile().close_chunk();
+    }
+
+    /// `dispose()`: `GenChunk.dispose`, the tile's [`Tile::dispose`].
+    pub fn dispose(&self) {
+        self.tile().dispose();
     }
 }
 
@@ -1767,6 +1834,327 @@ h1 true true 25 true true true true 256 1c76c64b231b9e88
 h2 -6 13 -6 13 326 12 -6 13 -96 208 a0d4ce0f38b32f59 0:11 0:11 0:11 0:11 0:11 0:11
 h3 true 176 fd6943c3bd8e196c 6a771b7ec1bf0d24
 ";
+
+    /// `TileDisposalOracle.java`'s output (`./run.sh` writes it to `disposal.txt`).
+    const TILE_DISPOSAL_ORACLE: &str = "\
+x0 0 0 4 16 true true
+x1 4 3 4 16 true true 0[] true
+x2 4 4 4 16 true true 1[-1,2,true,false] false
+x3 4 5 4 16 true true 2[-1,2,true,false;-1,2,false,false] false
+x4 true -1 0 4 16 false false 4 6 4 16 true true 3[-1,2,true,false;-1,2,false,false;-1,2,false,false] false
+x5 0 0 4 16 true true -1 4 4 16 false false 4[-1,2,true,false;-1,2,false,false;-1,2,false,false;5,-6,true,false] false
+x6 1 4 4 16 true true 0 4 4 16 true true 5[-1,2,true,false;-1,2,false,false;-1,2,false,false;5,-6,true,false;3,3,true,false] false
+x7 1 0 0 4 16 true true false false true 0 0 1 1 true true -1 0 1 1 false false false 5[-1,2,true,false;-1,2,false,false;-1,2,false,false;5,-6,true,false;3,3,true,false] 0[]
+x8 0 4 4 16 true true -1 0 4 16 false false 6[-1,2,true,false;-1,2,false,false;-1,2,false,false;5,-6,true,false;3,3,true,false;0,0,false,false] false
+x9 7[-1,2,true,false;-1,2,false,false;-1,2,false,false;5,-6,true,false;3,3,true,false;0,0,false,false;9,9,true,false] 1[10,10,false,false] false true 0 4 4 16 true true
+x10 -1 8 4 16 false false 5 true false -1 8000 4 16 false false 7997
+x11 0 0 4 16 true true -1 0 4 16 false false true
+";
+
+    /// `TileDisposalOracle`'s `Logged`: logs each `onDispose` (`<regionX>,<regionZ>,<the cache's
+    /// entry holds this tile>,<the map's lock is held>`) before the cache's own. The lookup takes
+    /// the map's read lock, so it would never return under the write lock: the flag is `false`
+    /// whenever the line is logged at all.
+    struct Logged {
+        cache: Arc<Cache<CacheEntry<'static, Tile>>>,
+        events: Mutex<Vec<String>>,
+    }
+
+    impl DisposeListener<Tile> for Logged {
+        fn on_dispose(&self, tile: &Tile) {
+            let entry = self.cache.get(tile.region_id());
+            let same = entry.is_some_and(|entry| std::ptr::eq(entry.call(), tile));
+            let (rx, rz) = (tile.region_x(), tile.region_z());
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("{rx},{rz},{same},false"));
+            self.cache.on_dispose(tile);
+        }
+    }
+
+    impl Logged {
+        /// `new Logged(generator)`: a `NONE` tile cache whose listener is the logger.
+        fn new<H, F>(
+            generator: &Arc<TileGenerator<H, F>>,
+            clock: fn() -> i64,
+        ) -> (TileCache<H, F>, Arc<Self>)
+        where
+            H: HeightmapSource + Send + Sync + 'static,
+            F: TileFilters + Send + Sync + 'static,
+        {
+            let cache = TileCache::with_clock(Arc::clone(generator), ThreadPool::NONE, clock);
+            let logged = Arc::new(Self {
+                cache: Arc::clone(&cache.cache),
+                events: Mutex::new(Vec::new()),
+            });
+            let listener = Arc::downgrade(&logged);
+            generator.set_listener(listener);
+            (cache, logged)
+        }
+
+        fn events(&self) -> String {
+            let events = self.events.lock().unwrap();
+            format!("{}[{}]", events.len(), events.join(";"))
+        }
+    }
+
+    /// `<active> <disposed> <chunkCount> <getChunkCount> <open> <open>`: Engine's two resources
+    /// are open until the tile closes (no line reopens a closed tile).
+    fn disposal_state(tile: &Tile) -> String {
+        let open = tile.active() != -1;
+        let (active, disposed) = (tile.active(), tile.disposed());
+        let (threshold, count) = (tile.disposal_threshold(), tile.chunk_count());
+        format!("{active} {disposed} {threshold} {count} {open} {open}")
+    }
+
+    /// The four readers of a size-1 region (2x2 chunks), z rows then x.
+    fn region_readers<H, F>(cache: &TileCache<H, F>, rx: i32, rz: i32) -> Vec<CachedChunk>
+    where
+        H: HeightmapSource + Send + Sync + 'static,
+        F: TileFilters + Send + Sync + 'static,
+    {
+        (0..4)
+            .map(|i| {
+                cache
+                    .get_chunk(rx * 2 + (i & 1), rz * 2 + (i >> 1))
+                    .unwrap()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn tile_disposal_matches_engine_oracle() {
+        static CLOCK: AtomicI64 = AtomicI64::new(0);
+        fn clock() -> i64 {
+            CLOCK.load(Ordering::SeqCst)
+        }
+        let terrains = Arc::new(TerrainRegistry::new());
+        let kinds = ["none", "coast", "beach", "hills"]
+            .map(|name| terrains.get_by_name(name).expect("built-in terrain"));
+        let world = || {
+            let mut settings = FilterSettings::default();
+            settings.erosion.droplets_per_chunk = 20;
+            settings.smoothing.iterations = 1;
+            let points = WorldControlPoints {
+                beach: 0.327,
+                ..WorldControlPoints::default()
+            };
+            let filters =
+                WorldFilters::new(12345, settings, Levels::new(256, 63), points, &terrains);
+            WorldGenerator::new(FillHeightmap::new(kinds.clone()), filters)
+        };
+        let generator = |size| {
+            Arc::new(
+                TileGenerator::builder()
+                    .size(size, size)
+                    .factory(Arc::clone(&terrains), world())
+                    .build(),
+            )
+        };
+        let tiles = generator(1);
+        let (dc, log) = Logged::new(&tiles, clock);
+        let mut out = String::new();
+        let entry = dc.get_tile_at(-1, 2);
+        let t = entry.call();
+        out += &format!("x0 {}\n", disposal_state(t));
+        let r = region_readers(&dc, -1, 2);
+        for reader in &r[..3] {
+            reader.dispose();
+        }
+        let has =
+            |cache: &TileCache<_, _>, rx, rz| cache.get(Tile::region_id_for(rx, rz)).is_some();
+        out += &format!(
+            "x1 {} {} {}\n",
+            disposal_state(t),
+            log.events(),
+            has(&dc, -1, 2)
+        );
+        r[3].dispose();
+        out += &format!(
+            "x2 {} {} {}\n",
+            disposal_state(t),
+            log.events(),
+            has(&dc, -1, 2)
+        );
+        r[0].dispose();
+        out += &format!(
+            "x3 {} {} {}\n",
+            disposal_state(t),
+            log.events(),
+            has(&dc, -1, 2)
+        );
+        let entry2 = dc.get_tile_at(-1, 2);
+        let t2 = entry2.call();
+        r[0].dispose();
+        out += &format!(
+            "x4 {} {} {} {} {}\n",
+            !std::ptr::eq(t2, t),
+            disposal_state(t2),
+            disposal_state(t),
+            log.events(),
+            has(&dc, -1, 2)
+        );
+        let entry3 = dc.get_tile_at(5, -6);
+        let t3 = entry3.call();
+        let r3 = region_readers(&dc, 5, -6);
+        r3.iter().for_each(CachedChunk::close);
+        let closed = disposal_state(t3);
+        for reader in &r3[..3] {
+            reader.dispose();
+        }
+        t3.dispose();
+        out += &format!(
+            "x5 {closed} {} {} {}\n",
+            disposal_state(t3),
+            log.events(),
+            has(&dc, 5, -6)
+        );
+        let entry4 = dc.get_tile_at(3, 3);
+        let t4 = entry4.call();
+        let r4 = region_readers(&dc, 3, 3);
+        r4[..3].iter().for_each(CachedChunk::close);
+        r4.iter().for_each(CachedChunk::dispose);
+        let held = disposal_state(t4);
+        r4[3].close();
+        out += &format!(
+            "x6 {held} {} {} {}\n",
+            disposal_state(t4),
+            log.events(),
+            has(&dc, 3, 3)
+        );
+        let entry5 = dc.get_tile_at(7, -3);
+        CLOCK.store(i64::MAX, Ordering::SeqCst);
+        let swept = dc.cache.run();
+        CLOCK.store(0, Ordering::SeqCst);
+        let sweep = format!(
+            "{swept} {} {}",
+            disposal_state(entry5.call()),
+            has(&dc, 7, -3)
+        );
+        let small = generator(0);
+        let (sc, small_log) = Logged::new(&small, clock);
+        let first = sc.get_tile_at(0, 0);
+        for x in 1..=256 {
+            sc.get_tile_at(x, 0);
+        }
+        let evicted = format!(
+            "{} {} {}",
+            has(&sc, 0, 0),
+            has(&sc, 1, 0),
+            disposal_state(first.call())
+        );
+        let kept = sc.get_tile_at(1, 0);
+        sc.cache.remove(Tile::region_id_for(1, 0));
+        out += &format!(
+            "x7 {sweep} {evicted} {} {} {} {}\n",
+            disposal_state(kept.call()),
+            has(&sc, 1, 0),
+            log.events(),
+            small_log.events()
+        );
+        let cached00 = dc.get_tile_at(0, 0);
+        let zoomed = tiles.generate_zoomed_region(0.0, 0.0, 1.0, false);
+        (0..4).for_each(|_| zoomed.dispose());
+        out += &format!(
+            "x8 {} {} {} {}\n",
+            disposal_state(&zoomed),
+            disposal_state(cached00.call()),
+            log.events(),
+            has(&dc, 0, 0)
+        );
+        let entry6 = dc.get_tile_at(9, 9);
+        let (_dd, dd_log) = Logged::new(&tiles, clock);
+        let entry7 = dc.get_tile_at(10, 10);
+        for _ in 0..4 {
+            entry6.call().dispose();
+            entry7.call().dispose();
+        }
+        out += &format!(
+            "x9 {} {} {} {} {}\n",
+            log.events(),
+            dd_log.events(),
+            has(&dc, 9, 9),
+            has(&dc, 10, 10),
+            disposal_state(entry7.call())
+        );
+        let tiles2 = generator(1);
+        let (ec, ec_log) = Logged::new(&tiles2, clock);
+        let entry8 = ec.get_tile_at(-4, 6);
+        let r8 = region_readers(&ec, -4, 6);
+        r8.iter().for_each(CachedChunk::close);
+        let barrier = std::sync::Barrier::new(8);
+        std::thread::scope(|scope| {
+            for i in 0..8 {
+                let (reader, barrier) = (&r8[i & 3], &barrier);
+                scope.spawn(move || {
+                    barrier.wait();
+                    reader.dispose();
+                });
+            }
+        });
+        let burst = {
+            let events = ec_log.events.lock().unwrap();
+            // Whether the entry still held the tile depends on the threads' order.
+            let region = events.iter().all(|e| e.starts_with("-4,6,"));
+            format!("{} {region}", events.len())
+        };
+        let entry9 = ec.get_tile_at(2, 2);
+        ec_log.events.lock().unwrap().clear();
+        ec.cache.remove(Tile::region_id_for(2, 2));
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let (tile, barrier) = (entry9.call(), &barrier);
+                scope.spawn(move || {
+                    barrier.wait();
+                    (0..1000).for_each(|_| tile.dispose());
+                });
+            }
+        });
+        out += &format!(
+            "x10 {} {burst} {} {} {}\n",
+            disposal_state(entry8.call()),
+            has(&ec, -4, 6),
+            disposal_state(entry9.call()),
+            ec_log.events.lock().unwrap().len()
+        );
+        let pooled = Arc::new(
+            TileGenerator::builder()
+                .size(1, 1)
+                .pool(8)
+                .factory(Arc::clone(&terrains), world())
+                .build(),
+        );
+        let pc = TileCache::with_clock(Arc::clone(&pooled), pooled.pool.clone(), clock);
+        let unread = pc.get_or_compute(Tile::region_id_for(1, 1));
+        while !unread.is_done() {
+            std::hint::spin_loop();
+        }
+        pc.cache.remove(Tile::region_id_for(1, 1));
+        let late = disposal_state(unread.get());
+        let read = pc.get_tile_at(2, 1);
+        pc.cache.remove(Tile::region_id_for(2, 1));
+        let state = disposal_state(read.call());
+        out += &format!("x11 {late} {state} {}\n", !has(&pc, 1, 1));
+        assert_eq!(out, TILE_DISPOSAL_ORACLE);
+        let entry = ec.get_tile_at(1, 1);
+        ec.on_dispose(entry.call());
+        assert!(!has(&ec, 1, 1), "onDispose removes the tile's region");
+        assert_eq!(entry.call().active(), -1, "and closes its unopened tile");
+        let alive = TileCache::with_clock(generator(0), ThreadPool::NONE, clock);
+        let entry = alive.get_tile_at(0, 0);
+        entry.call().dispose();
+        assert_eq!(entry.call().active(), -1, "the cache removed and closed it");
+        let dropped = TileCache::with_clock(generator(0), ThreadPool::NONE, clock);
+        let entry = dropped.get_tile_at(0, 0);
+        drop(dropped);
+        entry.call().dispose();
+        assert_eq!(
+            entry.call().active(),
+            0,
+            "a dropped cache's tiles tell no one"
+        );
+    }
 
     /// `TileGeneratorOracle.java`'s output (`./run.sh` writes it to `out.txt`).
     const ORACLE: &str = "\
