@@ -1247,6 +1247,7 @@ struct CacheValue {
 
 enum ModuleKind {
     Constant(f32),
+    Custom(Arc<dyn Fn(f32, f32) -> f32 + Send + Sync + std::panic::RefUnwindSafe>),
     Source(Source),
     ErosionRidge {
         ridge: ErosionRidge,
@@ -1651,6 +1652,16 @@ impl Module {
         Self::node(ModuleKind::Constant(value), value, value)
     }
 
+    /// A Java class implementing `Module` itself (such as the climate layer's `Temperature`): `value` is its
+    /// `getValue`, `min`/`max` its `minValue`/`maxValue` (the `Noise` defaults 0..1 unless the class overrides them).
+    pub fn custom(
+        min: f32,
+        max: f32,
+        value: impl Fn(f32, f32) -> f32 + Send + Sync + std::panic::RefUnwindSafe + 'static,
+    ) -> Self {
+        Self::node(ModuleKind::Custom(Arc::new(value)), min, max)
+    }
+
     pub fn source(source: Source) -> Self {
         Self::node(
             ModuleKind::Source(source),
@@ -1724,6 +1735,7 @@ impl Module {
     pub fn value(&self, x: f32, y: f32) -> f32 {
         match &self.0.kind {
             ModuleKind::Constant(value) => *value,
+            ModuleKind::Custom(value) => value(x, y),
             ModuleKind::Source(source) => source.value(x, y),
             ModuleKind::ErosionRidge { ridge, source } => ridge.value(x, y, source),
             ModuleKind::CellSource {
@@ -2894,6 +2906,35 @@ pub fn java_pow(value: f32, power: f32) -> f32 {
         return f32::NAN;
     }
     (f64::from(value).powf(f64::from(power))) as f32
+}
+
+/// `NoiseUtil.pow(float, int)`: repeated float products (`value * value * value` for 3), not `Math.pow`; a negative
+/// power gives 1.
+pub fn pow_int(value: f32, power: i32) -> f32 {
+    match power {
+        0 => 1.0,
+        1 => value,
+        2 => value * value,
+        3 => value * value * value,
+        4 => value * value * value * value,
+        _ => {
+            let mut result = 1.0;
+            for _ in 0..power {
+                result *= value;
+            }
+            result
+        }
+    }
+}
+
+/// `NoiseUtil.copySign`: negates `value` only when its sign and `sign`'s differ by a strict comparison with 0, so
+/// zeros, NaNs and a zero or NaN `sign` leave it unchanged (unlike `f32::copysign`).
+pub fn copy_sign(value: f32, sign: f32) -> f32 {
+    if (sign < 0.0 && value > 0.0) || (sign > 0.0 && value < 0.0) {
+        -value
+    } else {
+        value
+    }
 }
 
 /// Java's `Math.max(float, float)`: NaN wins and +0.0 is larger than -0.0.
