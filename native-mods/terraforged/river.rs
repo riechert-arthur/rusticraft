@@ -28,7 +28,8 @@
 // continent river config instead, which this module does not port. `GenWarp` (`rivermap.gen.GenWarp`) holds the
 // lake and river domain warps Engine's river generators build per continent. `River`, `RiverWarp`
 // (`rivermap.river`) and `Vec2i` (`noise.util.Vec2i`) are the channel segments those generators lay out, and
-// `RiverCarver` (`rivermap.river`) carves one segment's valley, banks and bed into a cell.
+// `RiverCarver` (`rivermap.river`) carves one segment's valley, banks and bed into a cell; `LakeCarver`
+// (`rivermap.lake.Lake`) carves a lake and its valley, and `Boundsf` (`util.Boundsf`) bounds them.
 
 use super::{
     terraforged::{
@@ -139,6 +140,13 @@ pub struct Range {
     pub max: f32,
 }
 
+impl Range {
+    pub const fn new(min: f32, max: f32) -> Self {
+        Self { min, max }
+    }
+}
+
+/// Engine's `util.Boundsf`: a float rectangle, inclusive at both ends (a NaN test is never contained).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Boundsf {
     pub min_x: f32,
@@ -148,6 +156,7 @@ pub struct Boundsf {
 }
 
 impl Boundsf {
+    /// `Boundsf.NONE`: min above max, so it contains nothing.
     pub const NONE: Self = Self::new(1.0, 1.0, -1.0, -1.0);
 
     pub const fn new(min_x: f32, min_y: f32, max_x: f32, max_y: f32) -> Self {
@@ -168,6 +177,9 @@ impl Boundsf {
     }
 }
 
+/// Engine's `Boundsf.Builder`. As in Engine, the maxima start at `Float.MIN_VALUE` (the smallest positive
+/// subnormal, not `f32::MIN_POSITIVE`), so an empty builder or one that only records negative coordinates
+/// keeps that maximum; `record` uses `Math.min`/`Math.max`, so a NaN coordinate sticks.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BoundsfBuilder {
     min_x: f32,
@@ -181,16 +193,16 @@ impl BoundsfBuilder {
         Self {
             min_x: f32::MAX,
             min_y: f32::MAX,
-            max_x: f32::MIN_POSITIVE,
-            max_y: f32::MIN_POSITIVE,
+            max_x: f32::from_bits(1),
+            max_y: f32::from_bits(1),
         }
     }
 
     pub fn record(&mut self, x: f32, y: f32) {
-        self.min_x = self.min_x.min(x);
-        self.min_y = self.min_y.min(y);
-        self.max_x = self.max_x.max(x);
-        self.max_y = self.max_y.max(y);
+        self.min_x = java_min(self.min_x, x);
+        self.min_y = java_min(self.min_y, y);
+        self.max_x = java_max(self.max_x, x);
+        self.max_y = java_max(self.max_y, y);
     }
 
     pub const fn build(self) -> Boundsf {
@@ -201,12 +213,6 @@ impl BoundsfBuilder {
 impl Default for BoundsfBuilder {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-impl Range {
-    pub const fn new(min: f32, max: f32) -> Self {
-        Self { min, max }
     }
 }
 
@@ -894,6 +900,12 @@ pub struct LakeConfig {
     pub distance_max: f32,
 }
 
+/// Engine's `rivermap.lake.Lake` (named `LakeCarver` here: `Lake` is the settings struct): a circular lake
+/// bed of radius `radius * multiplier` inside a valley of radius `275 * multiplier`. `apply` writes only the
+/// cell's `value`, `river_mask` and `terrain`, in Engine's order.
+///
+/// Engine's class extends `TerrainPopulator` (terrain `LAKE`, zero sources, weight 1) only to be typed as one;
+/// nothing reads those populator fields, so they are not ported.
 pub struct LakeCarver {
     valley: f32,
     valley2: f32,
@@ -906,17 +918,26 @@ pub struct LakeCarver {
     bank_min: f32,
     bank_max: f32,
     center: Vec2f,
+    /// `TerrainType.LAKE`, from the world's registry so `is_same` checks against its built-ins hold.
     lake_terrain: Terrain,
 }
 
 impl LakeCarver {
-    pub fn new(center: Vec2f, radius: f32, multiplier: f32, config: LakeConfig) -> Self {
+    /// `new Lake(center, radius, multiplier, config)`. `registry` is the world's terrain registry: the lake
+    /// tags cells with its `lake` terrain.
+    pub fn new(
+        center: Vec2f,
+        radius: f32,
+        multiplier: f32,
+        config: LakeConfig,
+        registry: &TerrainRegistry,
+    ) -> Self {
         let lake = radius * multiplier;
         let valley = 275.0 * multiplier;
         let valley2 = valley * valley;
-        let lake_distance2 = lake * lake;
         let bank_alpha_min = config.bank_min;
-        let bank_alpha_max = 1.0_f32.min(bank_alpha_min + 0.275);
+        let bank_alpha_max = java_min(1.0, bank_alpha_min + 0.275);
+        let lake_distance2 = lake * lake;
         Self {
             valley,
             valley2,
@@ -929,10 +950,11 @@ impl LakeCarver {
             bank_min: config.bank_min,
             bank_max: config.bank_max,
             center,
-            lake_terrain: TerrainRegistry::new().get_by_id(6),
+            lake_terrain: registry.get_by_id(6),
         }
     }
 
+    /// `apply(cell, x, z)`. Engine clamps its alphas with `<`/`>` tests, so a NaN alpha passes through.
     pub fn apply(&self, cell: &mut Cell, x: f32, z: f32) {
         let distance2 = self.distance2(x, z);
         if distance2 > self.valley2 {
@@ -950,25 +972,27 @@ impl LakeCarver {
             );
             cell.value = lerp(cell.value, bank_height, valley_alpha);
             cell.river_mask *= 1.0 - valley_alpha;
-            cell.river_mask = cell.river_mask.min(1.0 - valley_alpha);
+            cell.river_mask = java_min(cell.river_mask, 1.0 - valley_alpha);
             return;
         }
-        cell.value = bank_height.min(cell.value);
+        cell.value = java_min(bank_height, cell.value);
         if distance2 < self.lake_distance2 {
             let depth_alpha = clamp(1.0 - distance2 / self.lake_distance2, 0.0, 1.0);
-            let lake_depth = cell.value.min(self.depth);
+            let lake_depth = java_min(cell.value, self.depth);
             cell.value = lerp(cell.value, lake_depth, depth_alpha);
             cell.terrain = self.lake_terrain.clone();
-            cell.river_mask = cell.river_mask.min(1.0 - depth_alpha);
+            cell.river_mask = java_min(cell.river_mask, 1.0 - depth_alpha);
         }
     }
 
+    /// `recordBounds(builder)`: the valley's square, widened by 20%.
     pub fn record_bounds(&self, builder: &mut BoundsfBuilder) {
         let radius = self.valley * 1.2;
         builder.record(self.center.x - radius, self.center.y - radius);
         builder.record(self.center.x + radius, self.center.y + radius);
     }
 
+    /// `overlaps(x, z, radius2)`: whether `(x, z)` is closer than the lake's squared radius plus `radius2`.
     pub fn overlaps(&self, x: f32, z: f32, radius2: f32) -> bool {
         self.distance2(x, z) < self.lake_distance2 + radius2
     }
@@ -980,7 +1004,7 @@ impl LakeCarver {
     }
 
     fn bank_height(&self, cell: &Cell) -> f32 {
-        let alpha = noise_map(
+        let alpha = map(
             cell.value,
             self.bank_alpha_min,
             self.bank_alpha_max,
@@ -2187,45 +2211,283 @@ mod tests {
         }
     }
 
-    #[test]
-    fn lake_carver_matches_engine_0_3_0() {
-        let levels = Levels::new(256, 63);
-        let config = LakeConfig::new(DefaultRiverSettings::default().lakes, levels);
-        let lake = LakeCarver::new(Vec2f::new(100.0, -50.0), 75.0, 0.8, config);
-        assert_eq!(
-            [100.0, 130.0, 160.0, 175.0, 200.0, 300.0, 321.0].map(|x| {
-                let mut cell = Cell::default();
-                cell.value = 0.6;
-                cell.river_mask = 1.0;
-                lake.apply(&mut cell, x, -50.0);
-                (
-                    cell.value.to_bits(),
-                    cell.river_mask.to_bits(),
-                    cell.terrain.id(),
-                )
-            }),
+    /// Engine 0.3.0's `Lake` and `Boundsf` against `LakeOracle.java` (`.local/terraforged/oracles/river/`,
+    /// `run-lake.sh`), which runs Engine's classes on the same inputs.
+    mod lake_oracle {
+        use super::*;
+
+        const NAN: f32 = f32::NAN;
+        const INF: f32 = f32::INFINITY;
+        /// depth, min bank height, max bank height.
+        const SETTINGS: [(i32, i32, i32); 6] = [
+            (10, 2, 10),
+            (1, 1, 1),
+            (20, 10, 1),
+            (0, 0, 0),
+            (-5, 300, -300),
+            (i32::MIN, i32::MAX, i32::MIN),
+        ];
+        const CENTERS: [[f32; 2]; 3] = [[100.0, -50.0], [-0.0, -0.0], [1e7, -3.5e6]];
+        /// radius, multiplier.
+        #[rustfmt::skip]
+        const SIZES: [[f32; 2]; 10] = [
+            [75.0, 0.8], [150.0, 1.0], [0.0, 1.0], [75.0, 0.0], [100.0, -1.0], [NAN, 1.0], [75.0, NAN],
+            [INF, 1.0], [300.0, 1.0], [75.0, INF],
+        ];
+        #[rustfmt::skip]
+        const OFFS: [f32; 20] = [
+            0.0, -0.0, 1.0, 30.0, 59.999_996, 60.0, 60.000_004, 100.0, 150.0, 219.999_98, 220.0, 220.000_02,
+            275.0, 300.0, 330.0, 500.0, 1e20, NAN, INF, -INF,
+        ];
+        const RADII2: [f32; 7] = [0.0, -0.0, 400.0, -1.0, 1e9, NAN, INF];
+        /// value, river mask, terrain id (erosion mask: even fills).
+        #[rustfmt::skip]
+        const FILLS: [(f32, f32, i32); 12] = [
+            (0.6, 1.0, 0), (0.3, 0.5, 7), (0.2, NAN, 5), (0.0, -0.0, 6), (1.0, 1.0, 12), (NAN, 1.0, 0),
+            (0.24, 0.75, 8), (0.25, 1.0, 7), (-0.5, 1.0, 11), (-0.0, 2.0, 0), (INF, -1.0, 0),
+            (0.242_187_5, 0.25, 3),
+        ];
+
+        struct Fold(i32);
+
+        impl Fold {
+            fn mix(&mut self, v: i32) {
+                self.0 = self.0.wrapping_mul(31).wrapping_add(v);
+            }
+            fn b(&mut self, v: bool) {
+                self.mix(i32::from(v));
+            }
+            /// `Float.floatToIntBits`: every NaN folds as 0x7fc00000.
+            fn f(&mut self, v: f32) {
+                self.mix(if v.is_nan() {
+                    0x7fc0_0000
+                } else {
+                    v.to_bits() as i32
+                });
+            }
+            fn cell(&mut self, c: &Cell, registry: &TerrainRegistry) {
+                for v in [
+                    c.value,
+                    c.erosion,
+                    c.sediment,
+                    c.gradient,
+                    c.moisture,
+                    c.temperature,
+                    c.continent_id,
+                    c.continent_edge,
+                    c.terrain_region_id,
+                    c.terrain_region_edge,
+                    c.biome_region_id,
+                    c.biome_region_edge,
+                    c.macro_biome_id,
+                    c.river_mask,
+                ] {
+                    self.f(v);
+                }
+                self.mix(c.terrain_region_center as i32);
+                self.mix((c.terrain_region_center as u64 >> 32) as i32);
+                self.mix(c.continent_x);
+                self.mix(c.continent_z);
+                self.b(c.erosion_mask);
+                // Engine compares terrains by identity: the cell's must be the world registry's own.
+                assert!(c.terrain.is_same(&registry.get_by_id(c.terrain.id())));
+                self.mix(c.terrain.id());
+                self.mix(c.biome as i32);
+            }
+            fn lake(&mut self, k: &LakeCarver) {
+                for v in [
+                    k.valley,
+                    k.valley2,
+                    k.lake_distance2,
+                    k.valley_distance2,
+                    k.bank_alpha_min,
+                    k.bank_alpha_max,
+                    k.bank_alpha_range,
+                    k.depth,
+                    k.bank_min,
+                    k.bank_max,
+                    k.center.x,
+                    k.center.y,
+                ] {
+                    self.f(v);
+                }
+            }
+            fn bounds(&mut self, b: Boundsf) {
+                for v in [b.min_x, b.min_y, b.max_x, b.max_y] {
+                    self.f(v);
+                }
+            }
+        }
+
+        fn levels() -> [Levels; 3] {
+            // TerraForged's own, swapped `Levels(63, 255)` among them.
             [
-                (0x3e500000, 0, 6),
-                (0x3e640000, 0x3e800000, 6),
-                (0x3e900000, 0x3f800000, 0),
-                (0x3e976075, 0x3d392490, 0),
-                (0x3ea75075, 0x3e124924, 0),
-                (0x3f0a4ccd, 0x3f500000, 0),
-                (0x3f19999a, 0x3f800000, 0),
+                Levels::new(256, 63),
+                Levels::new(63, 255),
+                Levels::new(384, 62),
             ]
-        );
-        let mut builder = Boundsf::builder();
-        lake.record_bounds(&mut builder);
-        let bounds = builder.build();
-        assert_eq!(
-            [bounds.min_x, bounds.min_y, bounds.max_x, bounds.max_y].map(f32::to_bits),
-            [0xc3240000, 0xc39d0000, 0x43b60000, 0x43560000]
-        );
-        assert_eq!(
-            [100.0, 160.0, 175.0, 200.0, 300.0].map(|x| lake.overlaps(x, -50.0, 400.0)),
-            [true, true, false, false, false]
-        );
-        assert!(bounds.contains(100.0, -50.0));
-        assert!(!Boundsf::NONE.contains(0.0, 0.0));
+        }
+
+        fn configs(levels: Levels) -> Vec<LakeConfig> {
+            let mut configs: Vec<_> = SETTINGS
+                .iter()
+                .map(|&(depth, min_bank_height, max_bank_height)| {
+                    LakeConfig::new(
+                        Lake {
+                            depth,
+                            min_bank_height,
+                            max_bank_height,
+                            ..Lake::default()
+                        },
+                        levels,
+                    )
+                })
+                .collect();
+            let default = LakeConfig::new(Lake::default(), levels);
+            for (depth, bank_min, bank_max) in [(NAN, NAN, INF), (-0.0, 0.9, -INF)] {
+                configs.push(LakeConfig {
+                    depth,
+                    bank_min,
+                    bank_max,
+                    ..default
+                });
+            }
+            configs
+        }
+
+        fn fill(i: Option<usize>, registry: &TerrainRegistry) -> Cell {
+            let mut c = Cell::new(registry);
+            let Some(i) = i else { return c };
+            let (value, river_mask, terrain) = FILLS[i];
+            c.value = value;
+            c.river_mask = river_mask;
+            c.terrain = registry.get_by_id(terrain);
+            c.erosion_mask = i % 2 == 0;
+            c.erosion = 0.125;
+            c.sediment = 0.25;
+            c.gradient = 0.5;
+            c.moisture = 0.75;
+            c.temperature = 0.375;
+            c.continent_id = 0.625;
+            c.continent_edge = 0.4;
+            c.terrain_region_id = 0.875;
+            c.terrain_region_edge = 0.0625;
+            c.terrain_region_center = 0x0123_4567_89ab_cdef;
+            c.biome_region_id = 0.3;
+            c.biome_region_edge = 0.7;
+            c.macro_biome_id = 0.9;
+            c.continent_x = -7;
+            c.continent_z = 9;
+            c
+        }
+
+        #[test]
+        fn applies_every_cell_field_like_engine() {
+            let registry = TerrainRegistry::new();
+            let mut fold = Fold(17);
+            let mut applies = 0;
+            for levels in levels() {
+                for config in configs(levels) {
+                    fold.f(config.depth);
+                    fold.f(config.bank_min);
+                    fold.f(config.bank_max);
+                    let mut all = Boundsf::builder();
+                    for [cx, cz] in CENTERS {
+                        for [radius, multiplier] in SIZES {
+                            let k = LakeCarver::new(
+                                Vec2f::new(cx, cz),
+                                radius,
+                                multiplier,
+                                config,
+                                &registry,
+                            );
+                            fold.lake(&k);
+                            let mut one = Boundsf::builder();
+                            k.record_bounds(&mut one);
+                            k.record_bounds(&mut all);
+                            let bounds = one.build();
+                            fold.bounds(bounds);
+                            for off in OFFS {
+                                for [x, z] in [
+                                    [cx + off, cz],
+                                    [cx, cz - off],
+                                    [cx + off * 0.6, cz + off * 0.8],
+                                ] {
+                                    for i in std::iter::once(None).chain((0..FILLS.len()).map(Some))
+                                    {
+                                        let mut c = fill(i, &registry);
+                                        k.apply(&mut c, x, z);
+                                        fold.cell(&c, &registry);
+                                        applies += 1;
+                                    }
+                                    for radius2 in RADII2 {
+                                        fold.b(k.overlaps(x, z, radius2));
+                                    }
+                                    fold.b(bounds.contains(x, z));
+                                    fold.b(Boundsf::NONE.contains(x, z));
+                                }
+                            }
+                        }
+                    }
+                    fold.bounds(all.build());
+                }
+            }
+            assert_eq!((applies, fold.0), (561_600, -511_542_011));
+        }
+
+        #[test]
+        fn builds_bounds_like_engine() {
+            let mut fold = Fold(17);
+            fold.bounds(Boundsf::builder().build());
+            fold.bounds(Boundsf::NONE);
+            let records = [
+                [-0.0, 0.0],
+                [0.0, -0.0],
+                [1.0, -1.0],
+                [NAN, 2.0],
+                [3.0, NAN],
+                [-INF, INF],
+                [1e-45, -1e-45],
+            ];
+            for start in 0..records.len() {
+                let mut builder = Boundsf::builder();
+                for [x, y] in &records[start..] {
+                    builder.record(*x, *y);
+                    fold.bounds(builder.build());
+                }
+            }
+            assert_eq!(fold.0, 434_349_810);
+            // `Float.MIN_VALUE`, not `f32::MIN_POSITIVE`.
+            assert_eq!(Boundsf::builder().build().max_x.to_bits(), 1);
+        }
+
+        #[test]
+        fn samples_match_engine() {
+            let registry = TerrainRegistry::new();
+            let levels = levels()[0];
+            let lake = LakeCarver::new(
+                Vec2f::new(100.0, -50.0),
+                75.0,
+                0.8,
+                LakeConfig::new(Lake::default(), levels),
+                &registry,
+            );
+            assert_eq!(
+                [100.0, 130.0, 160.0, 175.0, 200.0, 300.0, 321.0].map(|x| {
+                    let mut c = fill(Some(0), &registry);
+                    lake.apply(&mut c, x, -50.0);
+                    (c.value.to_bits(), c.river_mask.to_bits(), c.terrain.id())
+                }),
+                [
+                    (0x3e500000, 0, 6),
+                    (0x3e640000, 0x3e800000, 6),
+                    (0x3e900000, 0x3f800000, 0),
+                    (0x3e976075, 0x3d392490, 0),
+                    (0x3ea75075, 0x3e124924, 0),
+                    (0x3f0a4ccd, 0x3f500000, 0),
+                    (0x3f19999a, 0x3f800000, 0),
+                ]
+            );
+        }
     }
 }
