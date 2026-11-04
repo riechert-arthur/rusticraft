@@ -27,7 +27,7 @@ use super::{
     terraforged_engine::{Cell, TerrainRegistry},
     terraforged_filters::WorldFilters,
     terraforged_river::Rivermap,
-    terraforged_tile::{ChunkWriter, Tile},
+    terraforged_tile::{BatchChunk, Tile},
 };
 use std::sync::Arc;
 
@@ -87,7 +87,8 @@ impl<H, F> WorldGenerator<H, F> {
 /// `TileGenerator.builder().build()` returns without a batch size): the size factor and border
 /// (in chunks) of its tiles, the batch size (kept for the batched generators), the world's
 /// registry the tiles' cells start from (in place of Engine's `TileResources` pools) and the
-/// world generator. The batched and striped generators, the async wrapper, the tile cache, the
+/// world generator. Engine's `TileGeneratorBatched` and `TileGeneratorStriped` are the
+/// `generate_batched_*` and `generate_striped_*` methods. The async wrapper, the tile cache, the
 /// builder and tile disposal are not ported.
 pub struct TileGenerator<H, F> {
     factor: i32,
@@ -203,13 +204,33 @@ where
         tile
     }
 
-    pub fn generate_batched_region(&self, region_x: i32, region_z: i32, batch_count: i32) -> Tile {
+    /// `TileGeneratorBatched.generateRegion(regionX, regionZ)` with `batch(batch_count)`: an empty
+    /// region filled by [`Tile::generate_area`] (`batch_count` squared batches of chunks on
+    /// [`batch_workers`] threads, each chunk as [`drive_chunk`]), then the filters with the optional
+    /// ones. The cells equal [`Self::generate_region`]'s for any batch count; only the river-map
+    /// lookups differ, as each chunk starts without one. Engine's builder never makes a batched
+    /// generator for a count below 1; called with one, it throws, and so does this:
+    /// `ArithmeticException` for 0 (`getBatchSize`), and for a negative count, which fills no cell,
+    /// a `NullPointerException` once the filters read the cells it never created. A stage's panic
+    /// is re-raised.
+    pub fn generate_batched_region(&self, region_x: i32, region_z: i32, batch_count: i32) -> Tile
+    where
+        H: Sync,
+    {
+        check_batch_count(batch_count);
+        let heightmap = self.generator.heightmap();
         let mut tile = self.create_empty_region(region_x, region_z);
-        self.generate_area(&mut tile, batch_count, SampleTransform::Direct);
+        tile.generate_area(batch_count, batch_workers(), |chunk| {
+            drive_chunk(chunk, heightmap, None);
+        });
         self.generator.filters().apply(&mut tile, true);
         tile
     }
 
+    /// `TileGeneratorBatched.generateRegion(centerX, centerZ, zoom, filter)`: region (0, 0) filled
+    /// by [`Tile::generate_area`] at [`Tile::generate_zoomed_heightmap`]'s positions, then the
+    /// filters, the optional ones only when `filter` is set. Panics as
+    /// [`Self::generate_batched_region`].
     pub fn generate_batched_zoomed_region(
         &self,
         center_x: f32,
@@ -217,21 +238,40 @@ where
         zoom: f32,
         filter: bool,
         batch_count: i32,
-    ) -> Tile {
+    ) -> Tile
+    where
+        H: Sync,
+    {
+        check_batch_count(batch_count);
+        let heightmap = self.generator.heightmap();
         let mut tile = self.create_empty_region(0, 0);
-        let transform = SampleTransform::zoomed(&tile, center_x, center_z, zoom);
-        self.generate_area(&mut tile, batch_count, transform);
+        let zoom = Some(Zoom::new(&tile, center_x, center_z, zoom));
+        tile.generate_area(batch_count, batch_workers(), |chunk| {
+            drive_chunk(chunk, heightmap, zoom);
+        });
         self.generator.filters().apply(&mut tile, filter);
         tile
     }
 
-    pub fn generate_striped_region(&self, region_x: i32, region_z: i32, sections: i32) -> Tile {
+    /// `TileGeneratorStriped.generateRegion(regionX, regionZ)` with `batch(sections)`: as
+    /// [`Self::generate_batched_region`], each chunk row cut into `sections` stripes
+    /// ([`Tile::generate_area_striped`]).
+    pub fn generate_striped_region(&self, region_x: i32, region_z: i32, sections: i32) -> Tile
+    where
+        H: Sync,
+    {
+        check_batch_count(sections);
+        let heightmap = self.generator.heightmap();
         let mut tile = self.create_empty_region(region_x, region_z);
-        self.generate_striped(&mut tile, sections, SampleTransform::Direct);
+        tile.generate_area_striped(sections, batch_workers(), |chunk| {
+            drive_chunk(chunk, heightmap, None);
+        });
         self.generator.filters().apply(&mut tile, true);
         tile
     }
 
+    /// `TileGeneratorStriped.generateRegion(centerX, centerZ, zoom, filter)`: as
+    /// [`Self::generate_batched_zoomed_region`], in stripes.
     pub fn generate_striped_zoomed_region(
         &self,
         center_x: f32,
@@ -239,10 +279,17 @@ where
         zoom: f32,
         filter: bool,
         sections: i32,
-    ) -> Tile {
+    ) -> Tile
+    where
+        H: Sync,
+    {
+        check_batch_count(sections);
+        let heightmap = self.generator.heightmap();
         let mut tile = self.create_empty_region(0, 0);
-        let transform = SampleTransform::zoomed(&tile, center_x, center_z, zoom);
-        self.generate_striped(&mut tile, sections, transform);
+        let zoom = Some(Zoom::new(&tile, center_x, center_z, zoom));
+        tile.generate_area_striped(sections, batch_workers(), |chunk| {
+            drive_chunk(chunk, heightmap, zoom);
+        });
         self.generator.filters().apply(&mut tile, filter);
         tile
     }
@@ -252,93 +299,60 @@ where
     pub fn create_empty_region(&self, region_x: i32, region_z: i32) -> Tile {
         Tile::new(region_x, region_z, self.factor, self.border, &self.terrains)
     }
-
-    fn generate_area(&self, tile: &mut Tile, batch_count: i32, transform: SampleTransform) {
-        let chunk_size = tile.chunk_size();
-        let batch_size = Tile::batch_size(batch_count, chunk_size);
-        for delta_z in 0..batch_count {
-            let start_z = delta_z.wrapping_mul(batch_size);
-            let max_z = chunk_size.total.min(start_z.wrapping_add(batch_size));
-            for delta_x in 0..batch_count {
-                let start_x = delta_x.wrapping_mul(batch_size);
-                let max_x = chunk_size.total.min(start_x.wrapping_add(batch_size));
-                for chunk_z in start_z..max_z {
-                    for chunk_x in start_x..max_x {
-                        generate_chunk(
-                            tile.chunk_writer(chunk_x, chunk_z)
-                                .expect("tile-local chunk inside the chunk array"),
-                            self.generator.heightmap(),
-                            transform,
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    fn generate_striped(&self, tile: &mut Tile, sections: i32, transform: SampleTransform) {
-        let chunk_size = tile.chunk_size();
-        let section_length = Tile::batch_size(sections, chunk_size);
-        for chunk_z in 0..chunk_size.total {
-            for section in 0..sections {
-                let start_x = section.wrapping_mul(section_length);
-                let max_x = chunk_size.total.min(start_x.wrapping_add(section_length));
-                for chunk_x in start_x..max_x {
-                    generate_chunk(
-                        tile.chunk_writer(chunk_x, chunk_z)
-                            .expect("tile-local chunk inside the chunk array"),
-                        self.generator.heightmap(),
-                        transform,
-                    );
-                }
-            }
-        }
-    }
 }
 
+/// Panics for a negative batch count, where Engine's batched generators throw (see
+/// [`TileGenerator::generate_batched_region`]); a zero count panics in [`Tile::batch_size`].
+fn check_batch_count(count: i32) {
+    assert!(
+        count >= 0,
+        "batch count {count}: Engine fills no cell and its filters throw NullPointerException"
+    );
+}
+
+/// The batch threads: Engine's default pool (`ThreadPools.createDefault()`) has `max(2,
+/// processors)` batch workers.
+fn batch_workers() -> usize {
+    std::thread::available_parallelism().map_or(2, |n| n.get().max(2))
+}
+
+/// The zoomed tasks' `translateX`/`translateZ` and zoom, as `generateArea(.., offsetX, offsetZ,
+/// zoom)` computes them: `offset - (float) blockSize.size * zoom / 2`, in `float` math.
 #[derive(Clone, Copy)]
-enum SampleTransform {
-    Direct,
-    Zoom {
-        translate_x: f32,
-        translate_z: f32,
-        zoom: f32,
-    },
+struct Zoom {
+    translate_x: f32,
+    translate_z: f32,
+    zoom: f32,
 }
 
-impl SampleTransform {
-    fn zoomed(tile: &Tile, center_x: f32, center_z: f32, zoom: f32) -> Self {
-        Self::Zoom {
-            translate_x: center_x - tile.block_size().size as f32 * zoom / 2.0,
-            translate_z: center_z - tile.block_size().size as f32 * zoom / 2.0,
+impl Zoom {
+    fn new(tile: &Tile, offset_x: f32, offset_z: f32, zoom: f32) -> Self {
+        let size = tile.block_size().size as f32;
+        Self {
+            translate_x: offset_x - size * zoom / 2.0,
+            translate_z: offset_z - size * zoom / 2.0,
             zoom,
         }
     }
-
-    fn apply(self, x: i32, z: i32) -> (f32, f32) {
-        match self {
-            Self::Direct => (x as f32, z as f32),
-            Self::Zoom {
-                translate_x,
-                translate_z,
-                zoom,
-            } => (x as f32 * zoom + translate_x, z as f32 * zoom + translate_z),
-        }
-    }
 }
 
-fn generate_chunk<H: HeightmapSource>(
-    mut chunk: ChunkWriter<'_>,
-    heightmap: &H,
-    transform: SampleTransform,
-) {
+/// `ChunkBatchTask.driveOne` (and the striped and zoomed tasks', which are the same): each cell,
+/// row by row, at its world block position (zoomed: `(float) block * zoom + translate`) through
+/// `applyBase`, the river map (`Rivermap.get`, starting from none in every chunk), `applyRivers`
+/// and `applyClimate`.
+fn drive_chunk<H: HeightmapSource>(chunk: &mut BatchChunk, heightmap: &H, zoom: Option<Zoom>) {
     let mut current = None;
     chunk.generate(|cell, _, _, block_x, block_z| {
-        let (x, z) = transform.apply(block_x, block_z);
+        let (x, z) = match zoom {
+            None => (block_x as f32, block_z as f32),
+            Some(t) => (
+                block_x as f32 * t.zoom + t.translate_x,
+                block_z as f32 * t.zoom + t.translate_z,
+            ),
+        };
         heightmap.apply_base(cell, x, z);
-        let rivermap = Rivermap::get_for_cell(cell, current.take(), |map_x, map_z| {
-            heightmap.rivermap(map_x, map_z)
-        });
+        let rivermap =
+            Rivermap::get_for_cell(cell, current.take(), |x, z| heightmap.rivermap(x, z));
         heightmap.apply_rivers(cell, x, z, &rivermap);
         heightmap.apply_climate(cell, x, z);
         current = Some(rivermap);
@@ -353,7 +367,8 @@ mod tests {
         terraforged_river::GenWarp,
     };
     use super::*;
-    use std::cell::Cell as Counter;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicI32, AtomicI64, Ordering};
 
     fn fold(fold: i64, value: i32) -> i64 {
         fold.wrapping_mul(31).wrapping_add(i64::from(value))
@@ -367,33 +382,55 @@ mod tests {
     }
 
     /// `TileGeneratorOracle.java`'s `FillHeightmap`: stages that hash heights, continent edges,
-    /// terrains and erosion and river masks from the block position, and fold every call.
+    /// terrains and erosion and river masks from the block position, and fold every call: into
+    /// one trace in call order (meaningful for single-threaded fills) and, each call folded on its
+    /// own, into a sum that does not depend on the order threads run them in (the oracle's `call`).
     struct FillHeightmap {
         kinds: [Terrain; 4],
-        trace: Counter<i64>,
-        lookups: Counter<i32>,
+        trace: Mutex<i64>,
+        sum: AtomicI64,
+        lookups: AtomicI32,
     }
 
     impl FillHeightmap {
-        fn mix(&self, value: i32) {
-            self.trace.set(fold(self.trace.get(), value));
+        fn new(kinds: [Terrain; 4]) -> Self {
+            Self {
+                kinds,
+                trace: Mutex::new(17),
+                sum: AtomicI64::new(0),
+                lookups: AtomicI32::new(0),
+            }
         }
 
-        fn mix_point(&self, stage: i32, x: f32, z: f32) {
-            self.mix(stage);
-            self.mix(x.to_bits() as i32);
-            self.mix(z.to_bits() as i32);
+        fn call(&self, values: &[i32]) {
+            let mut trace = self.trace.lock().unwrap();
+            *trace = values.iter().fold(*trace, |f, &v| fold(f, v));
+            let own = values.iter().fold(17, |f, &v| fold(f, v));
+            self.sum.fetch_add(own, Ordering::SeqCst);
+        }
+
+        fn call_point(&self, stage: i32, x: f32, z: f32) {
+            self.call(&[stage, x.to_bits() as i32, z.to_bits() as i32]);
         }
 
         /// The stage trace and lookup count since the last call.
         fn take(&self) -> (i32, i64) {
-            (self.lookups.replace(0), self.trace.replace(17))
+            self.sum.store(0, Ordering::SeqCst);
+            let trace = std::mem::replace(&mut *self.trace.lock().unwrap(), 17);
+            (self.lookups.swap(0, Ordering::SeqCst), trace)
+        }
+
+        /// The lookup count and the order-free stage sum since the last call.
+        fn take_sum(&self) -> (i32, i64) {
+            *self.trace.lock().unwrap() = 17;
+            let sum = self.sum.swap(0, Ordering::SeqCst);
+            (self.lookups.swap(0, Ordering::SeqCst), sum)
         }
     }
 
     impl HeightmapSource for FillHeightmap {
         fn apply_base(&self, cell: &mut Cell, x: f32, z: f32) {
-            self.mix_point(1, x, z);
+            self.call_point(1, x, z);
             let (x, z) = (x as i32, z as i32);
             let h = hash(x, z);
             cell.value = 3_i32
@@ -411,24 +448,21 @@ mod tests {
         }
 
         fn rivermap(&self, x: i32, z: i32) -> Arc<Rivermap> {
-            self.lookups.set(self.lookups.get() + 1);
-            self.mix(1000);
-            self.mix(x);
-            self.mix(z);
+            self.lookups.fetch_add(1, Ordering::SeqCst);
+            self.call(&[1000, x, z]);
             Arc::new(Rivermap::new(x, z, Vec::new(), GenWarp::direct()))
         }
 
         fn apply_rivers(&self, cell: &mut Cell, x: f32, z: f32, map: &Rivermap) {
-            self.mix_point(2, x, z);
-            self.mix(map.x());
-            self.mix(map.z());
+            let (bx, bz) = (x.to_bits() as i32, z.to_bits() as i32);
+            self.call(&[2, bx, bz, map.x(), map.z()]);
             let h = hash(x as i32, z as i32);
             let mask = if (h >> 4) & 3 == 0 { 0.05 } else { 1.0 };
             cell.river_mask = mask - (map.x() + map.z()).rem_euclid(3) as f32 * 0.01;
         }
 
         fn apply_climate(&self, cell: &mut Cell, x: f32, z: f32) {
-            self.mix_point(3, x, z);
+            self.call_point(3, x, z);
             cell.temperature = z * 0.001 - cell.river_mask;
             cell.moisture += x * 0.001;
         }
@@ -480,8 +514,11 @@ mod tests {
     /// generator (fractional, unit, negative, NaN and huge centers and zooms, filters on and off);
     /// `l` and `m` lines the lazy `getTile(regionX, regionZ)` and `getTile(centerX, centerZ, zoom,
     /// filter)` handles (nothing runs before the first `get`, a second `get` returns the same tile
-    /// without running anything); `s` lines `chunkToRegion` for shift factors Java masks to five
-    /// bits.
+    /// without running anything); `b` and `y` lines Engine's `TileGeneratorBatched` and
+    /// `TileGeneratorStriped` (`batch(n)`, on a four-thread pool) regular and zoomed for batch
+    /// counts 1, 3, 2, 7 and 100, with the lookup count and an order-free sum of the stage calls
+    /// (their cells equal the `g`/`z` lines'); `e` lines counts 0 and -2, where Engine throws; `s`
+    /// lines `chunkToRegion` for shift factors Java masks to five bits.
     #[test]
     fn tile_generator_matches_engine_oracle() {
         let terrains = Arc::new(TerrainRegistry::new());
@@ -517,11 +554,7 @@ mod tests {
             };
             let filters =
                 WorldFilters::new(seed, settings, Levels::new(256, 63), points, &terrains);
-            let heightmap = FillHeightmap {
-                kinds: kinds.clone(),
-                trace: Counter::new(17),
-                lookups: Counter::new(0),
-            };
+            let heightmap = FillHeightmap::new(kinds.clone());
             let generator = TileGenerator::new(
                 factor,
                 border,
@@ -540,6 +573,53 @@ mod tests {
                 let (rx, rz, cells) = (tile.region_x(), tile.region_z(), fold_tile(&tile));
                 out += &format!("z {run} {pair} {rx} {rz} {lookups} {trace:x} {cells:x}\n");
             }
+            for striped in [false, true] {
+                for count in [1, 3, 2, 7, 100] {
+                    let tile = if striped {
+                        generator.generate_striped_region(region_x, region_z, count)
+                    } else {
+                        generator.generate_batched_region(region_x, region_z, count)
+                    };
+                    let (lookups, sum) = heightmap.take_sum();
+                    let (st, cells) = (u8::from(striped), fold_tile(&tile));
+                    out += &format!("b {run} {st} {count} {lookups} {sum:x} {cells:x}\n");
+                    let set = (run + count as usize) % zooms.len();
+                    let (center_x, center_z, zoom, filter) = zooms[set];
+                    let tile = if striped {
+                        generator
+                            .generate_striped_zoomed_region(center_x, center_z, zoom, filter, count)
+                    } else {
+                        generator
+                            .generate_batched_zoomed_region(center_x, center_z, zoom, filter, count)
+                    };
+                    let (lookups, sum) = heightmap.take_sum();
+                    let cells = fold_tile(&tile);
+                    out += &format!("y {run} {st} {count} {set} {lookups} {sum:x} {cells:x}\n");
+                }
+            }
+            for striped in [false, true] {
+                for count in [0, -2] {
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        if striped {
+                            generator.generate_striped_region(region_x, region_z, count)
+                        } else {
+                            generator.generate_batched_region(region_x, region_z, count)
+                        }
+                    }));
+                    assert!(result.is_err());
+                    let thrown = if count == 0 {
+                        "ArithmeticException"
+                    } else {
+                        "NullPointerException"
+                    };
+                    out += &format!("e {run} {} {count} throws {thrown}\n", u8::from(striped));
+                }
+            }
+            // A negative count on the tile itself runs no stage (Engine's synchronous batcher).
+            let mut tile = generator.create_empty_region(region_x, region_z);
+            tile.generate_area(-2, 4, |chunk| drive_chunk(chunk, heightmap, None));
+            tile.generate_area_striped(-2, 4, |chunk| drive_chunk(chunk, heightmap, None));
+            assert_eq!(heightmap.take_sum(), (0, 0));
             let (center_x, center_z, zoom, filter) = zooms[run % zooms.len()];
             let regular = generator.get_tile(region_x, region_z);
             let zoomed = generator.get_zoomed_tile(center_x, center_z, zoom, filter);
@@ -567,14 +647,7 @@ mod tests {
                 0,
                 0,
                 Arc::clone(&terrains),
-                WorldGenerator::new(
-                    FillHeightmap {
-                        kinds: kinds.clone(),
-                        trace: Counter::new(17),
-                        lookups: Counter::new(0),
-                    },
-                    NoFilters,
-                ),
+                WorldGenerator::new(FillHeightmap::new(kinds.clone()), NoFilters),
             );
             out += &format!("s {factor}");
             for chunk in chunks {
@@ -607,40 +680,39 @@ mod tests {
         fn apply(&self, _: &mut Tile, _: bool) {}
     }
 
-    /// Batched and striped fills give the plain fill's cells.
+    /// Batches give the same cells on one thread or many (each chunk's cells belong to one batch),
+    /// odd and uneven counts included, and a stage's panic reaches the caller with its payload.
     #[test]
-    fn batched_tile_generators_match_plain_generation() {
+    fn batches_match_any_thread_count_and_propagate_panics() {
         let terrains = Arc::new(TerrainRegistry::new());
         let kinds = ["none", "coast", "beach", "hills"]
             .map(|name| terrains.get_by_name(name).expect("built-in terrain"));
-        let generator = TileGenerator::new(
-            1,
-            1,
-            3,
-            Arc::clone(&terrains),
-            WorldGenerator::new(
-                FillHeightmap {
-                    kinds,
-                    trace: Counter::new(17),
-                    lookups: Counter::new(0),
-                },
-                NoFilters,
-            ),
-        );
-        let plain = fold_tile(&generator.generate_region(1, -1));
-        assert_eq!(
-            fold_tile(&generator.generate_batched_region(1, -1, 3)),
-            plain
-        );
-        assert_eq!(
-            fold_tile(&generator.generate_striped_region(1, -1, 3)),
-            plain
-        );
-        let zoomed = fold_tile(&generator.generate_zoomed_region(100.0, -50.0, 0.5, false));
-        let batched = generator.generate_batched_zoomed_region(100.0, -50.0, 0.5, false, 3);
-        let striped = generator.generate_striped_zoomed_region(100.0, -50.0, 0.5, false, 3);
-        assert_eq!(fold_tile(&batched), zoomed);
-        assert_eq!(fold_tile(&striped), zoomed);
+        let heightmap = FillHeightmap::new(kinds);
+        for (count, workers) in [(1, 8), (3, 1), (3, 8), (5, 3), (2, 64)] {
+            let fill = |workers, striped| {
+                let mut tile = Tile::new(-3, 4, 2, 1, &terrains);
+                let drive = |chunk: &mut BatchChunk| drive_chunk(chunk, &heightmap, None);
+                if striped {
+                    tile.generate_area_striped(count, workers, drive);
+                } else {
+                    tile.generate_area(count, workers, drive);
+                }
+                (fold_tile(&tile), heightmap.take_sum())
+            };
+            for striped in [false, true] {
+                assert!(fill(workers, striped) == fill(1, striped));
+            }
+        }
+        let panicked = std::panic::catch_unwind(|| {
+            let mut tile = Tile::new(0, 0, 2, 0, &terrains);
+            tile.generate_area(2, 4, |chunk| {
+                if chunk.chunk().chunk_x() == 3 {
+                    std::panic::panic_any(chunk.chunk().chunk_z());
+                }
+            });
+        });
+        let payload = panicked.expect_err("a batch panicked");
+        assert!(matches!(payload.downcast_ref::<i32>(), Some(0..=3)));
     }
 
     /// Engine shares one tile generator between its generation threads.
@@ -714,6 +786,30 @@ z 0 1 0 0 637 4ecaf1596e70d26 29ad7e3985d0e0bc
 z 0 2 0 0 256 6727ea6ac494b891 d25a67c809fc7d0
 z 0 3 0 0 8 8f7006778fc0c8d c94e0748cd32a3cd
 z 0 4 0 0 388 b8f70426f6f55903 ff2a52d36fd50b5d
+b 0 0 1 140 ff293731a98fd032 2afe9d3c12774c0d
+y 0 0 1 1 640 fefc13f226a90bf4 29ad7e3985d0e0bc
+b 0 0 3 140 ff293731a98fd032 2afe9d3c12774c0d
+y 0 0 3 3 20 3a5386a7092fd84 c94e0748cd32a3cd
+b 0 0 2 140 ff293731a98fd032 2afe9d3c12774c0d
+y 0 0 2 2 264 21f82f8697838 d25a67c809fc7d0
+b 0 0 7 140 ff293731a98fd032 2afe9d3c12774c0d
+y 0 0 7 2 264 21f82f8697838 d25a67c809fc7d0
+b 0 0 100 140 ff293731a98fd032 2afe9d3c12774c0d
+y 0 0 100 0 143 1d834f8ce5c4fe1 4166d8e307e01385
+b 0 1 1 140 ff293731a98fd032 2afe9d3c12774c0d
+y 0 1 1 1 640 fefc13f226a90bf4 29ad7e3985d0e0bc
+b 0 1 3 140 ff293731a98fd032 2afe9d3c12774c0d
+y 0 1 3 3 20 3a5386a7092fd84 c94e0748cd32a3cd
+b 0 1 2 140 ff293731a98fd032 2afe9d3c12774c0d
+y 0 1 2 2 264 21f82f8697838 d25a67c809fc7d0
+b 0 1 7 140 ff293731a98fd032 2afe9d3c12774c0d
+y 0 1 7 2 264 21f82f8697838 d25a67c809fc7d0
+b 0 1 100 140 ff293731a98fd032 2afe9d3c12774c0d
+y 0 1 100 0 143 1d834f8ce5c4fe1 4166d8e307e01385
+e 0 0 0 throws ArithmeticException
+e 0 0 -2 throws NullPointerException
+e 0 1 0 throws ArithmeticException
+e 0 1 -2 throws NullPointerException
 l 0 false 0 11 132 933dedba501bf8f1 -1 2 2afe9d3c12774c0d true 0 11 true
 m 0 false 0 11 134 8ea15ead27a7ffee 0 0 4166d8e307e01385 true 0 11 true
 g 1 397 7245952d37687c55 e76a63e92f8379dd
@@ -722,6 +818,30 @@ z 1 1 0 0 1339 11b697d16848b786 567dacf67f971c65
 z 1 2 0 0 400 cd67b6f5d8dbd049 245b91724bc38581
 z 1 3 0 0 12 375f578adf39af4b c24985dd40cbb39
 z 1 4 0 0 780 67386badb7371713 ff26c135e2959741
+b 1 0 1 412 430d669402ba99e e76a63e92f8379dd
+y 1 0 1 2 416 f2e329f5bab60 245b91724bc38581
+b 1 0 3 412 430d669402ba99e e76a63e92f8379dd
+y 1 0 3 4 788 4ec03c40ff6e3de ff26c135e2959741
+b 1 0 2 412 430d669402ba99e e76a63e92f8379dd
+y 1 0 2 3 42 8327cdb50c78cd4 c24985dd40cbb39
+b 1 0 7 412 430d669402ba99e e76a63e92f8379dd
+y 1 0 7 3 42 8327cdb50c78cd4 c24985dd40cbb39
+b 1 0 100 412 430d669402ba99e e76a63e92f8379dd
+y 1 0 100 1 1344 fe886cc8d526ea84 567dacf67f971c65
+b 1 1 1 412 430d669402ba99e e76a63e92f8379dd
+y 1 1 1 2 416 f2e329f5bab60 245b91724bc38581
+b 1 1 3 412 430d669402ba99e e76a63e92f8379dd
+y 1 1 3 4 788 4ec03c40ff6e3de ff26c135e2959741
+b 1 1 2 412 430d669402ba99e e76a63e92f8379dd
+y 1 1 2 3 42 8327cdb50c78cd4 c24985dd40cbb39
+b 1 1 7 412 430d669402ba99e e76a63e92f8379dd
+y 1 1 7 3 42 8327cdb50c78cd4 c24985dd40cbb39
+b 1 1 100 412 430d669402ba99e e76a63e92f8379dd
+y 1 1 100 1 1344 fe886cc8d526ea84 567dacf67f971c65
+e 1 0 0 throws ArithmeticException
+e 1 0 -2 throws NullPointerException
+e 1 1 0 throws ArithmeticException
+e 1 1 -2 throws NullPointerException
 l 1 false 0 11 397 7245952d37687c55 3 -5 e76a63e92f8379dd true 0 11 true
 m 1 false 0 11 1339 11b697d16848b786 0 0 567dacf67f971c65 true 0 11 true
 g 2 64 1dec756bf463a431 40bc3ec1ab771b58
@@ -730,6 +850,30 @@ z 2 1 0 0 128 3822735c75797611 cb3b77fd7a9dc52
 z 2 2 0 0 4 7984c67e49e48d73 4756c143b5e81e07
 z 2 3 0 0 4 ae3ae2c61568fccf a6e0dce0067b12e9
 z 2 4 0 0 66 d5ffa2bb28613a2a 51601f1cf26142c
+b 2 0 1 66 76f754be1ac50e 40bc3ec1ab771b58
+y 2 0 1 3 6 e9bf5b965b23e8 a6e0dce0067b12e9
+b 2 0 3 66 76f754be1ac50e 40bc3ec1ab771b58
+y 2 0 3 0 66 760d40901c86c2 bd0ab1842c50e7af
+b 2 0 2 66 76f754be1ac50e 40bc3ec1ab771b58
+y 2 0 2 4 67 8c00650c2da25e 51601f1cf26142c
+b 2 0 7 66 76f754be1ac50e 40bc3ec1ab771b58
+y 2 0 7 4 67 8c00650c2da25e 51601f1cf26142c
+b 2 0 100 66 76f754be1ac50e 40bc3ec1ab771b58
+y 2 0 100 2 4 fffdc4acb8ae1c9c 4756c143b5e81e07
+b 2 1 1 66 76f754be1ac50e 40bc3ec1ab771b58
+y 2 1 1 3 6 e9bf5b965b23e8 a6e0dce0067b12e9
+b 2 1 3 66 76f754be1ac50e 40bc3ec1ab771b58
+y 2 1 3 0 66 760d40901c86c2 bd0ab1842c50e7af
+b 2 1 2 66 76f754be1ac50e 40bc3ec1ab771b58
+y 2 1 2 4 67 8c00650c2da25e 51601f1cf26142c
+b 2 1 7 66 76f754be1ac50e 40bc3ec1ab771b58
+y 2 1 7 4 67 8c00650c2da25e 51601f1cf26142c
+b 2 1 100 66 76f754be1ac50e 40bc3ec1ab771b58
+y 2 1 100 2 4 fffdc4acb8ae1c9c 4756c143b5e81e07
+e 2 0 0 throws ArithmeticException
+e 2 0 -2 throws NullPointerException
+e 2 1 0 throws ArithmeticException
+e 2 1 -2 throws NullPointerException
 l 2 false 0 11 64 1dec756bf463a431 0 0 40bc3ec1ab771b58 true 0 11 true
 m 2 false 0 11 4 7984c67e49e48d73 0 0 4756c143b5e81e07 true 0 11 true
 g 3 326 e3c4cdf7c5eefaee 6f363908c2b37e18
@@ -738,6 +882,30 @@ z 3 1 0 0 876 c2eea373f1f90a33 339683019cd47a84
 z 3 2 0 0 176 c1be527b1c6e9de9 ee52c23ae4267780
 z 3 3 0 0 10 e5baee091137038c c7d462f17993a8db
 z 3 4 0 0 490 10079d51f1cdcca3 b4a4cebe6cb0976c
+b 3 0 1 338 fd5fd1e315136131 6f363908c2b37e18
+y 3 0 1 4 496 36b028e533e6f86 b4a4cebe6cb0976c
+b 3 0 3 338 fd5fd1e315136131 6f363908c2b37e18
+y 3 0 3 1 880 fec0d50e0c2b5520 339683019cd47a84
+b 3 0 2 338 fd5fd1e315136131 6f363908c2b37e18
+y 3 0 2 0 30 2e1d26996dc80e4 6ca6c7d6745fb36a
+b 3 0 7 338 fd5fd1e315136131 6f363908c2b37e18
+y 3 0 7 0 30 2e1d26996dc80e4 6ca6c7d6745fb36a
+b 3 0 100 338 fd5fd1e315136131 6f363908c2b37e18
+y 3 0 100 3 30 5b1a07cd4c1ae73 c7d462f17993a8db
+b 3 1 1 338 fd5fd1e315136131 6f363908c2b37e18
+y 3 1 1 4 496 36b028e533e6f86 b4a4cebe6cb0976c
+b 3 1 3 338 fd5fd1e315136131 6f363908c2b37e18
+y 3 1 3 1 880 fec0d50e0c2b5520 339683019cd47a84
+b 3 1 2 338 fd5fd1e315136131 6f363908c2b37e18
+y 3 1 2 0 30 2e1d26996dc80e4 6ca6c7d6745fb36a
+b 3 1 7 338 fd5fd1e315136131 6f363908c2b37e18
+y 3 1 7 0 30 2e1d26996dc80e4 6ca6c7d6745fb36a
+b 3 1 100 338 fd5fd1e315136131 6f363908c2b37e18
+y 3 1 100 3 30 5b1a07cd4c1ae73 c7d462f17993a8db
+e 3 0 0 throws ArithmeticException
+e 3 0 -2 throws NullPointerException
+e 3 1 0 throws ArithmeticException
+e 3 1 -2 throws NullPointerException
 l 3 false 0 11 326 e3c4cdf7c5eefaee -7 9 6f363908c2b37e18 true 0 11 true
 m 3 false 0 11 10 e5baee091137038c 0 0 c7d462f17993a8db true 0 11 true
 g 4 1568 b599986399fb3e01 9a47ad4f7c38f0ee
@@ -746,6 +914,30 @@ z 4 1 0 0 5354 49faaa1e08c16c6d 57f2964297284da4
 z 4 2 0 0 1568 cdf03463f768fa01 46ee6896e1099572
 z 4 3 0 0 70 ec220899b350f0e4 28f7541d10beeeef
 z 4 4 0 0 2733 fb4116edd58af70f 970936609b0cd3ac
+b 4 0 1 1648 10e3e60eaa993958 9a47ad4f7c38f0ee
+y 4 0 1 0 1648 109898f04353cd88 c7ce55c3d1993304
+b 4 0 3 1648 10e3e60eaa993958 9a47ad4f7c38f0ee
+y 4 0 3 2 1648 74713a7c086b10 46ee6896e1099572
+b 4 0 2 1648 10e3e60eaa993958 9a47ad4f7c38f0ee
+y 4 0 2 1 5376 fd76ddefa49ba6a0 57f2964297284da4
+b 4 0 7 1648 10e3e60eaa993958 9a47ad4f7c38f0ee
+y 4 0 7 1 5376 fd76ddefa49ba6a0 57f2964297284da4
+b 4 0 100 1648 10e3e60eaa993958 9a47ad4f7c38f0ee
+y 4 0 100 4 2783 13b00ea32c87c9a8 970936609b0cd3ac
+b 4 1 1 1648 10e3e60eaa993958 9a47ad4f7c38f0ee
+y 4 1 1 0 1648 109898f04353cd88 c7ce55c3d1993304
+b 4 1 3 1648 10e3e60eaa993958 9a47ad4f7c38f0ee
+y 4 1 3 2 1648 74713a7c086b10 46ee6896e1099572
+b 4 1 2 1648 10e3e60eaa993958 9a47ad4f7c38f0ee
+y 4 1 2 1 5376 fd76ddefa49ba6a0 57f2964297284da4
+b 4 1 7 1648 10e3e60eaa993958 9a47ad4f7c38f0ee
+y 4 1 7 1 5376 fd76ddefa49ba6a0 57f2964297284da4
+b 4 1 100 1648 10e3e60eaa993958 9a47ad4f7c38f0ee
+y 4 1 100 4 2783 13b00ea32c87c9a8 970936609b0cd3ac
+e 4 0 0 throws ArithmeticException
+e 4 0 -2 throws NullPointerException
+e 4 1 0 throws ArithmeticException
+e 4 1 -2 throws NullPointerException
 l 4 false 0 11 1568 b599986399fb3e01 1 -1 9a47ad4f7c38f0ee true 0 11 true
 m 4 false 0 11 2733 fb4116edd58af70f 0 0 970936609b0cd3ac true 0 11 true
 g 5 137 d84abfe0adb754b 4c8e54bd50b0358b
@@ -754,6 +946,30 @@ z 5 1 0 0 637 4ecaf1596e70d26 19eab031c83bcbf7
 z 5 2 0 0 256 6727ea6ac494b891 26501176026dc54e
 z 5 3 0 0 8 8f7006778fc0c8d c0702424e84aeb1e
 z 5 4 0 0 388 b8f70426f6f55903 2b01bed53f599881
+b 5 0 1 143 e47d7e7dd561fa 4c8e54bd50b0358b
+y 5 0 1 1 640 fefc13f226a90bf4 19eab031c83bcbf7
+b 5 0 3 143 e47d7e7dd561fa 4c8e54bd50b0358b
+y 5 0 3 3 20 3a5386a7092fd84 c0702424e84aeb1e
+b 5 0 2 143 e47d7e7dd561fa 4c8e54bd50b0358b
+y 5 0 2 2 264 21f82f8697838 26501176026dc54e
+b 5 0 7 143 e47d7e7dd561fa 4c8e54bd50b0358b
+y 5 0 7 2 264 21f82f8697838 26501176026dc54e
+b 5 0 100 143 e47d7e7dd561fa 4c8e54bd50b0358b
+y 5 0 100 0 143 1d834f8ce5c4fe1 f7d66956f95d7b09
+b 5 1 1 143 e47d7e7dd561fa 4c8e54bd50b0358b
+y 5 1 1 1 640 fefc13f226a90bf4 19eab031c83bcbf7
+b 5 1 3 143 e47d7e7dd561fa 4c8e54bd50b0358b
+y 5 1 3 3 20 3a5386a7092fd84 c0702424e84aeb1e
+b 5 1 2 143 e47d7e7dd561fa 4c8e54bd50b0358b
+y 5 1 2 2 264 21f82f8697838 26501176026dc54e
+b 5 1 7 143 e47d7e7dd561fa 4c8e54bd50b0358b
+y 5 1 7 2 264 21f82f8697838 26501176026dc54e
+b 5 1 100 143 e47d7e7dd561fa 4c8e54bd50b0358b
+y 5 1 100 0 143 1d834f8ce5c4fe1 f7d66956f95d7b09
+e 5 0 0 throws ArithmeticException
+e 5 0 -2 throws NullPointerException
+e 5 1 0 throws ArithmeticException
+e 5 1 -2 throws NullPointerException
 l 5 false 0 11 137 d84abfe0adb754b 268435456 -268435457 4c8e54bd50b0358b true 0 11 true
 m 5 false 0 11 134 8ea15ead27a7ffee 0 0 f7d66956f95d7b09 true 0 11 true
 s 0 0 1 -1 7 -8 1000 -1000 2147483647 -2147483648
