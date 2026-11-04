@@ -1107,6 +1107,11 @@ pub fn clamp(value: f32, min: f32, max: f32) -> f32 {
     }
 }
 
+/// `NoiseUtil.seed(x, z)`: `x` in the low half, `z` in the high half (the reverse of `PosUtil.pack`).
+pub fn pack_seed(x: i32, z: i32) -> i64 {
+    (i64::from(z) << 32) | (i64::from(x) & 0xffff_ffff)
+}
+
 /// `NoiseUtil.curve(t, mid, steepness)`.
 pub fn noise_curve(value: f32, midpoint: f32, steepness: f32) -> f32 {
     1.0 / (1.0 + noise_exp(-steepness * (value - midpoint)))
