@@ -454,8 +454,8 @@ continent to carve lakes and river channels. The lake warp adds a Perlin `Domain
 strength 300 to one with scale 50, 2 octaves and strength 50; the river warp adds scale 95, 1 octave, strength 25 to
 scale 16, 1 octave, strength 5. As in Engine, the four warps take seeds `seed + 1` to `seed + 4` (wrapping as Java
 `int`s), each warp's y noise uses its seed + 1, the continent scale argument is ignored and `GenWarp.EMPTY` is
-`GenWarp::direct()`. Engine's private, unused `scaleMegaWarp` is kept as `scale_mega_warp`. Nothing uses these warps
-yet: the river networks that do are not ported. Its tests fold every warp's offsets and coordinates over a grid with
+`GenWarp::direct()`. Engine's private, unused `scaleMegaWarp` is kept as `scale_mega_warp`. Only the river maps use these
+warps, and nothing builds river maps yet. Its tests fold every warp's offsets and coordinates over a grid with
 -0, huge, infinite and NaN coordinates for eight seeds (the `int` edges among them) against a Java oracle running
 Engine's `GenWarp`, `GenWarpOracle.java` in `.local/terraforged/oracles/river/`.
 
@@ -517,16 +517,26 @@ carver's warp (where it applies along the river), carves the river, then applies
 offset) and the children (at the warped coordinates, so each branch warps again). `build` gives the root the bounds of
 every river, lake and wetland in the tree and each child `Boundsf.NONE`, as Engine does. The builder's overlap test
 (against a branch's own parent, or any other network) and the network's are ported as is; the builder's own
-`addBounds` box is kept although Engine never reads it. Nothing uses river networks yet: the river generators that build
-them are not ported. Its tests fold every cell field over 532575 carves of fresh and filled cells at a grid of points
+`addBounds` box is kept although Engine never reads it. Only the river maps use river networks, and the river generators that
+build both are not ported. Its tests fold every cell field over 532575 carves of fresh and filled cells at a grid of points
 (plus -0, NaN and infinite ones) with three lake offsets (one NaN), for three networks (warped and unwarped carvers,
 overlapping lakes and wetlands, branches nested three deep, NaN and infinite rivers, lakes and wetlands) and three
 `Levels` (TerraForged's swapped `Levels(63, 255)` among them), plus every builder and network overlap test and the
 bounds, against a Java oracle running Engine's classes, `NetworkOracle.java` in `.local/terraforged/oracles/river/`.
 
+The rivermap layer adds Engine's `Rivermap` (`river.rs`): one continent's river networks, its `GenWarp` and the
+continent cell (`x`, `z`) it belongs to. `apply` warps a point with the river warp, takes the lake warp's offset at the
+warped point and carves, in order, every network whose bounds contain the warped point. The timestamp is
+`System.currentTimeMillis()` at creation, as Engine's rivermap cache reads it; the cache and Engine's static
+`Rivermap.get` (reuse a map or ask the heightmap's continent) are not ported. Nothing builds river maps yet: the river
+generators are not ported. Its tests fold every cell field over 304380 applies of fresh and filled cells at a grid of
+points (plus -0, NaN, infinite and huge ones) for `NetworkOracle`'s networks, four `GenWarp`s (one whose seeds wrap,
+and `GenWarp.EMPTY`) and three `Levels`, plus direct samples, against a Java oracle running Engine's class,
+`RivermapOracle.java` in `.local/terraforged/oracles/river/`.
+
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands and its river networks. They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks and its river maps. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development

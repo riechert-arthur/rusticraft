@@ -49,6 +49,7 @@ use horizon_core::{
     jmath,
     random::{LegacyRandom, RandomSource},
 };
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Engine's `rivermap.gen.GenWarp`: the lake and river domain warps a river map carves its networks with.
 /// `BaseRiverGenerator` and `FancyRiverGenerator` build one per continent from `(int) id`.
@@ -1310,6 +1311,64 @@ impl RiverNetworkBuilder {
         for wetland in &self.wetlands {
             wetland.record_bounds(builder);
         }
+    }
+}
+
+/// Engine's `rivermap.Rivermap`: one continent's river networks (at continent cell `x`, `z`) with the
+/// `GenWarp` they are carved through, and its creation time for the rivermap cache (`ExpiringEntry`).
+/// Engine's static `Rivermap.get` (reuse an instance or ask the heightmap's continent) comes with the
+/// heightmap wiring.
+pub struct Rivermap {
+    x: i32,
+    z: i32,
+    lake_warp: Domain,
+    river_warp: Domain,
+    networks: Vec<RiverNetwork>,
+    timestamp: i64,
+}
+
+impl Rivermap {
+    /// `new Rivermap(x, z, networks, warp)`; the timestamp is `System.currentTimeMillis()`.
+    pub fn new(x: i32, z: i32, networks: Vec<RiverNetwork>, warp: GenWarp) -> Self {
+        let timestamp = match SystemTime::now().duration_since(UNIX_EPOCH) {
+            Ok(since) => i64::try_from(since.as_millis()).unwrap_or(i64::MAX),
+            Err(before) => i64::try_from(before.duration().as_millis()).map_or(i64::MIN, |ms| -ms),
+        };
+        Self {
+            x,
+            z,
+            lake_warp: warp.lake,
+            river_warp: warp.river,
+            networks,
+            timestamp,
+        }
+    }
+
+    /// `apply(cell, x, z)`: warps `(x, z)` with the river warp, takes the lake offset at the warped point
+    /// and carves every network whose bounds contain the warped point, in order.
+    pub fn apply(&self, cell: &mut Cell, x: f32, z: f32) {
+        let river_x = self.river_warp.x(x, z);
+        let river_z = self.river_warp.y(x, z);
+        let lake_x = self.lake_warp.offset_x(river_x, river_z);
+        let lake_z = self.lake_warp.offset_y(river_x, river_z);
+        for network in &self.networks {
+            if network.contains(river_x, river_z) {
+                network.carve(cell, river_x, river_z, lake_x, lake_z);
+            }
+        }
+    }
+
+    /// `getTimestamp()`: milliseconds since the epoch when the map was made.
+    pub const fn timestamp(&self) -> i64 {
+        self.timestamp
+    }
+
+    pub const fn x(&self) -> i32 {
+        self.x
+    }
+
+    pub const fn z(&self) -> i32 {
+        self.z
     }
 }
 
@@ -2824,7 +2883,7 @@ mod tests {
         /// value, river mask, terrain id (erosion mask: even fills); for `Levels(256, 63)` the bed is
         /// 0.236328125, the mound top 0.25 and the banks 0.2578125.
         #[rustfmt::skip]
-        const FILLS: [(f32, f32, i32); 14] = [
+        pub(super) const FILLS: [(f32, f32, i32); 14] = [
             (0.6, 1.0, 0), (0.3, 0.5, 7), (0.2, NAN, 5), (0.0, -0.0, 6), (1.0, 1.0, 12), (NAN, 1.0, 0),
             (0.24, 0.75, 8), (0.25, 1.0, 7), (-0.5, 1.0, 11), (-0.0, 2.0, 0), (INF, -1.0, 0),
             (0.242_187_5, 0.25, 3), (0.236_328_125, 0.5, 0), (0.257_812_5, 1.0, 10),
@@ -2976,7 +3035,7 @@ mod tests {
         const INF: f32 = f32::INFINITY;
         /// `WetlandOracle`'s fills: value, river mask, terrain id (erosion mask: even fills).
         #[rustfmt::skip]
-        const FILLS: [(f32, f32, i32); 14] = [
+        pub(super) const FILLS: [(f32, f32, i32); 14] = [
             (0.6, 1.0, 0), (0.3, 0.5, 7), (0.2, NAN, 5), (0.0, -0.0, 6), (1.0, 1.0, 12), (NAN, 1.0, 0),
             (0.24, 0.75, 8), (0.25, 1.0, 7), (-0.5, 1.0, 11), (-0.0, 2.0, 0), (INF, -1.0, 0),
             (0.242_187_5, 0.25, 3), (0.236_328_125, 0.5, 0), (0.257_812_5, 1.0, 10),
@@ -3032,7 +3091,7 @@ mod tests {
         }
 
         /// `NetworkOracle.roots`: networks a, b and c.
-        fn roots(
+        pub(super) fn roots(
             fold: &mut Fold,
             levels: Levels,
             registry: &TerrainRegistry,
@@ -3216,6 +3275,102 @@ mod tests {
             assert_eq!(
                 [bounds.min_x, bounds.min_y, bounds.max_x, bounds.max_y].map(f32::to_bits),
                 [0xc409_8000, 0xc483_4000, 0x44da_c000, 0x4483_4000]
+            );
+        }
+    }
+
+    /// Engine 0.3.0's `Rivermap` against `RivermapOracle.java` (in the maintainer's
+    /// `.local/terraforged/oracles/river/`), which runs Engine's class over `NetworkOracle`'s networks.
+    mod rivermap_oracle {
+        use super::lake_oracle::{Fold, fill_from, levels};
+        use super::network_oracle::{FILLS, roots};
+        use super::*;
+
+        fn warps() -> [GenWarp; 4] {
+            [
+                GenWarp::new(12_345, 3_000),
+                GenWarp::new(i32::MAX - 2, 0),
+                GenWarp::new(-1, 500),
+                GenWarp::direct(),
+            ]
+        }
+
+        #[test]
+        fn applies_every_cell_field_like_engine() {
+            let registry = TerrainRegistry::new();
+            let mut fold = Fold(17);
+            let mut applies = 0;
+            let mut points = Vec::new();
+            for i in 0..=40 {
+                for j in 0..=40 {
+                    points.push((-700.0 + 60.0 * i as f32, -800.0 + 40.0 * j as f32));
+                }
+            }
+            for e in [-0.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 1e20] {
+                points.push((e, 0.0));
+                points.push((500.0, e));
+            }
+            for levels in levels() {
+                let networks = roots(&mut fold, levels, &registry).map(RiverNetworkBuilder::build);
+                let mut networks = Vec::from(networks);
+                for (w, warp) in (0..).zip(warps()) {
+                    let map = Rivermap::new(-3 * w, w - 7, networks, warp);
+                    fold.mix(map.x());
+                    fold.mix(map.z());
+                    for &(x, z) in &points {
+                        for i in std::iter::once(None).chain((0..FILLS.len()).map(Some)) {
+                            let mut cell = fill_from(&FILLS, i, &registry);
+                            map.apply(&mut cell, x, z);
+                            fold.cell(&cell, &registry);
+                            applies += 1;
+                        }
+                    }
+                    networks = map.networks;
+                }
+            }
+            assert_eq!((applies, fold.0), (304_380, -811_895_622));
+        }
+
+        #[test]
+        fn samples_match_engine() {
+            let registry = TerrainRegistry::new();
+            let networks =
+                roots(&mut Fold(0), levels()[0], &registry).map(RiverNetworkBuilder::build);
+            let [warp, ..] = warps();
+            let map = Rivermap::new(17, -9, Vec::from(networks), warp);
+            assert_eq!((map.x(), map.z()), (17, -9));
+            assert!(map.timestamp() > 0);
+            // Engine's rivermap cache hands one map to every generation thread.
+            fn shared<T: Send + Sync>(_: &T) {}
+            shared(&map);
+            #[rustfmt::skip]
+            let samples = [
+                (0.0, 0.0), (500.0, 0.0), (500.0, 50.0), (1000.0, 0.0), (200.0, 100.0), (750.0, -100.0),
+                (-50.0, 150.0), (520.0, 300.0), (500.0, -480.0), (2000.0, 2000.0),
+            ];
+            let applied = samples.map(|(x, z)| {
+                let mut cell = Cell::new(&registry);
+                cell.value = 0.6;
+                cell.river_mask = 1.0;
+                cell.continent_edge = 0.4;
+                map.apply(&mut cell, x, z);
+                (
+                    cell.value.to_bits(),
+                    cell.river_mask.to_bits(),
+                    cell.erosion_mask,
+                    cell.terrain.id(),
+                )
+            });
+            #[rustfmt::skip]
+            assert_eq!(
+                applied,
+                [
+                    (0x3e50_0000, 0, true, 6), (0x3e7c_0083, 0x38f8_4000, false, 0),
+                    (0x3e7c_0490, 0x3a8f_4800, false, 0), (0x3e69_0fd5, 0x3a78_b000, true, 5),
+                    (0x3e80_d2df, 0x3a7e_a30b, false, 0), (0x3e7e_137b, 0, true, 7),
+                    (0x3e7b_7aa7, 0, true, 7), (0x3e75_392d, 0, true, 7),
+                    (0x3e73_cd30, 0x39a7_a000, false, 6), (0x3f19_999a, 0x3f80_0000, false, 0),
+                ]
             );
         }
     }
