@@ -29,13 +29,18 @@
 // lake and river domain warps Engine's river generators build per continent.
 
 use super::{
-    terraforged::{Domain, Line, SourceKind, cos, map, round, simplex, sin},
+    terraforged::{
+        Domain, Line, PI2, SourceKind, clamp, cos, java_max, java_min, map, round, simplex, sin,
+    },
     terraforged_continent::noise_warp,
     terraforged_engine::{Lake, Levels, Wetland},
     terraforged_fancy::Vec2f,
     terraforged_util::{pack_floats, unpack_left_float, unpack_right_float},
 };
-use horizon_core::random::{LegacyRandom, RandomSource};
+use horizon_core::{
+    jmath,
+    random::{LegacyRandom, RandomSource},
+};
 
 /// Engine's `rivermap.gen.GenWarp`: the lake and river domain warps a river map carves its networks with.
 /// `BaseRiverGenerator` and `FancyRiverGenerator` build one per continent from `(int) id`.
@@ -199,10 +204,10 @@ impl River {
             norm_z: -ndx,
             length,
             length2: length * length,
-            min_x: x1.min(x2) - radius,
-            min_z: z1.min(z2) - radius,
-            max_x: x1.max(x2) + radius,
-            max_z: z1.max(z2) + radius,
+            min_x: java_min(x1, x2) - radius,
+            min_z: java_min(z1, z2) - radius,
+            max_x: java_max(x1, x2) + radius,
+            max_z: java_max(z1, z2) + radius,
         }
     }
 
@@ -211,7 +216,7 @@ impl River {
     }
 
     pub fn angle(self) -> f32 {
-        f64::from(self.dx).atan2(f64::from(self.dz)) as f32
+        jmath::atan2(f64::from(self.dx), f64::from(self.dz)) as f32
     }
 
     pub fn pos(self, distance: f32) -> i64 {
@@ -353,7 +358,7 @@ impl RiverWarp {
         let factor = river.length * 0.0004;
         let wiggle_frequency = 8.0 * factor;
         let wiggle_distance = clamp(self.wiggle_alpha(distance) * 25.0 * factor, 2.0, 45.0);
-        let radians = noise + distance * java_pi2() * wiggle_frequency;
+        let radians = noise + distance * PI2 * wiggle_frequency;
         dx += cos(radians) * river.norm_x * wiggle_distance;
         dz += sin(radians) * river.norm_z * wiggle_distance;
         pack_floats(dx, dz)
@@ -369,8 +374,10 @@ impl RiverWarp {
         Self::new(random.next_int(), lower, upper, frequency, scale)
     }
 
+    /// `getWarpAlpha`. Not `!(0.0..=1.0).contains(..)`: a NaN distance falls through to 1, as in Engine.
+    #[allow(clippy::manual_range_contains)]
     fn warp_alpha(self, distance: f32) -> f32 {
-        if !(0.0..=1.0).contains(&distance) {
+        if distance < 0.0 || distance > 1.0 {
             0.0
         } else if distance < self.lower {
             distance * self.lower_range
@@ -585,14 +592,6 @@ impl WetlandConfig {
             width: Variance::of(50.0, 150.0),
         }
     }
-}
-
-fn clamp(value: f32, min: f32, max: f32) -> f32 {
-    value.max(min).min(max)
-}
-
-fn java_pi2() -> f32 {
-    f32::from_bits(0x40c9_0fdb)
 }
 
 #[cfg(test)]
@@ -1182,5 +1181,231 @@ mod tests {
         );
         assert!(!RiverWarp::none().test(0.5));
         assert!(RiverWarp::new(0, 0.0, 0.0, 0.0, 0.0).test(0.5));
+    }
+
+    /// Folds `River` and `RiverWarp` exactly as `RiverGeometryOracle.java` (`.local/terraforged/oracles/river/`)
+    /// folds Engine 0.3.0's classes: zero-length, NaN, infinite and -0 segments, odd radii, distances outside
+    /// 0..1 and NaN, warps with NaN and degenerate fades, and `java.util.Random` draws.
+    mod geometry_oracle {
+        use super::*;
+
+        const NAN: f32 = f32::NAN;
+        const INF: f32 = f32::INFINITY;
+        const POINTS: [[f32; 2]; 16] = [
+            [0.0, 0.0],
+            [-0.0, -0.0],
+            [10.25, -20.5],
+            [310.75, 179.125],
+            [100.0, 250.0],
+            [200.0, -100.0],
+            [-4096.5, 8192.25],
+            [1e-3, -1e-3],
+            [3.0e7, -3.0e7],
+            [16777217.0, 3.0],
+            [1e20, -1e30],
+            [f32::MAX, -f32::MAX],
+            [INF, 0.0],
+            [0.0, -INF],
+            [NAN, 5.0],
+            [5.0, NAN],
+        ];
+        const RADII: [f32; 9] = [
+            275.0,
+            300.0,
+            0.0,
+            -0.0,
+            -1.0,
+            12.5,
+            NAN,
+            INF,
+            f32::from_bits(1),
+        ];
+        const T: [f32; 18] = [
+            -0.25, -0.0, 0.0, 1e-4, 0.05, 0.075, 0.1, 0.2, 0.25, 0.5, 0.8, 0.9, 1.0, 1.0000001,
+            1.25, NAN, INF, -INF,
+        ];
+        const SHORTEN: [i32; 7] = [0, 1, 100, -50, 2000, i32::MAX, i32::MIN];
+        const EXTEND: [f32; 7] = [0.0, -0.0, 50.0, -10.0, 1e9, NAN, INF];
+        const WARPS: [[f32; 4]; 8] = [
+            [0.2, 0.8, 0.00075, 140.0],
+            [0.0, 1.0, 0.0005, 125.0],
+            [0.5, 0.5, 0.001, 174.0],
+            [0.0, 0.0, 0.0, 0.0],
+            [0.9, 0.1, 0.01, -30.0],
+            [NAN, 0.75, 0.002, 150.0],
+            [0.25, NAN, 0.002, NAN],
+            [-0.1, 1.1, 1.0, 1e6],
+        ];
+        const SEEDS: [i32; 5] = [0, 918_273, -1, i32::MAX, i32::MIN];
+
+        struct Fold(i32);
+
+        impl Fold {
+            fn new() -> Self {
+                Self(17)
+            }
+            fn mix(&mut self, v: i32) {
+                self.0 = self.0.wrapping_mul(31).wrapping_add(v);
+            }
+            fn b(&mut self, v: bool) {
+                self.mix(i32::from(v));
+            }
+            /// `Float.floatToIntBits`: every NaN folds as 0x7fc00000.
+            fn f(&mut self, v: f32) {
+                self.mix(if v.is_nan() {
+                    0x7fc0_0000
+                } else {
+                    v.to_bits() as i32
+                });
+            }
+            fn p(&mut self, packed: i64) {
+                self.f(unpack_left_float(packed));
+                self.f(unpack_right_float(packed));
+            }
+            fn river(&mut self, r: River) {
+                for v in [
+                    r.x1, r.z1, r.x2, r.z2, r.dx, r.dz, r.ndx, r.ndz, r.norm_x, r.norm_z, r.length,
+                    r.length2, r.min_x, r.min_z, r.max_x, r.max_z,
+                ] {
+                    self.f(v);
+                }
+                self.f(r.length());
+                self.f(r.angle());
+            }
+            fn warp(&mut self, w: RiverWarp) {
+                self.mix(w.seed);
+                for v in [
+                    w.lower,
+                    w.upper,
+                    w.lower_range,
+                    w.upper_range,
+                    w.frequency,
+                    w.scale,
+                ] {
+                    self.f(v);
+                }
+                for t in T {
+                    self.b(w.test(t));
+                    self.f(w.warp_alpha(t));
+                    self.f(w.wiggle_alpha(t));
+                }
+            }
+        }
+
+        fn rivers() -> Vec<River> {
+            let mut rivers = Vec::new();
+            for a in POINTS {
+                for b in POINTS {
+                    rivers.push(River::new(a[0], a[1], b[0], b[1]));
+                    for radius in RADII {
+                        rivers.push(River::with_radius(a[0], a[1], b[0], b[1], radius));
+                    }
+                }
+            }
+            rivers
+        }
+
+        #[test]
+        fn rivers_match_engine_0_3_0() {
+            let rivers = rivers();
+            assert_eq!(rivers.len(), 2560);
+            let mut fold = Fold::new();
+            for &r in &rivers {
+                fold.river(r);
+                for t in T {
+                    fold.p(r.pos(t));
+                }
+                for p in POINTS {
+                    fold.b(r.contains(p[0], p[1]));
+                }
+                for d in SHORTEN {
+                    fold.river(r.shorten(d));
+                }
+            }
+            assert_eq!(fold.0, -1_304_354_281);
+        }
+
+        #[test]
+        fn river_pairs_match_engine_0_3_0() {
+            let rivers = rivers();
+            let mut fold = Fold::new();
+            for &a in rivers.iter().step_by(RADII.len() + 1) {
+                for &b in rivers.iter().step_by(RADII.len() + 1) {
+                    fold.b(a.intersects(b));
+                    for e in EXTEND {
+                        fold.b(a.intersects_extended(b, e));
+                    }
+                    fold.b(a.overlaps(b));
+                    fold.b(a.overlaps_bounds(b.min_x, b.min_z, b.max_x, b.max_z));
+                }
+                for p in POINTS {
+                    for radius in RADII {
+                        fold.b(a.overlaps_circle(Vec2f::new(p[0], p[1]), radius));
+                    }
+                }
+            }
+            assert_eq!(fold.0, -1_335_821_953);
+        }
+
+        #[test]
+        fn rivers_from_nodes_match_engine_0_3_0() {
+            let ints = [0, 1, -1, 300, -300, 16_777_217, i32::MAX, i32::MIN];
+            let mut fold = Fold::new();
+            for x1 in ints {
+                for y1 in ints {
+                    for x2 in ints {
+                        for y2 in ints {
+                            fold.river(River::from_nodes(Vec2i::new(x1, y1), Vec2i::new(x2, y2)));
+                        }
+                    }
+                }
+            }
+            assert_eq!(fold.0, -933_395_885);
+        }
+
+        #[test]
+        fn river_warps_match_engine_0_3_0() {
+            let rivers = rivers();
+            let mut fold = Fold::new();
+            for seed in SEEDS {
+                for w in WARPS {
+                    let warp = RiverWarp::new(seed, w[0], w[1], w[2], w[3]);
+                    fold.warp(warp);
+                    for &r in rivers.iter().step_by(7) {
+                        for t in T {
+                            let x = r.x1 + r.dx * t;
+                            let z = r.z1 + r.dz * t;
+                            fold.p(warp.offset(x, z, t, r));
+                            fold.p(r.warped_pos(t, warp));
+                        }
+                    }
+                }
+            }
+            fold.warp(RiverWarp::none());
+            for &r in &rivers {
+                for t in T {
+                    fold.p(r.warped_pos(t, RiverWarp::none()));
+                }
+            }
+            assert_eq!(fold.0, -2_034_090_640);
+        }
+
+        #[test]
+        fn river_warp_draws_match_engine_0_3_0() {
+            let mut fold = Fold::new();
+            for seed in [0, 1, -1, 12345, i64::MAX, i64::MIN] {
+                let mut random = LegacyRandom::new(seed);
+                let a = RiverWarp::create(0.15, &mut random);
+                let b = RiverWarp::create_range(0.1, 0.95, &mut random);
+                let c = a.child(0.2, 0.7, 0.5, &mut random);
+                let d = RiverWarp::none().child(0.3, 0.6, 2.0, &mut random);
+                let e = b.child(NAN, 0.6, NAN, &mut random);
+                for w in [a, b, c, d, e] {
+                    fold.warp(w);
+                }
+                fold.mix(random.next_int());
+            }
+            assert_eq!(fold.0, 2_004_787_916);
+        }
     }
 }
