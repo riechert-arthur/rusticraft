@@ -186,7 +186,7 @@ impl<T> Object2FloatCache<T> {
 /// each walked from its corner `(-r, -r)` along +x, +z, -x, then -z, as `PosUtil.pack`ed positions. All `int`
 /// math wraps as Java's. As an [`Iterator`], `next` returns `None` once `has_next` is false (Java's `next` never
 /// checks; callers loop on `hasNext`). Java's quirks are kept: a start radius above `max_radius` yields the same
-/// position forever, and a ring of length 0 (a negative start radius) panics where Java divides by zero.
+/// position forever, and stepping into ring 0 (from a negative start radius) panics where Java divides by zero.
 pub struct SpiralIterator {
     x: i32,
     z: i32,
