@@ -2141,6 +2141,19 @@ x11 0 0 4 16 true true -1 0 4 16 false false true
         ec.on_dispose(entry.call());
         assert!(!has(&ec, 1, 1), "onDispose removes the tile's region");
         assert_eq!(entry.call().active(), -1, "and closes its unopened tile");
+        let alive = TileCache::with_clock(generator(0), ThreadPool::NONE, clock);
+        let entry = alive.get_tile_at(0, 0);
+        entry.call().dispose();
+        assert_eq!(entry.call().active(), -1, "the cache removed and closed it");
+        let dropped = TileCache::with_clock(generator(0), ThreadPool::NONE, clock);
+        let entry = dropped.get_tile_at(0, 0);
+        drop(dropped);
+        entry.call().dispose();
+        assert_eq!(
+            entry.call().active(),
+            0,
+            "a dropped cache's tiles tell no one"
+        );
     }
 
     /// `TileGeneratorOracle.java`'s output (`./run.sh` writes it to `out.txt`).
