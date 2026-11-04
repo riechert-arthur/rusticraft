@@ -30,7 +30,9 @@
 // (`rivermap.river`) and `Vec2i` (`noise.util.Vec2i`) are the channel segments those generators lay out, and
 // `RiverCarver` (`rivermap.river`) carves one segment's valley, banks and bed into a cell; `LakeCarver`
 // (`rivermap.lake.Lake`) carves a lake and its valley, `WetlandCarver` (`rivermap.wetland.Wetland`) a wetland
-// along a segment, and `Boundsf` (`util.Boundsf`) bounds them.
+// along a segment, and `Boundsf` (`util.Boundsf`) bounds them. `RiverNetwork` (`rivermap.river.Network`) groups a
+// river with its lakes, wetlands and forks, `Rivermap` (`rivermap.Rivermap`) holds one continent's networks, and
+// `BaseRiverGenerator` (`rivermap.river.BaseRiverGenerator`) lays out the forks, lakes and wetlands of a map.
 
 use super::{
     terraforged::{
