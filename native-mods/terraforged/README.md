@@ -642,10 +642,10 @@ order, picking the river map with `Rivermap::get_for_cell` (reusing the caller's
 cell's continent cell), caches the cell and returns the map it used; on a hit it copies the cached cell into the
 caller's (`copyFrom`, which leaves `terrain_region_center` alone) and returns the caller's map unchanged. It shares
 the cells of `get`, but makes no beach correction. Engine caches the caller's `Cell` object itself, so later changes
-to that tile cell reach the cache; this caches a snapshot taken after the climate stage. Nothing calls it yet (the
-tile code is not ported). Its tests check that a hit runs no stage, and fold 600 `generate` and `get` calls over 120
-blocks (every returned cell field, the order the stages run in, the returned map and whether it is the caller's, the
-lookups) against `HeightmapGenerateOracle.java` in `.local/terraforged/oracles/heightmap/`, which calls Engine's
+to that tile cell reach the cache; this caches a snapshot taken after the climate stage. The cached tile fill
+(`generate_cached_heightmap`, below) calls it. Its tests check that a hit runs no stage, and fold 600 `generate` and
+`get` calls over 120 blocks (every returned cell field, the order the stages run in, the returned map and whether it
+is the caller's, the lookups) against `HeightmapGenerateOracle.java` in `.local/terraforged/oracles/heightmap/`, which calls Engine's
 `HeightmapCache.generate` and `get` on a `Heightmap` whose stages are the same fills; the caller cells carry markers
 that show what a miss keeps and what a hit's `copyFrom` overwrites.
 
@@ -663,8 +663,8 @@ towards the weighted mean of the present cells within the smoothing radius (weig
 outer `round(r + 0.5)` cells and cells under the erosion mask. The change is at full strength for cells up to one block
 above sea level and fades out linearly by 120 blocks above it; it is also weakened near terrain-region edges of
 terrains whose erosion modifier is not 1 (badlands and its composites) and near rivers. Engine's settings UI limits the radius to 0..5; a radius below -1, which
-only a hand-edited config can give, leaves the map unchanged as in Engine. `WorldFilters` runs it; the tile map is
-not ported yet. Its tests replay `SmoothingOracle.java` in `.local/terraforged/oracles/smoothing/`,
+only a hand-edited config can give, leaves the map unchanged as in Engine. `WorldFilters` runs it on a tile's
+filter region. Its tests replay `SmoothingOracle.java` in `.local/terraforged/oracles/smoothing/`,
 which runs Engine's `Smoothing.apply` on the same 14x14 maps for 11 radius, rate, level and iteration cases and
 prints every cell's value bits folded together.
 
@@ -673,7 +673,7 @@ radius 1 and scaler 10. It sets each cell's gradient to `min(1, scaler * Σ |hei
 radius)` over the 15 cells at `(dx, dz) * radius` for `dx` and `dz` from -1 to 2 (Engine's neighbourhood is
 asymmetric), skipping absent cells and those outside the map; like Engine's `Tile.getCellRaw`, a neighbour past the
 left or right edge is read from the previous or next row while it stays inside the backing array. Radius 0 divides by
-zero as in Engine. `WorldFilters` runs it; the tile map is not ported yet. Its tests replay
+zero as in Engine. `WorldFilters` runs it on a tile's filter region. Its tests replay
 `SteepnessOracle.java` in `.local/terraforged/oracles/steepness/`, which runs Engine's `Steepness.apply` on the
 smoothing oracle's 14x14 maps for 14 radius, scaler, level and NaN/signed-zero height cases and prints every cell's
 gradient bits folded together.
@@ -684,7 +684,7 @@ registry's own beach terrain when its squared height gradient is below 0.275, th
 differences to the cells 8 blocks east and west and 8 blocks north and south, each divided by 17. A neighbour that is
 absent or outside the map is replaced by the cell itself and takes 8 off that distance; neighbours are read like
 Engine's `Tile.getCellRaw`, as for steepness. Invalid control points fall back to the defaults, as Engine's
-`ControlPoints` does. `WorldFilters` runs it; the tile map is not ported yet. Its tests replay
+`ControlPoints` does. `WorldFilters` runs it on a tile's filter region. Its tests replay
 `BeachDetectOracle.java` in `.local/terraforged/oracles/beach/`, which runs Engine's `BeachDetect.apply` on hashed
 8x8 to 33x33 maps (absent cells, NaN, infinite and signed-zero heights, NaN continent edges, valid and invalid beach
 control points) and prints every cell's terrain id folded together with the cells it turned into beach.
@@ -717,8 +717,8 @@ the world's root seed, filter settings, levels, control points and terrain regis
 `GeneratorContext`. `apply(map, region_x, region_z, optional)` runs, when `optional` is set, erosion (built for the
 map's total size and kept in a `WorldErosion` until the size changes; `erosion.droplets_per_chunk` iterations) then
 smoothing (`smoothing.iterations` passes), and always steepness (radius 1, scaler 10) then beach detection;
-`apply_tile` (the tile layer, below) runs it on a tile. Nothing calls them yet: the tile generator is a later layer.
-Its test replays `WorldFiltersOracle.java` in `.local/terraforged/oracles/world_filters/`, which builds Engine's
+`apply_tile` (the tile layer, below) runs it on a tile. Nothing calls them yet: the tile generator is a later layer
+(#80). Its test replays `WorldFiltersOracle.java` in `.local/terraforged/oracles/world_filters/`, which builds Engine's
 `WorldFilters` from a `GeneratorContext` for four settings groups (long seeds, other levels, droplet counts and smoothing passes including 0, radii, rates, beach
 points, lifetimes) and runs each over several maps in turn (borders, negative positions, the optional filters on and
 off, cache reuse and rebuilds, NaN and infinite heights), folding every cell's value, erosion, sediment, gradient and
@@ -737,7 +737,7 @@ built from the world's registry. `cell(x, z)` is Engine's `getCell` (masked into
 `Filterable` the filters read: its block position, block size and backing, with `getCellRaw`'s index in Java `int`
 math and `Cell.empty()` outside the backing. `WorldFilters::apply_tile(tile, optional)` is Engine's `apply(tile,
 optionalFilters)`: the filters over that region, seeded with the tile's region coordinates. Nothing builds tiles yet:
-the tile generator is a later layer. Its tests replay `TileOracle.java` in `.local/terraforged/oracles/tile/` over
+the tile generator is a later layer (#80). Its tests replay `TileOracle.java` in `.local/terraforged/oracles/tile/` over
 negative and wrapping region positions, shift factors Java masks to five bits, missing and negative borders, and
 negative, border and overflowing coordinates, and run Engine's `WorldFilters.apply` on its own tiles (hashed cells,
 borders and the optional filters on and off) against `apply_tile`.
@@ -763,8 +763,8 @@ filled), and for each of its cells (z rows, then x) runs the base stage, picks t
 cell (the previous cell's map when it matches, carried from the tile's first cell to its last, else a lookup:
 `Rivermap::get_for_cell`), runs the river stage (`HeightmapRivers::apply`) and the climate stage, each with the cell's
 world block position as floats. `Heightmap` itself is not ported yet, so the stages and the lookup are closures; the
-filters (`WorldFilters::apply_tile`) and the tile generator are later layers. Its tests replay
-`TileHeightmapOracle.java` in `.local/terraforged/oracles/tile_heightmap/` on six tiles (negative, wrapping and
+tile generator, which runs the filters (`WorldFilters::apply_tile`) after the fill, is a later layer (#80). Its tests
+replay `TileHeightmapOracle.java` in `.local/terraforged/oracles/tile_heightmap/` on six tiles (negative, wrapping and
 borderless ones, and one whose slots hold aliasing chunks made before the fill) with stub stages: the stage trace with
 every coordinate and lookup, every cell of the backing and every chunk read afterwards.
 
