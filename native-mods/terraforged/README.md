@@ -878,7 +878,7 @@ start of every `get`, before the task runs; `call` and `is_done` leave it, as in
 the task ended, even by panicking. As with a failed Engine `Future`, the task never runs twice: after it panicked, every
 `get` and `call` panics again. `cancel` and `is_cancelled` return `false`. Engine's `close` closes a closeable value (a
 `Tile` hands its cells back to resource pools that are not ported); here it does nothing and the value is dropped with
-the entry. When an entry expires is Engine's `Cache`'s rule, also a later layer. Its test replays `CacheEntryOracle.java`
+the entry. When an entry expires is Engine's `Cache`'s rule (the next layer). Its test replays `CacheEntryOracle.java`
 in `.local/terraforged/oracles/cache_entry/` (flags before and after `get`, where the timestamp is set, a throwing task, 16
 concurrent getters with one run, `isDone` during another thread's run) with an injected clock in place of the oracle's
 sleeps; debug and release builds agree.
