@@ -1244,7 +1244,8 @@ mod tests {
         assert_eq!((plain.kind, plain.batch_threads), (Kind::Plain, None));
     }
 
-    /// Engine shares one tile generator, and its tile cache, between its generation threads.
+    /// Engine shares one tile generator, its tile cache and the chunk readers it hands out between
+    /// its generation threads.
     #[test]
     fn tile_generators_are_shared_between_threads() {
         fn shareable<T: Send + Sync>() {}
@@ -1259,6 +1260,7 @@ mod tests {
         }
         shareable::<TileGenerator<SharedHeightmap, WorldFilters>>();
         shareable::<TileCache<SharedHeightmap, WorldFilters>>();
+        shareable::<CachedChunk>();
     }
 
     /// A lazy tile shared between threads (as Engine's tile cache shares its entries) is generated
