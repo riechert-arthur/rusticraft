@@ -2873,7 +2873,7 @@ fn fold_bounds(
 /// ±1 with an infinite power, where C's `pow` (Rust's `powf`) returns 1 for a base of 1 (or -1 and an infinite power).
 /// A NaN result keeps Java's bits: `Math.pow` returns its NaN operand (the base's first, quieted), except that a zero
 /// power gives 1 and a base of 1 with a NaN power gives the canonical NaN.
-fn java_pow(value: f32, power: f32) -> f32 {
+pub fn java_pow(value: f32, power: f32) -> f32 {
     let quiet = |nan: f32| f32::from_bits(nan.to_bits() | 0x0040_0000);
     if power == 0.0 {
         return 1.0;
