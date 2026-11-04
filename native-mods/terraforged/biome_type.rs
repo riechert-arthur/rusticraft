@@ -22,8 +22,11 @@
  * SOFTWARE.
  */
 
+use super::terraforged::round;
 use super::terraforged_engine::{BiomeType, Cell};
 
+// Engine computes these in `BiomeTypeLoader.getRanges` from the type map: per type, the smallest and largest
+// `x / 255f` (temperature) and `y / 255f` (moisture) of the squares it covers, as raw f32 bits.
 const RANGES: [[f32; 4]; 11] = [
     [
         f32::from_bits(0x3f4acacb),
@@ -93,6 +96,8 @@ const RANGES: [[f32; 4]; 11] = [
     ],
 ];
 
+// Each type's lookup colour (the first constructor arguments): `BiomeTypeLoader` gives every pixel of
+// TerraForged's `biomes.png` the type whose lookup colour is nearest.
 const LOOKUP_COLORS: [[u8; 3]; 11] = [
     [7, 83, 48],
     [151, 165, 39],
@@ -107,6 +112,7 @@ const LOOKUP_COLORS: [[u8; 3]; 11] = [
     [0, 0, 0],
 ];
 
+// `getColor`: the colours of TerraForged's `biomes.txt`, which override every constructor default.
 const COLORS: [[u8; 3]; 11] = [
     [52, 125, 63],
     [136, 173, 62],
@@ -138,7 +144,9 @@ const ROW_OFFSETS: [u16; 257] = [
     1034, 1036, 1038, 1040, 1042, 1044, 1046, 1048, 1050,
 ];
 
-// Inclusive x endpoint followed by BiomeType ordinal, grouped by row through ROW_OFFSETS.
+// Engine's 256x256 type map (`BiomeTypeLoader.getTypeMap()`, row = moisture index, column = temperature index),
+// run-length encoded: row `y`'s runs are `RUNS[2 * ROW_OFFSETS[y]..2 * ROW_OFFSETS[y + 1]]`, each an inclusive
+// last x followed by a BiomeType ordinal. `ROW_OFFSETS` counts runs.
 const RUNS: [u8; 2100] = [
     35, 9, 98, 6, 126, 7, 255, 2, 0, 10, 36, 9, 100, 6, 133, 7, 255, 2, 1, 10, 38, 9, 101, 6, 138,
     7, 255, 2, 2, 10, 40, 9, 104, 6, 144, 7, 255, 2, 3, 10, 41, 9, 107, 6, 147, 7, 255, 2, 4, 10,
@@ -233,37 +241,39 @@ const RUNS: [u8; 2100] = [
 ];
 
 impl BiomeType {
+    /// `BiomeType.get(float, float)` (Java overloads `get`): the curved lookup.
     pub fn at_climate(temperature: f32, moisture: f32) -> Self {
         Self::get_curve(temperature, moisture)
     }
 
+    /// `getLinear`. Panics where Engine throws `ArrayIndexOutOfBoundsException`: a temperature or
+    /// moisture index outside 0..=255.
     pub fn get_linear(temperature: f32, moisture: f32) -> Self {
-        let x = round(255.0 * temperature);
-        let y = if moisture > temperature {
-            x
-        } else {
-            round(255.0 * moisture)
-        };
+        let (x, y) = linear_index(temperature, moisture);
         type_at(x, y)
     }
 
+    /// `getCurve`. Panics where Engine throws `ArrayIndexOutOfBoundsException`: a temperature or
+    /// moisture index outside 0..=255.
     pub fn get_curve(temperature: f32, moisture: f32) -> Self {
-        let x = round(255.0 * temperature);
-        let max = x + (255 - x) / 2;
-        let y = round(max as f32 * moisture).min(x);
+        let (x, y) = curve_index(temperature, moisture);
         type_at(x, y)
     }
 
+    /// `apply`: `applyCurve`.
     pub fn apply(cell: &mut Cell) {
-        cell.biome = Self::get_curve(cell.temperature, cell.moisture);
+        Self::apply_curve(cell);
     }
 
+    /// `applyLinear`. Engine's body is the same as `applyCurve` (`cell.biome = get(t, m)`), so this
+    /// uses the curved lookup too, not `get_linear`.
     pub fn apply_linear(cell: &mut Cell) {
-        cell.biome = Self::get_linear(cell.temperature, cell.moisture);
+        cell.biome = Self::at_climate(cell.temperature, cell.moisture);
     }
 
+    /// `applyCurve`.
     pub fn apply_curve(cell: &mut Cell) {
-        Self::apply(cell);
+        cell.biome = Self::at_climate(cell.temperature, cell.moisture);
     }
 
     pub fn map_temperature(self, value: f32) -> f32 {
@@ -288,84 +298,326 @@ impl BiomeType {
     pub const fn max_moisture(self) -> f32 {
         RANGES[self as usize][3]
     }
+    /// `getLookup`: the colour the type map image uses for this type (RGB; Engine's colours are opaque).
     pub const fn lookup_color(self) -> [u8; 3] {
         LOOKUP_COLORS[self as usize]
     }
+    /// `getColor`: the display colour (RGB; Engine's colours are opaque).
     pub const fn color(self) -> [u8; 3] {
         COLORS[self as usize]
     }
 }
 
-fn type_at(x: i32, y: i32) -> BiomeType {
-    let row = y as usize;
-    let start = ROW_OFFSETS[row] as usize;
-    let end = ROW_OFFSETS[row + 1] as usize;
-    let x = u8::try_from(x).expect("biome temperature index outside lookup map");
-    for run in start..end {
-        let offset = run * 2;
-        if x <= RUNS[offset] {
-            return BiomeType::get(i32::from(RUNS[offset + 1]));
-        }
-    }
-    unreachable!("biome lookup row does not cover x")
+/// `getLinear`'s map indices: `x = round(255 * t)`, `y = x` where moisture exceeds temperature, else
+/// `round(255 * m)` (`NoiseUtil.round`).
+fn linear_index(temperature: f32, moisture: f32) -> (i32, i32) {
+    let x = round(255.0 * temperature);
+    let y = if moisture > temperature {
+        x
+    } else {
+        round(255.0 * moisture)
+    };
+    (x, y)
 }
 
-fn round(value: f32) -> i32 {
-    if value >= 0.0 {
-        (value + 0.5) as i32
-    } else {
-        (value - 0.5) as i32
-    }
+/// `getCurve`'s map indices: `x = round(255 * t)`, `y = min(x, round((x + (255 - x) / 2) * m))`, in Java int
+/// math (wrapping, division towards zero).
+fn curve_index(temperature: f32, moisture: f32) -> (i32, i32) {
+    let x = round(255.0 * temperature);
+    let max = x.wrapping_add(255_i32.wrapping_sub(x) / 2);
+    let y = round(max as f32 * moisture);
+    (x, x.min(y))
+}
+
+/// `getTypeMap()[y][x]`; `None` where Engine's array access throws.
+fn lookup(x: i32, y: i32) -> Option<BiomeType> {
+    let x = u8::try_from(x).ok()?;
+    let row = usize::from(u8::try_from(y).ok()?);
+    let runs = &RUNS[2 * ROW_OFFSETS[row] as usize..2 * ROW_OFFSETS[row + 1] as usize];
+    runs.chunks_exact(2)
+        .find(|run| x <= run[0])
+        .map(|run| BiomeType::get(i32::from(run[1])))
+}
+
+fn type_at(x: i32, y: i32) -> BiomeType {
+    lookup(x, y).unwrap_or_else(|| panic!("biome type map index [{y}][{x}] out of bounds"))
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::terraforged::{java_max, java_min};
+    use super::super::terraforged_engine::TerrainRegistry;
     use super::*;
+
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+
+    fn fnv(hash: u64, bytes: &[u8]) -> u64 {
+        bytes.iter().fold(hash, |hash, &byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+        })
+    }
+
+    // BiomeTypeOracle.java's SPECIAL inputs (raw bits): zeros, subnormals, 1 and its neighbours, the rounding
+    // edges of index 0, 1, 255 and 256, values just outside 0..1, the extremes, NaN and the infinities.
+    const SPECIAL: [u32; 33] = [
+        0x00000000, 0x80000000, 0x00000001, 0x80000001, 0x3f800000, 0x3f800001, 0x3f7fffff,
+        0x80000001, 0x3f000000, 0x3b808081, 0x3b008081, 0x3b008080, 0x3f7f7f7f, 0x3f7f7f7e,
+        0x3f804040, 0x3f80403f, 0x3f804041, 0x3fc00000, 0xbb008081, 0xbb008080, 0xbc23d70a,
+        0x40000000, 0x7fc00000, 0x7f800000, 0xff800000, 0x7f7fffff, 0xff7fffff, 0x3e800000,
+        0x3f400000, 0x3e99999a, 0x3f333333, 0x3f666666, 0x3dcccccd,
+    ];
+
+    fn code(kind: Option<BiomeType>) -> String {
+        kind.map_or("X".to_owned(), |kind| kind.id().to_string())
+    }
+
+    fn letter(kind: Option<BiomeType>) -> u8 {
+        kind.map_or(b'X', |kind| b'a' + kind as u8)
+    }
+
+    // The cell's biome after `apply`, or None (without calling it) where the curved lookup has no
+    // square: `apply`'s panic is checked once in `biome_type_classification_matches_engine_0_3_0`.
+    fn applied(
+        registry: &TerrainRegistry,
+        apply: fn(&mut Cell),
+        temperature: f32,
+        moisture: f32,
+    ) -> Option<BiomeType> {
+        let (x, y) = curve_index(temperature, moisture);
+        lookup(x, y)?;
+        let mut cell = Cell::new(registry);
+        cell.temperature = temperature;
+        cell.moisture = moisture;
+        apply(&mut cell);
+        Some(cell.biome)
+    }
+
+    fn canonical(value: f32) -> u32 {
+        if value.is_nan() {
+            0x7fc00000
+        } else {
+            value.to_bits()
+        }
+    }
 
     #[test]
     fn biome_type_map_matches_engine_0_3_0() {
-        let mut hash = 0xcbf29ce484222325_u64;
+        // FNV-1a over BiomeTypeOracle's `m` lines (the map's ordinals, row by row).
+        let mut hash = FNV_OFFSET;
         for y in 0..256 {
             for x in 0..256 {
-                hash ^= type_at(x, y) as u8 as u64;
-                hash = hash.wrapping_mul(0x100000001b3);
+                hash = fnv(hash, &[lookup(x, y).unwrap() as u8]);
             }
         }
         assert_eq!(hash, 0xd1be24a129080e93);
+        for (x, y) in [
+            (-1, 0),
+            (0, -1),
+            (256, 0),
+            (0, 256),
+            (i32::MIN, 0),
+            (0, i32::MAX),
+        ] {
+            assert_eq!(lookup(x, y), None);
+        }
+    }
+
+    #[test]
+    fn biome_type_ranges_and_colors_match_engine_0_3_0() {
+        // BiomeTypeOracle's `t` lines: range bits, lookup colour, display colour.
+        let expected: [([u32; 4], [u8; 3], [u8; 3]); 11] = [
+            (
+                [0x3f4acacb, 0x3f800000, 0x3f1d9d9e, 0x3f800000],
+                [7, 83, 48],
+                [52, 125, 63],
+            ),
+            (
+                [0x3eeeeeef, 0x3f800000, 0x3e20a0a1, 0x3f29a9aa],
+                [151, 165, 39],
+                [136, 173, 62],
+            ),
+            (
+                [0x3efefeff, 0x3f800000, 0x00000000, 0x3e868687],
+                [200, 113, 55],
+                [230, 219, 156],
+            ),
+            (
+                [0x3f0c8c8d, 0x3f52d2d3, 0x3f0c8c8d, 0x3f52d2d3],
+                [10, 84, 109],
+                [82, 140, 53],
+            ),
+            (
+                [0x3ed4d4d5, 0x3f55d5d6, 0x3e2cacad, 0x3f1c9c9d],
+                [44, 137, 160],
+                [93, 153, 72],
+            ),
+            (
+                [0x3e78f8f9, 0x3f56d6d7, 0x3d50d0d1, 0x3ec8c8c9],
+                [179, 124, 6],
+                [75, 179, 79],
+            ),
+            (
+                [0x3e109091, 0x3f169697, 0x00000000, 0x3e969697],
+                [131, 112, 71],
+                [194, 187, 132],
+            ),
+            (
+                [0x3ec6c6c7, 0x3f3fbfc0, 0x00000000, 0x3e088889],
+                [199, 155, 60],
+                [224, 203, 137],
+            ),
+            (
+                [0x3e44c4c5, 0x3f20a0a1, 0x3d30b0b1, 0x3edededf],
+                [91, 143, 82],
+                [77, 115, 59],
+            ),
+            (
+                [0x00000000, 0x3e58d8d9, 0x00000000, 0x3e54d4d5],
+                [147, 167, 172],
+                [215, 219, 200],
+            ),
+            (
+                [0x00000000, 0x3f7efeff, 0x3b808081, 0x3f800000],
+                [0, 0, 0],
+                [239, 242, 237],
+            ),
+        ];
+        for (kind, (ranges, lookup_color, color)) in BiomeType::VALUES.into_iter().zip(expected) {
+            let actual = [
+                kind.min_temperature(),
+                kind.max_temperature(),
+                kind.min_moisture(),
+                kind.max_moisture(),
+            ];
+            assert_eq!(actual.map(f32::to_bits), ranges, "{kind:?}");
+            assert_eq!(kind.lookup_color(), lookup_color, "{kind:?}");
+            assert_eq!(kind.color(), color, "{kind:?}");
+        }
+        // The ranges are `BiomeTypeLoader.getRanges` over the map (float min/max of x/255f and y/255f).
+        for kind in BiomeType::VALUES {
+            let mut range = [1.0_f32, 0.0, 1.0, 0.0];
+            for y in 0..256 {
+                for x in 0..256 {
+                    if lookup(x, y) == Some(kind) {
+                        let (t, m) = (x as f32 / 255.0, y as f32 / 255.0);
+                        range = [
+                            java_min(range[0], t),
+                            java_max(range[1], t),
+                            java_min(range[2], m),
+                            java_max(range[3], m),
+                        ];
+                    }
+                }
+            }
+            assert_eq!(
+                range.map(f32::to_bits),
+                RANGES[kind as usize].map(f32::to_bits)
+            );
+        }
+    }
+
+    #[test]
+    fn biome_type_mapping_matches_engine_0_3_0() {
+        // FNV-1a over BiomeTypeOracle's `p` lines: mapTemperature and mapMoisture of every SPECIAL input.
+        let lines: Vec<String> = BiomeType::VALUES
+            .into_iter()
+            .flat_map(|kind| {
+                SPECIAL.map(|bits| {
+                    let value = f32::from_bits(bits);
+                    format!(
+                        "p {} {bits:08x} {:08x} {:08x}",
+                        kind.id(),
+                        canonical(kind.map_temperature(value)),
+                        canonical(kind.map_moisture(value))
+                    )
+                })
+            })
+            .collect();
+        assert_eq!(
+            fnv(FNV_OFFSET, lines.join("\n").as_bytes()),
+            0x11e7b92c7a6df795
+        );
     }
 
     #[test]
     fn biome_type_classification_matches_engine_0_3_0() {
-        let samples = [
-            (0.0, 0.0, 9),
-            (0.1, 0.1, 9),
-            (0.2, 0.8, 9),
-            (0.5, 0.5, 4),
-            (0.7, 0.3, 5),
-            (0.9, 0.9, 0),
-            (1.0, 1.0, 0),
-        ];
-        for (temperature, moisture, expected) in samples {
-            assert_eq!(BiomeType::get_curve(temperature, moisture).id(), expected);
-            assert_eq!(BiomeType::get_linear(temperature, moisture).id(), expected);
+        // BiomeTypeOracle's `s` lines: curve, linear, get, apply, applyLinear and applyCurve over every
+        // pair of SPECIAL inputs; X where Engine throws.
+        let registry = TerrainRegistry::new();
+        let mut lines = Vec::new();
+        for t in SPECIAL {
+            for m in SPECIAL {
+                let (temperature, moisture) = (f32::from_bits(t), f32::from_bits(m));
+                let (cx, cy) = curve_index(temperature, moisture);
+                let (lx, ly) = linear_index(temperature, moisture);
+                let curve = lookup(cx, cy);
+                lines.push(format!(
+                    "s {t:08x} {m:08x} {} {} {} {} {} {}",
+                    code(curve),
+                    code(lookup(lx, ly)),
+                    code(curve),
+                    code(applied(&registry, BiomeType::apply, temperature, moisture)),
+                    code(applied(
+                        &registry,
+                        BiomeType::apply_linear,
+                        temperature,
+                        moisture
+                    )),
+                    code(applied(
+                        &registry,
+                        BiomeType::apply_curve,
+                        temperature,
+                        moisture
+                    )),
+                ));
+            }
         }
+        assert_eq!(
+            fnv(FNV_OFFSET, lines.join("\n").as_bytes()),
+            0xb2c6a733a7e3f2c5
+        );
+        // A few lines in full, including applyLinear using the curve where the linear lookup differs.
+        assert!(lines.contains(&"s 00000000 bb008081 9 X 9 9 9 9".to_owned()));
+        assert!(lines.contains(&"s 3f800000 3f800000 0 0 0 0 0 0".to_owned()));
+        assert!(lines.contains(&"s 00000000 ff800000 X X X X X X".to_owned()));
+        // The public lookups agree with the indices and panic where Engine throws.
+        assert_eq!(BiomeType::get_curve(0.5, 0.5), lookup(128, 64).unwrap());
+        assert_eq!(
+            BiomeType::at_climate(0.9, 0.9),
+            BiomeType::TropicalRainforest
+        );
+        assert_eq!(BiomeType::get_linear(0.7, 0.3), BiomeType::Grassland);
+        assert!(std::panic::catch_unwind(|| BiomeType::get_curve(f32::NEG_INFINITY, 0.5)).is_err());
+        assert!(std::panic::catch_unwind(|| BiomeType::get_linear(0.0, -0.01)).is_err());
+        assert!(
+            std::panic::catch_unwind(|| {
+                let mut cell = Cell::new(&TerrainRegistry::new());
+                cell.temperature = 2.0;
+                BiomeType::apply_linear(&mut cell);
+            })
+            .is_err()
+        );
     }
 
     #[test]
-    fn biome_type_ranges_match_engine_0_3_0() {
-        let actual: Vec<_> = BiomeType::VALUES
-            .into_iter()
-            .flat_map(|kind| {
-                [
-                    kind.min_temperature(),
-                    kind.max_temperature(),
-                    kind.min_moisture(),
-                    kind.max_moisture(),
-                ]
-            })
-            .map(f32::to_bits)
-            .collect();
-        let expected: Vec<_> = RANGES.into_iter().flatten().map(f32::to_bits).collect();
-        assert_eq!(actual, expected);
+    fn biome_type_grid_matches_engine_0_3_0() {
+        // BiomeTypeOracle's `g` lines: t, m = i / 600f - 0.05f for i in 0..=660, curve then linear codes.
+        let axis: Vec<f32> = (0..=660).map(|i| i as f32 / 600.0 - 0.05).collect();
+        let mut text = Vec::new();
+        for (row, &t) in axis.iter().enumerate() {
+            if row > 0 {
+                text.push(b' ');
+            }
+            for &m in &axis {
+                let (x, y) = curve_index(t, m);
+                text.push(letter(lookup(x, y)));
+            }
+            text.push(b' ');
+            for &m in &axis {
+                let (x, y) = linear_index(t, m);
+                text.push(letter(lookup(x, y)));
+            }
+        }
+        assert_eq!(fnv(FNV_OFFSET, &text), 0x549bc3632ee3fd0e);
     }
 }
