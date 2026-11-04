@@ -105,9 +105,9 @@ impl Size {
 /// `block_size().array_size` cells, all allocated up front with the world's registry (Engine's
 /// pooled arrays fill their cells lazily, `computeCell`, and may be longer than the tile needs when
 /// a larger pooled array is reused; neither is observable once a tile is generated). Its chunk
-/// array holds the `GenChunk`s `chunk_writer` has created, as Engine's does. Generation, disposal
-/// and resource pools are later layers. A negative array size (only from absurd sizes or borders)
-/// gives an empty backing where Java throws.
+/// array holds the `GenChunk`s `chunk_writer` and the heightmap fills create, as Engine's does.
+/// Disposal and resource pools are not ported. A negative array size (only from absurd sizes or
+/// borders) gives an empty backing where Java throws.
 #[derive(Clone)]
 pub struct Tile {
     region_x: i32,
