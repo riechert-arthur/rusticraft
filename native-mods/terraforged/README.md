@@ -716,10 +716,10 @@ The world-filters layer adds Engine's filter chain (`WorldFilters`, `filters.rs`
 the world's root seed, filter settings, levels, control points and terrain registry as Engine builds it from its
 `GeneratorContext`. `apply(map, region_x, region_z, optional)` runs, when `optional` is set, erosion (built for the
 map's total size and kept in a `WorldErosion` until the size changes; `erosion.droplets_per_chunk` iterations) then
-smoothing (`smoothing.iterations` passes), and always steepness (radius 1, scaler 10) then beach detection. Nothing
-calls it yet: the tile generator that runs it on each tile's `filterable()` is a later layer. Its test replays `WorldFiltersOracle.java` in
-`.local/terraforged/oracles/world_filters/`, which builds Engine's `WorldFilters` from a `GeneratorContext` for four
-settings groups (long seeds, other levels, droplet counts and smoothing passes including 0, radii, rates, beach
+smoothing (`smoothing.iterations` passes), and always steepness (radius 1, scaler 10) then beach detection;
+`apply_tile` (the tile layer, below) runs it on a tile. Nothing calls them yet: the tile generator is a later layer.
+Its test replays `WorldFiltersOracle.java` in `.local/terraforged/oracles/world_filters/`, which builds Engine's
+`WorldFilters` from a `GeneratorContext` for four settings groups (long seeds, other levels, droplet counts and smoothing passes including 0, radii, rates, beach
 points, lifetimes) and runs each over several maps in turn (borders, negative positions, the optional filters on and
 off, cache reuse and rebuilds, NaN and infinite heights), folding every cell's value, erosion, sediment, gradient and
 terrain.
@@ -734,10 +734,13 @@ The tile layer adds Engine's `Tile` (`tile.rs`) without its chunk views and gene
 position (`region << size`, then `<< 4`), its region id (`PosUtil.pack`), and its bordered block backing, every cell
 built from the world's registry. `cell(x, z)` is Engine's `getCell` (masked into the tile, past the border) and
 `raw_cell(x, z)` its `getRawCell` (`None` where Java throws). `filterable()` is Engine's `FilterRegion`, the
-`Filterable` that `WorldFilters::apply` takes: its block position, block size and backing, with `getCellRaw`'s index in
-Java `int` math and `Cell.empty()` outside the backing. Nothing builds tiles yet: the tile generator is a later layer.
-Its test replays `TileOracle.java` in `.local/terraforged/oracles/tile/` over negative and wrapping region positions,
-shift factors Java masks to five bits, missing and negative borders, and negative, border and overflowing coordinates.
+`Filterable` the filters read: its block position, block size and backing, with `getCellRaw`'s index in Java `int`
+math and `Cell.empty()` outside the backing. `WorldFilters::apply_tile(tile, optional)` is Engine's `apply(tile,
+optionalFilters)`: the filters over that region, seeded with the tile's region coordinates. Nothing builds tiles yet:
+the tile generator is a later layer. Its tests replay `TileOracle.java` in `.local/terraforged/oracles/tile/` over
+negative and wrapping region positions, shift factors Java masks to five bits, missing and negative borders, and
+negative, border and overflowing coordinates, and run Engine's `WorldFilters.apply` on its own tiles (hashed cells,
+borders and the optional filters on and off) against `apply_tile`.
 
 ## Status: development only
 
