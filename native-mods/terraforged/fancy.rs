@@ -34,8 +34,8 @@ use super::{
     },
     terraforged_populator::Populator,
     terraforged_river::{
-        BaseRiverGenerator, GenWarp, River, RiverCarver, RiverCarverSettings, RiverNetwork,
-        RiverNetworkBuilder, RiverWarp, Rivermap, Variance,
+        BaseRiverGenerator, GenWarp, River, RiverCache, RiverCarver, RiverCarverSettings,
+        RiverNetwork, RiverNetworkBuilder, RiverWarp, Rivermap, Variance,
     },
     terraforged_util::{
         pack, pack_floats, pack_mix_int_float, unpack_left, unpack_left_float, unpack_right_float,
@@ -306,7 +306,7 @@ impl Island {
 
 /// Engine's `FancyContinent`: a main island and four arms of three ever smaller satellite islands, built from a
 /// `java.util.Random` seeded with the generator's first seed. Engine's `FancyContinent` also builds the continent's
-/// `FancyRiverGenerator` and answers `generateRivers` with it; here `FancyRiverGenerator` owns the continent generator.
+/// `FancyRiverGenerator` and answers `generateRivers` with it; here `FancyContinentGenerator::river_generator` builds it.
 pub struct FancyContinent {
     islands: Vec<Island>,
 }
@@ -463,17 +463,35 @@ impl FancyContinent {
 }
 
 /// Engine's `FancyContinentGenerator` (`ContinentType.EXPERIMENTAL`): one [`FancyContinent`] at the origin,
-/// sampled through three summed domain warps. Its river map is not ported.
+/// sampled through three summed domain warps, with a [`RiverCache`] of the maps its [`FancyRiverGenerator`] builds.
 pub struct FancyContinentGenerator {
     frequency: f32,
     warp: Domain,
     source: FancyContinent,
+    river_cache: RiverCache,
+    /// What Engine's `FancyContinent` builds its `FancyRiverGenerator` from: the `GeneratorContext`'s seed root,
+    /// world and river settings and levels, and the world's terrain registry.
+    river_root_seed: i32,
+    world: WorldSettings,
+    rivers: RiverSettings,
+    levels: Levels,
+    registry: Arc<TerrainRegistry>,
 }
 
 impl FancyContinentGenerator {
-    /// Draws four seeds: the continent's, then the first warp's (Simplex, its y source at `seed + 1`) and the
-    /// two Perlin warps' (`Domain.warp(seed, …)` defaults to Perlin).
-    pub fn new(seed: &mut Seed, settings: WorldSettings) -> Self {
+    /// `new FancyContinentGenerator(seed, context)`. Draws four seeds from `seed`: the continent's, then the first
+    /// warp's (Simplex, its y source at `seed + 1`) and the two Perlin warps' (`Domain.warp(seed, …)` defaults to
+    /// Perlin). The rest is what Engine reads from the `GeneratorContext`: `root_seed` is `context.seed.root()`
+    /// (Engine's heightmap passes `context.seed` as `seed`, so it is `seed`'s root in a world), `levels` is
+    /// `context.levels`, and `registry` is the world's terrain registry.
+    pub fn new(
+        seed: &mut Seed,
+        root_seed: i32,
+        settings: WorldSettings,
+        rivers: RiverSettings,
+        levels: Levels,
+        registry: Arc<TerrainRegistry>,
+    ) -> Self {
         let warp_scale = settings.continent.continent_scale / 2;
         let warp_strength = (f64::from(warp_scale) * 0.4) as f32;
         let source = FancyContinent::new(
@@ -496,6 +514,12 @@ impl FancyContinentGenerator {
             frequency,
             warp,
             source,
+            river_cache: RiverCache::new(),
+            river_root_seed: root_seed,
+            world: settings,
+            rivers,
+            levels,
+            registry,
         }
     }
 
@@ -503,6 +527,26 @@ impl FancyContinentGenerator {
         &self.source
     }
 
+    /// The `FancyRiverGenerator` Engine's `FancyContinent` holds (`getSource().generateRivers` uses it). It is
+    /// stateless, so building one per call is the same as Engine's single instance.
+    pub fn river_generator(&self) -> FancyRiverGenerator<'_> {
+        FancyRiverGenerator::new(
+            self,
+            self.river_root_seed,
+            &self.world,
+            &self.rivers,
+            self.levels,
+            Arc::clone(&self.registry),
+        )
+    }
+
+    /// `getRivermap(x, z)`: the river map of continent cell (`x`, `z`) from the river cache, generated with id
+    /// `PosUtil.pack(x, z)` on a miss.
+    pub fn rivermap(&self, x: i32, z: i32) -> Arc<Rivermap> {
+        self.river_cache.get_rivers(x, z, |x, z, id| {
+            self.river_generator().generate_rivers(x, z, id)
+        })
+    }
     /// `getEdgeValue`: the continent's value at the warped point times the frequency.
     pub fn edge_value(&self, x: f32, y: f32) -> f32 {
         let point_x = self.warp.x(x, y) * self.frequency;
@@ -533,21 +577,22 @@ impl FancyContinentGenerator {
 /// Engine's `FancyRiverGenerator`: per island of the fancy continent, main rivers projected across its segments
 /// and out of its two endpoints until the continent value falls below 0.1, each forked and given wetlands as soon
 /// as it is placed. In Engine, `FancyContinent` builds one in its constructor and `FancyContinentGenerator`'s
-/// river cache asks it for maps; here it owns the continent generator and the caller passes what Engine reads
-/// from the `GeneratorContext` (see `BaseRiverGenerator::new`).
-pub struct FancyRiverGenerator {
-    base: BaseRiverGenerator<FancyContinentGenerator>,
+/// river cache asks it for maps; here it borrows the continent generator and the caller passes what Engine reads
+/// from the `GeneratorContext` (see `BaseRiverGenerator::new`); [`FancyContinentGenerator::river_generator`] builds
+/// the continent's own.
+pub struct FancyRiverGenerator<'a> {
+    base: BaseRiverGenerator<&'a FancyContinentGenerator>,
     frequency: f32,
 }
 
-impl FancyRiverGenerator {
+impl<'a> FancyRiverGenerator<'a> {
     /// `END_VALUE`: the continent value below which a river ends.
     const END_VALUE: f32 = 0.1;
     const MAIN_PADDING: Variance = Variance::of(0.05, 0.1);
     const MAIN_JITTER: Variance = Variance::of(-0.2, 0.4);
 
     pub fn new(
-        continent: FancyContinentGenerator,
+        continent: &'a FancyContinentGenerator,
         root_seed: i32,
         world: &WorldSettings,
         rivers: &RiverSettings,
@@ -1103,7 +1148,7 @@ mod tests {
         let registry = TerrainRegistry::new();
         let (seed_value, settings) = config(index);
         let mut seed = Seed::new(seed_value);
-        let generator = FancyContinentGenerator::new(&mut seed, settings);
+        let generator = continent_only(&mut seed, settings);
         mix(h, i64::from(seed.get()));
         let source = generator.source();
         mix(h, source.islands().len() as i64);
@@ -1168,11 +1213,23 @@ mod tests {
         }
     }
 
+    /// A generator for continent-only tests: default rivers, a throwaway registry.
+    fn continent_only(seed: &mut Seed, settings: WorldSettings) -> FancyContinentGenerator {
+        FancyContinentGenerator::new(
+            seed,
+            seed.root(),
+            settings,
+            RiverSettings::default(),
+            Levels::from_properties(settings.properties),
+            std::sync::Arc::new(TerrainRegistry::new()),
+        )
+    }
+
     #[test]
     fn fancy_continent_matches_engine_0_3_0() {
         let registry = TerrainRegistry::new();
         let mut seed = Seed::new(12_345);
-        let generator = FancyContinentGenerator::new(&mut seed, WorldSettings::default());
+        let generator = continent_only(&mut seed, WorldSettings::default());
         assert_eq!(seed.get(), 12_349);
         let source = generator.source();
         let ids: Vec<i32> = source.islands().iter().map(Island::id).collect();

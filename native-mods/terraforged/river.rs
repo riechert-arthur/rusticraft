@@ -52,8 +52,14 @@ use horizon_core::{
     jmath,
     random::{LegacyRandom, RandomSource},
 };
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc, PoisonError, RwLock,
+        atomic::{AtomicI64, Ordering},
+    },
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 /// Engine's `rivermap.gen.GenWarp`: the lake and river domain warps a river map carves its networks with.
 /// `BaseRiverGenerator` and `FancyRiverGenerator` build one per continent from `(int) id`.
@@ -1339,20 +1345,24 @@ pub struct Rivermap {
     timestamp: i64,
 }
 
+/// `System.currentTimeMillis()`.
+fn current_time_millis() -> i64 {
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(since) => i64::try_from(since.as_millis()).unwrap_or(i64::MAX),
+        Err(before) => i64::try_from(before.duration().as_millis()).map_or(i64::MIN, |ms| -ms),
+    }
+}
+
 impl Rivermap {
     /// `new Rivermap(x, z, networks, warp)`; the timestamp is `System.currentTimeMillis()`.
     pub fn new(x: i32, z: i32, networks: Vec<RiverNetwork>, warp: GenWarp) -> Self {
-        let timestamp = match SystemTime::now().duration_since(UNIX_EPOCH) {
-            Ok(since) => i64::try_from(since.as_millis()).unwrap_or(i64::MAX),
-            Err(before) => i64::try_from(before.duration().as_millis()).map_or(i64::MIN, |ms| -ms),
-        };
         Self {
             x,
             z,
             lake_warp: warp.lake,
             river_warp: warp.river,
             networks,
-            timestamp,
+            timestamp: current_time_millis(),
         }
     }
 
@@ -1384,9 +1394,118 @@ impl Rivermap {
     }
 }
 
+/// Engine's `rivermap.RiverCache`: river maps by continent cell, made by a `RiverGenerator` on first use and kept
+/// until they are more than five minutes old (`Cache("RiverCache", 32, 5, 1, MINUTES, StampedLongMap::new)`).
+///
+/// Shared across threads like Engine's `StampedLongMap`: lookups that hit take a read lock, a miss takes the write
+/// lock and generates under it, so each map is generated once and other lookups wait meanwhile. Engine's
+/// `CacheManager` sweeps expired maps from a scheduler thread every minute; here the sweep runs on a miss, at most
+/// once a minute, so the cache holds no more than the maps made in the last six minutes or so (hits add nothing).
+/// A map is the same whenever it is regenerated, so when the sweep runs never changes what the cache returns.
+pub struct RiverCache {
+    entries: RwLock<HashMap<i64, Arc<Rivermap>>>,
+    /// `System.currentTimeMillis()` of the last sweep (0: none yet).
+    last_sweep: AtomicI64,
+}
+
+impl RiverCache {
+    /// The cache's lifetime: 5 minutes.
+    const LIFETIME_MILLIS: i64 = 5 * 60 * 1_000;
+    /// How often Engine's scheduler sweeps it: every minute.
+    const SWEEP_INTERVAL_MILLIS: u64 = 60 * 1_000;
+
+    pub fn new() -> Self {
+        Self {
+            entries: RwLock::new(HashMap::new()),
+            last_sweep: AtomicI64::new(0),
+        }
+    }
+
+    /// `getRivers(x, z)`: the map of continent cell (`x`, `z`), generated as `generate(x, z, PosUtil.pack(x, z))`
+    /// on a miss.
+    pub fn get_rivers(
+        &self,
+        x: i32,
+        z: i32,
+        generate: impl FnOnce(i32, i32, i64) -> Rivermap,
+    ) -> Arc<Rivermap> {
+        self.get_or_generate(super::terraforged_util::pack(x, z), x, z, generate)
+    }
+
+    /// `StampedLongMap.computeIfAbsent`: a read-locked lookup, then a write-locked `computeIfAbsent`.
+    fn get_or_generate(
+        &self,
+        id: i64,
+        x: i32,
+        z: i32,
+        generate: impl FnOnce(i32, i32, i64) -> Rivermap,
+    ) -> Arc<Rivermap> {
+        // A generator that panicked under the lock inserted nothing, so a poisoned map is still consistent.
+        if let Some(map) = self
+            .entries
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&id)
+        {
+            return Arc::clone(map);
+        }
+        let mut entries = self.entries.write().unwrap_or_else(PoisonError::into_inner);
+        let now = current_time_millis();
+        // `abs_diff`: a clock set back must not stop the sweeps until it catches up.
+        if now.abs_diff(self.last_sweep.load(Ordering::Relaxed)) >= Self::SWEEP_INTERVAL_MILLIS {
+            self.last_sweep.store(now, Ordering::Relaxed);
+            // `Cache.run` and `Cache.test`: a map expires once its timestamp is before `now - lifetime`.
+            let timeout = now.saturating_sub(Self::LIFETIME_MILLIS);
+            entries.retain(|_, map| map.timestamp() >= timeout);
+        }
+        Arc::clone(
+            entries
+                .entry(id)
+                .or_insert_with(|| Arc::new(generate(x, z, id))),
+        )
+    }
+}
+
+impl Default for RiverCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Engine's `rivermap.LegacyRiverCache` (the simple continent's): a [`RiverCache`] keyed by `NoiseUtil.seed(x, z)`
+/// (`z` in the high half, unlike `PosUtil.pack`), which also passes its generator that id.
+#[derive(Default)]
+pub struct LegacyRiverCache {
+    cache: RiverCache,
+}
+
+impl LegacyRiverCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// `getRivers(x, z)`: the map of continent cell (`x`, `z`), generated as `generate(x, z, NoiseUtil.seed(x, z))`
+    /// on a miss.
+    pub fn get_rivers(
+        &self,
+        x: i32,
+        z: i32,
+        generate: impl FnOnce(i32, i32, i64) -> Rivermap,
+    ) -> Arc<Rivermap> {
+        let id = (i64::from(z) << 32) | (i64::from(x) & 0xffff_ffff);
+        self.cache.get_or_generate(id, x, z, generate)
+    }
+}
+
 /// The part of Engine's `Continent` the river generators read: `getEdgeValue(x, z)`.
 pub trait ContinentSampler {
     fn edge_value(&self, x: f32, z: f32) -> f32;
+}
+
+impl<T: ContinentSampler + ?Sized> ContinentSampler for &T {
+    fn edge_value(&self, x: f32, z: f32) -> f32 {
+        T::edge_value(self, x, z)
+    }
 }
 
 impl ContinentSampler for super::terraforged_fancy::FancyContinentGenerator {
@@ -3768,6 +3887,85 @@ mod tests {
         }
     }
 
+    /// Engine 0.3.0's `RiverCache` and `LegacyRiverCache` against `RiverCacheOracle.java` (in the maintainer's
+    /// `.local/terraforged/oracles/river/`): the (x, z, id) each passes its generator, one generation per cell, and the
+    /// cached instance on the second lookup.
+    #[test]
+    fn river_caches_match_engine_0_3_0() {
+        #[rustfmt::skip]
+        let expected: [(i32, i32, u64, u64); 6] = [
+            (-7, 9, 0xfffffff9_00000009, 0x00000009_fffffff9),
+            (0, 0, 0, 0),
+            (17, -9, 0x00000011_fffffff7, 0xfffffff7_00000011),
+            (i32::MIN, i32::MAX, 0x80000000_7fffffff, 0x7fffffff_80000000),
+            (-1, -1, u64::MAX, u64::MAX),
+            (3, i32::MIN, 0x00000003_80000000, 0x80000000_00000003),
+        ];
+        let cache = RiverCache::new();
+        let legacy = LegacyRiverCache::new();
+        for (x, z, id, legacy_id) in expected {
+            for (is_legacy, expected_id) in [(false, id), (true, legacy_id)] {
+                let mut calls = Vec::new();
+                let mut lookup = || {
+                    let generate = |gx, gz, gid: i64| {
+                        calls.push((gx, gz, gid as u64));
+                        Rivermap::new(gx, gz, Vec::new(), GenWarp::direct())
+                    };
+                    if is_legacy {
+                        legacy.get_rivers(x, z, generate)
+                    } else {
+                        cache.get_rivers(x, z, generate)
+                    }
+                };
+                let first = lookup();
+                let second = lookup();
+                assert!(Arc::ptr_eq(&first, &second));
+                assert_eq!((first.x(), first.z()), (x, z));
+                assert_eq!(calls, [(x, z, expected_id)]);
+            }
+        }
+    }
+
+    /// The sweep drops maps older than five minutes (on a miss, at most once a minute) and keeps the rest; a dropped
+    /// map is generated again on its next lookup.
+    #[test]
+    fn river_cache_expires_old_maps() {
+        let cache = RiverCache::new();
+        let make = |x, z, age: i64| {
+            let mut map = Rivermap::new(x, z, Vec::new(), GenWarp::direct());
+            map.timestamp -= age;
+            map
+        };
+        let old = cache.get_rivers(1, 1, |x, z, _| {
+            make(x, z, RiverCache::LIFETIME_MILLIS + 1_000)
+        });
+        // The first miss swept the empty cache; within the minute, the next one does not sweep.
+        let fresh = cache.get_rivers(2, 2, |x, z, _| make(x, z, 0));
+        assert!(Arc::ptr_eq(
+            &old,
+            &cache.get_rivers(1, 1, |_, _, _| unreachable!())
+        ));
+        cache.last_sweep.store(0, Ordering::Relaxed);
+        cache.get_rivers(3, 3, |x, z, _| make(x, z, 0));
+        assert_eq!(cache.entries.read().unwrap().len(), 2);
+        assert!(Arc::ptr_eq(
+            &fresh,
+            &cache.get_rivers(2, 2, |_, _, _| unreachable!())
+        ));
+        let again = cache.get_rivers(1, 1, |x, z, _| make(x, z, 0));
+        assert!(!Arc::ptr_eq(&old, &again));
+        assert_eq!((again.x(), again.z()), (1, 1));
+    }
+
+    /// The caches and the fancy continent generator that owns one are shared by worldgen threads.
+    #[test]
+    fn river_caches_are_send_and_sync() {
+        fn shared<T: Send + Sync>() {}
+        shared::<RiverCache>();
+        shared::<LegacyRiverCache>();
+        shared::<super::super::terraforged_fancy::FancyContinentGenerator>();
+    }
+
     /// Engine 0.3.0's `BaseRiverGenerator` against `BaseRiverGeneratorOracle.java` (in the maintainer's
     /// `.local/terraforged/oracles/river/`), which runs Engine's class through a subclass with radial roots.
     mod base_river_generator_oracle {
@@ -4093,9 +4291,7 @@ mod tests {
 
     mod fancy_river_generator_oracle {
         use super::super::super::terraforged_engine::Seed;
-        use super::super::super::terraforged_fancy::{
-            FancyContinentGenerator, FancyRiverGenerator,
-        };
+        use super::super::super::terraforged_fancy::FancyContinentGenerator;
         use super::base_river_generator_oracle::mix_network;
         use super::lake_oracle::{Fold, fill_from};
         use super::network_oracle::FILLS;
@@ -4131,25 +4327,24 @@ mod tests {
             (world, rivers)
         }
 
-        /// `new FancyContinentGenerator(new Seed(continent_seed), context)` and the `FancyRiverGenerator` its
-        /// `FancyContinent` builds from the same `GeneratorContext`.
-        fn generator(
+        /// `new FancyContinentGenerator(new Seed(continent_seed), context)`, whose `FancyContinent` builds its
+        /// `FancyRiverGenerator` from the same `GeneratorContext` (seed root `world.seed`).
+        fn continent(
             variant: i32,
             continent_seed: i32,
             registry: &Arc<TerrainRegistry>,
-        ) -> (FancyRiverGenerator, i32) {
+        ) -> (FancyContinentGenerator, i32) {
             let (world, rivers) = settings(variant);
-            let continent = FancyContinentGenerator::new(&mut Seed::new(continent_seed), world);
             let levels = Levels::new(world.properties.world_height, world.properties.sea_level);
-            let generator = FancyRiverGenerator::new(
-                continent,
+            let continent = FancyContinentGenerator::new(
+                &mut Seed::new(continent_seed),
                 world.seed as i32,
-                &world,
-                &rivers,
+                world,
+                rivers,
                 levels,
                 Arc::clone(registry),
             );
-            (generator, world.continent.continent_scale)
+            (continent, world.continent.continent_scale)
         }
 
         #[test]
@@ -4160,7 +4355,8 @@ mod tests {
             let (mut applies, mut networks, mut nodes) = (0, 0, 0);
             for variant in 0..5 {
                 for continent_seed in [12_345, -98_765] {
-                    let (generator, scale) = generator(variant, continent_seed, &registry);
+                    let (continent, scale) = continent(variant, continent_seed, &registry);
+                    let generator = continent.river_generator();
                     for (i, id) in (0..).zip(ids) {
                         let (x, z) = (200 * i - 300, 150 - 100 * i);
                         let map = generator.generate_rivers(x, z, id);
@@ -4193,10 +4389,43 @@ mod tests {
             );
         }
 
+        /// `FancyContinentGenerator.getRivermap`: the river cache over the continent's own `FancyRiverGenerator`, with
+        /// a continent seed that differs from the context's, folded like `generates_networks_like_engine`.
+        #[test]
+        fn rivermaps_match_engine() {
+            const CELLS: [(i32, i32); 6] = [
+                (-7, 9),
+                (0, 0),
+                (17, -9),
+                (i32::MIN, i32::MAX),
+                (-1, -1),
+                (3, i32::MIN),
+            ];
+            let registry = Arc::new(TerrainRegistry::new());
+            let mut fold = Fold(17);
+            let (mut networks, mut nodes) = (0, 0);
+            for variant in 0..5 {
+                let (continent, _) = continent(variant, -98_765, &registry);
+                for (x, z) in CELLS {
+                    let map = continent.rivermap(x, z);
+                    assert!(Arc::ptr_eq(&map, &continent.rivermap(x, z)));
+                    fold.mix(map.x());
+                    fold.mix(map.z());
+                    fold.mix(map.networks.len() as i32);
+                    networks += map.networks.len();
+                    for network in &map.networks {
+                        nodes += mix_network(&mut fold, network);
+                    }
+                }
+            }
+            assert_eq!((networks, nodes, fold.0), (1216, 1781, 92_682_963));
+        }
+
         #[test]
         fn samples_match_engine() {
             let registry = Arc::new(TerrainRegistry::new());
-            let (generator, _) = generator(0, 12_345, &registry);
+            let (continent, _) = continent(0, 12_345, &registry);
+            let generator = continent.river_generator();
             let map = generator.generate_rivers(17, -9, 0x1234_5678);
             assert_eq!(map.networks.len(), 38);
             let roots: Vec<_> = map
