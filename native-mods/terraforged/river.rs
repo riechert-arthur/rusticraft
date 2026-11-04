@@ -37,7 +37,7 @@
 use super::{
     terraforged::{
         CurveFunction, Domain, Line, Module, PI2, SourceKind, clamp, cos, java_max, java_min, lerp,
-        map, round, simplex, sin,
+        map, pack_seed, round, simplex, sin,
     },
     terraforged_continent::noise_warp,
     terraforged_engine::{
@@ -1515,7 +1515,7 @@ impl LegacyRiverCache {
         z: i32,
         generate: impl FnOnce(i32, i32, i64) -> Rivermap,
     ) -> Arc<Rivermap> {
-        let id = (i64::from(z) << 32) | (i64::from(x) & 0xffff_ffff);
+        let id = pack_seed(x, z);
         self.cache.get_or_generate(id, x, z, generate)
     }
 }
@@ -4778,7 +4778,7 @@ mod tests {
                     let center = nearest_center(px, pz);
                     let (x, z) = (unpack_left(center), unpack_right(center));
                     let id = if legacy_id {
-                        (i64::from(z) << 32) | (i64::from(x) & 0xffff_ffff)
+                        pack_seed(x, z)
                     } else {
                         pack(x, z)
                     };
@@ -4929,11 +4929,9 @@ mod tests {
             };
             let center = continent.nearest_center(1000.0, -2000.0);
             let (x, z) = (unpack_left(center), unpack_right(center));
-            let map = continent.river_generator().generate_rivers(
-                x,
-                z,
-                (i64::from(z) << 32) | (i64::from(x) & 0xffff_ffff),
-            );
+            let map = continent
+                .river_generator()
+                .generate_rivers(x, z, pack_seed(x, z));
             assert_eq!((x, z), (538, -8737));
             let roots: Vec<_> = map
                 .networks

@@ -24,7 +24,7 @@
 
 use std::sync::{Arc, RwLock};
 
-use super::terraforged::{java_max, java_min, lerp, map, round};
+use super::terraforged::{clamp, java_max, java_min, lerp, map, pack_seed, round};
 use super::terraforged_engine::{
     Cell, ControlPoints, Levels, Terrain, TerrainProperties, TerrainRegistry, WorldControlPoints,
 };
@@ -321,6 +321,7 @@ impl ErosionBrushes {
     }
 }
 
+/// Engine's `Erosion.TerrainPos`: the droplet's bilinearly interpolated height and gradient.
 #[derive(Clone, Copy, Debug, Default)]
 struct TerrainPosition {
     height: f32,
@@ -329,6 +330,8 @@ struct TerrainPosition {
 }
 
 impl TerrainPosition {
+    /// `at(nodes, mapSize, posX, posY)`. `(int)` of a NaN position is 0 in Java and Rust alike;
+    /// negative positions never get here.
     fn at(&mut self, cells: &[Cell], map_size: usize, position_x: f32, position_y: f32) {
         let coordinate_x = position_x as usize;
         let coordinate_y = position_y as usize;
@@ -350,6 +353,11 @@ impl TerrainPosition {
     }
 }
 
+/// Engine's `Erosion` filter: hydraulic erosion by water droplets. For each iteration and each
+/// chunk of the map, one droplet starts at a random block of the chunk (a `FastRandom` seeded by
+/// the chunk's world position and the iteration, so neighbouring tiles agree) and runs downhill for
+/// up to `droplet_lifetime` steps, eroding cells through the radius-4 brush and depositing
+/// sediment bilinearly; each change is scaled by the filter's `Modifier`.
 #[derive(Debug)]
 pub struct Erosion {
     erode_speed: f32,
@@ -364,6 +372,7 @@ pub struct Erosion {
 }
 
 impl Erosion {
+    /// `new Erosion(seed, mapSize, settings, modifier)`: builds the brushes for `map_size`.
     pub fn new(seed: i32, map_size: usize, settings: ErosionSettings, modifier: Modifier) -> Self {
         Self {
             erode_speed: settings.erosion_rate,
@@ -378,6 +387,8 @@ impl Erosion {
         }
     }
 
+    /// `Erosion.factory(context).apply(mapSize)`: seed `context.seed.root() + 12768` (Java `int`
+    /// wrap) and `Modifier.range(levels.ground, levels.ground(15))`, not inverted.
     pub fn factory(
         root_seed: i32,
         map_size: usize,
@@ -392,10 +403,14 @@ impl Erosion {
         )
     }
 
+    /// `getSize()`: the map size the brushes were built for.
     pub fn size(&self) -> usize {
         self.map_size
     }
 
+    /// `apply(map, regionX, regionZ, iterationsPerChunk)`: the region coordinates are unused, as in
+    /// Engine. As in Engine, droplets index the map with its own `total` size while the brushes
+    /// belong to the size this filter was built for; `WorldErosion` keeps the two equal.
     pub fn apply(
         &self,
         map: &mut impl Filterable,
@@ -403,12 +418,13 @@ impl Erosion {
         _region_z: i32,
         iterations: i32,
     ) {
+        // Java `int` arithmetic throughout, as in Engine.
         let chunk_x = map.block_x() >> 4;
         let chunk_z = map.block_z() >> 4;
-        let length_chunks = map.total_size() >> 4;
-        let border_chunks = map.border_size() >> 4;
         let map_size = map.total_size();
-        let max_position = (map_size - 2) as f32;
+        let length_chunks = map_size as i32 >> 4;
+        let border_chunks = map.border_size() as i32 >> 4;
+        let max_position = (map_size as i32).wrapping_sub(2) as f32;
         let cells = map.backing_mut();
         let mut first = TerrainPosition::default();
         let mut second = TerrainPosition::default();
@@ -416,27 +432,40 @@ impl Erosion {
             let iteration_seed = pack_seed(self.seed, iteration);
             for chunk_offset_z in 0..length_chunks {
                 let relative_z = chunk_offset_z << 4;
-                let seed_z = chunk_z + chunk_offset_z as i32 - border_chunks as i32;
+                let seed_z = chunk_z
+                    .wrapping_add(chunk_offset_z)
+                    .wrapping_sub(border_chunks);
                 for chunk_offset_x in 0..length_chunks {
                     let relative_x = chunk_offset_x << 4;
-                    let seed_x = chunk_x + chunk_offset_x as i32 - border_chunks as i32;
-                    let chunk_seed = pack_seed(seed_x, seed_z);
-                    let mut random = FastRandom::seeded(chunk_seed, iteration_seed);
-                    let position_x =
-                        (relative_x as f32 + random.next_int(16) as f32).clamp(1.0, max_position);
-                    let position_y =
-                        (relative_z as f32 + random.next_int(16) as f32).clamp(1.0, max_position);
-                    self.apply_drop(position_x, position_y, cells, &mut first, &mut second);
+                    let seed_x = chunk_x
+                        .wrapping_add(chunk_offset_x)
+                        .wrapping_sub(border_chunks);
+                    let mut random = FastRandom::seeded(pack_seed(seed_x, seed_z), iteration_seed);
+                    // `relX + random.nextInt(16)` is an `int` sum, then a float.
+                    let position_x = relative_x.wrapping_add(random.next_int(16)) as f32;
+                    let position_y = relative_z.wrapping_add(random.next_int(16)) as f32;
+                    let position_x = clamp(position_x, 1.0, max_position);
+                    let position_y = clamp(position_y, 1.0, max_position);
+                    self.apply_drop(
+                        position_x,
+                        position_y,
+                        cells,
+                        map_size,
+                        &mut first,
+                        &mut second,
+                    );
                 }
             }
         }
     }
 
+    /// `applyDrop(posX, posY, cells, mapSize, gradient1, gradient2)`.
     fn apply_drop(
         &self,
         mut position_x: f32,
         mut position_y: f32,
         cells: &mut [Cell],
+        map_size: usize,
         first: &mut TerrainPosition,
         second: &mut TerrainPosition,
     ) {
@@ -447,13 +476,14 @@ impl Erosion {
         let mut water = self.initial_water_volume;
         *first = TerrainPosition::default();
         *second = TerrainPosition::default();
+        let last = (map_size - 1) as f32;
         for _ in 0..self.max_droplet_lifetime {
             let node_x = position_x as usize;
             let node_y = position_y as usize;
-            let droplet_index = node_y * self.map_size + node_x;
+            let droplet_index = node_y * map_size + node_x;
             let cell_offset_x = position_x - node_x as f32;
             let cell_offset_y = position_y - node_y as f32;
-            first.at(cells, self.map_size, position_x, position_y);
+            first.at(cells, map_size, position_x, position_y);
             direction_x = direction_x * 0.05 - first.gradient_x * 0.95;
             direction_y = direction_y * 0.05 - first.gradient_y * 0.95;
             let mut length =
@@ -467,15 +497,17 @@ impl Erosion {
             }
             position_x += direction_x;
             position_y += direction_y;
+            // Engine's test as written: a NaN direction or position passes it, and the droplet
+            // carries on from cell 0 (`(int) NaN` is 0).
             if (direction_x == 0.0 && direction_y == 0.0)
                 || position_x < 0.0
-                || position_x >= (self.map_size - 1) as f32
+                || position_x >= last
                 || position_y < 0.0
-                || position_y >= (self.map_size - 1) as f32
+                || position_y >= last
             {
                 return;
             }
-            second.at(cells, self.map_size, position_x, position_y);
+            second.at(cells, map_size, position_x, position_y);
             let height_delta = second.height - first.height;
             let sediment_capacity = java_max(-height_delta * speed * water * 4.0, 0.01);
             if sediment > sediment_capacity || height_delta > 0.0 {
@@ -494,11 +526,11 @@ impl Erosion {
                     deposit * cell_offset_x * (1.0 - cell_offset_y),
                 );
                 self.deposit(
-                    &mut cells[droplet_index + self.map_size],
+                    &mut cells[droplet_index + map_size],
                     deposit * (1.0 - cell_offset_x) * cell_offset_y,
                 );
                 self.deposit(
-                    &mut cells[droplet_index + self.map_size + 1],
+                    &mut cells[droplet_index + map_size + 1],
                     deposit * cell_offset_x * cell_offset_y,
                 );
             } else {
@@ -537,10 +569,6 @@ impl Erosion {
             cell.erosion -= change;
         }
     }
-}
-
-fn pack_seed(x: i32, z: i32) -> i64 {
-    (u64::from(x as u32) | (u64::from(z as u32) << 32)) as i64
 }
 
 /// Engine's `Smoothing` filter: pulls each cell's height towards the weighted mean of the present
@@ -1352,87 +1380,251 @@ mod tests {
         );
     }
 
-    #[test]
-    fn hydraulic_erosion_matches_engine_0_3_0() {
-        struct ErosionMap {
-            cells: Vec<Cell>,
+    /// A map for the hydraulic erosion oracle: `total = size + 2 * border` (Engine's `Size`) at a
+    /// block position.
+    struct ErosionMap {
+        total: usize,
+        border: usize,
+        block_x: i32,
+        block_z: i32,
+        cells: Vec<Cell>,
+    }
+
+    impl Filterable for ErosionMap {
+        fn block_x(&self) -> i32 {
+            self.block_x
         }
 
-        impl Filterable for ErosionMap {
-            fn block_x(&self) -> i32 {
-                -32
-            }
-
-            fn block_z(&self) -> i32 {
-                48
-            }
-
-            fn total_size(&self) -> usize {
-                48
-            }
-
-            fn border_size(&self) -> usize {
-                16
-            }
-
-            fn backing(&self) -> &[Cell] {
-                &self.cells
-            }
-
-            fn backing_mut(&mut self) -> &mut [Cell] {
-                &mut self.cells
-            }
+        fn block_z(&self) -> i32 {
+            self.block_z
         }
 
-        let registry = &TerrainRegistry::new();
-        let total = 48;
-        let cells = (0..total)
-            .flat_map(|z| {
-                (0..total).map(move |x| {
-                    let index = z * total + x;
-                    let mut cell = Cell::new(registry);
-                    cell.value = 0.28 + ((x * 13 + z * 7 + x * z) % 31) as f32 / 1_000.0;
-                    cell.river_mask = if index % 37 == 0 { 0.05 } else { 1.0 };
-                    cell.terrain_region_edge = (index % 5) as f32 * 0.03;
-                    cell.erosion_mask = index % 113 == 0;
-                    cell
-                })
+        fn total_size(&self) -> usize {
+            self.total
+        }
+
+        fn border_size(&self) -> usize {
+            self.border
+        }
+
+        fn backing(&self) -> &[Cell] {
+            &self.cells
+        }
+
+        fn backing_mut(&mut self) -> &mut [Cell] {
+            &mut self.cells
+        }
+    }
+
+    /// The cell map `ErosionOracle.java` builds for case `salt`: sloped heights with hashed noise
+    /// (`special` 1 adds NaN, infinite and -0.0 heights; 2 lowers every height below the
+    /// modifier's range), the smoothing oracle's river masks, region edges, erosion masks and
+    /// none/badlands/hills/mountains terrains.
+    fn erosion_cells(
+        registry: &TerrainRegistry,
+        total: usize,
+        salt: i32,
+        special: i32,
+    ) -> Vec<Cell> {
+        let terrains = ["none", "badlands", "hills", "mountains"]
+            .map(|name| registry.get_by_name(name).expect("built-in terrain"));
+        let total = total as i32;
+        (0..total * total)
+            .map(|index| {
+                let (x, z) = (index % total, index / total);
+                let mut h = index
+                    .wrapping_mul(7919)
+                    .wrapping_add(salt.wrapping_mul(104_729));
+                h ^= ((h as u32) >> 13) as i32;
+                h = h.wrapping_mul(0x5bd1_e995);
+                h ^= ((h as u32) >> 15) as i32;
+                let mut cell = Cell::new(registry);
+                let base = ((x * x + 3 * z + salt) % 97) as f32 / 400.0 + 0.2;
+                cell.value = base + (((h as u32) >> 8) & 0xFFFF) as f32 / 2_000_000.0;
+                if special == 2 {
+                    cell.value -= 0.6;
+                }
+                if special == 1 {
+                    match h & 127 {
+                        5 => cell.value = f32::NAN,
+                        6 => cell.value = f32::INFINITY,
+                        7 => cell.value = -0.0,
+                        8 => cell.value = f32::NEG_INFINITY,
+                        _ => {}
+                    }
+                }
+                cell.river_mask = match ((h as u32) >> 4) & 7 {
+                    0 => 0.001,
+                    1 => 0.05,
+                    2 => 0.0999,
+                    3 => 0.1,
+                    _ => 1.0,
+                };
+                cell.terrain_region_edge = (((h as u32) >> 24) & 63) as f32 / 256.0;
+                cell.erosion_mask = h & 63 == 17;
+                cell.terrain = terrains[(((h as u32) >> 1) & 3) as usize].clone();
+                cell
             })
-            .collect();
-        let mut map = ErosionMap { cells };
-        let levels = Levels::new(256, 63);
-        Erosion::factory(12_345, total, ErosionSettings::default(), levels)
-            .apply(&mut map, 99, -77, 2);
+            .collect()
+    }
 
-        let expected = [
-            (12, 0x3e8fdec3, 0xb66fcb70, 0),
-            (13, 0x3e968542, 0xb7745ea9, 0),
-            (14, 0x3e9d12b7, 0xb96321be, 0),
-            (15, 0x3e93c4b5, 0xb9cc66c8, 0),
-            (16, 0x3e9a199e, 0xba862106, 0),
-            (17, 0x3e90e4cf, 0xba83a375, 0),
-            (18, 0x3e971f22, 0xbaf1407e, 0),
-            (19, 0x3e9d7402, 0xbb22285d, 0),
-            (20, 0x3e946e35, 0xbb0dde5f, 0x388ebcc2),
-            (21, 0x3e9aa9d5, 0xbb3f9b74, 0x352c9cfa),
-            (22, 0x3e9276a3, 0xbb01abbe, 0x3a8850a8),
-            (23, 0x3e9851d4, 0xbb2420c7, 0x36754feb),
-            (24, 0x3e8fec69, 0xbab2ec9e, 0x39f42625),
-            (25, 0x3e965ad2, 0xbaaf8cde, 0x358992f7),
-            (26, 0x3e9d21a4, 0xba9089d6, 0),
-            (27, 0x3e9447d0, 0xb9cc4573, 0),
+    /// Replays `ErosionOracle.java` (`.local/terraforged/oracles/erosion/`), which runs Engine's
+    /// `Erosion.apply` (built as `Erosion.Factory` builds it) on 16 maps: default and custom
+    /// settings (long and zero lifetimes, rates above 1, zero volume and velocity), several root
+    /// seeds (including `i32::MAX`, whose `+ 12768` wraps, and `i32::MIN`), block positions with
+    /// negative, extreme and non-chunk-aligned coordinates, totals of 0, 1, 15 (no whole chunk), 16,
+    /// 20, 32, 48 and 64 with and without borders, zero and negative iteration counts, NaN/infinite
+    /// heights, and heights below the modifier's range. Each line folds every cell's value, erosion
+    /// and sediment bits (NaNs canonical, `fold * 31 + bits`, from 17) and lists every 97th cell's
+    /// three bit patterns from cell 13.
+    #[test]
+    fn hydraulic_erosion_matches_engine_oracle() {
+        let registry = TerrainRegistry::new();
+        // size, border, block x, block z, root seed, iterations, height, sea level, special,
+        // and settings (lifetime, volume, velocity, erosion rate, deposit rate) or the defaults.
+        type Settings = Option<(i32, f32, f32, f32, f32)>;
+        let cases: [(usize, usize, i32, i32, i32, i32, i32, i32, i32, Settings); 16] = [
+            (16, 16, -32, 48, 12_345, 2, 256, 63, 0, None),
+            (32, 0, 0, 0, -7, 1, 256, 63, 0, None),
+            (
+                32,
+                16,
+                1000,
+                -2000,
+                i32::MAX,
+                3,
+                384,
+                127,
+                0,
+                Some((30, 1.2, 0.3, 0.9, 0.2)),
+            ),
+            (8, 4, -17, -1, 0, 1, 256, 63, 0, None),
+            (10, 5, 5, 33, 99, 2, 256, 63, 0, None),
+            (16, 16, -32, 48, 12_345, 0, 256, 63, 0, None),
+            (16, 16, -32, 48, 12_345, -2, 256, 63, 0, None),
+            (
+                16,
+                16,
+                -32,
+                48,
+                12_345,
+                1,
+                256,
+                63,
+                0,
+                Some((0, 0.7, 0.7, 0.5, 0.5)),
+            ),
+            (16, 16, 77, -301, 4242, 2, 256, 63, 1, None),
+            (
+                16,
+                16,
+                -32,
+                48,
+                -123_456_789,
+                1,
+                256,
+                63,
+                0,
+                Some((20, 0.0, 0.0, 2.0, 1.5)),
+            ),
+            (0, 16, i32::MAX, i32::MIN, i32::MIN, 2, 256, 63, 0, None),
+            (15, 0, 0, 0, 1, 3, 256, 63, 0, None),
+            (1, 0, 0, 0, 1, 3, 256, 63, 0, None),
+            (0, 0, 0, 0, 1, 3, 256, 63, 0, None),
+            (
+                24,
+                12,
+                -4096,
+                4095,
+                31_337,
+                2,
+                64,
+                300,
+                2,
+                Some((64, 0.9, 1.0, 0.7, 0.7)),
+            ),
+            (
+                16,
+                16,
+                160,
+                160,
+                555,
+                4,
+                320,
+                62,
+                0,
+                Some((12, 0.5, 0.1, 0.3, 0.9)),
+            ),
         ];
-        for (index, value, erosion, sediment) in expected {
-            assert_eq!(
-                (
-                    map.cells[index].value.to_bits(),
-                    map.cells[index].erosion.to_bits(),
-                    map.cells[index].sediment.to_bits(),
-                ),
-                (value, erosion, sediment),
-                "cell {index}"
-            );
+        let canonical = |value: f32| {
+            if value.is_nan() {
+                0x7fc0_0000
+            } else {
+                value.to_bits()
+            }
+        };
+        let mut out = String::new();
+        for (
+            case,
+            (size, border, block_x, block_z, root, iterations, height, sea_level, special, custom),
+        ) in cases.into_iter().enumerate()
+        {
+            let total = size + 2 * border;
+            let mut settings = ErosionSettings::default();
+            if let Some((lifetime, volume, velocity, erosion_rate, deposit_rate)) = custom {
+                settings.droplet_lifetime = lifetime;
+                settings.droplet_volume = volume;
+                settings.droplet_velocity = velocity;
+                settings.erosion_rate = erosion_rate;
+                settings.deposit_rate = deposit_rate;
+            }
+            let mut map = ErosionMap {
+                total,
+                border,
+                block_x,
+                block_z,
+                cells: erosion_cells(&registry, total, case as i32, special),
+            };
+            Erosion::factory(root, total, settings, Levels::new(height, sea_level))
+                .apply(&mut map, 123, -456, iterations);
+            let (mut values, mut erosion, mut sediment) = (17_i64, 17_i64, 17_i64);
+            let mut samples = String::new();
+            for (index, cell) in map.cells.iter().enumerate() {
+                let bits = [cell.value, cell.erosion, cell.sediment].map(canonical);
+                values = values
+                    .wrapping_mul(31)
+                    .wrapping_add(i64::from(bits[0] as i32));
+                erosion = erosion
+                    .wrapping_mul(31)
+                    .wrapping_add(i64::from(bits[1] as i32));
+                sediment = sediment
+                    .wrapping_mul(31)
+                    .wrapping_add(i64::from(bits[2] as i32));
+                if index % 97 == 13 {
+                    samples += &format!(" {:08x}/{:08x}/{:08x}", bits[0], bits[1], bits[2]);
+                }
+            }
+            out += &format!("{case} {values:016x} {erosion:016x} {sediment:016x}{samples}\n");
         }
+        assert_eq!(
+            out,
+            "0 f3167f96b4281c91 fc4c6b903685c9e2 49555b2275b486c5 3ec5246c/bbbfd6c6/00000000 3e67fb48/00000000/00000000 3ea7e36d/00000000/00000000 3ed626f6/00000000/00000000 3e83e931/00000000/00000000 3ebbc0e4/00000000/00000000 3e6b0f8c/00000000/00000000 3eb7b0f7/00000000/00000000 3e670282/00000000/00000000 3eb61554/00000000/00000000 3e7a265f/00000000/00000000 3ebc56f8/00000000/00000000 3e8605ff/00000000/00000000 3ec947cf/00000000/00000000 3e954d01/bb74debc/00000000 3e595422/00000000/00000000 3eba8e6c/baeee77b/00000000 3e9b35f4/00000000/00000000 3e6215db/00000000/00000000 3ecb0835/00000000/00000000 3ea01659/00000000/00000000 3e871088/00000000/00000000 3eeae200/00000000/00000000 3ed479e5/00000000/00000000\n\
+             1 184f407583c9baa9 c62829d0a80a4087 4b9af0e5438fe576 3ec79ea4/bb45ceaa/00000000 3e79ad86/00000000/00000000 3eb4c85e/baeb726e/00000000 3eddb414/00000000/00000000 3e980bdc/00000000/00000000 3ecdb995/00000000/00000000 3e9850df/00000000/00000000 3ed2394f/00000000/00000000 3e9bfb7b/00000000/00000000 3ecedd16/00000000/00000000 3e98eb14/00000000/00000000\n\
+             2 8ef19c54fb6028cb 00c4c5ef59b94499 badd6ce0a30f101b 3ecceef1/00000000/00000000 3edea1e4/bba4e06b/00000000 3ea26e65/00000000/00000000 3ee228db/bac7c434/00000000 3e8c9f95/00000000/00000000 3e55cc42/00000000/00000000 3e5d931d/00000000/00000000 3e830f7c/00000000/00000000 3edb9887/bccb112f/00000000 3eb2c341/b83b05fd/00000000 3edbc83b/00000000/00000000 3edcea8e/00000000/00000000 3e5af20e/00000000/00000000 3e94adbd/00000000/00000000 3e82bbed/00000000/00000000 3ed958da/00000000/00000000 3ea2da88/00000000/00000000 3e9bf8ec/00000000/00000000 3ec62b17/00000000/00000000 3edccaa0/b9f88ef1/00000000 3e8c3ab9/00000000/00000000 3e72ccf7/00000000/00000000 3ebb83ea/bb0832ab/00000000 3e90998d/00000000/00000000 3e8bfee2/00000000/00000000 3eb397e4/ba1f10c2/00000000 3edac4a0/ba8cec35/00000000 3ee8270f/00000000/00000000 3ec7a94c/00000000/00000000 3ea74a78/00000000/00000000 3ea4b231/00000000/00000000 3edfe998/bc128562/00000000 3ea5652c/00000000/00000000 3eb5c2b5/bbaafeca/00000000 3ea204c1/00000000/00000000 3e9ab28e/00000000/00000000 3ea7be77/00000000/00000000 3e802bc7/00000000/00000000 3eb17a44/b8e2a283/00000000 3ed7853a/bcc6381c/00000000 3edce161/00000000/00000000 3ed4139a/bca0e3f6/00000000 3e87f21c/00000000/00000000\n\
+             3 c56218d42d278c02 f804c1cb2083d9d0 88ccc0f8667cb097 3ed345e3/ba056aaf/00000000 3e8406af/00000000/00000000 3ec35dbc/00000000/00000000\n\
+             4 f1ac805478090785 dc31ecfc06fef576 e58b0d1afaaef2cc 3ece8112/00000000/00000000 3e8e6b0d/00000000/00000000 3ed24d5d/00000000/00000000 3ec236a0/00000000/00000000\n\
+             5 8bb0d5d454363821 21583428833ae011 21583428833ae011 3ecccdfa/00000000/00000000 3e87545c/00000000/00000000 3ea9ca7d/00000000/00000000 3ed82050/00000000/00000000 3e8c64aa/00000000/00000000 3eca0664/00000000/00000000 3e7eb4a6/00000000/00000000 3eb645b2/00000000/00000000 3e6abead/00000000/00000000 3eb543af/00000000/00000000 3e79f6cb/00000000/00000000 3ec5c348/00000000/00000000 3e8f914f/00000000/00000000 3ed79304/00000000/00000000 3eabb1af/00000000/00000000 3e6bc98a/00000000/00000000 3ecdfcc2/00000000/00000000 3ea161a2/00000000/00000000 3e65614e/00000000/00000000 3ec9e2cd/00000000/00000000 3eabe9a7/00000000/00000000 3e9490f7/00000000/00000000 3e743633/00000000/00000000 3ede412d/00000000/00000000\n\
+             6 9a72408b24cb5f17 21583428833ae011 21583428833ae011 3ed3deb5/00000000/00000000 3e7726d0/00000000/00000000 3eab4d6a/00000000/00000000 3ee3adb1/00000000/00000000 3e8c7c64/00000000/00000000 3ec9ad21/00000000/00000000 3e861577/00000000/00000000 3ec2429f/00000000/00000000 3e7569f5/00000000/00000000 3ebf4342/00000000/00000000 3e83bd7b/00000000/00000000 3ec695ea/00000000/00000000 3e871e4b/00000000/00000000 3ed0b956/00000000/00000000 3ea48ba8/00000000/00000000 3e684a95/00000000/00000000 3ec2223e/00000000/00000000 3ea77f39/00000000/00000000 3e6caa54/00000000/00000000 3ec977fa/00000000/00000000 3eaff9c6/00000000/00000000 3e98c7e3/00000000/00000000 3e5f3494/00000000/00000000 3ed6ff3b/00000000/00000000\n\
+             7 8ee8380b58cddbaf 21583428833ae011 21583428833ae011 3ed6cc3e/00000000/00000000 3e773bca/00000000/00000000 3eb4e443/00000000/00000000 3ee43926/00000000/00000000 3e9a9920/00000000/00000000 3ec06e3b/00000000/00000000 3e89cf79/00000000/00000000 3ec09258/00000000/00000000 3e7e9122/00000000/00000000 3ebd76ac/00000000/00000000 3e79819d/00000000/00000000 3ec25615/00000000/00000000 3e92a066/00000000/00000000 3ed0c6b5/00000000/00000000 3e9f9757/00000000/00000000 3e71e908/00000000/00000000 3ecd1a97/00000000/00000000 3ea1d69e/00000000/00000000 3e6476f2/00000000/00000000 3ed01051/00000000/00000000 3eac9070/00000000/00000000 3e95ad86/00000000/00000000 3e660dcc/00000000/00000000 3ed2b52d/00000000/00000000\n\
+             8 2e0bd8dd5018cd18 025879494994df6f 5940a2df9ff4d018 7fc00000/7fc00000/00000000 7fc00000/7fc00000/00000000 7fc00000/7fc00000/3cbd8404 3edafa26/ba89a97c/00000000 3e8f762e/00000000/00000000 3ed027e9/00000000/00000000 3e84941d/00000000/00000000 7f800000/00000000/00000000 3e8462f6/00000000/00000000 3eb4ab61/00000000/00000000 3e73dafa/00000000/00000000 7fc00000/7fc00000/00000000 7fc00000/7fc00000/00000000 7fc00000/7fc00000/00000000 3eaf1f79/00000000/00000000 3e75dd4c/00000000/00000000 7fc00000/7fc00000/00000000 7fc00000/7fc00000/00000000 3e82eddd/00000000/00000000 3ed7e22f/00000000/00000000 80000000/00000000/00000000 7fc00000/7fc00000/00000000 7fc00000/7fc00000/00000000 7fc00000/7fc00000/00000000\n\
+             9 f6c11875bf21a027 c2dcff95341ece8b def4733483a2f752 3ecf93d0/bb93675b/00000000 3e8651bf/ba43f236/39ffd11b 3eb01ecd/b9bf1682/00000000 3ee69846/00000000/00000000 3e965e68/00000000/00000000 3ed1a5ca/00000000/00000000 3e864733/b8088d89/00000000 3ec14223/bb45f015/00000000 3e6e2952/00000000/00000000 3ec4916d/00000000/00000000 3e7df118/00000000/00000000 3ec48399/00000000/00000000 3e8f8690/00000000/00000000 3ed7bb62/00000000/00000000 3ea63ed1/00000000/00000000 3e729671/00000000/00000000 3ed2e260/bb0f455b/00000000 3ea18612/bba43a08/3c2ae1c7 3e70d952/00000000/00000000 3ecfbe1c/bb335a0f/00000000 3eac51db/bb138e0e/00000000 3e8de7f6/bb2e1178/3b6fb97c 3e6f2474/00000000/00000000 3edfd7a7/bb423d83/00000000\n\
+             10 eb4011d58b0b1d52 a18ab4d3146d1d7c 5f81d97df7ecfb74 3ed6c5b0/00000000/00000000 3e851e33/b96947ce/00000000 3eb8c972/bbea752a/00000000 3e5a7e74/00000000/00000000 3ea72581/00000000/00000000 3ed82046/bc0fdf47/00000000 3e9d79b3/bc4dce63/00000000 3edae6fc/00000000/00000000 3e974694/bc4dc2c2/00000000 3edf56e7/bb43245f/00000000 3eae7008/00000000/00000000\n\
+             11 0d26e98df415339c c61af487c3741e0f c61af487c3741e0f 3ed4651f/00000000/00000000 3ebd819d/00000000/00000000 3e574689/00000000/00000000\n\
+             12 000000003e7d5dba 000000000000020f 000000000000020f\n\
+             13 0000000000000011 0000000000000011 0000000000000011\n\
+             14 15952d94fca6e34b 21583428833ae011 21583428833ae011 be395054/00000000/00000000 beaf9b68/00000000/00000000 be7270f4/00000000/00000000 be0ef73e/00000000/00000000 be97c116/00000000/00000000 be470134/00000000/00000000 beac0b58/00000000/00000000 be648d3c/00000000/00000000 beb5202a/00000000/00000000 be66fe94/00000000/00000000 beaca927/00000000/00000000 be5bb66a/00000000/00000000 be991666/00000000/00000000 be289248/00000000/00000000 be892265/00000000/00000000 beac3f3e/00000000/00000000 be3645c6/00000000/00000000 be8c73ad/00000000/00000000 bead8949/00000000/00000000 be3c113c/00000000/00000000 be742d08/00000000/00000000 be906813/00000000/00000000 beb56431/00000000/00000000 be195a6e/00000000/00000000\n\
+             15 593fbcd3819527e3 d62d83ad053260bc a1d85b4e18dd9ea8 3ee600d8/b9a66084/00000000 3e876e82/00000000/00000000 3ebc62a2/00000000/00000000 3eef3fb8/00000000/00000000 3e9d409b/00000000/00000000 3ecd78d4/00000000/00000000 3e954c01/00000000/00000000 3ebfcaf9/ba0f6a7a/00000000 3e84ad81/b97d03c0/00000000 3ec8c975/00000000/00000000 3e9151d6/00000000/00000000 3ecbff8a/00000000/00000000 3e93f1a6/00000000/00000000 3ee38ef4/00000000/00000000 3eab7e5e/00000000/00000000 3e781302/00000000/00000000 3ecbb2bc/00000000/00000000 3ea2ed57/00000000/00000000 3e7da816/00000000/00000000 3ee4de5e/00000000/00000000 3ebbf00b/b98f01ba/00000000 3ea3f08f/bb23ab03/00000000 3e8558ff/bbe7c48a/3c07533f 3edc6890/bbbfc014/00000000\n"
+        );
     }
 
     #[test]
@@ -1530,9 +1722,5 @@ mod tests {
              2147483647 -> 2147483647 #2 [validate 8192 2147483647, validate 8192 2147483647, build 2147483647]\n\
              0 -> 2147483647 #2 [validate 2147483647 0]\n"
         );
-    }
-
-    fn pack_seed(x: i32, z: i32) -> i64 {
-        (u64::from(x as u32) | (u64::from(z as u32) << 32)) as i64
     }
 }
