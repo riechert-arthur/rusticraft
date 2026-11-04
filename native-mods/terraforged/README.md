@@ -984,8 +984,16 @@ factory) on the factory's pool, which becomes the generator's listener. The test
 fill until released), tiles bit for bit the synchronous generator's (plain, zoomed, batched and striped), failures on
 both pools, listener delegation and capture, the factory's caches, and eight calls for one region making eight tiles.
 
-Climate primitives now include TerraForged's range compressor, latitude temperature curve, and
-frequency-scaled moisture shaping as composable noise modules with Java-oracle raw-bit fixtures.
+The climate-primitives layer adds Engine's `world.climate` building blocks (`climate.rs`): `Compressor` (squeezes a
+module's middle band and stretches its ends), `Temperature` (a latitude band from `NoiseUtil`'s sine table) and
+`Moisture` (a one-octave simplex clamped to 0.125..0.875 and stretched, sampled at half the x frequency); `module()`
+turns each into a graph node with the `Noise` default bounds 0..1. Their powers are `NoiseUtil.pow(float, int)`
+(repeated float products, 1 for a negative power; noise.rs `pow_int`), not `Math.pow`, and their signs
+`NoiseUtil.copySign` (noise.rs `copy_sign`, which leaves zeros and NaNs alone). The test replays `ClimateOracle.java`
+(in `.local/terraforged/oracles/climate/`): compressors with edge-case insets and ranges, temperatures over nine
+frequencies and eleven powers, moisture over a module and over seeds, scales and powers, each over 41 inputs from
+-0.0 and subnormals to ±infinity and NaN, and a few raw samples. The climate settings and the `Climate` stage are
+later layers.
 
 ## Status: development only
 
