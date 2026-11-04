@@ -26,7 +26,8 @@ use super::terraforged_river::{Rivermap, current_time_millis};
 use std::collections::{HashMap, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, RwLock, mpsc};
+use std::thread;
 
 /// Engine 0.3.0's `LazyCallable` (`com.terraforged.engine.concurrent.task`), the deferred value
 /// behind `TileGenerator.getTile` (`CallableTile`, `CallableZoomTile`): `create` runs on the first
@@ -118,17 +119,119 @@ struct TaskOutcome {
     failure: OnceLock<String>,
 }
 
+impl TaskOutcome {
+    /// Records a panicked task's message, which every later `get`/`call` panics with.
+    fn fail(&self, payload: &(dyn std::any::Any + Send)) {
+        let message = payload
+            .downcast_ref::<&str>()
+            .map(|message| (*message).to_owned())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_default();
+        let _ = self
+            .failure
+            .set(format!("cache entry task panicked: {message}"));
+    }
+
+    /// Panics with the recorded failure, if the task panicked.
+    fn rethrow(&self) {
+        if let Some(failure) = self.failure.get() {
+            panic!("{failure}");
+        }
+    }
+}
+
 /// The entry's task, boxed so that `CacheEntry` can name the [`LazyCallable`] that runs it.
 type Task<'a, T> = Box<dyn Fn() -> T + Send + Sync + 'a>;
+
+/// A job queued on a [`ThreadPool`]'s task threads.
+type Job = Box<dyn FnOnce() + Send>;
+
+/// The task threads of a [`ThreadPool`]: Engine's fixed `TF-Task` executor, one FIFO queue.
+struct TaskThreads {
+    threads: i32,
+    queue: mpsc::Sender<Job>,
+    jobs: Arc<Mutex<mpsc::Receiver<Job>>>,
+    started: Mutex<i32>,
+}
+
+/// Engine 0.3.0's `ThreadPool` (`com.terraforged.engine.concurrent.thread`) as
+/// [`CacheEntry::compute_async`] submits to it: [`ThreadPool::NONE`] (Engine's `EmptyThreadPool`)
+/// or [`ThreadPool::create`] (Engine's `BatchingThreadPool`, whose task executor runs the entries).
+///
+/// Engine's `ThreadPools.create` hands out one shared pool per size and shuts the previous one down;
+/// here every `create` is its own pool. Its batch threads are `tile_generator.rs`'s scoped threads,
+/// not these. Clones share the task threads; once the last clone is dropped the
+/// threads finish the queued tasks and exit (Engine's daemon threads outlive an unreferenced pool).
+#[derive(Clone)]
+pub struct ThreadPool {
+    size: i32,
+    tasks: Option<Arc<TaskThreads>>,
+}
+
+impl ThreadPool {
+    /// `ThreadPools.NONE`: no threads; a task runs on the thread of the entry's first `get`.
+    pub const NONE: Self = Self {
+        size: 0,
+        tasks: None,
+    };
+
+    /// `BatchingThreadPool.of(size)` (`ThreadPools.create(size)`): `max(1, size / 2)` task threads,
+    /// named `TF-Task-Worker-<n>` and started one per submitted task until all exist (Engine's
+    /// `newFixedThreadPool`), taking tasks in submission order.
+    pub fn create(size: i32) -> Self {
+        let threads = (size / 2).max(1);
+        let (queue, jobs) = mpsc::channel();
+        Self {
+            size: threads.wrapping_add(size.max(2)),
+            tasks: Some(Arc::new(TaskThreads {
+                threads,
+                queue,
+                jobs: Arc::new(Mutex::new(jobs)),
+                started: Mutex::new(0),
+            })),
+        }
+    }
+
+    /// `size()`: the task threads plus `max(2, size)` batch threads; 0 for [`Self::NONE`].
+    pub const fn size(&self) -> i32 {
+        self.size
+    }
+
+    /// `submit(callable)` on the task threads, starting one more if not all exist yet.
+    fn submit(tasks: &TaskThreads, job: Job) {
+        tasks
+            .queue
+            .send(job)
+            .expect("the task threads hold the queue");
+        let mut started = tasks.started.lock().unwrap_or_else(PoisonError::into_inner);
+        if *started < tasks.threads {
+            *started += 1;
+            let jobs = Arc::clone(&tasks.jobs);
+            thread::Builder::new()
+                .name(format!("TF-Task-Worker-{started}"))
+                .spawn(move || {
+                    loop {
+                        let job = jobs.lock().unwrap_or_else(PoisonError::into_inner).recv();
+                        match job {
+                            Ok(job) => job(),
+                            Err(_) => break,
+                        }
+                    }
+                })
+                .expect("failed to start a TF-Task thread");
+        }
+    }
+}
 
 /// Engine 0.3.0's `CacheEntry` (`com.terraforged.engine.concurrent.cache`): a [`LazyCallable`] over a
 /// task, plus the last-access timestamp Engine's `Cache` expires it by.
 ///
-/// The task runs on the first `get`/`call`, on the calling thread, like Engine's `CacheEntry` over a
-/// task its first `task.get()` runs (Engine's async `computeAsync`/`then` are a later layer). As in
-/// [`LazyCallable`], callers arriving while it runs wait for it and all see the same value. The
-/// task runs at most once: like a failed Engine `Future`, a task that panicked makes every later
-/// `get`/`call` panic too, without running it again, and `is_done` reports it done.
+/// From [`Self::new`], the task runs on the first `get`/`call`, on the calling thread, like Engine's
+/// `CacheEntry` over a task its first `task.get()` runs; [`Self::compute_async`] and [`Self::then`]
+/// run it on a [`ThreadPool`]. As in [`LazyCallable`], callers arriving while it runs wait for it
+/// and all see the same value. Except on [`ThreadPool::NONE`], the task runs at most once: like a
+/// failed Engine `Future`, a task that panicked makes every later `get`/`call` panic too, without
+/// running it again, and `is_done` reports it done.
 /// A task that calls `get` or `call` on its own entry never returns, as with [`LazyCallable`].
 ///
 /// The timestamp is `System.currentTimeMillis()` (`river.rs`'s [`current_time_millis`]) at
@@ -155,28 +258,23 @@ impl<'a, T> CacheEntry<'a, T> {
         // `create()`: `task.get()`. The callable only calls this again after a panic, so the task
         // itself runs once; later calls repeat its failure, as Engine's failed `Future` rethrows.
         let create = move || {
-            if let Some(failure) = record.failure.get() {
-                panic!("{failure}");
-            }
+            record.rethrow();
             let result = catch_unwind(AssertUnwindSafe(&task));
             if let Err(payload) = &result {
-                let message = payload
-                    .downcast_ref::<&str>()
-                    .map(|message| (*message).to_owned())
-                    .or_else(|| payload.downcast_ref::<String>().cloned())
-                    .unwrap_or_default();
-                let _ = record
-                    .failure
-                    .set(format!("cache entry task panicked: {message}"));
+                record.fail(&**payload);
             }
             record.done.store(true, Ordering::Release);
             result.unwrap_or_else(|payload| resume_unwind(payload))
         };
+        Self::from_task(Box::new(create), outcome, clock)
+    }
+
+    fn from_task(create: Task<'a, T>, outcome: Arc<TaskOutcome>, clock: fn() -> i64) -> Self {
         Self {
             timestamp: AtomicI64::new(clock()),
             clock,
             outcome,
-            value: LazyCallable::new(Box::new(create)),
+            value: LazyCallable::new(create),
         }
     }
 
@@ -206,6 +304,82 @@ impl<'a, T> CacheEntry<'a, T> {
     /// not wait for a task another thread is running (Engine's `Future.isDone` does not either).
     pub fn is_done(&self) -> bool {
         self.outcome.done.load(Ordering::Acquire)
+    }
+}
+
+impl<T: Send + 'static> CacheEntry<'static, T> {
+    /// `CacheEntry.computeAsync(task, executor)`: the entry of `executor.submit(task)`.
+    ///
+    /// On a [`ThreadPool::create`] pool the task starts on a task thread now; `is_done` is `false`
+    /// until it ends (returning or panicking), and `get`/`call` wait for it. A panicked task makes
+    /// every `get`/`call` panic, without running it again (Engine's failed `Future`). On
+    /// [`ThreadPool::NONE`] (Engine's `adaptComplete`) `is_done` is `true` at once, the task runs on
+    /// the first `get`/`call`'s thread, and a task that panicked runs again on the next one. The
+    /// timestamp is the clock after the submit, then each `get`'s, as for [`Self::new`].
+    pub fn compute_async(
+        task: impl Fn() -> T + Send + Sync + 'static,
+        executor: &ThreadPool,
+    ) -> Self {
+        Self::compute_async_with_clock(task, executor, current_time_millis)
+    }
+
+    /// [`Self::compute_async`] reading the time from `clock` in place of `System.currentTimeMillis()`.
+    pub fn compute_async_with_clock(
+        task: impl Fn() -> T + Send + Sync + 'static,
+        executor: &ThreadPool,
+        clock: fn() -> i64,
+    ) -> Self {
+        let outcome = Arc::new(TaskOutcome::default());
+        let Some(tasks) = &executor.tasks else {
+            outcome.done.store(true, Ordering::Release);
+            return Self::from_task(Box::new(task), outcome, clock);
+        };
+        let record = Arc::clone(&outcome);
+        let (sender, receiver) = mpsc::sync_channel(1);
+        ThreadPool::submit(
+            tasks,
+            Box::new(move || {
+                let result = catch_unwind(AssertUnwindSafe(&task));
+                if let Err(payload) = &result {
+                    record.fail(&**payload);
+                }
+                record.done.store(true, Ordering::Release);
+                let _ = sender.send(result);
+            }),
+        );
+        let failed = Arc::clone(&outcome);
+        let receiver = Mutex::new(receiver);
+        // `create()`: `task.get()`, waiting for the task thread. The callable calls this again only
+        // after a panic, which then repeats the task's failure.
+        let create = move || {
+            failed.rethrow();
+            let result = receiver
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .recv();
+            match result {
+                Ok(result) => result.unwrap_or_else(|payload| resume_unwind(payload)),
+                Err(_) => {
+                    failed.rethrow();
+                    unreachable!("the task thread sends its outcome once")
+                }
+            }
+        };
+        Self::from_task(Box::new(create), outcome, clock)
+    }
+}
+
+impl<T: Send + Sync + 'static> CacheEntry<'static, T> {
+    /// `then(executor, function)`: `computeAsync(() -> function.apply(this.get()), executor)`, so
+    /// the new entry's task gets this entry (stamping its access time, and panicking if it failed)
+    /// on the executor's thread. The new entry reads this entry's clock.
+    pub fn then<V: Send + 'static>(
+        self: &Arc<Self>,
+        executor: &ThreadPool,
+        function: impl Fn(&T) -> V + Send + Sync + 'static,
+    ) -> CacheEntry<'static, V> {
+        let parent = Arc::clone(self);
+        CacheEntry::compute_async_with_clock(move || function(parent.get()), executor, self.clock)
     }
 }
 
@@ -815,6 +989,287 @@ c 16 1 1
 d 0 false true true
 d 1 false true true
 ";
+
+    /// Replays `CacheEntryOracle.java`'s async lines: Engine 0.3.0's `CacheEntry.computeAsync` and
+    /// `then` on `ThreadPools.create(4)` and on `ThreadPools.NONE`. On the pool the task runs on a
+    /// `TF-Task-Worker` thread (two at once), `isDone` is `false` while it runs and `get` waits for
+    /// it; a failure (the task's, or the parent's under `then`) is final. The timestamp is set at
+    /// creation and by `get` only; `then`'s task gets the parent, stamping it. On `NONE` the entry is
+    /// done at once, the task runs on the first getter's thread and a failure runs it again. The
+    /// clock is injected where the oracle sleeps.
+    #[test]
+    fn async_cache_entry_matches_engine_oracle() {
+        static NOW: AtomicI64 = AtomicI64::new(0);
+        fn now() -> i64 {
+            NOW.load(Ordering::SeqCst)
+        }
+        fn worker() -> bool {
+            thread::current()
+                .name()
+                .is_some_and(|name| name.starts_with("TF-Task-Worker-"))
+        }
+        let mut out = String::new();
+        let pool = ThreadPool::create(4);
+
+        let (started_tx, started) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel::<()>();
+        let (started_tx, release_rx) = (Mutex::new(started_tx), Mutex::new(release_rx));
+        let ran = Arc::new(Mutex::new(String::new()));
+        let ran_on = Arc::clone(&ran);
+        let a = CacheEntry::compute_async(
+            move || {
+                *ran_on.lock().unwrap() = thread::current().name().unwrap().to_owned();
+                started_tx.lock().unwrap().send(()).unwrap();
+                release_rx.lock().unwrap().recv().unwrap();
+                9
+            },
+            &pool,
+        );
+        started.recv().unwrap();
+        let during = a.is_done();
+        let (blocked_get, got) = blocked(release, || *a.get());
+        out += &format!(
+            "a {during} {blocked_get} {} {} {got} {} {}\n",
+            a.is_done(),
+            ran.lock().unwrap(),
+            a.cancel(true),
+            a.is_cancelled()
+        );
+
+        let (begun_tx, begun) = mpsc::channel();
+        let (go, go_rx) = mpsc::channel::<()>();
+        let (begun_tx, go_rx) = (Mutex::new(begun_tx), Arc::new(Mutex::new(go_rx)));
+        let begun_tx = Arc::new(begun_tx);
+        let busy: Vec<_> = (0..3)
+            .map(|_| {
+                let (begun_tx, go_rx) = (Arc::clone(&begun_tx), Arc::clone(&go_rx));
+                CacheEntry::compute_async(
+                    move || {
+                        begun_tx.lock().unwrap().send(()).unwrap();
+                        go_rx.lock().unwrap().recv().unwrap();
+                        worker()
+                    },
+                    &pool,
+                )
+            })
+            .collect();
+        begun.recv().unwrap();
+        begun.recv().unwrap();
+        // The third task waits for a free task thread: none starts it within 100 ms.
+        let at_once = 2 + usize::from(begun.recv_timeout(Duration::from_millis(100)).is_ok());
+        for _ in 0..3 {
+            go.send(()).unwrap();
+        }
+        out += &format!("s {at_once}");
+        for entry in &busy {
+            out += &format!(" {}", entry.get());
+        }
+        out += "\n";
+
+        NOW.store(1000, Ordering::SeqCst);
+        let u = CacheEntry::compute_async_with_clock(|| 3, &pool, now);
+        let t0 = u.timestamp();
+        NOW.store(2000, Ordering::SeqCst);
+        u.call();
+        let end_keeps = u.timestamp() == t0;
+        NOW.store(3000, Ordering::SeqCst);
+        u.get();
+        let t1 = u.timestamp();
+        NOW.store(4000, Ordering::SeqCst);
+        u.call();
+        out += &format!(
+            "u {} {end_keeps} {} {}\n",
+            t0 == 1000,
+            t1 == 3000,
+            u.timestamp() == t1
+        );
+
+        let runs = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&runs);
+        let x = CacheEntry::compute_async(
+            move || -> i32 {
+                counted.fetch_add(1, Ordering::SeqCst);
+                panic!("boom")
+            },
+            &pool,
+        );
+        let first = panics(|| *x.get());
+        let second = panics(|| *x.get());
+        let third = panics(|| *x.call());
+        let runs_now = runs.load(Ordering::SeqCst);
+        out += &format!("x {} {first} {second} {third} {runs_now}\n", x.is_done());
+
+        NOW.store(1000, Ordering::SeqCst);
+        let parent = Arc::new(CacheEntry::compute_async_with_clock(|| 20, &pool, now));
+        parent.get();
+        let p0 = parent.timestamp();
+        NOW.store(2000, Ordering::SeqCst);
+        let child = parent.then(&pool, |value| (value + 1, worker()));
+        let (value, on_worker) = *child.get();
+        out += &format!(
+            "n {value} {on_worker} {} {}\n",
+            parent.timestamp() > p0,
+            child.is_done()
+        );
+
+        let runs = Arc::new(AtomicUsize::new(0));
+        let applied = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&runs);
+        let bad_parent = Arc::new(CacheEntry::compute_async(
+            move || -> i32 {
+                counted.fetch_add(1, Ordering::SeqCst);
+                panic!("parent")
+            },
+            &pool,
+        ));
+        let applies = Arc::clone(&applied);
+        let bad_child = bad_parent.then(&pool, move |value| {
+            applies.fetch_add(1, Ordering::SeqCst);
+            *value
+        });
+        let (c1, c2) = (panics(|| *bad_child.get()), panics(|| *bad_child.get()));
+        let applies = Arc::clone(&applied);
+        let throwing = parent.then(&pool, move |_| -> i32 {
+            applies.fetch_add(1, Ordering::SeqCst);
+            panic!("function")
+        });
+        let (c3, c4) = (panics(|| *throwing.get()), panics(|| *throwing.get()));
+        out += &format!(
+            "m {c1} {c2} {} {} {c3} {c4} {} {}\n",
+            bad_child.is_done(),
+            runs.load(Ordering::SeqCst),
+            throwing.is_done(),
+            applied.load(Ordering::SeqCst)
+        );
+
+        let none = ThreadPool::NONE;
+        let caller = thread::current().id();
+        let runs = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&runs);
+        let z = CacheEntry::compute_async(
+            move || {
+                counted.fetch_add(1, Ordering::SeqCst);
+                (4, thread::current().id())
+            },
+            &none,
+        );
+        let before = z.is_done();
+        let runs_before = runs.load(Ordering::SeqCst);
+        let (value, ran_on) = *z.get();
+        z.get();
+        out += &format!(
+            "z {before} {runs_before} {value} {} {}\n",
+            ran_on == caller,
+            runs.load(Ordering::SeqCst)
+        );
+        let runs = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&runs);
+        let zb = CacheEntry::compute_async(
+            move || -> i32 {
+                counted.fetch_add(1, Ordering::SeqCst);
+                panic!("none")
+            },
+            &none,
+        );
+        let (z1, z2, z3) = (
+            panics(|| *zb.get()),
+            panics(|| *zb.get()),
+            panics(|| *zb.call()),
+        );
+        out += &format!(
+            "z {} {z1} {z2} {z3} {}\n",
+            zb.is_done(),
+            runs.load(Ordering::SeqCst)
+        );
+        let runs = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&runs);
+        let zp = Arc::new(CacheEntry::compute_async(
+            move || {
+                counted.fetch_add(1, Ordering::SeqCst);
+                6
+            },
+            &none,
+        ));
+        let zc = zp.then(&none, |value| (value * 2, thread::current().id()));
+        let runs_then = runs.load(Ordering::SeqCst);
+        let (value, ran_on) = *zc.get();
+        out += &format!(
+            "z {} {runs_then} {value} {} {}\n",
+            zc.is_done(),
+            ran_on == caller,
+            runs.load(Ordering::SeqCst)
+        );
+
+        out += &format!(
+            "p {} {} {} {}\n",
+            pool.size(),
+            none.size(),
+            ThreadPool::create(1).size(),
+            ThreadPool::create(7).size()
+        );
+        assert_eq!(out, ASYNC_CACHE_ENTRY_ORACLE);
+    }
+
+    /// `CacheEntryOracle.java`'s async lines, after [`CACHE_ENTRY_ORACLE`]'s in `out.txt`.
+    const ASYNC_CACHE_ENTRY_ORACLE: &str = "\
+a false true true TF-Task-Worker-1 9 false false
+s 2 true true true
+u true true true true
+x true true true true 1
+n 21 true true true
+m true true true 1 true true true 1
+z true 0 4 true 1
+z true true true true 3
+z true 0 12 true 1
+p 6 0 3 10
+";
+
+    /// An expiring `Cache` of async entries sweeps one whose task still runs; its holder still gets
+    /// the value, and the next lookup makes a new entry. Extreme pool sizes keep Java's int math.
+    #[test]
+    fn caches_sweep_running_async_entries() {
+        static NOW: AtomicI64 = AtomicI64::new(0);
+        fn now() -> i64 {
+            NOW.load(Ordering::SeqCst)
+        }
+        let pool = ThreadPool::create(2);
+        let cache: Cache<CacheEntry<'static, i32>> = Cache::with_clock("T", 4, 60, 20, now);
+        let (release, released) = mpsc::channel::<()>();
+        let released = Mutex::new(released);
+        let held = cache.compute_if_absent(1, |_| {
+            CacheEntry::compute_async_with_clock(
+                move || {
+                    released.lock().unwrap().recv().unwrap();
+                    42
+                },
+                &pool,
+                now,
+            )
+        });
+        NOW.store(100, Ordering::SeqCst);
+        let other = cache.compute_if_absent(2, |_| {
+            CacheEntry::compute_async_with_clock(|| 7, &pool, now)
+        });
+        assert!(cache.get(1).is_none());
+        assert!(!held.is_done());
+        release.send(()).unwrap();
+        assert_eq!(*held.get(), 42);
+        assert_eq!(*other.get(), 7);
+        let again = cache.compute_if_absent(1, |_| {
+            CacheEntry::compute_async_with_clock(|| 43, &pool, now)
+        });
+        assert_eq!(*again.get(), 43);
+
+        assert_eq!(
+            ThreadPool::create(i32::MAX).size(),
+            (i32::MAX / 2).wrapping_add(i32::MAX)
+        );
+        assert_eq!(ThreadPool::create(i32::MIN).size(), 3);
+        assert_eq!(
+            *CacheEntry::compute_async(|| 5, &ThreadPool::create(i32::MAX)).get(),
+            5
+        );
+    }
     /// `CacheOracle.java`'s `Entry`: a fixed timestamp and a count of its `close` calls.
     struct TestEntry {
         id: i64,
