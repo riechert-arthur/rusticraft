@@ -814,7 +814,7 @@ is `createEmptyRegion`, and `generate_region(region_x, region_z)` is `generateRe
 every cell, border included, only after the fill. `generate_zoomed_region(center_x, center_z, zoom, filter)` is the
 zoomed `generateRegion`: region (0, 0) filled by the uncached `generate_zoomed_heightmap` with the center as offset,
 then the filters, the optional ones only when `filter` is set. Lazy tiles and the batched and striped generators are the
-next layers; the builder (#83), the async wrapper, the tile cache and tile disposal are later layers or not ported.
+next layers, then the builder; the async wrapper, the tile cache and tile disposal are later layers or not ported.
 Its test replays `TileGeneratorOracle.java` in `.local/terraforged/oracles/tile_generator/`: Engine's `generateRegion`
 with a `WorldGeneratorFactory` over a stub heightmap that hashes heights, continent edges, terrains and erosion and
 river masks, for two filter settings groups and six sizes and regions (borderless, wide-border, negative and wrapping),
@@ -842,7 +842,7 @@ count Engine's builder passes (`batch(n)`). `Tile::generate_area` is `Tile.gener
 `n * n` squares of `Tile::batch_size` chunks a side (`d * size` in Java `int` math, clipped to the chunk count), and
 `Tile::generate_area_striped` is `generateAreaStriped`: each chunk row cut into `n` stripes. Each batch is an Engine
 `ChunkBatchTask` (or `ChunkStripeBatchTask`): its chunks are taken on the calling thread with copies of their cells, up to
-`max(2, processors)` scoped threads (Engine's default pool) take the batches in order and run `driveOne` on each chunk
+`max(2, processors)` scoped threads (Engine's default pool; a generator from the builder below uses its pool) take the batches in order and run `driveOne` on each chunk
 without holding a lock, and the cells go back to the tile once all are done; then the filters run on the whole tile as in
 `generateRegion`. Like Engine's tasks, each chunk starts without a river map, so batched runs look river maps up more
 often than the plain fill, but every cell is the same for any batch count and thread schedule. A stage's panic is
@@ -855,9 +855,23 @@ batch counts 1, 2, 3, 7 and 100, zoomed for 3 and 100, folding the lookups, an o
 cell; the cells equal the `g`/`z` lines') and `e` lines (counts 0 and -2), and check that one thread or many give the
 same cells and that a panic keeps its payload. Debug and release builds agree.
 
+The builder layer adds Engine's `TileGenerator.Builder` (`TileGenerator::builder()`): size factor 0, border 0, batch size
+0, not striped and no thread pool until `size`/`factor`/`border`, `batch`, `striped` and `pool` set them (the last call
+wins), and `factory(registry, generator)` for Engine's `WorldGeneratorFactory`. `build()` makes Engine's
+`TileGeneratorStriped` for a positive batch size with `striped()`, `TileGeneratorBatched` for a positive batch size
+without it, and the plain `TileGenerator` otherwise (a count of 1 is still batched, and `striped()` or a pool alone
+change nothing). `generate_region`, `generate_zoomed_region` and the lazy `get_tile` handles then run that class's
+`generateRegion`, which needs a `Sync` heightmap. `pool(size)` stands for `ThreadPools.create(size)`, whose batches run on
+`max(2, size)` threads; without a pool, as with Engine's `ThreadPools.NONE`, every batch runs on the calling thread in
+order. Like Engine's, the builder checks no argument; `build()` panics without a factory, where Engine throws
+`NullPointerException`. `TileGenerator::new` stays the plain generator. Its test replays the tile-generator oracle's
+`u`/`w` lines (Engine's real builder for batch counts unset, 0, -3, 1 and 4, striped or not, with and without a pool:
+the class, `generateRegion`, the lazy tile and the zoomed `generateRegion`, with Engine's stage trace when no pool runs
+them) and `d`/`n` lines (defaults, overriding calls, no factory); debug and release builds agree.
+
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles and its batched and striped generation. They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation and its builder. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
