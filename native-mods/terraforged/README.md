@@ -321,9 +321,21 @@ field against a Java oracle running Engine's selector and lerper on Engine cells
 (`RegionModule`, then the lerper) over real landforms with ModTerrains' weights; the oracle lives outside Git, in
 `.local/terraforged/oracles/region_selection/`.
 
+The volcano layer adds Engine's `VolcanoPopulator` (`populator.rs`), the populator TerraForged registers for volcano
+regions. It writes only `value` and `terrain`: the levels' ground plus a cone built from the region config's cell edge
+distance and scaled by a per-cell height, turning down into a throat near its top, where the terrain becomes
+`volcano_pipe`, and blending into ridged lowlands at its foot, where it is `volcano`; between those bands the cell keeps
+its terrain. It draws four seeds in Engine's order and weighs in `RegionSelector` by its own weight, as a
+`TerrainPopulator` does. `modify_volcano_type` (run by Heightmap after the rivers) turns a `volcano_pipe` cell below
+the water level or with a river mask under 0.85 back into `volcano`. Where Engine's cell lookup throws (non-finite
+coordinates) this port panics. Its test checks every cell field over grids and around pipes, for Heightmap's region
+config, a small one and overflowing seeds, plus `modifyVolcanoType` at its edges and a `RegionSelector` holding
+volcanoes, against a Java oracle running Engine's classes on Engine cells; the oracle lives outside Git, in
+`.local/terraforged/oracles/volcano/`.
+
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators and its terrain regions. They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions and its volcano populator. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development

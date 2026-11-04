@@ -387,12 +387,12 @@ impl LandForms {
 }
 
 /// `Source.build(seed, scale, octaves).lacunarity(lacunarity).perlin()` (Engine's builder defaults otherwise).
-fn perlin(seed: i32, scale: i32, octaves: usize, lacunarity: f32) -> Module {
+pub fn perlin(seed: i32, scale: i32, octaves: usize, lacunarity: f32) -> Module {
     source(SourceKind::Perlin, seed, scale, octaves, 0.5, lacunarity)
 }
 
 /// `Source.build(seed, scale, octaves).gain(gain).lacunarity(lacunarity)` built as `kind`.
-fn source(
+pub fn source(
     kind: SourceKind,
     seed: i32,
     scale: i32,
@@ -414,7 +414,7 @@ fn source(
 }
 
 /// The domain of `Module.warp(seed, scale, octaves, strength)`: Perlin axes seeded `seed` and `seed + 1`.
-fn noise_warp(seed: i32, scale: i32, octaves: usize, strength: f32) -> Domain {
+pub fn noise_warp(seed: i32, scale: i32, octaves: usize, strength: f32) -> Domain {
     Domain::domain_warp(
         perlin(seed, scale, octaves, 2.0),
         perlin(seed.wrapping_add(1), scale, octaves, 2.0),
