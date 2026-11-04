@@ -534,7 +534,7 @@ impl ErosionRidge {
             octaves,
             strength,
             grid_size,
-            1.0 / (octaves + 1) as f32,
+            1.0 / octaves.wrapping_add(1) as f32,
             2.25,
             0.75,
             blend_mode,
@@ -3318,6 +3318,160 @@ mod tests {
                 expected_erosion
             );
         }
+    }
+
+    /// `ErosionRidgeOracle`'s rows: per case, the wrapped module's bounds and FNV-1a hashes of the raw bits (NaN
+    /// canonicalized to 0x7fc00000) of `Ridge.Noise.getValue` and `Ridge.getErosionValue` over `GRID` x `GRID`, then
+    /// over `EXTREME`.
+    #[allow(clippy::type_complexity)]
+    #[rustfmt::skip]
+    const EROSION_RIDGE_ORACLE: [(&str, u32, u32, u64, u64, u64, u64); 12] = [
+        ("landforms_mountains", 0x00000000, 0x3f800000, 0x003e2fcff2a8d2a5, 0xa58fa7626ca1f22e, 0x3d364bfd7ac192fd, 0xfbbc4c4ef997f82b),
+        ("input_linear", 0x00000000, 0x3f800000, 0x206ec839b3d01d9f, 0xf4fab5cea517dc28, 0xb8c213958d3ad18b, 0x2d2d4528ffbaad20),
+        ("output_linear", 0x00000000, 0x3f800000, 0xe9b0a201a5d22578, 0x3f56b4e87f12bb57, 0xea565b1588a5fe1f, 0x76c75d4b16c672a6),
+        ("constant_source", 0x00000000, 0x3f800000, 0x35976c5c4da5269d, 0xf50ea9a5b6d4b595, 0x17004c30fac8f031, 0x35e7cb73cd588278),
+        ("min_seed_sentinel", 0x00000000, 0x3f800000, 0xadf1ee001797deba, 0x864c542aa98214b0, 0x7e212cb491435c6c, 0xfd8d5433f52499f6),
+        ("nan_source", 0x00000000, 0x3f800000, 0x12956ce69e90b3c5, 0x234a240d9f3155c5, 0xb9e7322deb9a5665, 0xeb87129436c8da65),
+        ("zero_octaves", 0x00000000, 0x3f800000, 0x12956ce69e90b3c5, 0x12956ce69e90b3c5, 0xb9e7322deb9a5665, 0xb9e7322deb9a5665),
+        ("negative_octaves", 0x00000000, 0x3f800000, 0x12956ce69e90b3c5, 0x12956ce69e90b3c5, 0xb9e7322deb9a5665, 0xb9e7322deb9a5665),
+        ("negative_grid", 0x00000000, 0x3f800000, 0xd6d23f5fb2d4d9c9, 0x2c1b93daafb34265, 0xe701b35dbf2fafe5, 0x0c8210784d8af5a5),
+        ("zero_grid", 0x00000000, 0x3f800000, 0xcd9c395a4002bc6d, 0x234a240d9f3155c5, 0x43ae21051c064ba5, 0xeb87129436c8da65),
+        ("tiny_grid", 0x00000000, 0x3f800000, 0x5f1568a5a49a71cc, 0xf4d94b73b57e7103, 0x26c16afccadfb90b, 0xf2946cd9fc52be8e),
+        ("many_octaves", 0x00000000, 0x3f800000, 0x120b51670657bd9d, 0x1497217c082f5320, 0xafe0b5d983daa051, 0xe000c30eec299f79),
+    ];
+
+    #[test]
+    fn erosion_ridge_grid_matches_engine_0_3_0() {
+        const GRID: [f32; 10] = [
+            0.0, 12.25, -98.75, -4096.5, 8192.25, 123456.75, -0.125, -77777.5, 1e6, -3.0e5,
+        ];
+        const EXTREME: [(f32, f32); 8] = [
+            (3.0e9, -3.0e9),
+            (-3.0e9, 2.5e9),
+            (f32::NAN, 5.5),
+            (1.0, f32::NAN),
+            (f32::INFINITY, 1.0),
+            (-7.0, f32::NEG_INFINITY),
+            (-0.0, -0.0),
+            (f32::MAX, -f32::MAX),
+        ];
+        fn fnv(hash: u64, value: f32) -> u64 {
+            let bits = if value.is_nan() {
+                0x7fc0_0000
+            } else {
+                value.to_bits()
+            };
+            bits.to_le_bytes().iter().fold(hash, |hash, byte| {
+                (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3)
+            })
+        }
+        let perlin = |seed, scale: f32, octaves| {
+            Module::source(Source::new(
+                SourceKind::Perlin,
+                SourceConfig {
+                    seed,
+                    octaves,
+                    gain: 0.5,
+                    frequency: 1.0 / scale,
+                    lacunarity: 2.0,
+                    interpolation: Interpolation::Curve3,
+                },
+            ))
+        };
+        let warped = perlin(991, 200.0, 4).warp(Domain::domain_warp(
+            perlin(77, 50.0, 2),
+            perlin(78, 50.0, 2),
+            Module::constant(20.0),
+        ));
+        use ErosionMode::{Constant, InputLinear, OutputLinear};
+        let cases = [
+            (
+                ErosionRidge::full(123, 2, 0.65, 128.0, 0.15, 3.1, 0.8, Constant),
+                warped.clone(),
+            ),
+            (
+                ErosionRidge::full(-456, 3, 0.4, 96.0, 0.2, 2.25, 0.75, InputLinear),
+                warped.clone(),
+            ),
+            (
+                ErosionRidge::with_octaves(789, 2, 0.8, 64.0, OutputLinear),
+                warped.clone(),
+            ),
+            (
+                ErosionRidge::new(321, 0.7, 80.0, Constant),
+                Module::constant(0.35),
+            ),
+            (
+                ErosionRidge::with_octaves(i32::MIN, 2, 1.5, 1.0, InputLinear),
+                Module::constant(-1.0),
+            ),
+            (
+                ErosionRidge::new(5, 0.5, 40.0, OutputLinear),
+                Module::constant(f32::NAN),
+            ),
+            (
+                ErosionRidge::with_octaves(5, 0, 0.5, 40.0, Constant),
+                warped.clone(),
+            ),
+            (
+                ErosionRidge::with_octaves(5, -3, 0.5, 40.0, InputLinear),
+                warped.clone(),
+            ),
+            (
+                ErosionRidge::with_octaves(i32::MAX, 2, -0.25, -50.0, OutputLinear),
+                warped.clone(),
+            ),
+            (
+                ErosionRidge::with_octaves(17, 1, 0.5, 0.0, Constant),
+                warped.clone(),
+            ),
+            (
+                ErosionRidge::full(-1, 2, 0.9, 1e-3, 0.5, 2.25, 0.75, InputLinear),
+                warped.clone(),
+            ),
+            (
+                ErosionRidge::with_octaves(42, 6, 0.3, 300.0, Constant),
+                warped,
+            ),
+        ];
+        for ((ridge, source), (name, min, max, value, erosion, x_value, x_erosion)) in
+            cases.into_iter().zip(EROSION_RIDGE_ORACLE)
+        {
+            let module = ridge.wrap(source.clone());
+            let start = 0xcbf2_9ce4_8422_2325_u64;
+            let (mut got_value, mut got_erosion) = (start, start);
+            for x in GRID {
+                for y in GRID {
+                    got_value = fnv(got_value, module.value(x, y));
+                    got_erosion = fnv(got_erosion, ridge.erosion_value(x, y, &source));
+                }
+            }
+            let (mut got_x_value, mut got_x_erosion) = (start, start);
+            for (x, y) in EXTREME {
+                got_x_value = fnv(got_x_value, module.value(x, y));
+                got_x_erosion = fnv(got_x_erosion, ridge.erosion_value(x, y, &source));
+            }
+            let got = (
+                module.min_value().to_bits(),
+                module.max_value().to_bits(),
+                got_value,
+                got_erosion,
+                got_x_value,
+                got_x_erosion,
+            );
+            assert_eq!(
+                got,
+                (min, max, value, erosion, x_value, x_erosion),
+                "{name}"
+            );
+        }
+        // `1.0f / (float)(octaves + 1)` wraps like Java's `int`.
+        assert_eq!(
+            ErosionRidge::with_octaves(0, i32::MAX, 1.0, 1.0, Constant)
+                .amplitude
+                .to_bits(),
+            0xb000_0000
+        );
     }
 
     #[test]
