@@ -814,10 +814,10 @@ is `createEmptyRegion`, and `generate_region(region_x, region_z)` is `generateRe
 every cell, border included, only after the fill. `generate_zoomed_region(center_x, center_z, zoom, filter)` is the
 zoomed `generateRegion`: region (0, 0) filled by the uncached `generate_zoomed_heightmap` with the center as offset,
 then the filters, the optional ones only when `filter` is set. Lazy tiles are the next layer; the batched and striped
-generators (#82), the builder (#83), the async wrapper, the tile cache and tile disposal are later layers or not ported. Its test
-replays `TileGeneratorOracle.java` in `.local/terraforged/oracles/tile_generator/`: Engine's `generateRegion` with a
-`WorldGeneratorFactory` over a stub heightmap that hashes heights, continent edges, terrains and erosion and river
-masks, for two filter settings groups and six sizes and regions (borderless, wide-border, negative and wrapping),
+generators (#82), the builder (#83), the async wrapper, the tile cache and tile disposal are later layers or not ported.
+Its test replays `TileGeneratorOracle.java` in `.local/terraforged/oracles/tile_generator/`: Engine's `generateRegion`
+with a `WorldGeneratorFactory` over a stub heightmap that hashes heights, continent edges, terrains and erosion and
+river masks, for two filter settings groups and six sizes and regions (borderless, wide-border, negative and wrapping),
 five zoomed regions on each (fractional, unit, negative, NaN and huge centers and zooms, filters on and off) and
 `chunkToRegion` for shift factors Java masks, folding the stage trace and every cell; debug and release builds agree.
 
@@ -833,7 +833,8 @@ return `false`. Dropping a handle drops its tile; `LazyCallable` disposes of not
 `LazyCallableOracle.java` in `.local/terraforged/oracles/lazy_callable/` (one creation for 16 concurrent callers, all
 seeing the same value; retry after a throwing creation; `isDone` and `get` waiting on another thread's creation and
 seeing its outcome) and the tile-generator oracle's `l`/`m` lines (each handle's fold equals the eager generation, no
-stage runs before the first `get` or on a second one), plus eight threads sharing one lazy tile.
+stage runs before the first `get` or on a second one); another test has eight threads share one lazy tile, generated
+once. Debug and release builds agree.
 
 ## Status: development only
 
