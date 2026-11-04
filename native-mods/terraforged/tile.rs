@@ -1300,7 +1300,8 @@ mod tests {
         shareable::<Tile>();
     }
 
-    /// `TileHeightmapOracle.java`'s output (`h <tile> <lookups> <trace> <cells> <chunks>`).
+    /// `TileHeightmapOracle.java`'s output (`h <tile> <lookups> <trace> <cells> <chunks>`; `c`,
+    /// `r` alike, zoomed runs tagged `z<run>`).
     const ORACLE_HEIGHTMAP: &str = "\
 h 0 137 c579e321cc64ef46 7822c03163bbbc11 607ea5d406ecf6e3
 h 1 392 c0e0a699c90ced0d 2981a38add7f911 53f9d0616309a431
