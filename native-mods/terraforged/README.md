@@ -815,7 +815,7 @@ is `createEmptyRegion`, and `generate_region(region_x, region_z)` is `generateRe
 every cell, border included, only after the fill. `generate_zoomed_region(center_x, center_z, zoom, filter)` is the
 zoomed `generateRegion`: region (0, 0) filled by the uncached `generate_zoomed_heightmap` with the center as offset,
 then the filters, the optional ones only when `filter` is set. Lazy tiles and the batched and striped generators are the
-next layers, then the builder, the tile cache and tile disposal; the async wrapper is a later layer.
+next layers, then the builder, the tile cache, tile disposal and the async tile factory.
 Its test replays `TileGeneratorOracle.java` in `.local/terraforged/oracles/tile_generator/`: Engine's `generateRegion`
 with a `WorldGeneratorFactory` over a stub heightmap that hashes heights, continent edges, terrains and erosion and
 river masks, for two filter settings groups and six sizes and regions (borderless, wide-border, negative and wrapping),
@@ -830,7 +830,8 @@ zoom, filter)` the zoomed `getTile` (a `CallableZoomTile`). Nothing runs until t
 again, and `is_done` also waits, then reports whether a tile was stored. A generation that panics (Engine: throws)
 stores nothing, so the next caller, or one already waiting, generates it again. `cancel` and `is_cancelled` always
 return `false`. Dropping a handle drops its tile; `LazyCallable` disposes of nothing in Engine either. Its adapters
-(`adapt`, `adaptComplete`, `callAsync`, `then`), the timed `get` and `LazySupplier` are not ported. Its tests replay
+`adapt` and `adaptComplete`, the timed `get` and `LazySupplier` are not ported; `callAsync` and `then` are
+`CacheEntry::compute_async` and `CacheEntry::then` (see the async layers below). Its tests replay
 `LazyCallableOracle.java` in `.local/terraforged/oracles/lazy_callable/` (one creation for 16 concurrent callers, all
 seeing the same value; retry after a throwing creation; `isDone` and `get` waiting on another thread's creation and
 seeing its outcome) and the tile-generator oracle's `l`/`m` lines (each handle's fold equals the eager generation, no
@@ -968,9 +969,24 @@ readers blocking the close, a stale tile's disposal removing the region's new en
 zoomed tiles, a second cache taking over the generator's listener, eight threads disposing at once, and an unread
 entry on a pool that is not closed.
 
+The async-tile-factory layer adds Engine's `TileGeneratorAsync` (`tile_generator.rs`): `TileGenerator::asynchronous`
+(`async()`, on the generator's pool) or `AsyncTileGenerator::new(generator, pool)`. `get_tile` and `get_zoomed_tile`
+run the generator's `generate_region` and `generate_zoomed_region` through `CacheEntry::compute_async`, as Engine's
+`LazyCallable.callAsync(generator.getTile(...), threadPool)`: on a `ThreadPool::create` pool the tile starts on a task
+thread at once and the call returns a pending entry (`is_done` false until the task ends; `get` waits); on
+`ThreadPool::NONE` the entry is done at once and the tile is made on the first `get`'s thread. A panicking fill on a
+pool fails every later `get` without running again (Engine's `FutureAdapter` throws `NullPointerException`); on `NONE`
+each `get` runs it again. Every call makes its own tile: unlike the tile cache, nothing is shared. `chunk_to_region`
+and `set_listener` delegate to the wrapped generator, so the tiles take the listener it has when their task runs;
+`asynchronous()` on the factory returns itself, and `cached()` is a `TileCache` over the wrapped generator (not the
+factory) on the factory's pool, which becomes the generator's listener. The test replays `TileAsyncOracle.java` (in
+`.local/terraforged/oracles/tile_cache/`): which thread runs a tile, pending and done states (a stub stage holds the
+fill until released), tiles bit for bit the synchronous generator's (plain, zoomed, batched and striped), failures on
+both pools, listener delegation and capture, the factory's caches, and eight calls for one region making eight tiles.
+
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks and tile disposal. They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal and the async tile factory. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development

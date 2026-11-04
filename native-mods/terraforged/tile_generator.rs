@@ -91,8 +91,8 @@ impl<H, F> WorldGenerator<H, F> {
 /// place of Engine's `TileResources` pools), the world generator, and which of Engine's three
 /// generator classes it is ([`Self::builder`] picks it as `Builder.build()` does; [`Self::new`]
 /// makes the plain one). Engine's `TileGeneratorBatched` and `TileGeneratorStriped` are also the
-/// `generate_batched_*` and `generate_striped_*` methods; [`Self::cached`] is its `cached()`. The
-/// async wrapper is not ported.
+/// `generate_batched_*` and `generate_striped_*` methods; [`Self::cached`] is its `cached()` and
+/// [`Self::asynchronous`] its `async()`.
 pub struct TileGenerator<H, F> {
     factor: i32,
     border: i32,
@@ -523,6 +523,95 @@ where
         let pool = self.pool.clone();
         TileCache::new(self, pool)
     }
+
+    /// `async()`: `new TileGeneratorAsync(this, threadPool)`, the generator's async factory on its
+    /// pool.
+    pub fn asynchronous(self: Arc<Self>) -> AsyncTileGenerator<H, F> {
+        let pool = self.pool.clone();
+        AsyncTileGenerator::new(self, pool)
+    }
+}
+
+/// Engine 0.3.0's `TileGeneratorAsync` (`com.terraforged.engine.tile.gen`): a [`TileGenerator`]
+/// whose `getTile` overloads hand the generator's lazy tile to a [`ThreadPool`]
+/// (`LazyCallable.callAsync(generator.getTile(...), threadPool)`). Each call submits its own task:
+/// unlike [`TileCache`], nothing is shared between calls for one region.
+///
+/// The returned [`CacheEntry`] behaves as Engine's `FutureAdapter` over `threadPool.submit`: on a
+/// [`ThreadPool::create`] pool the tile starts on a task thread at once, `is_done` is `false` until
+/// it ends, and `get`/`call` wait for it; a panicked task makes every later `get`/`call` panic
+/// without running it again (Engine: `NullPointerException`). On [`ThreadPool::NONE`] it is done
+/// at once and the tile is made on the first `get`'s thread, again after a panic. Its timestamp,
+/// which Engine's `FutureAdapter` lacks, is unused. The tiles are the wrapped generator's, with the
+/// dispose listener it has when the task runs ([`TileGenerator::create_empty_region`]).
+pub struct AsyncTileGenerator<H, F> {
+    generator: Arc<TileGenerator<H, F>>,
+    thread_pool: ThreadPool,
+}
+
+impl<H, F> AsyncTileGenerator<H, F>
+where
+    H: HeightmapSource + Send + Sync + 'static,
+    F: TileFilters + Send + Sync + 'static,
+{
+    /// `new TileGeneratorAsync(generator, threadPool)`: any pool, not only the generator's.
+    pub const fn new(generator: Arc<TileGenerator<H, F>>, thread_pool: ThreadPool) -> Self {
+        Self {
+            generator,
+            thread_pool,
+        }
+    }
+
+    /// `chunkToRegion(i)`: the generator's.
+    pub fn chunk_to_region(&self, chunk: i32) -> i32 {
+        self.generator.chunk_to_region(chunk)
+    }
+
+    /// `setListener(listener)`: the generator's [`TileGenerator::set_listener`].
+    pub fn set_listener(&self, listener: TileListener) {
+        self.generator.set_listener(listener);
+    }
+
+    /// `getTile(regionX, regionZ)`: [`TileGenerator::generate_region`] on the pool.
+    pub fn get_tile(&self, region_x: i32, region_z: i32) -> CacheEntry<'static, Tile> {
+        let generator = Arc::clone(&self.generator);
+        CacheEntry::compute_async(
+            move || generator.generate_region(region_x, region_z),
+            &self.thread_pool,
+        )
+    }
+
+    /// `getTile(centerX, centerZ, zoom, filter)`: [`TileGenerator::generate_zoomed_region`] on the
+    /// pool.
+    pub fn get_zoomed_tile(
+        &self,
+        center_x: f32,
+        center_z: f32,
+        zoom: f32,
+        filter: bool,
+    ) -> CacheEntry<'static, Tile> {
+        let generator = Arc::clone(&self.generator);
+        CacheEntry::compute_async(
+            move || generator.generate_zoomed_region(center_x, center_z, zoom, filter),
+            &self.thread_pool,
+        )
+    }
+
+    /// `async()`: this factory.
+    pub const fn asynchronous(&self) -> &Self {
+        self
+    }
+
+    /// `cached()`: `new TileCache(generator, threadPool)`, a cache over the wrapped generator (not
+    /// this factory) on this factory's pool; it becomes the generator's dispose listener.
+    pub fn cached(&self) -> TileCache<H, F> {
+        TileCache::new(Arc::clone(&self.generator), self.thread_pool.clone())
+    }
+
+    /// The wrapped generator.
+    pub const fn generator(&self) -> &Arc<TileGenerator<H, F>> {
+        &self.generator
+    }
 }
 
 /// Engine 0.3.0's `TileCache` (`com.terraforged.engine.tile.gen`) with `TileProvider`'s lookups:
@@ -804,8 +893,9 @@ mod tests {
         terraforged_river::GenWarp,
     };
     use super::*;
-    use std::sync::Mutex;
-    use std::sync::atomic::{AtomicI32, AtomicI64, Ordering};
+    use std::panic::AssertUnwindSafe;
+    use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, Ordering};
+    use std::sync::{Mutex, mpsc};
 
     fn fold(fold: i64, value: i32) -> i64 {
         fold.wrapping_mul(31).wrapping_add(i64::from(value))
@@ -2426,5 +2516,336 @@ d 0 TileGenerator 1 16 16 -1 2 2 9ceef3334738d850 184eae53c5bf6135
 d 1 TileGenerator 2 32 32 -1 2 64 84688545135fa31 d9741ee0027beed3
 d 2 TileGenerator 1 16 16 -1 2 2 9ceef3334738d850 184eae53c5bf6135
 n throws NullPointerException
+";
+
+    /// `TileAsyncOracle.java`'s `Gated`: [`FillHeightmap`] that can hold the next fill at its first
+    /// `applyBase` until released (to watch a pending tile), records the thread running it, and
+    /// panics (Engine: throws) while `fail` is set, counting those runs.
+    struct Gated {
+        inner: FillHeightmap,
+        thread: Mutex<Option<(std::thread::ThreadId, Option<String>)>>,
+        gate: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
+        fail: AtomicBool,
+        runs: AtomicI32,
+    }
+
+    impl Gated {
+        fn new(kinds: [Terrain; 4]) -> Self {
+            Self {
+                inner: FillHeightmap::new(kinds),
+                thread: Mutex::new(None),
+                gate: Mutex::new(None),
+                fail: AtomicBool::new(false),
+                runs: AtomicI32::new(0),
+            }
+        }
+
+        /// Holds the next fill's first `apply_base`: returns the channel it signals once there and
+        /// the one that releases it.
+        fn gate(&self) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
+            let (started, at_gate) = mpsc::channel();
+            let (release, released) = mpsc::channel();
+            *self.gate.lock().unwrap() = Some((started, released));
+            (at_gate, release)
+        }
+
+        /// `caller` when the last fill ran on this thread, `task` on a `TF-Task-Worker-<n>`.
+        fn place(&self) -> String {
+            let (id, name) = self.thread.lock().unwrap().clone().expect("a fill ran");
+            if id == std::thread::current().id() {
+                return "caller".into();
+            }
+            let name = name.unwrap_or_default();
+            if name.starts_with("TF-Task-Worker-") {
+                "task".into()
+            } else {
+                name
+            }
+        }
+    }
+
+    impl HeightmapSource for Gated {
+        fn apply_base(&self, cell: &mut Cell, x: f32, z: f32) {
+            if self.fail.load(Ordering::SeqCst) {
+                self.runs.fetch_add(1, Ordering::SeqCst);
+                panic!("gated failure");
+            }
+            let gate = self.gate.lock().unwrap().take();
+            let current = std::thread::current();
+            *self.thread.lock().unwrap() = Some((current.id(), current.name().map(str::to_owned)));
+            if let Some((started, release)) = gate {
+                started.send(()).unwrap();
+                release.recv().unwrap();
+            }
+            self.inner.apply_base(cell, x, z);
+        }
+
+        fn rivermap(&self, x: i32, z: i32) -> Arc<Rivermap> {
+            self.inner.rivermap(x, z)
+        }
+
+        fn apply_rivers(&self, cell: &mut Cell, x: f32, z: f32, map: &Rivermap) {
+            self.inner.apply_rivers(cell, x, z, map);
+        }
+
+        fn apply_climate(&self, cell: &mut Cell, x: f32, z: f32) {
+            self.inner.apply_climate(cell, x, z);
+        }
+    }
+
+    /// `TileAsyncOracle`'s `Log`: the regions of the tiles disposed to it.
+    #[derive(Default)]
+    struct Log(Mutex<Vec<String>>);
+
+    impl DisposeListener<Tile> for Log {
+        fn on_dispose(&self, tile: &Tile) {
+            let line = format!("{},{}", tile.region_x(), tile.region_z());
+            self.0.lock().unwrap().push(line);
+        }
+    }
+
+    impl Log {
+        fn events(&self) -> String {
+            let events = self.0.lock().unwrap();
+            format!("{}[{}]", events.len(), events.join(";"))
+        }
+    }
+
+    /// Replays `TileAsyncOracle.java` (`.local/terraforged/oracles/tile_cache/`, `./run.sh` writes
+    /// `async.txt`): Engine 0.3.0's `TileGeneratorAsync` from `TileGenerator.async()` over the stub
+    /// heightmap (held at a gate, failing on demand) and real filters. `a0`/`a1`: on `NONE`
+    /// `async()` keeps the generator's pool and returns itself, `chunkToRegion` is the generator's,
+    /// a tile is done at once, runs nothing until `get`, then runs on the caller's thread and is
+    /// bit for bit the synchronous `generateRegion`'s (regular and zoomed); `a2`/`a3`: on
+    /// `create(8)` `getTile` returns while a task thread is still filling the tile (not done), and
+    /// `get` waits for it; `a4`: on the pool a failed task fails every `get` without rerunning, on
+    /// `NONE` every `get` reruns it; `a5`: `setListener` delegates to the generator, and a tile
+    /// takes the listener the generator has when its task runs; `a6`: `cached()` is a cache over the
+    /// wrapped generator on the factory's pool that becomes the generator's listener, so an async
+    /// tile's disposal removes the region's cached entry; `a7`: batched and striped generators'
+    /// async tiles equal their synchronous ones; `a8`: eight calls for one region make eight tiles.
+    #[test]
+    fn async_tile_factory_matches_engine_oracle() {
+        let terrains = Arc::new(TerrainRegistry::new());
+        let kinds = ["none", "coast", "beach", "hills"]
+            .map(|name| terrains.get_by_name(name).expect("built-in terrain"));
+        let world = || {
+            let mut settings = FilterSettings::default();
+            settings.erosion.droplets_per_chunk = 20;
+            settings.smoothing.iterations = 1;
+            let points = WorldControlPoints {
+                beach: 0.327,
+                ..WorldControlPoints::default()
+            };
+            let filters =
+                WorldFilters::new(12345, settings, Levels::new(256, 63), points, &terrains);
+            WorldGenerator::new(Gated::new(kinds.clone()), filters)
+        };
+        let builder = || {
+            TileGenerator::builder()
+                .size(1, 1)
+                .factory(Arc::clone(&terrains), world())
+        };
+        let measured = |heightmap: &Gated, tile: &Tile| {
+            let (lookups, trace) = heightmap.inner.take();
+            let (rx, rz) = (tile.region_x(), tile.region_z());
+            format!("{lookups} {trace:x} {rx} {rz} {:x}", fold_tile(tile))
+        };
+        // Engine's `NullPointerException` from `FutureAdapter.call` is a panic here.
+        let fails = |entry: &CacheEntry<'static, Tile>| {
+            let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                entry.get();
+            }));
+            if result.is_ok() {
+                "ok"
+            } else {
+                "NullPointerException"
+            }
+        };
+        let dispose_all = |tile: &Tile| (0..4).for_each(|_| tile.dispose());
+        let pool8 = ThreadPool::create(8);
+        let none = Arc::new(builder().build());
+        let pooled = Arc::new(builder().pool(8).build());
+        let an = Arc::clone(&none).asynchronous();
+        let ap = Arc::clone(&pooled).asynchronous();
+        let (hn, hp) = (none.generator().heightmap(), pooled.generator().heightmap());
+        let mut out = String::new();
+
+        let e = an.get_tile(-1, 2);
+        let before = format!(
+            "{} {}",
+            e.is_done(),
+            hn.inner.lookups.load(Ordering::SeqCst)
+        );
+        let t = e.get();
+        let line = measured(hn, t);
+        let sync = measured(hn, &none.generate_region(-1, 2));
+        out += &format!(
+            "a0 true {} {} {} {} {before} {} {line} {sync} {} {}\n",
+            std::ptr::eq(an.asynchronous(), &an),
+            an.thread_pool.size() == ThreadPool::NONE.size(),
+            an.chunk_to_region(-3),
+            an.chunk_to_region(i32::MIN),
+            hn.place(),
+            std::ptr::eq(e.get(), t),
+            hn.inner.lookups.load(Ordering::SeqCst)
+        );
+        let e = an.get_zoomed_tile(100.0, -50.0, 0.5, false);
+        let before = format!(
+            "{} {}",
+            e.is_done(),
+            hn.inner.lookups.load(Ordering::SeqCst)
+        );
+        let line = measured(hn, e.get());
+        let sync = measured(hn, &none.generate_zoomed_region(100.0, -50.0, 0.5, false));
+        out += &format!("a1 {before} {} {line} {sync}\n", hn.place());
+
+        let (at_gate, release) = hp.gate();
+        let e = ap.get_tile(5, -6);
+        at_gate.recv().unwrap();
+        let pending = format!("{} {}", e.is_done(), hp.place());
+        release.send(()).unwrap();
+        let t = e.get();
+        let line = measured(hp, t);
+        let sync = measured(hp, &pooled.generate_region(5, -6));
+        out += &format!(
+            "a2 {} {pending} {} {line} {sync} {}\n",
+            ap.thread_pool.size() == pool8.size(),
+            e.is_done(),
+            std::ptr::eq(e.get(), t)
+        );
+        let (at_gate, release) = hp.gate();
+        let e = ap.get_zoomed_tile(-37.25, 12.5, 2.0, true);
+        at_gate.recv().unwrap();
+        let pending = format!("{} {}", e.is_done(), hp.place());
+        release.send(()).unwrap();
+        let line = measured(hp, e.get());
+        let sync = measured(hp, &pooled.generate_zoomed_region(-37.25, 12.5, 2.0, true));
+        out += &format!("a3 {pending} {} {line} {sync}\n", e.is_done());
+
+        hp.fail.store(true, Ordering::SeqCst);
+        let e = ap.get_tile(3, 3);
+        let first = fails(&e);
+        let runs = |h: &Gated| h.runs.load(Ordering::SeqCst);
+        let mut pf = format!("{first} {} {} {}", e.is_done(), fails(&e), runs(hp));
+        hp.fail.store(false, Ordering::SeqCst);
+        pf += &format!(" {} {}", fails(&e), runs(hp));
+        hn.fail.store(true, Ordering::SeqCst);
+        let e = an.get_tile(3, 3);
+        let mut nf = format!("{} {}", e.is_done(), runs(hn));
+        nf += &format!(" {} {}", fails(&e), runs(hn));
+        nf += &format!(" {} {}", fails(&e), runs(hn));
+        hn.fail.store(false, Ordering::SeqCst);
+        hn.inner.take();
+        nf += &format!(" {} {}", fails(&e), runs(hn));
+        nf += &format!(" {}", measured(hn, e.get()));
+        nf += &format!(" {}", measured(hn, &none.generate_region(3, 3)));
+        out += &format!("a4 {pf} {nf}\n");
+
+        let (l1, l2, l3) = (
+            Arc::new(Log::default()),
+            Arc::new(Log::default()),
+            Arc::new(Log::default()),
+        );
+        let weak = |log: &Arc<Log>| -> TileListener { Arc::<Log>::downgrade(log) };
+        an.set_listener(weak(&l1));
+        let delegated = none
+            .listener
+            .read()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|listener| std::ptr::addr_eq(listener.as_ptr(), Arc::as_ptr(&l1)));
+        let e = an.get_tile(1, -1);
+        an.set_listener(weak(&l2));
+        dispose_all(e.get());
+        dispose_all(an.get_tile(2, -2).get());
+        dispose_all(&none.generate_region(4, 4));
+        ap.set_listener(weak(&l3));
+        dispose_all(ap.get_tile(-3, 6).get());
+        hn.inner.take();
+        hp.inner.take();
+        out += &format!(
+            "a5 {delegated} {} {} {}\n",
+            l1.events(),
+            l2.events(),
+            l3.events()
+        );
+
+        let (cn, cp) = (an.cached(), ap.cached());
+        let other = AsyncTileGenerator::new(Arc::clone(&none), pool8.clone());
+        let co = other.cached();
+        let shape = |cache: &TileCache<Gated, WorldFilters>, generator, pool: &ThreadPool| {
+            let same = Arc::ptr_eq(&cache.generator, generator);
+            let size = cache.thread_pool.size() == pool.size();
+            format!("{same} {size} {}", cache.can_queue)
+        };
+        let shape = [
+            shape(&cn, &none, &ThreadPool::NONE),
+            shape(&cp, &pooled, &pool8),
+            shape(&co, &none, &pool8),
+        ]
+        .join(" ");
+        let cached_tile = cp.get_tile_at(4, -5);
+        let async_tile = ap.get_tile(4, -5);
+        let distinct = !std::ptr::eq(cached_tile.call(), async_tile.get());
+        let equal = fold_tile(cached_tile.call()) == fold_tile(async_tile.call());
+        let id = Tile::region_id_for(4, -5);
+        let had = cp.get(id).is_some();
+        dispose_all(async_tile.call());
+        let removed = cp.get(id).is_none();
+        other.get_tile(0, 1).get();
+        let place = hn.place();
+        hn.inner.take();
+        hp.inner.take();
+        out += &format!(
+            "a6 {shape} {distinct} {equal} {had} {removed} {place} {}\n",
+            l3.events()
+        );
+
+        out += "a7";
+        for striped in [false, true] {
+            let mut builder = builder().batch(3).pool(8);
+            if striped {
+                builder = builder.striped();
+            }
+            let g = Arc::new(builder.build());
+            let a = Arc::clone(&g).asynchronous();
+            let at = fold_tile(a.get_tile(-7, 9).get());
+            let st = fold_tile(&g.generate_region(-7, 9));
+            let az = fold_tile(a.get_zoomed_tile(1e9, -1e9, -3.0, false).get());
+            let sz = fold_tile(&g.generate_zoomed_region(1e9, -1e9, -3.0, false));
+            let class = match g.kind {
+                Kind::Plain => "TileGenerator",
+                Kind::Batched => "TileGeneratorBatched",
+                Kind::Striped => "TileGeneratorStriped",
+            };
+            out += &format!(" {class} {at:x} {} {az:x} {}", at == st, az == sz);
+        }
+        out += "\n";
+
+        hp.inner.take();
+        let entries: Vec<_> = (0..8).map(|_| ap.get_tile(-1, -1)).collect();
+        let tiles: Vec<&Tile> = entries.iter().map(|entry| entry.get()).collect();
+        let distinct = (0..8)
+            .filter(|&i| (0..i).all(|j| !std::ptr::eq(tiles[i], tiles[j])))
+            .count();
+        let fold = fold_tile(tiles[0]);
+        let same = tiles.iter().all(|tile| fold_tile(tile) == fold);
+        let (lookups, _) = hp.inner.take();
+        out += &format!("a8 {distinct} {same} {lookups} {fold:x}\n");
+        assert_eq!(out, TILE_ASYNC_ORACLE);
+    }
+
+    /// `TileAsyncOracle.java`'s output (`./run.sh` writes it to `async.txt`).
+    const TILE_ASYNC_ORACLE: &str = "\
+a0 true true true -2 -1073741824 true 0 caller 132 933dedba501bf8f1 -1 2 2afe9d3c12774c0d 132 933dedba501bf8f1 -1 2 2afe9d3c12774c0d true 0
+a1 true 0 caller 134 8ea15ead27a7ffee 0 0 4166d8e307e01385 134 8ea15ead27a7ffee 0 0 4166d8e307e01385
+a2 true false task true 137 7e3196318cb259b8 5 -6 bdd7e0198d0c33c3 137 7e3196318cb259b8 5 -6 bdd7e0198d0c33c3 true
+a3 false task true 637 4ecaf1596e70d26 0 0 29ad7e3985d0e0bc 637 4ecaf1596e70d26 0 0 29ad7e3985d0e0bc
+a4 NullPointerException true NullPointerException 1 NullPointerException 1 true 0 NullPointerException 1 NullPointerException 2 ok 2 137 8c625cfff37cd90c 3 3 824d1c7dad7a86fa 137 8c625cfff37cd90c 3 3 824d1c7dad7a86fa
+a5 true 0[] 3[1,-1;2,-2;4,4] 1[-3,6]
+a6 true true false true true true true true true true true true true task 1[-3,6]
+a7 TileGeneratorBatched 5c3c2185ae5ff301 true ff2a52d36fd50b5d true TileGeneratorStriped 5c3c2185ae5ff301 true ff2a52d36fd50b5d true
+a8 8 true 1096 c8fc16f9a1adfa38
 ";
 }
