@@ -168,7 +168,7 @@ impl Default for BiomeNoise {
     }
 }
 
-/// Engine's `ClimateSettings`, with Engine's defaults: what the climate module (a later layer) reads.
+/// Engine's `ClimateSettings`, with Engine's defaults: what [`ClimateModule`] reads.
 #[derive(Clone, Copy)]
 pub struct ClimateSettings {
     pub temperature: ClimateRange,
@@ -368,8 +368,8 @@ pub struct ClimateModule {
 }
 
 impl ClimateModule {
-    /// `new ClimateModule(continent, context)`: draws four seeds from `seed` (the context's seed)
-    /// and two from each of the moisture and temperature offset seeds, in Engine's order. `settings`
+    /// `new ClimateModule(continent, context)`: draws four seeds from `seed` (the context's seed),
+    /// three from the moisture offset seed and two from the temperature one, in Engine's order. `settings`
     /// and `control_points` are the context's `settings.climate` and `settings.world.controlPoints`;
     /// `registry` is the world's, whose `coast` (`TerrainType.COAST`) the coast mask writes.
     pub fn new(

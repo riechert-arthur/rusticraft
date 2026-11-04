@@ -1021,8 +1021,19 @@ every default bit for bit, `getMin`/`getMax`/`getBias` and `apply` over all comb
 signed zeros, values outside 0..1, subnormals, ±infinity, NaN) for min, max and bias, and `build` over seven noise
 types, four seeds and eight scale/octave/gain/lacunarity configurations.
 
-The climate module now reproduces warped biome cells, region identity and edges, macro grouping,
-continent-adjusted moisture, biome classification, and coastal terrain masking.
+The climate-module layer adds Engine's `ClimateModule` (`climate.rs`): its constructor draws the module, warp and
+macro-noise seeds from the context's `&mut Seed`, three from the moisture offset seed and two from the temperature
+one, in Engine's order, and builds the warped temperature and moisture modules (warp strengths in double math, as
+Engine passes them). `apply` (and `apply_masked`, Engine's `apply(cell, x, y, mask)`) finds the nearest of the 3x3
+jittered biome cells around the warped point and writes the region id, moisture, temperature and macro-biome id at its
+centre, then (masked) the region edge and the coast mask, the continent-adjusted moisture and the biome type. The
+continent is any `LandValue` (`getLandValue`); the coast it writes is the world registry's own. Where Engine's biome
+lookup throws (a moisture or temperature outside the type map), this panics. The climate stage that calls it is a
+later layer. The test replays `ClimateModuleOracle.java` (in `.local/terraforged/oracles/climate_module/`), which
+builds Engine's real module from a `GeneratorContext`: the seed cursor after the constructor and every field `apply`
+writes, the biome, the terrain and the continent's arguments, masked and unmasked, over six settings (seeds, biome
+sizes, scales, falloffs, offsets, biases, warps and control points), 625 edge-case coordinate pairs (signed zeros,
+huge values, subnormals, ±infinity, NaN) and a 19x19 grid, including the points where Engine throws.
 
 ## Status: development only
 
