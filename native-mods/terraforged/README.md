@@ -1051,12 +1051,24 @@ noise from seven noise types, strengths from -14 to `Integer.MAX_VALUE`, and lev
 0.45 and one above it): the seed cursor and levels, `getRand` and the offsets, and every cell field after `apply`, with
 starting heights at each threshold and its neighbours, over 625 edge-case coordinate pairs, a 19x19 and a 48x48 grid.
 
-A shared continent interface now exposes terrain population, edge and land sampling, nearest centers,
-and river maps across multi, single, improved, and fancy generator factory modes.
+The continent-factory layer adds Engine's `Continent` interface and `ContinentType.create` (`continent_api.rs`):
+the `Continent` trait (`apply`, edge and land values, nearest centre, `getRivermap` by continent cell or by cell),
+implemented by the multi and single, advanced and fancy continent generators, and `create_continent(type, seed,
+...)`, which builds the generator of each type (`MULTI`, `SINGLE`, `MULTI_IMPROVED`, `FANCY`) from the seed, which
+it draws from in that constructor's order (4, 4, 7 and 4 draws), and what the constructor reads from Engine's
+`GeneratorContext`. Its result plugs into the climate module and stage, which take a continent's land value. Engine's
+settings deserializer (which reads the type by its exact name and keeps `MULTI_IMPROVED` for an unknown one) is
+not ported, nor is `Heightmap`, which calls the factory. Its test replays `ContinentFactoryOracle.java` (in
+`.local/terraforged/oracles/continent_factory/`), which calls Engine's `ContinentType.create` for every type over
+five settings variants with the context's seed (as `Heightmap` does) and once with a separate seed: the created
+class and the seed draws, every edge, land and nearest-centre value and cell field after `apply` over a 41x41 grid
+and NaN, infinite, signed-zero and huge points, the river stage through `getRivermap(cell)` over a 17x17 grid, and
+`new Climate(continent, context)` on the created continent (its draws and every cell field after `apply`); the test
+also checks that each created continent samples like the generator built directly.
 
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives, the biome climate types, the climate settings, the climate module and the climate stage. They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives, the biome climate types, the climate settings, the climate module, the climate stage and the continent factory. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
