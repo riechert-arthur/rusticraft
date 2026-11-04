@@ -424,4 +424,28 @@ SEEDS seed() 4242 4243 4242 seed(5) 4247 4247 parent 4247
             assert!(a.terrain.is_same(&b.terrain));
         }
     }
+
+    /// `world_generator` registers into the context's registry: with the registry shared (a copy, or the first
+    /// factory) it panics before drawing, leaving the context's seed where it was.
+    #[test]
+    fn world_generator_needs_an_unshared_registry() {
+        let mut settings = GeneratorSettings::default();
+        settings.world.seed = 99;
+        let mut context = GeneratorContext::new(settings);
+        context.seed.next();
+        let copy = context.copy();
+        let build = |context: &mut GeneratorContext| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                context.world_generator();
+            }))
+        };
+        assert!(build(&mut context).is_err());
+        assert_eq!((context.seed.root(), context.seed.get()), (99, 100));
+        drop(copy);
+        let factory = context.world_generator();
+        assert_eq!(context.seed.get(), 100);
+        assert!(build(&mut context).is_err());
+        assert_eq!(context.seed.get(), 100);
+        drop(factory);
+    }
 }

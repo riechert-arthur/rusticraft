@@ -1079,7 +1079,8 @@ The generator-context layer adds Engine's `Settings` and `GeneratorContext` (`co
 terrain, river and filter settings; the seed (`new Seed(settings.world.seed)`, the long's low 32 bits, no draws), the
 levels (`new Levels(settings.world)`) and the world's one terrain registry, shared by everything built from the
 context. `new` (Engine's `create` path) and `create_no_cache` build the same context, since Engine's lazy world
-generator and tile cache are not forced while it is built and are not ported yet; `copy` and `split(offset)` share the
+generator and tile cache are not forced while it is built (the world generator is `world_generator()`, below; the
+tile cache is not ported); `copy` and `split(offset)` share the
 levels, settings and registry and start a new seed at `root + offset` (wrapping), and `seed()`/`seed_offset(n)` return
 new seeds, as in Engine. Java shares one mutable `Seed` while the Rust `Seed` is `Copy`, so consumers draw through
 `&mut context.seed`: `continent()` (`ContinentType.create(context.seed, context)`) and `climate(continent)` (`new
@@ -1106,8 +1107,22 @@ zero-weight landforms, other levels and control points) and every continent type
 constructor, the provider's variant counts, and every cell field after `apply` over 196 edge points (signed zeros, a
 subnormal, huge values, infinities, NaN) and a 40x40 grid with volcano cells, terrains compared by identity.
 
-The world-generator factory now owns and shares the concrete heightmap and filter graph, returning
-lightweight generator views with TerraForged's original factory lifecycle.
+The world-generator factory layer adds Engine's `WorldGeneratorFactory` (`tile_generator.rs`): `new(&mut context)`
+builds the heightmap (17 seed draws, 20 for `MULTI_IMPROVED`) and then the world filters (`WorldFilters::from_context`,
+no draws, the beach from the context's registry); `with_heightmap` takes a heightmap built from the same context. Every
+`get()` returns a `WorldGenerator` sharing that one heightmap and filter chain; `climate()` is the heightmap's, and
+`terrains()` is the context's registry, the one the heightmap registered its composite terrains into. The tile
+builder's `world_factory(&factory)` is Engine's `builder.factory(factory)`. Engine's lazy `context.worldGenerator`
+(`new WorldGeneratorFactory(context.copy())`) is `context.world_generator()`: it draws from a new seed at the root and
+leaves the context's own cursor alone, as the copy does, but builds on the context itself, since Engine's copy shares
+the registry and registering here needs it unshared; it panics, before drawing, if anything already holds the registry,
+and is not memoized (keep the factory it returns). Engine's other lazy supplier, `context.cache` (a cached
+`TileGenerator` of size 3, border 1, on the default pool), is not ported: only Engine's `WorldLookup` reads it. Its test
+replays `WorldGeneratorFactoryOracle.java` (in `.local/terraforged/oracles/world_generator_factory/`) for four settings
+variants, one per continent type: the seed cursors after the direct and lazy factories (also on contexts that drew
+first), what the factory shares, cells of the factory's, a direct and the lazy heightmap, and the first end-to-end
+tiles, `TileGenerator.builder().factory(factory)` regions (plain and batched) and a zoomed region with the real
+heightmap and filters, every backing cell compared bit for bit.
 
 ## Status: development only
 
