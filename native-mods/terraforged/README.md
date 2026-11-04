@@ -652,8 +652,8 @@ that show what a miss keeps and what a hit's `copyFrom` overwrites.
 The world-erosion layer adds Engine's `WorldErosion` (`filters.rs`, `WorldErosion`), the thread-safe holder
 `WorldFilters` keeps its `Erosion` filter in: `get(ctx)` returns the cached value while a validator accepts it for
 `ctx` (`WorldFilters` passes the tile map's total size and checks the filter's size), and otherwise rebuilds it with a
-factory under a write lock, checking again first so that threads asking at once share one build. Nothing uses it yet
-(the erosion filter and `WorldFilters` are not ported). Its tests check reuse and rebuilds, one build across threads,
+factory under a write lock, checking again first so that threads asking at once share one build. `WorldFilters` uses it
+for its erosion filter. Its tests check reuse and rebuilds, one build across threads,
 and replay a transcript of the validator and factory calls from `WorldErosionOracle.java` in
 `.local/terraforged/oracles/world_erosion/`, which calls Engine's `WorldErosion.get`.
 
@@ -663,8 +663,8 @@ towards the weighted mean of the present cells within the smoothing radius (weig
 outer `round(r + 0.5)` cells and cells under the erosion mask. The change is at full strength for cells up to one block
 above sea level and fades out linearly by 120 blocks above it; it is also weakened near terrain-region edges of
 terrains whose erosion modifier is not 1 (badlands and its composites) and near rivers. Engine's settings UI limits the radius to 0..5; a radius below -1, which
-only a hand-edited config can give, leaves the map unchanged as in Engine. Nothing uses it yet (`WorldFilters` and
-the tile map are not ported). Its tests replay `SmoothingOracle.java` in `.local/terraforged/oracles/smoothing/`,
+only a hand-edited config can give, leaves the map unchanged as in Engine. `WorldFilters` runs it; the tile map is
+not ported yet. Its tests replay `SmoothingOracle.java` in `.local/terraforged/oracles/smoothing/`,
 which runs Engine's `Smoothing.apply` on the same 14x14 maps for 11 radius, rate, level and iteration cases and
 prints every cell's value bits folded together.
 
@@ -673,7 +673,7 @@ radius 1 and scaler 10. It sets each cell's gradient to `min(1, scaler * Σ |hei
 radius)` over the 15 cells at `(dx, dz) * radius` for `dx` and `dz` from -1 to 2 (Engine's neighbourhood is
 asymmetric), skipping absent cells and those outside the map; like Engine's `Tile.getCellRaw`, a neighbour past the
 left or right edge is read from the previous or next row while it stays inside the backing array. Radius 0 divides by
-zero as in Engine. Nothing uses it yet (`WorldFilters` and the tile map are not ported). Its tests replay
+zero as in Engine. `WorldFilters` runs it; the tile map is not ported yet. Its tests replay
 `SteepnessOracle.java` in `.local/terraforged/oracles/steepness/`, which runs Engine's `Steepness.apply` on the
 smoothing oracle's 14x14 maps for 14 radius, scaler, level and NaN/signed-zero height cases and prints every cell's
 gradient bits folded together.
@@ -684,7 +684,7 @@ registry's own beach terrain when its squared height gradient is below 0.275, th
 differences to the cells 8 blocks east and west and 8 blocks north and south, each divided by 17. A neighbour that is
 absent or outside the map is replaced by the cell itself and takes 8 off that distance; neighbours are read like
 Engine's `Tile.getCellRaw`, as for steepness. Invalid control points fall back to the defaults, as Engine's
-`ControlPoints` does. Nothing uses it yet (`WorldFilters` and the tile map are not ported). Its tests replay
+`ControlPoints` does. `WorldFilters` runs it; the tile map is not ported yet. Its tests replay
 `BeachDetectOracle.java` in `.local/terraforged/oracles/beach/`, which runs Engine's `BeachDetect.apply` on hashed
 8x8 to 33x33 maps (absent cells, NaN, infinite and signed-zero heights, NaN continent edges, valid and invalid beach
 control points) and prints every cell's terrain id folded together with the cells it turned into beach.
@@ -710,12 +710,23 @@ ported in both forms: `Modifier::range(min, max)` (erosion uses `range(ground, g
 `.invert()` (smoothing). Its test replays `ErosionOracle.java` in `.local/terraforged/oracles/erosion/`, which runs
 Engine's `Erosion.apply` on 16 maps (several seeds, sizes from 0 to 64 with and without borders, negative and extreme
 block positions, custom settings, zero and negative iterations, NaN and infinite heights) and folds every cell's
-value, erosion and sediment bits. Nothing calls the filter yet: wiring Engine's filter chain into tiles is a later
-layer.
+value, erosion and sediment bits.
+
+The world-filters layer adds Engine's filter chain (`WorldFilters`, `filters.rs`, with `FilterSettings`), built from
+the world's root seed, filter settings, levels, control points and terrain registry as Engine builds it from its
+`GeneratorContext`. `apply(map, region_x, region_z, optional)` runs, when `optional` is set, erosion (built for the
+map's total size and kept in a `WorldErosion` until the size changes; `erosion.droplets_per_chunk` iterations) then
+smoothing (`smoothing.iterations` passes), and always steepness (radius 1, scaler 10) then beach detection. Nothing
+calls it yet: the tile map Engine runs it on is a later layer. Its test replays `WorldFiltersOracle.java` in
+`.local/terraforged/oracles/world_filters/`, which builds Engine's `WorldFilters` from a `GeneratorContext` for four
+settings groups (long seeds, other levels, droplet counts and smoothing passes including 0, radii, rates, beach
+points, lifetimes) and runs each over several maps in turn (borders, negative positions, the optional filters on and
+off, cache reuse and rebuilds, NaN and infinite heights), folding every cell's value, erosion, sediment, gradient and
+terrain.
 
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter and the hydraulic erosion filter (with its settings, random stream and brushes). They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes) and the world filter chain. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development

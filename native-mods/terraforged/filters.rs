@@ -75,6 +75,13 @@ impl Default for ErosionSettings {
     }
 }
 
+/// Engine's `FilterSettings`: the erosion and smoothing settings `WorldFilters` reads.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct FilterSettings {
+    pub erosion: ErosionSettings,
+    pub smoothing: SmoothingSettings,
+}
+
 /// Engine's `Filterable`: a square map of `total_size() * total_size()` cells stored row by row
 /// (`Size.indexOf(x, z) = z * total + x`). `cell_raw` is `getCellRaw`, which Engine's `Tile` answers
 /// with `Cell.empty()` outside the backing array; here that is `None`.
@@ -855,6 +862,83 @@ where
     }
 }
 
+/// `Erosion.factory(context)`: builds the erosion filter for a map size.
+type ErosionFactory = Box<dyn Fn(i32) -> Erosion + Send + Sync>;
+/// `(e, size) -> e.getSize() == size`.
+type ErosionValidator = fn(&Erosion, i32) -> bool;
+
+/// Engine's `WorldFilters`: the filter chain a tile runs after its heightmap. The optional filters
+/// are erosion (`droplets_per_chunk` iterations, rebuilt by `WorldErosion` whenever the map size
+/// changes) then smoothing (`smoothing.iterations` passes); the required ones, which always run,
+/// are steepness (radius 1, scaler 10) then beach detection.
+pub struct WorldFilters {
+    smoothing: Smoothing,
+    steepness: Steepness,
+    beach: BeachDetect,
+    settings: FilterSettings,
+    erosion: WorldErosion<Erosion, ErosionFactory, ErosionValidator>,
+    erosion_iterations: i32,
+    smoothing_iterations: i32,
+}
+
+impl WorldFilters {
+    /// `new WorldFilters(context)`: `root_seed` is `context.seed.root()`, `settings` is
+    /// `context.settings.filters`, `levels` is `context.levels`, `control_points` is
+    /// `context.settings.world.controlPoints` and `terrains` is the world's registry (whose
+    /// built-in beach the beach filter assigns).
+    pub fn new(
+        root_seed: i32,
+        settings: FilterSettings,
+        levels: Levels,
+        control_points: WorldControlPoints,
+        terrains: &TerrainRegistry,
+    ) -> Self {
+        // Erosion.Factory copies the erosion settings when the filters are built.
+        let erosion_settings = settings.erosion;
+        let factory: ErosionFactory = Box::new(move |size| {
+            Erosion::factory(root_seed, size as usize, erosion_settings, levels)
+        });
+        let validator: ErosionValidator = |erosion, size| erosion.size() as i32 == size;
+        Self {
+            smoothing: Smoothing::new(settings.smoothing, levels),
+            steepness: Steepness::new(1, 10.0, levels),
+            beach: BeachDetect::new(control_points, terrains),
+            settings,
+            erosion: WorldErosion::new(factory, validator),
+            erosion_iterations: settings.erosion.droplets_per_chunk,
+            smoothing_iterations: settings.smoothing.iterations,
+        }
+    }
+
+    /// `getSettings()`.
+    pub fn settings(&self) -> &FilterSettings {
+        &self.settings
+    }
+
+    /// `apply(tile, optionalFilters)`: `map` is `tile.filterable()` and the seeds are the tile's
+    /// region coordinates.
+    pub fn apply(&self, map: &mut impl Filterable, region_x: i32, region_z: i32, optional: bool) {
+        if optional {
+            self.apply_optional(map, region_x, region_z);
+        }
+        self.apply_required(map, region_x, region_z);
+    }
+
+    /// `applyRequiredFilters`: steepness, then beach detection, one pass each.
+    pub fn apply_required(&self, map: &mut impl Filterable, seed_x: i32, seed_z: i32) {
+        self.steepness.apply(map, seed_x, seed_z, 1);
+        self.beach.apply(map, seed_x, seed_z, 1);
+    }
+
+    /// `applyOptionalFilters`: erosion for the map's total size, then smoothing.
+    pub fn apply_optional(&self, map: &mut impl Filterable, seed_x: i32, seed_z: i32) {
+        let erosion = self.erosion.get(map.total_size() as i32);
+        erosion.apply(map, seed_x, seed_z, self.erosion_iterations);
+        self.smoothing
+            .apply(map, seed_x, seed_z, self.smoothing_iterations);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::terraforged_engine::TerrainRegistry;
@@ -1625,6 +1709,198 @@ mod tests {
              14 15952d94fca6e34b 21583428833ae011 21583428833ae011 be395054/00000000/00000000 beaf9b68/00000000/00000000 be7270f4/00000000/00000000 be0ef73e/00000000/00000000 be97c116/00000000/00000000 be470134/00000000/00000000 beac0b58/00000000/00000000 be648d3c/00000000/00000000 beb5202a/00000000/00000000 be66fe94/00000000/00000000 beaca927/00000000/00000000 be5bb66a/00000000/00000000 be991666/00000000/00000000 be289248/00000000/00000000 be892265/00000000/00000000 beac3f3e/00000000/00000000 be3645c6/00000000/00000000 be8c73ad/00000000/00000000 bead8949/00000000/00000000 be3c113c/00000000/00000000 be742d08/00000000/00000000 be906813/00000000/00000000 beb56431/00000000/00000000 be195a6e/00000000/00000000\n\
              15 593fbcd3819527e3 d62d83ad053260bc a1d85b4e18dd9ea8 3ee600d8/b9a66084/00000000 3e876e82/00000000/00000000 3ebc62a2/00000000/00000000 3eef3fb8/00000000/00000000 3e9d409b/00000000/00000000 3ecd78d4/00000000/00000000 3e954c01/00000000/00000000 3ebfcaf9/ba0f6a7a/00000000 3e84ad81/b97d03c0/00000000 3ec8c975/00000000/00000000 3e9151d6/00000000/00000000 3ecbff8a/00000000/00000000 3e93f1a6/00000000/00000000 3ee38ef4/00000000/00000000 3eab7e5e/00000000/00000000 3e781302/00000000/00000000 3ecbb2bc/00000000/00000000 3ea2ed57/00000000/00000000 3e7da816/00000000/00000000 3ee4de5e/00000000/00000000 3ebbf00b/b98f01ba/00000000 3ea3f08f/bb23ab03/00000000 3e8558ff/bbe7c48a/3c07533f 3edc6890/bbbfc014/00000000\n"
         );
+    }
+
+    /// The cell map `WorldFiltersOracle.java` builds for map `salt`: gentle hashed slopes around
+    /// sea level, the smoothing oracle's river masks, region edges and erosion masks, hashed
+    /// continent edges, and none/badlands/hills/coast/beach/mountains/ocean terrains; `special` 1
+    /// adds NaN, infinite and -0.0 heights and NaN continent edges.
+    fn world_filter_cells(
+        registry: &TerrainRegistry,
+        total: usize,
+        salt: i32,
+        special: i32,
+    ) -> Vec<Cell> {
+        let terrains = [
+            "none",
+            "badlands",
+            "hills",
+            "coast",
+            "coast",
+            "beach",
+            "mountains",
+            "ocean",
+        ]
+        .map(|name| registry.get_by_name(name).expect("built-in terrain"));
+        let total = total as i32;
+        (0..total * total)
+            .map(|index| {
+                let (x, z) = (index % total, index / total);
+                let mut h = index
+                    .wrapping_mul(7919)
+                    .wrapping_add(salt.wrapping_mul(104_729));
+                h ^= ((h as u32) >> 13) as i32;
+                h = h.wrapping_mul(0x5bd1_e995);
+                h ^= ((h as u32) >> 15) as i32;
+                let mut cell = Cell::new(registry);
+                let base = ((3 * x + 2 * z + salt) % 97) as f32 / 2000.0 + 0.2;
+                cell.value = base + (((h as u32) >> 8) & 0xFFFF) as f32 / 40_000_000.0;
+                let nan_edge = special == 1 && h & 255 == 9;
+                if special == 1 {
+                    match h & 1023 {
+                        5 => cell.value = f32::NAN,
+                        6 => cell.value = f32::INFINITY,
+                        7 => cell.value = -0.0,
+                        _ => {}
+                    }
+                    if nan_edge {
+                        cell.continent_edge = f32::NAN;
+                    }
+                }
+                cell.river_mask = match ((h as u32) >> 4) & 7 {
+                    0 => 0.001,
+                    1 => 0.05,
+                    2 => 0.0999,
+                    3 => 0.1,
+                    _ => 1.0,
+                };
+                cell.terrain_region_edge = (((h as u32) >> 24) & 63) as f32 / 256.0;
+                cell.erosion_mask = h & 63 == 17;
+                if !nan_edge {
+                    cell.continent_edge = (((h as u32) >> 12) & 0x3FF) as f32 / 1600.0;
+                }
+                cell.terrain = terrains[(((h as u32) >> 1) & 7) as usize].clone();
+                cell
+            })
+            .collect()
+    }
+
+    /// Replays `WorldFiltersOracle.java` (`.local/terraforged/oracles/world_filters/`), which builds
+    /// Engine's `WorldFilters` from a `GeneratorContext` for four settings groups (long world seeds
+    /// whose `(int)` root differs, other levels, droplet counts including 0, smoothing passes
+    /// including 0, radii, rates, beach control points and droplet lifetimes) and runs each over
+    /// several maps in turn, so the erosion cache is reused for equal sizes and rebuilt when the size
+    /// changes: borders, negative block positions and region seeds, optional filters on and off
+    /// (`apply`), and NaN/infinite heights. Each line folds every cell's value, erosion, sediment and
+    /// gradient bits (NaNs canonical) and terrain id (`fold * 31 + x`, from 17) and lists every
+    /// 211th cell from cell 7.
+    #[test]
+    fn world_filters_match_engine_oracle() {
+        let registry = TerrainRegistry::new();
+        // seed, height, sea level, droplets, smoothing iterations, radius, rate, beach point,
+        // droplet lifetime (None: default).
+        let groups: [(i64, i32, i32, i32, i32, f32, f32, f32, Option<i32>); 4] = [
+            (0, 256, 63, 135, 1, 1.8, 0.9, 0.327, None),
+            (0x1_2345_6789, 256, 63, 20, 2, 2.5, 0.6, 0.4, Some(20)),
+            (-987_654_321, 256, 40, 3, 0, 1.8, 0.9, 0.327, None),
+            (i64::from(i32::MAX), 320, 62, 0, 3, 1.0, 1.0, 0.9, Some(8)),
+        ];
+        // group, size, border, block x, block z, region x, region z, optional, special.
+        let maps: [(usize, usize, usize, i32, i32, i32, i32, bool, i32); 11] = [
+            (0, 16, 16, -32, 48, 2, -3, true, 0),
+            (0, 16, 16, -32, 48, 2, -3, false, 0),
+            (0, 32, 8, 1000, -2000, 7, 11, true, 0),
+            (0, 16, 16, 512, 512, 0, 0, true, 1),
+            (1, 24, 4, -4096, 4095, -1, 1, true, 0),
+            (1, 24, 4, -4096, 4095, -1, 1, true, 1),
+            (1, 8, 4, 0, 0, 0, 0, true, 0),
+            (2, 16, 16, 160, 160, 3, 4, true, 0),
+            (2, 16, 0, -17, 33, 5, 6, true, 1),
+            (3, 16, 16, 77, -301, 9, 9, true, 0),
+            (3, 10, 5, 5, 33, 1, 2, false, 1),
+        ];
+        let filters = groups.map(
+            |(seed, height, sea_level, droplets, passes, radius, rate, beach, lifetime)| {
+                let mut settings = FilterSettings::default();
+                settings.erosion.droplets_per_chunk = droplets;
+                settings.smoothing.iterations = passes;
+                settings.smoothing.smoothing_radius = radius;
+                settings.smoothing.smoothing_rate = rate;
+                if let Some(lifetime) = lifetime {
+                    settings.erosion.droplet_lifetime = lifetime;
+                }
+                let points = WorldControlPoints {
+                    beach,
+                    ..WorldControlPoints::default()
+                };
+                // `new Seed(long)` keeps the low 32 bits.
+                WorldFilters::new(
+                    seed as i32,
+                    settings,
+                    Levels::new(height, sea_level),
+                    points,
+                    &registry,
+                )
+            },
+        );
+        let canonical = |value: f32| {
+            if value.is_nan() {
+                0x7fc0_0000
+            } else {
+                value.to_bits()
+            }
+        };
+        let fold =
+            |fold: i64, value: u32| fold.wrapping_mul(31).wrapping_add(i64::from(value as i32));
+        let mut out = String::new();
+        for (
+            case,
+            (group, size, border, block_x, block_z, region_x, region_z, optional, special),
+        ) in maps.into_iter().enumerate()
+        {
+            let total = size + 2 * border;
+            let mut map = ErosionMap {
+                total,
+                border,
+                block_x,
+                block_z,
+                cells: world_filter_cells(&registry, total, case as i32, special),
+            };
+            filters[group].apply(&mut map, region_x, region_z, optional);
+            let mut folds = [17_i64; 5];
+            let mut samples = String::new();
+            for (index, cell) in map.cells.iter().enumerate() {
+                let bits = [cell.value, cell.erosion, cell.sediment, cell.gradient].map(canonical);
+                for (slot, value) in folds.iter_mut().zip(bits) {
+                    *slot = fold(*slot, value);
+                }
+                folds[4] = fold(folds[4], cell.terrain.id() as u32);
+                if index % 211 == 7 {
+                    samples += &format!(
+                        " {:08x}/{:08x}/{:08x}/{}",
+                        bits[0],
+                        bits[1],
+                        bits[3],
+                        cell.terrain.id()
+                    );
+                }
+            }
+            out += &format!(
+                "{case} {:016x} {:016x} {:016x} {:016x} {:016x}{samples}\n",
+                folds[0], folds[1], folds[2], folds[3], folds[4]
+            );
+        }
+        assert_eq!(
+            out,
+            "0 fb8ffc03514618b8 1703544168ca274a ae3a7969b723ed7b d9bea000ec420c5f dae34e7833a4d6fc 3e5820ed/00000000/3f800000/11 3e79b9e1/00000000/3e3b81e0/12 3e6969ed/00000000/3f800000/11 3e73135b/00000000/3f3aa1c8/4 3e62feb4/00000000/3f800000/11 3e6d3e22/00000000/3f800000/4 3e5cc6d4/00000000/3f800000/2 3e6e794b/ba2bf5ca/3f800000/0 3e56e628/00000000/3f800000/4 3e78abe7/00000000/3e2edf4e/9 3e51693d/00000000/3f800000/9\n\
+             1 25409e2f1ea1dac5 21583428833ae011 21583428833ae011 1b70bd8db374754d d222d697bf2b1eed 3e58bca2/00000000/3f800000/4 3e79a4ee/00000000/3ea07477/4 3e697d10/00000000/3f800000/9 3e74af55/00000000/3eff9010/9 3e63be8d/00000000/3f800000/9 3e6e34f1/00000000/3f800000/0 3e5e5743/00000000/3f800000/4 3e7e6aa0/00000000/3f3b0640/2 3e571d1a/00000000/3f800000/2 3e78792a/00000000/3e89b0e8/0 3e509740/00000000/3f800000/4\n\
+             2 a487ab006fd8b487 faccc62ede969392 473738aa288bb52d 958254a8642c5ce0 8cbad2e34e974fb0 3e597fc8/00000000/3f800000/2 3e7ad933/00000000/3e76cd2c/0 3e6a7812/00000000/3f800000/11 3e740945/00000000/3f1a6dd9/12 3e6400a0/00000000/3f800000/4 3e6e4f81/00000000/3f800000/4 3e5e5067/00000000/3f800000/2 3e50dd8e/00000000/3f800000/9 3e57b98f/00000000/3f800000/12 3e791911/00000000/3e3d1c30/11 3e521304/00000000/3f800000/12\n\
+             3 78f307dfe70487ac 19dbc580237ae011 b1f7b061a7aba648 d2a53f84833ae011 dd2af86262982806 7fc00000/7fc00000/7fc00000/9 7fc00000/7fc00000/7fc00000/9 7fc00000/7fc00000/7fc00000/9 7fc00000/7fc00000/7fc00000/11 7fc00000/7fc00000/7fc00000/11 7fc00000/7fc00000/7fc00000/2 7fc00000/7fc00000/7fc00000/0 7fc00000/7fc00000/7fc00000/2 7fc00000/7fc00000/7fc00000/9 7fc00000/7fc00000/7fc00000/9 7fc00000/7fc00000/7fc00000/4\n\
+             4 adbdf57ac122e50c 3712a1f99c65d1cf 5760339bcbb3f6b7 a70e482843a53efc 18e5f595dc31f888 3e5ab0c2/00000000/3f800000/4 3e7d7304/00000000/3f39c90c/11 3e716a3f/00000000/3f76efc6/9 3e639516/00000000/3f800000/0 3e5634d4/00000000/3f800000/12\n\
+             5 1deea35a1954fdd8 525dc6758f28d814 601e979a41f011c4 12537dbca2595078 04e145a4e6961ac3 3e5ac702/00000000/3f800000/4 3e6d8b7d/b889a3d9/3f800000/4 3e719e2f/00000000/3f6f541e/3 3e652f6e/00000000/3f800000/4 3e566d70/00000000/3f800000/3\n\
+             6 bb5bff1557180a94 4562e551705be011 4562e551705be011 88c771f2cc6815b2 3f3f2d3340cb0da7 3e5b51ff/00000000/3f800000/3 3e6e0f07/00000000/3f800000/9\n\
+             7 71f6bad641fdfa6a a92ac5032231ccf3 b27bfd695e0a88d7 b5d583d5e635d010 7c3b7ac9b016f5bb 3e5bdff7/b5279997/3e8aff7a/3 3e7c1fb0/ba4d9fa8/3f800000/11 3e6d236c/b861d6d8/3e9e371b/9 3e7667c4/b760d4c6/3ebd38a5/4 3e671742/b997bbed/3e9c2bf1/11 3e70289f/00000000/3eb920b7/0 3e6131d3/b86fa35c/3e8bf1a0/4 3e4fe81e/00000000/3ea1b87d/4 3e5b03b2/b81359bc/3e91907e/4 3e7c097a/b8e4ecc8/3f800000/12 3e542765/00000000/3eaa311a/11\n\
+             8 85dc53882ea8a974 455abe15c16bda0a 4562e551705be011 75593f063f9cbe57 2fa3bad8b6746cec 3e5cb512/b873c3a8/3e5e0f80/3 3e6e368e/00000000/3ea6fe0f/3\n\
+             9 63f69e2ccfa3963c 21583428833ae011 21583428833ae011 320b6204be5229a6 e6c6e77c9375e2e3 3e5c8bfc/00000000/3e8e758d/3 3e7d86dd/00000000/3f800000/9 3e6d8218/00000000/3eb23ef0/9 3e77bfc3/00000000/3eaef22c/11 3e689163/00000000/3e874899/3 3e729ab0/00000000/3e8e4b67/12 3e626df9/00000000/3e73dc48/3 3e5174a2/00000000/3e909449/2 3e5c1dc8/00000000/3e911d47/0 3e7d7ef3/00000000/3f800000/11 3e54eb61/00000000/3e9ced1b/4\n\
+             10 daa8e2eaead87a3d 42d389671fb18e11 42d389671fb18e11 94dfa1258505ac46 dfeaccb2e2259cd1 3e5e3df5/00000000/3e3e9646/3 3e786f28/00000000/3f800000/4\n"
+        );
+    }
+
+    /// Engine shares one `WorldFilters` between its tile-generation threads.
+    #[test]
+    fn world_filters_are_shared_between_threads() {
+        fn shareable<T: Send + Sync>() {}
+        shareable::<WorldFilters>();
     }
 
     #[test]
