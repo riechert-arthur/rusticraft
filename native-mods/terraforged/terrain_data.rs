@@ -45,10 +45,11 @@ impl Index {
         chunk: true,
     };
 
+    /// `Index.borderedChunk(border)`: side `16 + border * 2` (Java `int` math).
     pub const fn bordered_chunk(border: i32) -> Self {
         Self {
             offset: border,
-            size: 16 + border * 2,
+            size: 16_i32.wrapping_add(border.wrapping_mul(2)),
             chunk: false,
         }
     }
@@ -68,8 +69,10 @@ impl Index {
         usize::try_from(self.of(x, z)).unwrap_or(usize::MAX)
     }
 
-    pub const fn length(self) -> usize {
-        (self.size * self.size) as usize
+    /// The maps' array length, `size * size` in Java `int` math; panics where Java throws
+    /// `NegativeArraySizeException`.
+    pub fn length(self) -> usize {
+        usize::try_from(self.size.wrapping_mul(self.size)).expect("negative array size")
     }
 }
 
@@ -557,6 +560,8 @@ mod tests {
             Index::bordered_chunk(0),
             Index::bordered_chunk(1),
             Index::bordered_chunk(3),
+            Index::bordered_chunk(i32::MAX),
+            Index::bordered_chunk(-9),
         ];
         for (i, index) in indices.iter().enumerate() {
             write!(out, "I {i}").unwrap();
@@ -654,8 +659,8 @@ mod tests {
         ] {
             assert!(out.lines().any(|l| l == line), "missing oracle line {line}");
         }
-        assert_eq!(out.lines().count(), 313);
-        assert_eq!(fnv(&out), 0xa741_2ebe_eb70_b9ea);
+        assert_eq!(out.lines().count(), 315);
+        assert_eq!(fnv(&out), 0x7bfd_a5e4_dd00_6d65);
     }
 
     #[test]
