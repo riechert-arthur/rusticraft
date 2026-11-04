@@ -332,11 +332,10 @@ impl Tile {
     /// [`floor`]: `(int) f`, minus 1 below zero, in Java `int` math: a NaN sample is -1, +infinity
     /// and huge samples saturate to `i32::MAX`, -infinity and huge negative ones wrap from
     /// `i32::MIN - 1` to `i32::MAX`, and a negative whole sample such as -16.0 floors to -17). The
-    /// cache key and the
-    /// stages both get that `int` position (as floats), as Engine's cache computes from the key.
-    /// Zoomed blocks that floor to one position share its cached cell, also with unzoomed cached
-    /// runs on the same cache. The same chunk and cell order, river-map carry and panics.
-    ///
+    /// cache key and the stages both get that `int` position (the stages as floats), as Engine's
+    /// cache computes a miss from its key. Zoomed blocks that floor to one position share its
+    /// cached cell, also with unzoomed cached runs on the same cache. The same chunk and cell
+    /// order, river-map carry and panics.
     #[allow(clippy::too_many_arguments)]
     pub fn generate_cached_zoomed_heightmap(
         &mut self,

@@ -793,7 +793,8 @@ through `HeightmapCache::generate` as the cached fill's block positions do. The 
 Engine's cache computes a cell from its key, and zoomed blocks that floor to the same position share one cached cell,
 also with the unzoomed cached fills on the same cache. The oracle runs sixteen offset and zoom pairs on the cache of
 the cached runs: unit, halved and doubled zooms over tile 0's cached blocks, the zoomed runs' pairs except the one on
-the aliasing tile, and a repeat where every block hits.
+the aliasing tile (with tile 1's unit pair shifted off the blocks whose cached cells that tile's aliasing chunks
+refilled, the snapshot difference above), and a repeat where every block hits; debug and release builds agree.
 
 ## Status: development only
 
