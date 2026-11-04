@@ -999,8 +999,8 @@ pub struct WorldSettings {
     pub properties: WorldProperties,
 }
 
-/// Engine's `TerrainSettings.Terrain`: one landform's weight and its base, vertical and
-/// horizontal scales. Engine's `apply` (scale, bias, then `TerrainPopulator.clamp`) is not ported.
+/// Engine's `RiverSettings`, with Engine's defaults (the serializer's `@Range` limits are not enforced).
+/// TerraForged 0.3.1 does not read it: its own continent river config replaces Engine's river map.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RiverSettings {
     pub seed_offset: i32,
@@ -1024,6 +1024,7 @@ impl Default for RiverSettings {
     }
 }
 
+/// Engine's `RiverSettings.River`; `Default` is Engine's no-argument constructor (all zero).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct River {
     pub bed_depth: i32,
@@ -1035,6 +1036,8 @@ pub struct River {
 }
 
 impl River {
+    /// Engine's `River(depth, minBank, maxBank, outer, inner, fade)`: `outer` is the bank width, `inner` the
+    /// bed width.
     pub const fn new(
         depth: i32,
         min_bank: i32,
@@ -1060,6 +1063,7 @@ impl Default for River {
     }
 }
 
+/// Engine's `RiverSettings.Lake`, with Engine's defaults.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Lake {
     pub chance: f32,
@@ -1087,6 +1091,7 @@ impl Default for Lake {
     }
 }
 
+/// Engine's `RiverSettings.Wetland`, with Engine's defaults.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Wetland {
     pub chance: f32,
@@ -1104,6 +1109,8 @@ impl Default for Wetland {
     }
 }
 
+/// Engine's `TerrainSettings.Terrain`: one landform's weight and its base, vertical and
+/// horizontal scales. Engine's `apply` (scale, bias, then `TerrainPopulator.clamp`) is not ported.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TerrainFormSettings {
     pub weight: f32,
