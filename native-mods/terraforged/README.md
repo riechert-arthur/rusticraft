@@ -587,7 +587,7 @@ difference: Engine throws for a negative river count (`new ArrayList(count)`); t
 calls it yet: the continents' river caches come with a later layer. Its tests fold every built network and 345960
 applies of the resulting river maps on a grid for the multi, single and advanced continents, five settings variants
 (a wrapping seed offset with chance-1 lakes and wetlands, a 384/62 world, continent scale 1000, one to eight rivers),
-two continent seeds and four cells each, plus direct samples, against
+two continent seeds and four cells each, plus the networks of extreme and negative cells and direct samples, against
 a Java oracle running Engine's classes, `SimpleRiverGeneratorOracle.java` in `.local/terraforged/oracles/river/`.
 
 ## Status: development only

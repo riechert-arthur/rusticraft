@@ -4777,6 +4777,52 @@ mod tests {
             );
         }
 
+        /// Extreme and negative continent cells, with the ids the continents' caches build.
+        #[test]
+        fn extreme_cells_match_engine() {
+            const CELLS: [(i32, i32); 4] = [
+                (i32::MIN, i32::MAX),
+                (i32::MAX, i32::MIN),
+                (-1, -1),
+                (-3001, 77),
+            ];
+            let registry = Arc::new(TerrainRegistry::new());
+            let (world, _) = settings(0);
+            let mut fold = Fold(17);
+            let (mut networks, mut nodes) = (0, 0);
+            let mut fold_maps = |generate: &dyn Fn(i32, i32, i64) -> Rivermap, legacy_id: bool| {
+                for (x, z) in CELLS {
+                    let id = if legacy_id {
+                        (i64::from(z) << 32) | (i64::from(x) & 0xffff_ffff)
+                    } else {
+                        pack(x, z)
+                    };
+                    let map = generate(x, z, id);
+                    fold.mix(map.x());
+                    fold.mix(map.z());
+                    fold.mix(map.networks.len() as i32);
+                    networks += map.networks.len();
+                    for network in &map.networks {
+                        nodes += mix_network(&mut fold, network);
+                    }
+                }
+            };
+            for kind in 0..2 {
+                let mut seed = Seed::new(-98_765);
+                let continent = if kind == 0 {
+                    SimpleContinentGenerator::multi(&mut seed, world)
+                } else {
+                    SimpleContinentGenerator::single(&mut seed, world)
+                };
+                let generator = generator(&continent, 0, &registry);
+                fold_maps(&|x, z, id| generator.generate_rivers(x, z, id), true);
+            }
+            let continent = AdvancedContinentGenerator::new(&mut Seed::new(-98_765), world);
+            let generator = generator(&continent, 0, &registry);
+            fold_maps(&|x, z, id| generator.generate_rivers(x, z, id), false);
+            assert_eq!((networks, nodes, fold.0), (96, 96, 1_391_867_816));
+        }
+
         #[test]
         fn samples_match_engine() {
             let registry = Arc::new(TerrainRegistry::new());
