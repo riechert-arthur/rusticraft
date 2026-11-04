@@ -1145,6 +1145,8 @@ impl WetlandCarver {
     }
 }
 
+/// Engine's `rivermap.river.Network`: a river carver with its lakes, wetlands and child networks. Only the root
+/// has real bounds; `RiverNetworkBuilder::build` gives every child `Boundsf::NONE`, as Engine does.
 pub struct RiverNetwork {
     bounds: Boundsf,
     lakes: Vec<LakeCarver>,
@@ -1213,6 +1215,8 @@ impl RiverNetwork {
     }
 }
 
+/// Engine's `Network.Builder`. Its `min/max` box (`add_bounds`, Engine's `Math.min`/`Math.max`) is kept as in
+/// Engine, which never reads it: `build` takes the bounds from the rivers, lakes and wetlands.
 pub struct RiverNetworkBuilder {
     pub carver: RiverCarver,
     pub lakes: Vec<LakeCarver>,

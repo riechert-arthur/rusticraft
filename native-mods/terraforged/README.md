@@ -492,8 +492,8 @@ toward it and its `riverMask` lowered; in the bed, `value` is capped at the bank
 depth and tagged with the world registry's `lake` terrain. `recordBounds` adds the valley's square widened by 20% to
 a `Boundsf.Builder`, whose maxima start at `Float.MIN_VALUE` as in Engine, and `overlaps` tests a point against the
 squared lake radius plus a margin. Engine's `TerrainPopulator` base is not ported, as for the river carver. Nothing
-uses lakes yet: the river networks are not ported. Its tests fold every cell field over 561600 applies of fresh and
-filled cells (NaN, infinite and -0 values and masks) at points inside, on the edge of and outside 30 lakes (zero,
+uses lakes yet but the river networks, which nothing uses yet either. Its tests fold every cell field over 561600
+applies of fresh and filled cells (NaN, infinite and -0 values and masks) at points inside, on the edge of and outside 30 lakes (zero,
 negative, NaN and infinite sizes), for eight lake configs (wrapping `int` settings, NaN and infinite heights) and three
 `Levels` (TerraForged's swapped `Levels(63, 255)` among them), plus bounds built from NaN, -0 and infinite records,
 against a Java oracle running Engine's classes, `LakeOracle.java` in `.local/terraforged/oracles/river/`.
@@ -504,15 +504,25 @@ height (`ground(3)`) is lowered toward it and its `riverMask` lowered; past 65% 
 and the banks is lowered toward the bed, the innermost part sets `erosionMask`, cells where the pool alpha beats an
 edge noise are tagged with the world registry's `wetland` terrain, and cells from the bed up to the mound top move
 toward seeded mound noise, sampled at the terrain coordinates. `recordBounds` adds the segment's box widened by the
-radius. Engine's `TerrainPopulator` base is not ported, as for the river carver and lakes. Nothing uses wetlands yet:
-the river networks are not ported. Its tests fold every cell field over 1927800 applies of fresh and filled cells
+radius. Engine's `TerrainPopulator` base is not ported, as for the river carver and lakes. Nothing uses wetlands yet
+but the river networks. Its tests fold every cell field over 1927800 applies of fresh and filled cells
 (NaN, infinite and -0 values and masks) at points inside, on the edge of and outside wetlands (degenerate, NaN and
 infinite segments; zero, negative, NaN and infinite radii; seeds that wrap) for three `Levels` (TerraForged's swapped
 `Levels(63, 255)` among them), with both plain and warped coordinates, against a Java oracle running Engine's class,
 `WetlandOracle.java` in `.local/terraforged/oracles/river/`.
 
-The river-network layer recursively composes warped channel carvers, lakes, wetlands and child
-branches, including aggregate bounds and TerraForged's branch-overlap checks.
+The river-network layer adds Engine's `Network` and `Network.Builder` (`RiverNetwork` and `RiverNetworkBuilder` in
+`river.rs`): a river carver with its lakes, wetlands and child networks. `carve` warps the coordinates with the
+carver's warp (where it applies along the river), carves the river, then applies the wetlands, the lakes (both at the warped coordinates plus the lake
+offset) and the children (at the warped coordinates, so each branch warps again). `build` gives the root the bounds of
+every river, lake and wetland in the tree and each child `Boundsf.NONE`, as Engine does. The builder's overlap test
+(against a branch's own parent, or any other network) and the network's are ported as is; the builder's own
+`addBounds` box is kept although Engine never reads it. Nothing uses river networks yet: the river generators that build
+them are not ported. Its tests fold every cell field over 532575 carves of fresh and filled cells at a grid of points
+(plus -0, NaN and infinite ones) with three lake offsets (one NaN), for three networks (warped and unwarped carvers,
+overlapping lakes and wetlands, branches nested three deep, NaN and infinite rivers, lakes and wetlands) and three
+`Levels` (TerraForged's swapped `Levels(63, 255)` among them), plus every builder and network overlap test and the
+bounds, against a Java oracle running Engine's classes, `NetworkOracle.java` in `.local/terraforged/oracles/river/`.
 
 ## Status: development only
 
