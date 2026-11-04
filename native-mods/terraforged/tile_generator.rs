@@ -23,10 +23,10 @@
  */
 
 use super::{
-    terraforged_concurrent::LazyCallable,
+    terraforged_concurrent::{Cache, CacheEntry, LazyCallable, ThreadPool},
     terraforged_engine::{Cell, TerrainRegistry},
     terraforged_filters::WorldFilters,
-    terraforged_river::Rivermap,
+    terraforged_river::{Rivermap, current_time_millis},
     terraforged_tile::{BatchChunk, Tile},
 };
 use std::sync::Arc;
@@ -88,8 +88,8 @@ impl<H, F> WorldGenerator<H, F> {
 /// place of Engine's `TileResources` pools), the world generator, and which of Engine's three
 /// generator classes it is ([`Self::builder`] picks it as `Builder.build()` does; [`Self::new`]
 /// makes the plain one). Engine's `TileGeneratorBatched` and `TileGeneratorStriped` are also the
-/// `generate_batched_*` and `generate_striped_*` methods. The async wrapper, the tile cache and
-/// tile disposal are not ported.
+/// `generate_batched_*` and `generate_striped_*` methods; [`Self::cached`] is its `cached()`. The
+/// async wrapper and tile disposal are not ported.
 pub struct TileGenerator<H, F> {
     factor: i32,
     border: i32,
@@ -97,6 +97,9 @@ pub struct TileGenerator<H, F> {
     kind: Kind,
     /// The batch threads; `None` for Engine's default pool, resolved when a batched fill runs.
     batch_threads: Option<usize>,
+    /// Engine's `threadPool` as the tile cache's entries use it: the builder's
+    /// `ThreadPool::create(size)`, else [`ThreadPool::NONE`] (`Builder.getOrDefaultPool`).
+    pool: ThreadPool,
     terrains: Arc<TerrainRegistry>,
     generator: WorldGenerator<H, F>,
 }
@@ -154,6 +157,8 @@ where
     /// `pool(ThreadPools.create(size))`: the batches run on `max(2, size)` threads, the batch
     /// threads of Engine's `BatchingThreadPool.of(size)`. Without a pool (Engine's
     /// `ThreadPools.NONE`, a synchronous batcher) every batch runs on the calling thread, in order.
+    /// The tile cache's entries ([`TileGenerator::cached`]) run on `ThreadPool::create(size)`, else
+    /// on `ThreadPool::NONE`.
     #[must_use]
     pub const fn pool(mut self, size: i32) -> Self {
         self.pool = Some(size);
@@ -196,6 +201,7 @@ where
             (true, true) => Kind::Striped,
         };
         let batch_threads = Some(self.pool.map_or(1, |size| size.max(2) as usize));
+        let pool = self.pool.map_or(ThreadPool::NONE, ThreadPool::create);
         let (terrains, generator) = self.factory.expect(
             "TileGenerator.Builder.build() without a factory: Engine throws NullPointerException",
         );
@@ -205,6 +211,7 @@ where
             batch_size: self.batch_size,
             kind,
             batch_threads,
+            pool,
             terrains,
             generator,
         }
@@ -220,7 +227,8 @@ where
     /// supplying `generator` and the batch size, which only the `generate_batched_*` and
     /// `generate_striped_*` methods use (on Engine's default pool, `max(2, processors)` threads);
     /// `terrains` is the world's registry. Engine's builder makes the plain class only for batch
-    /// sizes of 0 and less: use [`Self::builder`] for its choice.
+    /// sizes of 0 and less: use [`Self::builder`] for its choice. Its tile cache's entries run on
+    /// [`ThreadPool::NONE`], as without a builder `pool`.
     pub const fn new(
         factor: i32,
         border: i32,
@@ -234,6 +242,7 @@ where
             batch_size,
             kind: Kind::Plain,
             batch_threads: None,
+            pool: ThreadPool::NONE,
             terrains,
             generator,
         }
@@ -473,6 +482,146 @@ where
     }
 }
 
+impl<H, F> TileGenerator<H, F>
+where
+    H: HeightmapSource + Send + Sync + 'static,
+    F: TileFilters + Send + Sync + 'static,
+{
+    /// `cached()`: `new TileCache(this, threadPool)`, the generator's tile cache on its pool. The
+    /// cache shares the generator, which it keeps alive for its entries' tasks.
+    pub fn cached(self: Arc<Self>) -> TileCache<H, F> {
+        let pool = self.pool.clone();
+        TileCache::new(self, pool)
+    }
+}
+
+/// Engine 0.3.0's `TileCache` (`com.terraforged.engine.tile.gen`) with `TileProvider`'s lookups:
+/// an expiring [`Cache`] named `"TileCache"` (capacity 256, a 60 second lifetime swept every 20
+/// seconds) of [`CacheEntry`]s keyed by the region's packed id ([`Tile::region_id_for`]). A miss
+/// runs `computeCacheEntry`: [`CacheEntry::compute_async`] of the generator's `getTile(regionX,
+/// regionZ)` on the cache's pool, so concurrent lookups of one region share one entry and its tile
+/// is generated once (on [`ThreadPool::NONE`], on the first `get`'s thread). The tasks own the
+/// generator through an `Arc` (Engine's `CallableTile` keeps a reference to it).
+///
+/// Not ported: `TileProvider.getChunk` and the generator's dispose listener (`onDispose`, which
+/// removes a disposed tile's entry), later layers. Expiry drops a tile without closing it (Engine's
+/// sweep does not close either); Engine's `Tile.close`, run by `Cache.remove`, hands the tile's
+/// cells back to `TileResources` pools, which are not ported: here the cells are freed when the
+/// last holder of the entry drops it.
+pub struct TileCache<H, F> {
+    can_queue: bool,
+    generator: Arc<TileGenerator<H, F>>,
+    thread_pool: ThreadPool,
+    cache: Cache<CacheEntry<'static, Tile>>,
+    clock: fn() -> i64,
+}
+
+impl<H, F> TileCache<H, F>
+where
+    H: HeightmapSource + Send + Sync + 'static,
+    F: TileFilters + Send + Sync + 'static,
+{
+    /// `QUEUING_MIN_POOL_SIZE`: [`Self::queue_region`] runs only on pools larger than this.
+    pub const QUEUING_MIN_POOL_SIZE: i32 = 4;
+
+    /// `new TileCache(generator, threadPool)`: queues only when `threadPool.size() > 4`.
+    pub fn new(generator: Arc<TileGenerator<H, F>>, thread_pool: ThreadPool) -> Self {
+        Self::with_clock(generator, thread_pool, current_time_millis)
+    }
+
+    /// [`Self::new`] reading the time (for the cache's sweeps and its entries' timestamps) from
+    /// `clock` in place of `System.currentTimeMillis()`.
+    pub fn with_clock(
+        generator: Arc<TileGenerator<H, F>>,
+        thread_pool: ThreadPool,
+        clock: fn() -> i64,
+    ) -> Self {
+        Self {
+            can_queue: thread_pool.size() > Self::QUEUING_MIN_POOL_SIZE,
+            generator,
+            thread_pool,
+            cache: Cache::with_clock("TileCache", 256, 60_000, 20_000, clock),
+            clock,
+        }
+    }
+
+    /// `chunkToRegion(coord)`: the generator's.
+    pub fn chunk_to_region(&self, coord: i32) -> i32 {
+        self.generator.chunk_to_region(coord)
+    }
+
+    /// `get(id)`: the region's entry, if cached; never generates or sweeps.
+    pub fn get(&self, id: i64) -> Option<Arc<CacheEntry<'static, Tile>>> {
+        self.cache.get(id)
+    }
+
+    /// `getOrCompute(id)`: the region's entry, made by `computeCacheEntry` on a miss (after a due
+    /// sweep, see [`Cache::compute_if_absent`]); does not wait for the tile.
+    pub fn get_or_compute(&self, id: i64) -> Arc<CacheEntry<'static, Tile>> {
+        self.cache
+            .compute_if_absent(id, |id| self.compute_cache_entry(id))
+    }
+
+    /// `queueChunk(chunkX, chunkZ)`: [`Self::queue_region`] of the chunk's region.
+    pub fn queue_chunk(&self, chunk_x: i32, chunk_z: i32) {
+        if self.can_queue {
+            self.queue_region(self.chunk_to_region(chunk_x), self.chunk_to_region(chunk_z));
+        }
+    }
+
+    /// `queueRegion(regionX, regionZ)`: starts the region's tile (`getOrCompute`) when the pool
+    /// is larger than [`Self::QUEUING_MIN_POOL_SIZE`]; does nothing otherwise.
+    pub fn queue_region(&self, region_x: i32, region_z: i32) {
+        if self.can_queue {
+            self.get_or_compute(Tile::region_id_for(region_x, region_z));
+        }
+    }
+
+    /// `getTile(id)`: `getOrCompute(id).get()`, which stamps the entry and waits for (or, on
+    /// [`ThreadPool::NONE`], runs) its tile. Returns the entry, whose `call()` then reads the
+    /// tile without stamping it again.
+    pub fn get_tile(&self, id: i64) -> Arc<CacheEntry<'static, Tile>> {
+        let entry = self.get_or_compute(id);
+        entry.get();
+        entry
+    }
+
+    /// `getTile(regionX, regionZ)`: [`Self::get_tile`] of the packed region id.
+    pub fn get_tile_at(&self, region_x: i32, region_z: i32) -> Arc<CacheEntry<'static, Tile>> {
+        self.get_tile(Tile::region_id_for(region_x, region_z))
+    }
+
+    /// `getTileIfPresent(id)`: the cached entry once `isDone`, after its `get` (which stamps it);
+    /// `None` when absent or still running. On [`ThreadPool::NONE`] an entry is done at once, so
+    /// this runs a cached region's tile that no one has got yet, as Engine does.
+    pub fn get_tile_if_present(&self, id: i64) -> Option<Arc<CacheEntry<'static, Tile>>> {
+        let entry = self.get(id).filter(|entry| entry.is_done())?;
+        entry.get();
+        Some(entry)
+    }
+
+    /// `getTileIfPresent(regionX, regionZ)`.
+    pub fn get_tile_if_present_at(
+        &self,
+        region_x: i32,
+        region_z: i32,
+    ) -> Option<Arc<CacheEntry<'static, Tile>>> {
+        self.get_tile_if_present(Tile::region_id_for(region_x, region_z))
+    }
+
+    /// `computeCacheEntry(id)`: `CacheEntry.computeAsync(generator.getTile(regionX, regionZ),
+    /// threadPool)`; the task is `CallableTile`'s, [`TileGenerator::generate_region`].
+    fn compute_cache_entry(&self, id: i64) -> CacheEntry<'static, Tile> {
+        let (region_x, region_z) = (Tile::region_x_from(id), Tile::region_z_from(id));
+        let generator = Arc::clone(&self.generator);
+        CacheEntry::compute_async_with_clock(
+            move || generator.generate_region(region_x, region_z),
+            &self.thread_pool,
+            self.clock,
+        )
+    }
+}
+
 /// Panics for a negative batch count, where Engine's batched generators throw (see
 /// [`TileGenerator::generate_batched_region`]); a zero count panics in [`Tile::batch_size`].
 fn check_batch_count(count: i32) {
@@ -534,6 +683,7 @@ fn drive_chunk<H: HeightmapSource>(chunk: &mut BatchChunk, heightmap: &H, zoom: 
 #[cfg(test)]
 mod tests {
     use super::super::{
+        terraforged_concurrent::ExpiringEntry,
         terraforged_engine::{Levels, Terrain, WorldControlPoints},
         terraforged_filters::FilterSettings,
         terraforged_river::GenWarp,
@@ -1042,7 +1192,7 @@ mod tests {
         assert_eq!((plain.kind, plain.batch_threads), (Kind::Plain, None));
     }
 
-    /// Engine shares one tile generator between its generation threads.
+    /// Engine shares one tile generator, and its tile cache, between its generation threads.
     #[test]
     fn tile_generators_are_shared_between_threads() {
         fn shareable<T: Send + Sync>() {}
@@ -1056,6 +1206,7 @@ mod tests {
             fn apply_climate(&self, _: &mut Cell, _: f32, _: f32) {}
         }
         shareable::<TileGenerator<SharedHeightmap, WorldFilters>>();
+        shareable::<TileCache<SharedHeightmap, WorldFilters>>();
     }
 
     /// A lazy tile shared between threads (as Engine's tile cache shares its entries) is generated
@@ -1104,6 +1255,285 @@ mod tests {
         assert_eq!(calls, 256);
         assert_eq!(lazy.get().cell(0, 0).value, 32.0 + -48.0);
     }
+
+    /// The clock of [`tile_cache_matches_engine_oracle`]'s caches and entries.
+    static TILE_CACHE_CLOCK: AtomicI64 = AtomicI64::new(0);
+
+    fn tile_cache_clock() -> i64 {
+        TILE_CACHE_CLOCK.load(Ordering::SeqCst)
+    }
+
+    fn set_clock(now: i64) {
+        TILE_CACHE_CLOCK.store(now, Ordering::SeqCst);
+    }
+
+    /// Eight threads `getTile(regionX, regionZ)` at once: `<all the same tile> <lookups> <stage
+    /// sum> <cells>` (the oracle's `concurrent`).
+    fn concurrent_tiles<F>(
+        cache: &TileCache<FillHeightmap, F>,
+        region_x: i32,
+        region_z: i32,
+    ) -> String
+    where
+        F: TileFilters + Send + Sync + 'static,
+    {
+        let heightmap = cache.generator.generator().heightmap();
+        heightmap.take_sum();
+        let barrier = std::sync::Barrier::new(8);
+        let tiles: Vec<_> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        cache.get_tile_at(region_x, region_z)
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        let same = tiles.iter().all(|tile| Arc::ptr_eq(tile, &tiles[0]));
+        let (lookups, sum) = heightmap.take_sum();
+        format!("{same} {lookups} {sum:x} {:x}", fold_tile(tiles[0].call()))
+    }
+
+    /// Replays `TileCacheOracle.java` (`.local/terraforged/oracles/tile_cache/`): Engine 0.3.0's
+    /// real `TileCache` from `TileGenerator.cached()` over `TileGeneratorOracle`'s stub heightmap
+    /// and filters. `p` lines: which pools queue (`size() > 4`); `k` lines: the region ids;
+    /// `n` lines (pool `NONE`, the tile generator oracle's run 0): nothing is queued, `getTile`
+    /// generates the tile bit for bit as `generateRegion` (its `g 0` line), hits run nothing and
+    /// return the same tile, `get` does not stamp while `getTile`/`getTileIfPresent` do,
+    /// `getOrCompute` runs nothing and `getTileIfPresent` then runs the done-at-once entry, the
+    /// sweep keeps an entry stamped exactly a lifetime ago and drops one a millisecond older (the
+    /// next `getTile` makes a new tile), and eight threads asking for one region generate it once;
+    /// `q` lines (`ThreadPools.create(8)`, run 3): `queueRegion`/`queueChunk` start tiles, eight
+    /// threads share one tile, and a batched generator's cache. The oracle injects stamps through
+    /// Engine's private fields; here the cache's clock sets them.
+    #[test]
+    fn tile_cache_matches_engine_oracle() {
+        let terrains = Arc::new(TerrainRegistry::new());
+        let kinds = ["none", "coast", "beach", "hills"]
+            .map(|name| terrains.get_by_name(name).expect("built-in terrain"));
+        let filters = |seed, droplets, passes, beach| {
+            let mut settings = FilterSettings::default();
+            settings.erosion.droplets_per_chunk = droplets;
+            settings.smoothing.iterations = passes;
+            let points = WorldControlPoints {
+                beach,
+                ..WorldControlPoints::default()
+            };
+            WorldFilters::new(seed, settings, Levels::new(256, 63), points, &terrains)
+        };
+        let world = |group: usize| {
+            let filters = if group == 0 {
+                filters(12345, 20, 1, 0.327)
+            } else {
+                filters(-9, 5, 2, 0.4)
+            };
+            (
+                Arc::clone(&terrains),
+                WorldGenerator::new(FillHeightmap::new(kinds.clone()), filters),
+            )
+        };
+        let measured = |heightmap: &FillHeightmap, tile: &Tile| {
+            let (lookups, trace) = heightmap.take();
+            let (rx, rz) = (tile.region_x(), tile.region_z());
+            format!("{lookups} {trace:x} {rx} {rz} {:x}", fold_tile(tile))
+        };
+        set_clock(0);
+        let (registry, generator) = world(0);
+        let none = Arc::new(
+            TileGenerator::builder()
+                .size(1, 1)
+                .factory(registry, generator)
+                .build(),
+        );
+        let heightmap = none.generator().heightmap();
+        let cache = TileCache::with_clock(Arc::clone(&none), none.pool.clone(), tile_cache_clock);
+        let mut out = format!("c {} 256 60000\n", cache.cache.name());
+        out += &format!("p - {} {}\n", ThreadPool::NONE.size(), cache.can_queue);
+        for size in 1..=9 {
+            let pool = ThreadPool::create(size);
+            let queues = TileCache::new(Arc::clone(&none), pool.clone()).can_queue;
+            out += &format!("p {size} {} {queues}\n", pool.size());
+        }
+        let regions = [
+            (-1, 2),
+            (5, -6),
+            (0, 0),
+            (-7, 9),
+            (3, -4),
+            (i32::MIN, i32::MAX),
+            (-1, -1),
+        ];
+        for (rx, rz) in regions {
+            let id = Tile::region_id_for(rx, rz);
+            let (x, z) = (Tile::region_x_from(id), Tile::region_z_from(id));
+            out += &format!("k {rx} {rz} {id} {x} {z}\n");
+        }
+        let (id, other) = (Tile::region_id_for(-1, 2), Tile::region_id_for(5, -6));
+        heightmap.take();
+        cache.queue_region(-1, 2);
+        cache.queue_chunk(-2, 4);
+        let absent = (
+            cache.get(id).is_none(),
+            cache.get_tile_if_present(id).is_none(),
+        );
+        out += &format!("n0 {} {} {}\n", absent.0, absent.1, heightmap.take().0);
+        let first = cache.get_tile_at(-1, 2);
+        out += &format!("n1 {}\n", measured(heightmap, first.call()));
+        let entry = cache.get(id).unwrap();
+        set_clock(5);
+        entry.get();
+        set_clock(6);
+        cache.get(id);
+        let after_get = entry.timestamp();
+        let same = Arc::ptr_eq(&cache.get_tile(id), &first);
+        let after_tile = entry.timestamp();
+        set_clock(5);
+        entry.get();
+        set_clock(7);
+        let present = cache
+            .get_tile_if_present_at(-1, 2)
+            .is_some_and(|tile| Arc::ptr_eq(&tile, &first));
+        let (lookups, _) = heightmap.take();
+        let recomputed = Arc::ptr_eq(&cache.get_or_compute(id), &entry);
+        out += &format!(
+            "n2 {same} {present} {lookups} {after_get} {} {} {recomputed}\n",
+            after_tile != 5,
+            entry.timestamp() != 5
+        );
+        let computed = cache.get_or_compute(other);
+        let cached = cache.get(other).is_some_and(|e| Arc::ptr_eq(&e, &computed));
+        let before = format!("{cached} {} {}", computed.is_done(), heightmap.take().0);
+        let present = cache.get_tile_if_present(other).expect("done at once");
+        let line = measured(heightmap, present.call());
+        let again = Arc::ptr_eq(&cache.get_tile(other), &present);
+        out += &format!("n3 {before} {line} {again}\n");
+        set_clock(1000);
+        cache.get(id).unwrap().get();
+        set_clock(1001);
+        cache.get(other).unwrap().get();
+        set_clock(61_000);
+        let kept = cache.cache.run();
+        set_clock(61_001);
+        let swept = cache.cache.run();
+        let gone = (cache.get(id).is_none(), cache.get(other).is_some());
+        let again = cache.get_tile_at(-1, 2);
+        let line = measured(heightmap, again.call());
+        let new = !Arc::ptr_eq(&again, &first);
+        out += &format!("n4 {kept} {swept} {} {} {new} {line}\n", gone.0, gone.1);
+        set_clock(i64::MAX);
+        let all = cache.cache.run();
+        let gone = (cache.get(id).is_none(), cache.get(other).is_none());
+        let line = concurrent_tiles(&cache, 7, -3);
+        out += &format!("n5 {all} {} {} {line}\n", gone.0, gone.1);
+        set_clock(0);
+        let (registry, generator) = world(1);
+        let pooled = TileGenerator::builder()
+            .size(0, 2)
+            .pool(8)
+            .factory(registry, generator);
+        let pc = Arc::new(pooled.build()).cached();
+        let heightmap = pc.generator.generator().heightmap();
+        heightmap.take();
+        pc.queue_region(-7, 9);
+        let queued = pc.get(Tile::region_id_for(-7, 9)).is_some();
+        let tile = pc.get_tile_at(-7, 9);
+        let line = measured(heightmap, tile.call());
+        let present = pc
+            .get_tile_if_present_at(-7, 9)
+            .is_some_and(|e| Arc::ptr_eq(&e, &tile));
+        out += &format!("q0 {} {queued} {line} {present}\n", pc.can_queue);
+        pc.queue_chunk(3, -4);
+        let queued = pc.get(Tile::region_id_for(3, -4)).is_some();
+        let line = measured(heightmap, pc.get_tile_at(3, -4).call());
+        out += &format!("q1 {queued} {line}\n");
+        out += &format!("q2 {}\n", concurrent_tiles(&pc, 10, 11));
+        let (registry, generator) = world(0);
+        let batched = TileGenerator::builder().size(1, 1).batch(3).pool(8);
+        let batched = Arc::new(batched.factory(registry, generator).build());
+        assert_eq!(batched.kind, Kind::Batched);
+        let bc = Arc::clone(&batched).cached();
+        let tile = bc.get_tile_at(-1, 2);
+        let (lookups, sum) = batched.generator().heightmap().take_sum();
+        let cells = fold_tile(tile.call());
+        out += &format!("q3 TileGeneratorBatched {lookups} {sum:x} {cells:x}\n");
+        assert_eq!(out, TILE_CACHE_ORACLE);
+    }
+
+    /// The cache Engine's `TileCache` builds: 256 entries (the oldest insertion evicted first) and a
+    /// sweep every 20 seconds, run by the next `getOrCompute` once due; tiles are generated only by
+    /// `get`, never by `getOrCompute` on `NONE`.
+    #[test]
+    fn tile_cache_bounds_and_sweep_interval() {
+        static CLOCK: AtomicI64 = AtomicI64::new(0);
+        fn clock() -> i64 {
+            CLOCK.load(Ordering::SeqCst)
+        }
+        let terrains = Arc::new(TerrainRegistry::new());
+        let kinds = ["none", "coast", "beach", "hills"]
+            .map(|name| terrains.get_by_name(name).expect("built-in terrain"));
+        let generator = WorldGenerator::new(FillHeightmap::new(kinds), NoFilters);
+        let generator = Arc::new(TileGenerator::new(0, 0, 0, terrains, generator));
+        let cache = TileCache::with_clock(Arc::clone(&generator), ThreadPool::NONE, clock);
+        for x in 0..=256 {
+            cache.get_or_compute(Tile::region_id_for(x, 0));
+        }
+        assert!(cache.get(Tile::region_id_for(0, 0)).is_none());
+        assert!(cache.get(Tile::region_id_for(1, 0)).is_some());
+        assert_eq!(generator.generator().heightmap().take(), (0, 17));
+        let id = |x| Tile::region_id_for(x, 0);
+        CLOCK.store(60_001, Ordering::SeqCst);
+        let swept = cache.get_or_compute(id(-1));
+        assert!(
+            cache.get(id(1)).is_none(),
+            "stamped at 0, swept at 60.001 s"
+        );
+        CLOCK.store(10_000, Ordering::SeqCst);
+        swept.get();
+        CLOCK.store(79_999, Ordering::SeqCst);
+        cache.get_or_compute(id(-2));
+        assert!(
+            cache.get(id(-1)).is_some(),
+            "expired, but no sweep within 20 s"
+        );
+        CLOCK.store(80_001, Ordering::SeqCst);
+        cache.get_or_compute(id(-2));
+        assert!(cache.get(id(-1)).is_none(), "the next sweep drops it");
+        assert!(cache.get(id(-2)).is_some());
+    }
+
+    /// `TileCacheOracle.java`'s output (`./run.sh` writes it to `out.txt`).
+    const TILE_CACHE_ORACLE: &str = "\
+c TileCache 256 60000
+p - 0 false
+p 1 3 false
+p 2 3 false
+p 3 4 false
+p 4 6 true
+p 5 7 true
+p 6 9 true
+p 7 10 true
+p 8 12 true
+p 9 13 true
+k -1 2 -4294967294 -1 2
+k 5 -6 25769803770 5 -6
+k 0 0 0 0 0
+k -7 9 -30064771063 -7 9
+k 3 -4 17179869180 3 -4
+k -2147483648 2147483647 -9223372034707292161 -2147483648 2147483647
+k -1 -1 -1 -1 -1
+n0 true true 0
+n1 132 933dedba501bf8f1 -1 2 2afe9d3c12774c0d
+n2 true true 0 5 true true true
+n3 true true 0 137 7e3196318cb259b8 5 -6 bdd7e0198d0c33c3 true
+n4 0 1 true true true 132 933dedba501bf8f1 -1 2 2afe9d3c12774c0d
+n5 2 true true true 256 1dd0a6c58cacb00 13fed9e732db2fce
+q0 true true 326 e3c4cdf7c5eefaee -7 9 6f363908c2b37e18 true
+q1 true 326 aeeb33bba750cb4e 3 -4 3fbc3560bca57054
+q2 true 176 31575308f8b822c 456ad7f1ef76153
+q3 TileGeneratorBatched 140 ff293731a98fd032 2afe9d3c12774c0d
+";
 
     /// `TileGeneratorOracle.java`'s output (`./run.sh` writes it to `out.txt`).
     const ORACLE: &str = "\
