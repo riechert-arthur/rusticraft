@@ -813,17 +813,32 @@ is `createEmptyRegion`, and `generate_region(region_x, region_z)` is `generateRe
 `generate_heightmap`, then the filters with the optional ones, so erosion, smoothing, steepness and beach detection see
 every cell, border included, only after the fill. `generate_zoomed_region(center_x, center_z, zoom, filter)` is the
 zoomed `generateRegion`: region (0, 0) filled by the uncached `generate_zoomed_heightmap` with the center as offset,
-then the filters, the optional ones only when `filter` is set. Lazy tiles (#81), the batched and striped generators
-(#82), the builder (#83), the async wrapper, the tile cache and tile disposal are later layers or not ported. Its test
-replays `TileGeneratorOracle.java` in `.local/terraforged/oracles/tile_generator/`: Engine's `generateRegion` with a
-`WorldGeneratorFactory` over a stub heightmap that hashes heights, continent edges, terrains and erosion and river
-masks, for two filter settings groups and six sizes and regions (borderless, wide-border, negative and wrapping),
+then the filters, the optional ones only when `filter` is set. Lazy tiles are the next layer; the batched and striped
+generators (#82), the builder (#83), the async wrapper, the tile cache and tile disposal are later layers or not ported.
+Its test replays `TileGeneratorOracle.java` in `.local/terraforged/oracles/tile_generator/`: Engine's `generateRegion`
+with a `WorldGeneratorFactory` over a stub heightmap that hashes heights, continent edges, terrains and erosion and
+river masks, for two filter settings groups and six sizes and regions (borderless, wide-border, negative and wrapping),
 five zoomed regions on each (fractional, unit, negative, NaN and huge centers and zooms, filters on and off) and
 `chunkToRegion` for shift factors Java masks, folding the stage trace and every cell; debug and release builds agree.
 
+The lazy-tile layer adds Engine's `LazyCallable` (`concurrent.rs`, module `terraforged_concurrent`) and the generator's
+lazy handles: `get_tile(region_x, region_z)` is `getTile` (a `CallableTile`) and `get_zoomed_tile(center_x, center_z,
+zoom, filter)` the zoomed `getTile` (a `CallableZoomTile`). Nothing runs until the first `get` (or `call`), which runs
+`generate_region` or `generate_zoomed_region`; every later caller, on any thread, gets that same tile. As with Engine's
+`StampedLock`, the value is created under an exclusive lock: callers arriving meanwhile wait instead of generating it
+again, and `is_done` also waits, then reports whether a tile was stored. A generation that panics (Engine: throws)
+stores nothing, so the next caller, or one already waiting, generates it again. `cancel` and `is_cancelled` always
+return `false`. Dropping a handle drops its tile; `LazyCallable` disposes of nothing in Engine either. Its adapters
+(`adapt`, `adaptComplete`, `callAsync`, `then`), the timed `get` and `LazySupplier` are not ported. Its tests replay
+`LazyCallableOracle.java` in `.local/terraforged/oracles/lazy_callable/` (one creation for 16 concurrent callers, all
+seeing the same value; retry after a throwing creation; `isDone` and `get` waiting on another thread's creation and
+seeing its outcome) and the tile-generator oracle's `l`/`m` lines (each handle's fold equals the eager generation, no
+stage runs before the first `get` or on a second one); another test has eight threads share one lazy tile, generated
+once. Debug and release builds agree.
+
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors and the tile generator. They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator and its lazy tiles. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
