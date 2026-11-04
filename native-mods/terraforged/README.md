@@ -883,9 +883,25 @@ in `.local/terraforged/oracles/cache_entry/` (flags before and after `get`, wher
 concurrent getters with one run, `isDone` during another thread's run) with an injected clock in place of the oracle's
 sleeps; debug and release builds agree.
 
+The expiring-cache layer adds Engine's `Cache` and the `StampedBoundLongMap` behind it (`BoundedLongMap`, both in
+`concurrent.rs`). Entries are kept by `long` key in insertion order under one read-write lock; a `compute_if_absent` miss
+on a full map first drops the oldest insertion (without closing it), then runs the factory under the write lock, as Engine
+does. The sweep is Engine's `run()`: `timeout = now - lifetime` in wrapping Java `long` arithmetic, then every entry whose
+timestamp is strictly before it is removed, also without closing it, entries whose task is still running included (their
+holders keep them; the next lookup makes a new one). Only `remove` closes the removed entry. Engine's constructor
+schedules `run()` every `interval` milliseconds on its `CacheManager` scheduler thread, which is not ported: here a
+`compute_if_absent` or `map` runs the sweep first when the clock is an interval or more from the last sweep, so a cache
+nobody computes in is not swept (its capacity still bounds it); a swept entry is recomputed on its next lookup, so the
+values handed out are the same. As in Engine, a non-positive interval is rejected (a panic where Engine throws) and a map
+of capacity 0 panics on its first miss. `Rivermap` is an `ExpiringEntry` by its creation time; river.rs's `RiverCache`
+keeps its own sweep (Engine's uses an unbounded `StampedLongMap`). Its test replays `CacheOracle.java` in
+`.local/terraforged/oracles/cache/` (Engine's real `Cache` with the clock injected through its `timeout` field: the
+sweep for lifetimes and clocks up to the `long` extremes, eviction order, `map`, `remove`, a swept entry whose task never
+ran, the factory holding the lock, capacity 0 and bad intervals); debug and release builds agree.
+
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder and the tile cache's entries. They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries and the expiring cache. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development

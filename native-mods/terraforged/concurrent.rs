@@ -22,10 +22,10 @@
  * SOFTWARE.
  */
 
-use super::terraforged_river::current_time_millis;
+use super::terraforged_river::{Rivermap, current_time_millis};
+use std::collections::{HashMap, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
-use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, RwLock};
 
 /// Engine 0.3.0's `LazyCallable` (`com.terraforged.engine.concurrent.task`), the deferred value
@@ -101,7 +101,7 @@ where
 }
 
 /// Engine 0.3.0's `ExpiringEntry` (`com.terraforged.engine.concurrent.cache`): what Engine's `Cache`
-/// expires (the cache itself is a later layer).
+/// expires.
 pub trait ExpiringEntry {
     /// `getTimestamp()`: the entry's last access, in `System.currentTimeMillis()` milliseconds.
     fn timestamp(&self) -> i64;
@@ -219,17 +219,35 @@ impl<T> ExpiringEntry for CacheEntry<'_, T> {
     fn close(&self) {}
 }
 
+/// `Rivermap implements ExpiringEntry`: its creation time; `close` does nothing.
+impl ExpiringEntry for Rivermap {
+    fn timestamp(&self) -> i64 {
+        Rivermap::timestamp(self)
+    }
+}
+
+/// The map behind [`BoundedLongMap`]: the values and their keys in insertion order (Engine's
+/// `Long2ObjectLinkedOpenHashMap`).
 struct LongMapState<T> {
     values: HashMap<i64, Arc<T>>,
     order: VecDeque<i64>,
 }
 
+/// Engine 0.3.0's `StampedBoundLongMap` (`com.terraforged.engine.concurrent.cache.map`), the map
+/// behind [`Cache`]: `long` keys in insertion order under one read-write lock. Only
+/// `compute_if_absent` keeps the bound: a miss on a map holding `capacity` or more values first
+/// drops the oldest insertion, without closing it, even if another thread inserted the key in the
+/// meantime (Engine's order). Hits, `get` and `put` of a present key keep the order, and `put`
+/// adds without a bound. As in Engine, the factory runs under the write lock (other callers,
+/// readers too, wait for it), so a factory that uses its own map never returns.
 pub struct BoundedLongMap<T> {
     capacity: usize,
     state: RwLock<LongMapState<T>>,
 }
 
 impl<T> BoundedLongMap<T> {
+    /// `new StampedBoundLongMap(size)`. Capacity 0 is kept as in Engine: the first miss on an empty
+    /// map panics, where Engine's `removeFirst` throws `NoSuchElementException`.
     pub fn new(capacity: usize) -> Self {
         Self {
             capacity,
@@ -240,32 +258,36 @@ impl<T> BoundedLongMap<T> {
         }
     }
 
+    // A factory or predicate that panicked under the lock changed nothing after its eviction, so a
+    // poisoned map is still consistent (Engine's lock has no poisoning).
+    fn read(&self) -> std::sync::RwLockReadGuard<'_, LongMapState<T>> {
+        self.state.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn write(&self) -> std::sync::RwLockWriteGuard<'_, LongMapState<T>> {
+        self.state.write().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// `size()`.
     pub fn len(&self) -> usize {
-        self.state
-            .read()
-            .unwrap_or_else(|error| error.into_inner())
-            .values
-            .len()
+        self.read().values.len()
     }
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
+    /// `clear()`.
     pub fn clear(&self) {
-        let mut state = self
-            .state
-            .write()
-            .unwrap_or_else(|error| error.into_inner());
+        let mut state = self.write();
         state.values.clear();
         state.order.clear();
     }
 
+    /// `remove(key)`, returning the removed value so that the caller can act on it after the lock
+    /// is released, as Engine's `remove(key, consumer)` does.
     pub fn remove(&self, key: i64) -> Option<Arc<T>> {
-        let mut state = self
-            .state
-            .write()
-            .unwrap_or_else(|error| error.into_inner());
+        let mut state = self.write();
         let value = state.values.remove(&key);
         if value.is_some() {
             state.order.retain(|entry| *entry != key);
@@ -273,56 +295,48 @@ impl<T> BoundedLongMap<T> {
         value
     }
 
+    /// `removeIf(predicate)`: removes, in insertion order, every value the predicate accepts, without
+    /// closing it, and returns how many.
     pub fn remove_if(&self, predicate: impl Fn(&T) -> bool) -> usize {
-        let mut state = self
-            .state
-            .write()
-            .unwrap_or_else(|error| error.into_inner());
-        let keys = state
-            .values
-            .iter()
-            .filter_map(|(key, value)| predicate(value).then_some(*key))
-            .collect::<Vec<_>>();
-        for key in &keys {
-            state.values.remove(key);
-        }
-        state.order.retain(|key| !keys.contains(key));
-        keys.len()
+        let mut state = self.write();
+        let LongMapState { values, order } = &mut *state;
+        let before = values.len();
+        order.retain(|key| {
+            let expired = values.get(key).is_some_and(|value| predicate(value));
+            if expired {
+                values.remove(key);
+            }
+            !expired
+        });
+        before - values.len()
     }
 
-    pub fn put(&self, key: i64, value: T) -> Option<Arc<T>> {
-        let mut state = self
-            .state
-            .write()
-            .unwrap_or_else(|error| error.into_inner());
-        let previous = state.values.insert(key, Arc::new(value));
-        if previous.is_none() {
+    /// `put(key, value)`: replaces a present key's value in place, else appends.
+    pub fn put(&self, key: i64, value: T) {
+        let mut state = self.write();
+        if state.values.insert(key, Arc::new(value)).is_none() {
             state.order.push_back(key);
         }
-        previous
     }
 
+    /// `get(key)`.
     pub fn get(&self, key: i64) -> Option<Arc<T>> {
-        self.state
-            .read()
-            .unwrap_or_else(|error| error.into_inner())
-            .values
-            .get(&key)
-            .cloned()
+        self.read().values.get(&key).cloned()
     }
 
+    /// `computeIfAbsent(key, func)`: a read-locked lookup, then under the write lock the bound's
+    /// eviction and `computeIfAbsent`, which runs `factory(key)` only if the key is still absent.
     pub fn compute_if_absent(&self, key: i64, factory: impl FnOnce(i64) -> T) -> Arc<T> {
         if let Some(value) = self.get(key) {
             return value;
         }
-        let mut state = self
-            .state
-            .write()
-            .unwrap_or_else(|error| error.into_inner());
+        let mut state = self.write();
         if state.values.len() >= self.capacity {
-            if let Some(first) = state.order.pop_front() {
-                state.values.remove(&first);
-            }
+            let first = state
+                .order
+                .pop_front()
+                .expect("BoundedLongMap: compute_if_absent on an empty map of capacity 0");
+            state.values.remove(&first);
         }
         if let Some(value) = state.values.get(&key) {
             return Arc::clone(value);
@@ -333,6 +347,8 @@ impl<T> BoundedLongMap<T> {
         value
     }
 
+    /// `map(key, factory, mapper)`: `mapper` applied to `compute_if_absent(key, factory)`, after the
+    /// lock is released.
     pub fn map<V>(
         &self,
         key: i64,
@@ -343,62 +359,145 @@ impl<T> BoundedLongMap<T> {
     }
 }
 
+/// Engine 0.3.0's expiring `Cache` (`com.terraforged.engine.concurrent.cache`): [`ExpiringEntry`]
+/// values by `long` key in a [`BoundedLongMap`], swept of the entries not used for `lifetime`
+/// milliseconds.
+///
+/// The sweep is Engine's `run()`: `timeout = now - lifetime` in Java `long` arithmetic (it wraps:
+/// a lifetime of `i64::MAX` from a negative clock gives a timeout near `i64::MAX`), then every
+/// entry with `getTimestamp() < timeout` (strictly) is removed without being closed. Entries still
+/// computing are swept like the others: a holder keeps its `Arc` and can still get the value, and
+/// the next `compute_if_absent` makes a new entry. Only `remove` closes the entry, after releasing
+/// the map's lock.
+///
+/// Engine's constructor schedules `run()` on its `CacheManager` scheduler thread every `interval`
+/// milliseconds, the first one an interval after construction. That thread is not ported: here a
+/// `compute_if_absent` (or `map`) on a cache whose last sweep (or construction) is at least an
+/// interval away on the clock runs the sweep first, on the calling thread, once per interval
+/// across threads. A cache nobody computes in is not swept; the map's capacity still bounds it.
+/// Swept entries are recomputed on the next lookup, so when a sweep runs never changes the values
+/// the cache hands out.
 pub struct Cache<T> {
     name: String,
-    entries: BoundedLongMap<T>,
+    map: BoundedLongMap<T>,
     lifetime_millis: i64,
+    interval_millis: i64,
+    /// Engine's `volatile long timeout`.
     timeout: AtomicI64,
+    /// The clock at the last sweep (at construction until the first one).
+    last_sweep: AtomicI64,
+    clock: fn() -> i64,
 }
 
 impl<T: ExpiringEntry> Cache<T> {
-    pub fn new(name: impl Into<String>, capacity: usize, lifetime_millis: i64) -> Self {
+    /// `new Cache(name, capacity, expireTime, interval, MILLISECONDS)` over a `StampedBoundLongMap`
+    /// (Engine's default; its default capacity is 256).
+    ///
+    /// # Panics
+    ///
+    /// If `interval_millis` is not positive, where Engine's `scheduleAtFixedRate` throws
+    /// `IllegalArgumentException`.
+    pub fn new(
+        name: impl Into<String>,
+        capacity: usize,
+        lifetime_millis: i64,
+        interval_millis: i64,
+    ) -> Self {
+        Self::with_clock(
+            name,
+            capacity,
+            lifetime_millis,
+            interval_millis,
+            current_time_millis,
+        )
+    }
+
+    /// [`Self::new`] reading the time from `clock` in place of `System.currentTimeMillis()`.
+    pub fn with_clock(
+        name: impl Into<String>,
+        capacity: usize,
+        lifetime_millis: i64,
+        interval_millis: i64,
+        clock: fn() -> i64,
+    ) -> Self {
+        assert!(
+            interval_millis > 0,
+            "Cache: the sweep interval must be positive (Engine throws IllegalArgumentException)"
+        );
         Self {
             name: name.into(),
-            entries: BoundedLongMap::new(capacity),
+            map: BoundedLongMap::new(capacity),
             lifetime_millis,
+            interval_millis,
             timeout: AtomicI64::new(0),
+            last_sweep: AtomicI64::new(clock()),
+            clock,
         }
     }
 
+    /// `getName()`.
     pub fn name(&self) -> &str {
         &self.name
     }
 
+    /// `remove(key)`: removes the key's entry and closes it, outside the map's lock.
     pub fn remove(&self, key: i64) {
-        if let Some(entry) = self.entries.remove(key) {
+        if let Some(entry) = self.map.remove(key) {
             entry.close();
         }
     }
 
+    /// `get(key)`: the key's entry, if cached; never sweeps.
     pub fn get(&self, key: i64) -> Option<Arc<T>> {
-        self.entries.get(key)
+        self.map.get(key)
     }
 
+    /// `computeIfAbsent(key, func)`: the key's entry, made by `factory(key)` under the map's write
+    /// lock on a miss (see [`BoundedLongMap::compute_if_absent`]); runs a due sweep first.
     pub fn compute_if_absent(&self, key: i64, factory: impl FnOnce(i64) -> T) -> Arc<T> {
-        self.entries.compute_if_absent(key, factory)
+        self.run_if_due();
+        self.map.compute_if_absent(key, factory)
     }
 
+    /// `map(key, func, mapper)`: `mapper` applied to `compute_if_absent(key, factory)`.
     pub fn map<V>(
         &self,
         key: i64,
         factory: impl FnOnce(i64) -> T,
         mapper: impl FnOnce(&T) -> V,
     ) -> V {
-        self.entries.map(key, factory, mapper)
+        mapper(&self.compute_if_absent(key, factory))
     }
 
+    /// `run()`: the sweep, now; returns how many entries it removed.
     pub fn run(&self) -> usize {
-        self.run_at(current_time_millis())
+        self.run_at((self.clock)())
     }
 
-    pub fn run_at(&self, now: i64) -> usize {
-        let timeout = now.saturating_sub(self.lifetime_millis);
-        self.timeout.store(timeout, Ordering::Release);
-        self.entries.remove_if(|entry| entry.timestamp() < timeout)
+    /// `test(entry)`: whether the last sweep's timeout expires `entry`.
+    pub fn test(&self, entry: &T) -> bool {
+        entry.timestamp() < self.timeout.load(Ordering::Acquire)
     }
 
-    pub fn timeout(&self) -> i64 {
-        self.timeout.load(Ordering::Acquire)
+    fn run_at(&self, now: i64) -> usize {
+        self.timeout
+            .store(now.wrapping_sub(self.lifetime_millis), Ordering::Release);
+        self.map.remove_if(|entry| self.test(entry))
+    }
+
+    /// The scheduler's tick: sweeps if the clock is an interval or more from the last sweep (either
+    /// way, so a clock set back does not stop the sweeps), claiming it so only one caller sweeps.
+    fn run_if_due(&self) {
+        let now = (self.clock)();
+        let last = self.last_sweep.load(Ordering::Acquire);
+        if now.abs_diff(last) >= self.interval_millis.unsigned_abs()
+            && self
+                .last_sweep
+                .compare_exchange(last, now, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        {
+            self.run_at(now);
+        }
     }
 }
 
@@ -716,19 +815,24 @@ c 16 1 1
 d 0 false true true
 d 1 false true true
 ";
+    /// `CacheOracle.java`'s `Entry`: a fixed timestamp and a count of its `close` calls.
     struct TestEntry {
-        id: i32,
+        id: i64,
         timestamp: i64,
-        closed: AtomicBool,
+        closes: AtomicUsize,
     }
 
     impl TestEntry {
-        fn new(id: i32, timestamp: i64) -> Self {
+        fn new(id: i64, timestamp: i64) -> Self {
             Self {
                 id,
                 timestamp,
-                closed: AtomicBool::new(false),
+                closes: AtomicUsize::new(0),
             }
+        }
+
+        fn closes(&self) -> usize {
+            self.closes.load(Ordering::SeqCst)
         }
     }
 
@@ -738,45 +842,283 @@ d 1 false true true
         }
 
         fn close(&self) {
-            self.closed.store(true, Ordering::Release);
+            self.closes.fetch_add(1, Ordering::SeqCst);
         }
     }
 
+    /// Which of `candidates` the cache holds, as `CacheOracle.keys` prints them.
+    fn keys<T: ExpiringEntry>(cache: &Cache<T>, candidates: &[i64]) -> String {
+        let held: Vec<String> = candidates
+            .iter()
+            .filter(|key| cache.get(**key).is_some())
+            .map(i64::to_string)
+            .collect();
+        if held.is_empty() {
+            "-".to_owned()
+        } else {
+            held.join(",")
+        }
+    }
+
+    const DAY: i64 = 86_400_000;
+
+    /// Engine 0.3.0's `Cache` over `StampedBoundLongMap` against `CacheOracle.java` (in
+    /// `.local/terraforged/oracles/cache/`), with the oracle's injected clock: the sweep's wrapping
+    /// timeout and strict `<`, the bound's eviction order, `map`, `remove`'s single close, a swept
+    /// entry whose task never ran, the factory under the write lock, and capacity 0.
     #[test]
-    fn bounded_long_map_matches_engine_0_3_0() {
-        let map = BoundedLongMap::new(3);
+    fn cache_matches_engine_oracle() {
+        static NOW: AtomicI64 = AtomicI64::new(0);
+        fn now() -> i64 {
+            NOW.load(Ordering::SeqCst)
+        }
+        let mut out = String::new();
+        let cases: [(i64, i64); 8] = [
+            (1000, 60),
+            (1000, 0),
+            (1000, -5),
+            (1000, i64::MAX),
+            (-10, i64::MAX),
+            (1000, i64::MIN),
+            (i64::MIN, 1),
+            (i64::MAX, -1),
+        ];
+        for (at, life) in cases {
+            NOW.store(0, Ordering::SeqCst);
+            let cache = Cache::with_clock("S", 16, life, DAY, now);
+            let timeout = at.wrapping_sub(life);
+            let stamps = [
+                timeout.wrapping_sub(1),
+                timeout,
+                timeout.wrapping_add(1),
+                i64::MIN,
+                i64::MAX,
+            ];
+            let entries: Vec<_> = (0..)
+                .zip(stamps)
+                .map(|(id, stamp)| cache.compute_if_absent(id, |key| TestEntry::new(key, stamp)))
+                .collect();
+            NOW.store(at, Ordering::SeqCst);
+            let removed = cache.run();
+            let closes: usize = entries.iter().map(|entry| entry.closes()).sum();
+            let held = keys(&cache, &[0, 1, 2, 3, 4]);
+            out += &format!("s {at} {life} {timeout} {removed} {held} {closes}\n");
+        }
+
+        NOW.store(0, Ordering::SeqCst);
+        let cache = Cache::with_clock("E", 3, 60, DAY, now);
+        let calls = AtomicUsize::new(0);
+        let mut made: Vec<Arc<TestEntry>> = Vec::new();
+        for key in [1, 2, 3, 2, 4, 1, 5, 5] {
+            let entry = cache.compute_if_absent(key, |id| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                TestEntry::new(id, 0)
+            });
+            let held = keys(&cache, &[1, 2, 3, 4, 5]);
+            let calls = calls.load(Ordering::SeqCst);
+            out += &format!("e {key} {} {calls} {held}\n", entry.id);
+            if !made.iter().any(|seen| Arc::ptr_eq(seen, &entry)) {
+                made.push(entry);
+            }
+        }
+        // Every entry made, the evicted ones too: eviction closes none.
+        let closes: usize = made.iter().map(|entry| entry.closes()).sum();
+        let mapped = cache.map(4, |_| unreachable!(), |entry| entry.id * 10);
+        out += &format!("m {mapped} {closes}\n");
+        let four = cache.get(4).unwrap();
+        cache.remove(4);
+        cache.remove(4);
+        cache.remove(99);
+        let held = keys(&cache, &[1, 2, 3, 4, 5]);
+        out += &format!("r {} {held} {}\n", four.closes(), cache.get(99).is_none());
+        let six = cache.compute_if_absent(6, |id| TestEntry::new(id, 0));
+        let seven = cache.compute_if_absent(7, |id| TestEntry::new(id, 0));
+        let held = keys(&cache, &[1, 2, 3, 4, 5, 6, 7]);
+        out += &format!("r {held} {} {}\n", six.closes(), seven.closes());
+
+        NOW.store(0, Ordering::SeqCst);
+        let runs = AtomicUsize::new(0);
+        let cache: Cache<CacheEntry<'_, i32>> = Cache::with_clock("U", 4, 60, DAY, now);
+        let made = AtomicUsize::new(0);
+        let held = cache.compute_if_absent(9, |_| {
+            made.fetch_add(1, Ordering::SeqCst);
+            CacheEntry::with_clock(
+                || {
+                    runs.fetch_add(1, Ordering::SeqCst);
+                    42
+                },
+                now,
+            )
+        });
+        let done_before = held.is_done();
+        NOW.store(i64::MAX, Ordering::SeqCst);
+        let removed = cache.run();
+        let gone = cache.get(9).is_none();
+        let again = cache.compute_if_absent(9, |_| {
+            made.fetch_add(1, Ordering::SeqCst);
+            CacheEntry::with_clock(|| 43, now)
+        });
+        out += &format!(
+            "u {done_before} {removed} {gone} {} {} {}\n",
+            !Arc::ptr_eq(&again, &held),
+            made.load(Ordering::SeqCst),
+            runs.load(Ordering::SeqCst)
+        );
+        // Not in the oracle's line: the swept entry's holder still gets its value.
+        assert_eq!(*held.get(), 42);
+        assert_eq!(*again.get(), 43);
+
+        NOW.store(0, Ordering::SeqCst);
+        let cache = Cache::with_clock("L", 4, 60, DAY, now);
+        cache.compute_if_absent(1, |id| TestEntry::new(id, 0));
+        let (in_factory, factory_started) = mpsc::channel();
+        let (release, released) = mpsc::channel::<()>();
+        let cache = &cache;
+        let (waited, found) = thread::scope(|scope| {
+            let maker = scope.spawn(move || {
+                cache.compute_if_absent(2, |id| {
+                    in_factory.send(()).unwrap();
+                    released.recv().unwrap();
+                    TestEntry::new(id, 0)
+                });
+            });
+            factory_started.recv().unwrap();
+            let (read_done, read) = mpsc::channel();
+            scope.spawn(move || read_done.send(cache.get(1).is_some()).unwrap());
+            let waited = read.recv_timeout(Duration::from_millis(300)).is_err();
+            release.send(()).unwrap();
+            let found = read.recv_timeout(Duration::from_secs(10)).unwrap();
+            maker.join().unwrap();
+            (waited, found)
+        });
+        out += &format!("l {waited} {found}\n");
+
+        let zero = catch_unwind(|| {
+            Cache::with_clock("Z", 0, 60, DAY, now)
+                .compute_if_absent(1, |id| TestEntry::new(id, 0));
+        });
+        out += &format!(
+            "x cap0 {}\n",
+            if zero.is_err() {
+                "NoSuchElementException"
+            } else {
+                "ok"
+            }
+        );
+        for interval in [0, -1] {
+            let made = catch_unwind(|| Cache::<TestEntry>::with_clock("I", 4, 60, interval, now));
+            let result = if made.is_err() {
+                "IllegalArgumentException"
+            } else {
+                "ok"
+            };
+            out += &format!("x interval {interval} {result}\n");
+        }
+        assert_eq!(out, CACHE_ORACLE);
+    }
+
+    /// `CacheOracle.java`'s output (`./run.sh` writes it to `out.txt`).
+    const CACHE_ORACLE: &str = "\
+s 1000 60 940 2 1,2,4 0
+s 1000 0 1000 2 1,2,4 0
+s 1000 -5 1005 2 1,2,4 0
+s 1000 9223372036854775807 -9223372036854774807 2 1,2,4 0
+s -10 9223372036854775807 9223372036854775799 2 1,2,4 0
+s 1000 -9223372036854775808 -9223372036854774808 2 1,2,4 0
+s -9223372036854775808 1 9223372036854775807 3 1,4 0
+s 9223372036854775807 -1 -9223372036854775808 0 0,1,2,3,4 0
+e 1 1 1 1
+e 2 2 2 1,2
+e 3 3 3 1,2,3
+e 2 2 3 1,2,3
+e 4 4 4 2,3,4
+e 1 1 5 1,3,4
+e 5 5 6 1,4,5
+e 5 5 6 1,4,5
+m 40 0
+r 1 1,5 true
+r 5,6,7 0 0
+u false 1 true true 2 0
+l true true
+x cap0 NoSuchElementException
+x interval 0 IllegalArgumentException
+x interval -1 IllegalArgumentException
+";
+
+    /// Engine's scheduler, ported as a sweep that `compute_if_absent` runs once the clock is an
+    /// interval or more from the last sweep (or construction, or after the clock is set back), and
+    /// that `get` never runs.
+    #[test]
+    fn cache_sweeps_once_per_interval_on_compute() {
+        static NOW: AtomicI64 = AtomicI64::new(0);
+        fn now() -> i64 {
+            NOW.load(Ordering::SeqCst)
+        }
+        NOW.store(10_000, Ordering::SeqCst);
+        let cache = Cache::with_clock("T", 8, 100, 1_000, now);
+        cache.compute_if_absent(1, |id| TestEntry::new(id, 0));
+        NOW.store(10_999, Ordering::SeqCst);
+        cache.compute_if_absent(2, |id| TestEntry::new(id, 10_999));
+        assert!(cache.get(1).is_some(), "no sweep before an interval");
+        NOW.store(11_000, Ordering::SeqCst);
+        assert!(cache.get(1).is_some(), "get never sweeps");
+        cache.compute_if_absent(2, |_| unreachable!());
+        assert!(cache.get(1).is_none(), "a hit runs the due sweep too");
+        assert!(cache.get(2).is_some());
+        // The next sweep is due an interval after this one, not after construction.
+        cache.compute_if_absent(3, |id| TestEntry::new(id, 0));
+        NOW.store(11_999, Ordering::SeqCst);
+        cache.compute_if_absent(4, |id| TestEntry::new(id, 0));
+        assert!(cache.get(3).is_some());
+        // A clock set back an interval or more sweeps as well.
+        NOW.store(10_000, Ordering::SeqCst);
+        cache.map(5, |id| TestEntry::new(id, 10_000), |entry| entry.id);
+        assert_eq!(keys(&cache, &[1, 2, 3, 4, 5]), "2,5");
+        // A sweep removes without closing; `run` sweeps at once.
+        NOW.store(20_000, Ordering::SeqCst);
+        let two = cache.get(2).unwrap();
+        assert_eq!(cache.run(), 2);
+        assert_eq!(two.closes(), 0);
+        assert!(cache.test(&TestEntry::new(0, 19_899)));
+        assert!(!cache.test(&TestEntry::new(0, 19_900)));
+        assert_eq!(cache.name(), "T");
+    }
+
+    /// `Rivermap` is an `ExpiringEntry` by its creation time, and a cache of them (Engine's
+    /// `RiverCache` holds one) is shared between threads.
+    #[test]
+    fn rivermaps_expire_by_creation_time() {
+        static NOW: AtomicI64 = AtomicI64::new(0);
+        fn now() -> i64 {
+            NOW.load(Ordering::SeqCst)
+        }
+        fn shareable<T: Send + Sync>(_: &T) {}
+        use super::super::terraforged_river::GenWarp;
+        let cache = Cache::with_clock("RiverCache", 32, 300_000, 60_000, now);
+        shareable(&cache);
+        let map = cache.compute_if_absent(7, |_| {
+            Rivermap::new(1, 2, Vec::new(), GenWarp::new(1, 3000))
+        });
+        let made = Rivermap::timestamp(&map);
+        assert_eq!(ExpiringEntry::timestamp(&*map), made);
+        NOW.store(made + 300_000, Ordering::SeqCst);
+        assert_eq!(cache.run(), 0);
+        NOW.store(made + 300_001, Ordering::SeqCst);
+        assert_eq!(cache.run(), 1);
+
+        let map = BoundedLongMap::new(2);
         map.put(1, 10);
         map.put(2, 20);
         map.put(3, 30);
+        map.put(1, 11);
+        assert_eq!(map.len(), 3);
         assert_eq!(map.compute_if_absent(4, |_| 40).as_ref(), &40);
-        assert!(map.get(1).is_none());
-        assert_eq!(map.map(2, |_| unreachable!(), |value| *value), 20);
+        assert!(map.get(1).is_none(), "put keeps a replaced key's place");
+        assert_eq!(map.remove(2).as_deref(), Some(&20));
         assert_eq!(map.remove_if(|value| *value >= 30), 2);
-        assert_eq!(map.len(), 1);
-
+        assert!(map.is_empty());
         map.put(5, 50);
-        map.put(6, 60);
-        map.put(7, 70);
-        assert_eq!(map.len(), 4);
         map.clear();
         assert!(map.is_empty());
-    }
-
-    #[test]
-    fn expiring_cache_matches_engine_0_3_0() {
-        let cache = Cache::new("TileCache", 3, 60);
-        assert_eq!(cache.name(), "TileCache");
-        let removed = cache.compute_if_absent(1, |_| TestEntry::new(1, 900));
-        cache.remove(1);
-        assert!(removed.closed.load(Ordering::Acquire));
-
-        cache.compute_if_absent(2, |_| TestEntry::new(2, 939));
-        cache.compute_if_absent(3, |_| TestEntry::new(3, 940));
-        cache.compute_if_absent(4, |_| TestEntry::new(4, 1_000));
-        assert_eq!(cache.run_at(1_000), 1);
-        assert_eq!(cache.timeout(), 940);
-        assert!(cache.get(2).is_none());
-        assert_eq!(cache.get(3).unwrap().id, 3);
-        assert_eq!(cache.map(4, |_| unreachable!(), |entry| entry.id), 4);
     }
 }
