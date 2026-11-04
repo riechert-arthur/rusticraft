@@ -2890,7 +2890,8 @@ pub fn java_pow(value: f32, power: f32) -> f32 {
     (f64::from(value).powf(f64::from(power))) as f32
 }
 
-fn java_max(first: f32, second: f32) -> f32 {
+/// Java's `Math.max(float, float)`: NaN wins and +0.0 is larger than -0.0.
+pub fn java_max(first: f32, second: f32) -> f32 {
     if first.is_nan() {
         first
     } else if second.is_nan() {

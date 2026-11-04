@@ -22,7 +22,10 @@
  * SOFTWARE.
  */
 
-use super::{terraforged::noise_curve, terraforged_engine::ControlPoints};
+use super::{
+    terraforged::{Line, java_max, java_min, lerp, noise_curve},
+    terraforged_engine::ControlPoints,
+};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Vec2f {
@@ -70,23 +73,23 @@ impl Segment {
     }
 
     pub fn min_x(&self) -> f32 {
-        self.a.x.min(self.b.x)
+        java_min(self.a.x, self.b.x)
     }
 
     pub fn min_y(&self) -> f32 {
-        self.a.y.min(self.b.y)
+        java_min(self.a.y, self.b.y)
     }
 
     pub fn max_x(&self) -> f32 {
-        self.a.x.max(self.b.x)
+        java_max(self.a.x, self.b.x)
     }
 
     pub fn max_y(&self) -> f32 {
-        self.a.y.max(self.b.y)
+        java_max(self.a.y, self.b.y)
     }
 
     pub fn max_scale(&self) -> f32 {
-        self.scale_a.max(self.scale_b)
+        java_max(self.scale_a, self.scale_b)
     }
 
     pub fn translate(&self, offset: Vec2f) -> Self {
@@ -133,15 +136,16 @@ impl Island {
         let points = segments.len() + 1;
         let mut min_x = f32::MAX;
         let mut min_z = f32::MAX;
-        let mut max_x = f32::MIN_POSITIVE;
-        let mut max_z = f32::MIN_POSITIVE;
+        // Java's `Float.MIN_VALUE`: the smallest positive subnormal, not `f32::MIN_POSITIVE`.
+        let mut max_x = f32::from_bits(1);
+        let mut max_z = f32::from_bits(1);
         let mut max_radius = coast;
         for (index, segment) in segments.iter().enumerate() {
-            min_x = min_x.min(segment.min_x());
-            min_z = min_z.min(segment.min_y());
-            max_x = max_x.max(segment.max_x());
-            max_z = max_z.max(segment.max_y());
-            max_radius = max_radius.max(segment.max_scale() * coast);
+            min_x = java_min(min_x, segment.min_x());
+            min_z = java_min(min_z, segment.min_y());
+            max_x = java_max(max_x, segment.max_x());
+            max_z = java_max(max_z, segment.max_y());
+            max_radius = java_max(max_radius, segment.max_scale() * coast);
             if index == 0 {
                 x += segment.a.x;
                 y += segment.a.y;
@@ -153,7 +157,7 @@ impl Island {
         min_x -= coast;
         max_z += coast;
         min_z -= coast;
-        let max_dimension = (max_x - min_x).max(max_z - min_z);
+        let max_dimension = java_max(max_x - min_x, max_z - min_z);
         let deep_mod = 0.25;
         Self {
             id,
@@ -225,7 +229,10 @@ impl Island {
 
     pub fn edge_value(&self, x: f32, y: f32) -> f32 {
         let value = self.edge_distance2(x, y, self.deep_ocean2);
-        self.process(self.deep_ocean2.min(value), self.shallow_ocean2.min(value))
+        self.process(
+            java_min(self.deep_ocean2, value),
+            java_min(self.shallow_ocean2, value),
+        )
     }
 
     pub fn land_value(&self, x: f32, y: f32) -> f32 {
@@ -251,12 +258,10 @@ impl Island {
                 (
                     segment.a.x + projection * segment.dx,
                     segment.a.y + projection * segment.dy,
-                    segment.scale2_a + projection * (segment.scale2_b - segment.scale2_a),
+                    lerp(segment.scale2_a, segment.scale2_b, projection),
                 )
             };
-            let dx = point_x - x;
-            let dy = point_y - y;
-            value = value.min((dx * dx + dy * dy) / scale);
+            value = java_min(Line::dist2(x, y, point_x, point_y) / scale, value);
         }
         value
     }
@@ -358,5 +363,183 @@ mod tests {
             ],
             [0x42f00000, 0xc2200000, 0x42fcfb72, 0x467a0000, 0x3fa00000]
         );
+    }
+
+    const NAN: f32 = f32::NAN;
+    const INF: f32 = f32::INFINITY;
+
+    /// Per island: the polyline's points (x, y, scale), as in the oracle's `POINTS`.
+    const POINTS: [&[[f32; 3]]; 7] = [
+        &[
+            [0.0, 0.0, 0.75],
+            [120.0, -40.0, 1.25],
+            [200.0, 90.0, 2.5],
+            [-50.0, 180.0, 0.9],
+        ],
+        &[[-10.0, -20.0, 1.0], [-30.0, -5.0, 0.5], [-70.0, -90.0, 2.0]],
+        &[[-0.0, -0.0, 1.0], [0.0, 0.0, 1.0], [-0.0, 25.5, 1.5]],
+        &[],
+        &[
+            [5.0, 5.0, 1.0],
+            [5.0, 5.0, 2.0],
+            [40.0, -12.5, 0.0],
+            [40.0, NAN, 1.0],
+        ],
+        &[[1e30, -1e30, 1.0], [INF, 3e38, 1.0], [-3e38, -INF, NAN]],
+        &[
+            [-1500.5, 2400.75, 1.7],
+            [-1312.25, 2611.125, 0.35],
+            [-1001.0, 2580.5, 1.15],
+            [-777.75, 2201.25, 0.6],
+            [-650.125, 1999.5, 1.9],
+        ],
+    ];
+    /// Per island: deep ocean, shallow ocean, coast and inland.
+    const RADII: [[f32; 4]; 7] = [
+        [300.0, 125.0, 100.0, 97.5],
+        [50.0, 20.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 0.0],
+        [30.0, 12.5, 10.0, 9.75],
+        [90.0, 37.5, 30.0, 29.25],
+        [3e38, 1e38, 1e30, 9e29],
+        [660.0, 275.0, 220.0, 214.5],
+    ];
+    const XS: [f32; 16] = [
+        0.0,
+        -0.0,
+        5.0,
+        12.25,
+        -98.75,
+        100.0,
+        250.0,
+        -1312.25,
+        -1000.0,
+        2500.0,
+        1e9,
+        -3e38,
+        INF,
+        -INF,
+        NAN,
+        f32::from_bits(1),
+    ];
+    const OFFSETS: [[f32; 2]; 4] = [[50.0, -25.0], [-0.0, -0.0], [NAN, 1.0], [1e38, -1e38]];
+
+    fn mix(h: &mut i64, value: i64) {
+        *h = h.wrapping_mul(1_000_003) ^ value;
+    }
+
+    fn mix_f(h: &mut i64, value: f32) {
+        let bits = if value.is_nan() {
+            0x7fc0_0000
+        } else {
+            value.to_bits() as i32
+        };
+        mix(h, i64::from(bits));
+    }
+
+    fn island(index: usize) -> Island {
+        let points = POINTS[index];
+        let segments = points
+            .windows(2)
+            .map(|pair| {
+                Segment::new(
+                    Vec2f::new(pair[0][0], pair[0][1]),
+                    Vec2f::new(pair[1][0], pair[1][1]),
+                    pair[0][2],
+                    pair[1][2],
+                )
+            })
+            .collect();
+        let [deep_ocean, shallow_ocean, coast, inland] = RADII[index];
+        Island::new(
+            index as i32 * 7 - 3,
+            segments,
+            ControlPoints::new(WorldControlPoints::default()),
+            deep_ocean,
+            shallow_ocean,
+            coast,
+            inland,
+        )
+    }
+
+    /// Folds what the oracle prints for one island into `h`.
+    fn fold(h: &mut i64, island: &Island, all: &[Island]) {
+        mix(h, i64::from(island.id()));
+        mix_f(h, island.radius());
+        mix_f(h, island.coast());
+        for vector in [island.center(), island.min(), island.max()] {
+            mix_f(h, vector.x);
+            mix_f(h, vector.y);
+        }
+        for s in island.segments() {
+            for value in [
+                s.a.x,
+                s.a.y,
+                s.b.x,
+                s.b.y,
+                s.dx,
+                s.dy,
+                s.length,
+                s.length2,
+                s.scale_a,
+                s.scale2_a,
+                s.scale_b,
+                s.scale2_b,
+                s.min_x(),
+                s.min_y(),
+                s.max_x(),
+                s.max_y(),
+                s.max_scale(),
+            ] {
+                mix_f(h, value);
+            }
+        }
+        for x in XS {
+            for z in XS {
+                mix_f(h, island.edge_value(x, z));
+                mix_f(h, island.land_value(x, z));
+                mix(h, i64::from(island.contains(x, z)));
+            }
+        }
+        for other in all {
+            mix(h, i64::from(island.overlaps(other)));
+        }
+    }
+
+    #[test]
+    fn fancy_islands_match_engine_0_3_0_over_a_grid() {
+        // `island N hash=` and `translated N hash=` from the oracle's output.
+        const ISLANDS: [i64; 7] = [
+            4_471_371_439_962_242_810,
+            -2_980_711_422_084_806_754,
+            5_819_305_975_358_599_233,
+            5_436_465_002_603_715_890,
+            2_661_829_515_760_187_032,
+            -3_173_365_622_338_592_339,
+            -2_177_918_726_559_654_814,
+        ];
+        const TRANSLATED: [i64; 7] = [
+            8_439_386_740_593_808_674,
+            8_212_017_515_462_460_511,
+            -8_916_857_709_666_907_142,
+            -2_941_846_210_725_880_895,
+            2_537_679_223_634_290_945,
+            -4_324_800_807_680_692_811,
+            -1_581_689_032_412_099_271,
+        ];
+        let all: Vec<Island> = (0..POINTS.len()).map(island).collect();
+        let mut h = 17;
+        for (index, expected) in ISLANDS.into_iter().enumerate() {
+            fold(&mut h, &all[index], &all);
+            assert_eq!(h, expected, "island {index}");
+        }
+        for (index, expected) in TRANSLATED.into_iter().enumerate() {
+            for [x, y] in OFFSETS {
+                let mut island = island(index);
+                island.translate(Vec2f::new(x, y));
+                fold(&mut h, &island, &all);
+            }
+            assert_eq!(h, expected, "translated {index}");
+        }
     }
 }
