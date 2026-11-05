@@ -553,12 +553,12 @@ fn curve(value: Option<&Data>) -> Result<CurveFunction, TerrainAssetError> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::super::terraforged_engine::TerrainCategory;
     use super::*;
 
     /// `Float.floatToIntBits`.
-    fn bits(value: f32) -> u32 {
+    pub(crate) fn bits(value: f32) -> u32 {
         if value.is_nan() {
             0x7fc0_0000
         } else {
@@ -566,20 +566,9 @@ mod tests {
         }
     }
 
-    /// One `TerrainAssetOracle` line: the decoded id, weight bits, the raised noise's bounds and an FNV-1a hash of
-    /// seed-first samples (a sample that throws in Java, here a panic, folds as `0xffffffff`).
-    fn line(name: &str, json: &str) -> String {
-        let terrain =
-            Terrain::configured(31, "hills", TerrainCategory::Highland, 0.5, false, false);
-        let mut id = String::new();
-        let decoded = decode_terrain_asset(json, |name| {
-            id = name.to_owned();
-            Some(terrain.clone())
-        });
-        let Ok(decoded) = decoded else {
-            return format!("{name} err");
-        };
-        let noise = decoded.noise();
+    /// `TerrainAssetOracle`'s FNV-1a hash of `noise`'s seed-first samples (a sample that throws in Java, here a
+    /// panic, folds as `0xffffffff`).
+    pub(crate) fn sample_hash(noise: &Module) -> u64 {
         let mut hash = 0xcbf2_9ce4_8422_2325u64;
         let mut fold = |x: f32, y: f32, seed: i32| {
             let sample = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -601,6 +590,24 @@ mod tests {
             fold(1.0e6, -2.5e6, seed);
             fold(-123_456.78, 98_765.43, seed);
         }
+        hash
+    }
+
+    /// One `TerrainAssetOracle` line: the decoded id, weight bits, the raised noise's bounds and an FNV-1a hash of
+    /// seed-first samples (a sample that throws in Java, here a panic, folds as `0xffffffff`).
+    fn line(name: &str, json: &str) -> String {
+        let terrain =
+            Terrain::configured(31, "hills", TerrainCategory::Highland, 0.5, false, false);
+        let mut id = String::new();
+        let decoded = decode_terrain_asset(json, |name| {
+            id = name.to_owned();
+            Some(terrain.clone())
+        });
+        let Ok(decoded) = decoded else {
+            return format!("{name} err");
+        };
+        let noise = decoded.noise();
+        let hash = sample_hash(noise);
         format!(
             "{name} ok type={id} weight={:08x} min={:08x} max={:08x} hash={hash:016x}",
             bits(decoded.weight()),
