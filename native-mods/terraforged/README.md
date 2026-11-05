@@ -2064,21 +2064,27 @@ on eight threads, that a running task is shared and reported not ready, and that
 The generator queries (`generator_facade.rs`, `TerraForgedGenerator`) are TerraForged Reimagined's
 `worldgen.Generator` (a24d450, MIT, as above) over its terrain cache: `createState`'s seed capture (`Seeds.get`, the
 level seed's low 32 bits, kept beside the raw level seed), `getChunkData`/`getChunkDataAsync`, the cache hints and
-drop (each with the seed its Java hook passes), `getMinY`, `getSeaLevel`, `getGenDepth`, `getBaseHeight` and
-`getBaseColumn`. Heights count from block 0, as TerraForged's levels do; `getGenDepth` is `levels.maxY` (480 by
+drop (each with the seed its Java hook passes), `getMinY`, `getSeaLevel`, `getGenDepth` and `getBaseColumn`, plus
+TerraForged 6dd607eb's `getBaseHeight` (see below). Heights count from block 0, as TerraForged's levels do; `getGenDepth` is `levels.maxY` (480 by
 default, the exclusive top, not `maxY - minY`), and Reimagined fits that by widening the overworld dimension type to
 `-64..960`. Mapping the levels onto Horizon's 26.3 build range (`-64..320`) is the job of the layer that registers the
-generator. `getBaseHeight` reads the un-eroded sample's base (water) level and the ERODED column height, the surface
-heightmaps returning the higher plus one, the ocean-floor ones the height plus one; `getBaseColumn` reads only the
-un-eroded sample (stone up to the raw height, water up to the surface) and, as Java, reports the height as the
-column's `minY`. A sample that fails (a custom module has no seed-first form) is an `Err` the caller gets, never a
+generator. `getBaseHeight` (the structure height query) follows 6dd607eb: it reads ONE un-eroded sample, its base
+(water) level and its raw height, the surface heightmaps returning the higher plus one, the ocean-floor ones the height
+plus one. Reimagined reads the eroded height there instead, so its structures stand on the eroded ground; the port
+does not follow that change, so on eroded ground a structure's height can differ from the filled terrain's, as in
+6dd607eb. `getBaseColumn` reads the same un-eroded sample (stone up to the raw height, water up to the surface; both
+trees agree) and, as Java, reports the height as the column's `minY`. A sample that fails (a custom module has no seed-first form) is an `Err` the caller gets, never a
 made-up height; a negative column height panics where Java throws. `GeneratorQueryOracle.java`
 (`.local/terraforged/oracles/generator_facade/`, `run.sh`, after `oracles/erosion_region/e2e/run.sh`) runs the query
 bodies (copied, since `Generator` needs Minecraft's `ChunkGenerator`) on Reimagined's own `TerrainLevels`,
 `NoiseLevels` and `ErodedNoiseGenerator` over the newer source's `NoiseGenerator`, interpreted and JIT-compiled alike:
 the query math over signed zeros, subnormals, huge values, infinities and NaN for three level sets, `Seeds.get`, and
 thirteen end-to-end positions (four seeds, negative blocks, `int` limits, the world border); the tests match them bit
-for bit in debug and release.
+for bit in debug and release. That oracle's end-to-end heights are Reimagined's eroded ones, so the tests take those from
+`oracles/generator_facade/6dd607eb/` (`run.sh`, after the same e2e setup) instead: `extract.py` copies 6dd607eb's
+`getBaseHeight` and `getBaseColumn` verbatim and runs them with 6dd607eb's real `Seeds.get(RandomState)`, `TerrainLevels`
+and `NoiseLevels` over the newer source's `NoiseGenerator.getNoiseSample`, for all six heightmap types, at the same
+positions; the query math and `Seeds.get` lines equal Reimagined's.
 
 The chunk fill (`chunk_fill.rs`, `fill_chunk`) is `ChunkUtil.fillChunk` then `ChunkUtil.primeHeightmaps`, as
 TerraForged Reimagined's `Generator.fillFromNoise` calls them (a24d450, MIT, as above; the fill logic is the same in
