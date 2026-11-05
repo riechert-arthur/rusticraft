@@ -1494,7 +1494,7 @@ range`), so a zero range (0 octaves) or an infinite one (a huge gain) gives 1 in
 path uses that `map` (`map_current`), and `Source::value`/`value_seeded` keep the jar's. Reseeding (`Module::with_seed`,
 above) stays the jar's mechanism: a reseeded source gives the seed-first bits for the same seed where the two maps
 agree, except for Perlin and Perlin2 (reseeding changes their seed; seed-first sampling does not). The eight octave sources,
-the scalar graph nodes, the domain warps and the `Base`/`Blend`/`VariableBlend` selectors (below) are seed-first so far; the other nodes are not. `SeedFirstOracle.java` and `JarSeedOracle.java`
+the scalar graph nodes, the domain warps and the five selectors (below) are seed-first so far; the other nodes are not. `SeedFirstOracle.java` and `JarSeedOracle.java`
 (`.local/terraforged/oracles/seed_first/`, outside Git; `run.sh` compiles Noise2D 2cb4843 from source) fold every
 kind over seven configs (0 octaves, negative gain and lacunarity, an infinite range), five config seeds, eight runtime
 seeds (both `int` extremes) and ten points (NaN, infinity, -0); the tests match both tables bit for bit in debug and
@@ -1505,8 +1505,7 @@ the octave sources, `Abs`, `Alpha`, `Bias`, `Clamp`, `Invert`, `Map`, `Power`, `
 (`Add`, `Multiply`, `Max`, `Min`, `Sub`). Each passes the call's seed unchanged to its children (only the octave sources
 add their own seed), and their arithmetic is the jar's: in 2cb4843 these classes behave as the jar's apart from the seed
 parameter. None of them calls `NoiseUtil.map` (`Map` divides by the source range fixed in its constructor), so the newer
-map only shows through the sources (a 0-octave source inside a graph gives 1, not NaN). Any other node (custom modules,
-`Select`, `MultiBlend`, caches, terraces, curves and the remaining transforms and sources) returns an error
+map only shows through the sources (a 0-octave source inside a graph gives 1, not NaN). Any other node (custom modules, caches, terraces, curves and the remaining transforms and sources) returns an error
 instead of falling back to the seedless `value`, which would ignore the seed; later layers add them. The jar path
 (`value`) and reseeding (`with_seed`) are unchanged. Reseeding gives the same bits only where it seeds the same sources:
 not through Perlin/Perlin2, a `Bias`'s bias (reseeding drops it) a combiner's sources (reseeding leaves them
@@ -1550,7 +1549,23 @@ zero-width window gives NaN (0/0) when the control sits on it. So an unsupported
 `SeededBlendEdgeOracle.java` (27 families with the control at and one ulp beside each window edge, NaN, ±inf and ±0;
 zero, negative, NaN and infinite blend ranges and falloffs; NaN, ±inf, zero and seeded variators; windows clamped to
 0..1; nested selectors; seven seeds including both `int` extremes; six points with NaN, infinity and -0) run in the same
-`run-graphs.sh`; the tests match both bit for bit in debug and release. `Select` and `MultiBlend` are not seed-first yet.
+`run-graphs.sh`; the tests match both bit for bit in debug and release.
+
+`Select` and `MultiBlend` follow the same pattern (control first, then the children Java evaluates, all with the call's
+seed). `Select` reads its four curve edges (`bound ∓ falloff`) and their ranges from the constructor; a zero (or -0)
+falloff takes the hard edge (below `lowerBound` the lower source, else above `upperBound` the upper one, else the lower
+source; reversed bounds test the lower bound first, so only controls at or above it reach the upper source), and a NaN
+control or falloff falls through to the lower source.
+`MultiBlend` keeps the constructor's slots: `NoiseUtil.round(selector * maxIndex)` picks the slot, a zero `blendRange`
+returns its source, otherwise a control above (below) the slot blends with the next (previous) slot, alpha clamped to
+0..1 by `NoiseUtil.clamp`. These slots come from the constructor's float blend; only reseeding cuts it to an `int`.
+A control far enough outside 0..1 to pick a missing slot panics where Java throws. Neither class calls `NoiseUtil.map`.
+`TerraForgedSeededSelectionOracle.java` (five graphs, three interpolations, four seeds, four points, plus nine controls
+across one `Select` window) and `SeededSelectionEdgeOracle.java` (28 families with the control at and one ulp beside
+every curve, slot and rounding edge, NaN, ±inf, ±0 and values outside 0..1; zero, -0, negative, NaN and infinite
+falloffs and blends; reversed, equal, overlapping, NaN and infinite bounds; one to four sources; nested selectors; seven
+seeds including both `int` extremes; six points with NaN, infinity and -0; Java's exceptions where the port panics) run
+in the same `run-graphs.sh`; the tests match both bit for bit in debug and release.
 
 The bounded concurrent lossy cache (`lossy_cache.rs`, `ConcurrentLossyCache`) ports the newer source tree's
 `LossyCache.Concurrent` and its `LossyCache.Stamped` buckets (`com.terraforged.mod.util.storage`, 6dd607eb). The
