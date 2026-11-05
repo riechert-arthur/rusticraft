@@ -2155,10 +2155,28 @@ limits included, seven build ranges from `128..192` to `-2032..2032`, three cave
 the sampler's call trace and every cell of every section; failures at five calls, a reused resource and the band
 tests at the `int` limits are compared too. The tests match all of them.
 
+The cave biome sampler (`cave_biome_sampler.rs`, `CaveBiomeSampler`) is Reimagined's `CaveBiomeSampler` (a24d450,
+MIT, as above): one simplex noise (`Noise.singleSimplex`, seed + 124897 with Java `int` wrap, frequency `1F /
+scale`, mapped to `(1 + n) * 0.5` and clamped to 0..1) picks from an equal-weight `WeightMap` of the GLOBAL pool
+(`terraforged:cave`) or the UNIQUE pool (the registry's non-surface biomes: the `NON_SURFACE` tag, or a path
+`cave/…` or `…_caves`; an empty UNIQUE pool falls back to GLOBAL). `get_layer_biome`, the cave layer #159's fill
+asks for, first reads a coarser mask (seed + 987541, frequency `1F / 1600F`) and has no cave biome (`None`, the
+column keeps its surface biome) below 0.62. It takes block coordinates: Reimagined's `Source.getLayerBiome` shifts
+the quart coordinates by 2 and passes the captured world seed. TerraForged 6dd607eb has the choice noise and the
+two pools but no mask, no layer lookup and no fallback; the pools themselves (biome names onto Horizon's registry)
+and the `Source` wrapper come with later layers, and Reimagined's startup warning about incomplete cave biomes is not
+ported.
+
+`CaveBiomeSamplerOracle.java` (`.local/terraforged/oracles/cave_biome_sampler/`, `run.sh`) compiles Reimagined's
+own `CaveBiomeSampler`, `WeightMap`, `MathUtil`, `Noise` and `NoiseUtil` from source with stub registries and runs
+them interpreted and with `-Xcomp`: 8 scales (`0` and the `int` limits included), 6 pools (empty, fallback, one to
+seven biomes), 16 seeds (the offsets' wrap edges included) and 310 positions, 238,080 samples of the choice and
+mask bits and the layer, GLOBAL and UNIQUE choices. The test matches every digest in debug and release builds.
+
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives, the biome climate types, the climate settings, the climate module, the climate stage, the continent factory, the generator context, the heightmap, the world generator factory, TerraForged's terrain levels, its terrain data, its terrain generator, its terrain-blend utilities, its terrain blender with its nearest-terrain search (and the newer source's seed-first blender), noise-graph reseeding, the cave noise primitives, the biome viability rules, the biome overrides, the continent control points, the continent cell primitives, the continent configuration, the continent shape blending, the continent cell generator with its spawn-offset search, the continent river nodes, the continent river carver's arithmetic, the continent river networks with their nearest-node sampling and their warped, carved river sampling, the newer source's seed-first noise sources, scalar noise graphs, domain warps, selectors, graph caches, terraces, legacy terraces, advanced terraces, curves, transforms (steps, frequency, gradient and modulation), special sources (boost, cell, cell edge and sine) and lines, and its bounded concurrent lossy cache with the continent's cell and
-river-piece caches on it, the continent noise module that joins the continent layers, the newer source's terrain height sampler with its bordered chunk generation and its nearest-terrain search, the erosion tile geometry, and TerraForged Reimagined's heightmap smoothing, erosion brushes, hydraulic erosion filter, eroded-region cache, eroded region build, eroded chunk generation, terrain cache, generator queries, chunk fill, the terrain stage hand-off to it, and the biome chunk fill. They change nothing in the game, so there is
+river-piece caches on it, the continent noise module that joins the continent layers, the newer source's terrain height sampler with its bordered chunk generation and its nearest-terrain search, the erosion tile geometry, and TerraForged Reimagined's heightmap smoothing, erosion brushes, hydraulic erosion filter, eroded-region cache, eroded region build, eroded chunk generation, terrain cache, generator queries, chunk fill, the terrain stage hand-off to it, the biome chunk fill and the cave biome sampler. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development

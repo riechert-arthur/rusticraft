@@ -22,6 +22,12 @@
  * SOFTWARE.
  */
 
+// Adapted from TerraForged Reimagined (https://github.com/Romoslayer/TerraForged-Reimagined, a24d450):
+// `src/main/java/com/terraforged/mod/worldgen/biome/CaveBiomeSampler.java` with `util/storage/WeightMap.java`.
+// TerraForged 6dd607eb's CaveBiomeSampler has the choice noise and the two pools but no coverage mask, no
+// `getLayerBiome` and no empty-pool fallback; those are Reimagined's. MIT License, Copyright (c) 2020 TerraForged,
+// Copyright (c) 2026 Romoslayer; see `LICENSE-TERRAFORGED-REIMAGINED`.
+
 use super::{
     terraforged::{clamp, simplex},
     terraforged_cave_noise::CaveType,
@@ -120,7 +126,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn samples_and_layer_choices_match_current_java_source() {
+    fn fixtures_match_reimagined_java() {
         let sampler = CaveBiomeSampler::new(
             800,
             vec![Arc::new(9)],
