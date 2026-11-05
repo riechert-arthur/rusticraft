@@ -257,7 +257,7 @@ pub(crate) mod tests {
         terrain
     }
 
-    fn first_available(
+    pub(crate) fn first_available(
         chunk: &TerrainChunk<'_, Properties>,
         kind: HeightmapType,
         x: i32,
@@ -416,6 +416,41 @@ pub(crate) mod tests {
         (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
     }
 
+    /// `ChunkFillOracle.digest`/`ChunkStage.digest`: FNV-1a over every block of the chunk's build range (y, z, x;
+    /// air 0, stone 1, water 2), then OCEAN_FLOOR_WG's and WORLD_SURFACE_WG's heights (`int`, little-endian).
+    pub(crate) fn digest(chunk: &TerrainChunk<'_, Properties>) -> u64 {
+        let (min_y, height) = (chunk.min_y(), chunk.height());
+        let mut hash = 0xcbf2_9ce4_8422_2325;
+        for y in min_y..min_y + height {
+            for z in 0..16 {
+                for x in 0..16 {
+                    hash = fnv(
+                        hash,
+                        match chunk.block(x, y, z) {
+                            AIR => 0,
+                            STONE => 1,
+                            WATER => 2,
+                            other => panic!("unexpected state {other:?}"),
+                        },
+                    );
+                }
+            }
+        }
+        for kind in [HeightmapType::OceanFloorWg, HeightmapType::WorldSurfaceWg] {
+            for z in 0..16 {
+                for x in 0..16 {
+                    // The port stores no height outside the build range; the oracle's digest clamps Java's.
+                    let y = first_available(chunk, kind, x, z);
+                    assert!((min_y..=min_y + height).contains(&y), "{y}");
+                    for byte in y.to_le_bytes() {
+                        hash = fnv(hash, byte);
+                    }
+                }
+            }
+        }
+        hash
+    }
+
     #[test]
     fn fill_matches_java_chunk_util() {
         let blocks = registry();
@@ -447,35 +482,7 @@ pub(crate) mod tests {
                 WATER,
             )
             .unwrap();
-            let mut hash = 0xcbf2_9ce4_8422_2325;
-            for y in min_y..min_y + height {
-                for z in 0..16 {
-                    for x in 0..16 {
-                        hash = fnv(
-                            hash,
-                            match chunk.block(x, y, z) {
-                                AIR => 0,
-                                STONE => 1,
-                                WATER => 2,
-                                other => panic!("unexpected state {other:?}"),
-                            },
-                        );
-                    }
-                }
-            }
-            for kind in [HeightmapType::OceanFloorWg, HeightmapType::WorldSurfaceWg] {
-                for z in 0..16 {
-                    for x in 0..16 {
-                        // The port stores no height outside the build range; the oracle's digest clamps Java's.
-                        let y = first_available(&chunk, kind, x, z);
-                        assert!((min_y..=min_y + height).contains(&y), "case {index}: {y}");
-                        for byte in y.to_le_bytes() {
-                            hash = fnv(hash, byte);
-                        }
-                    }
-                }
-            }
-            assert_eq!(hash, JAVA[index], "case {index}");
+            assert_eq!(digest(&chunk), JAVA[index], "case {index}");
         }
     }
 }

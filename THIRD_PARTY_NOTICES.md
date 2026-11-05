@@ -21,7 +21,7 @@ The heightmap smoothing, the erosion brushes and filter and the eroded-region ca
 [TerraForged Reimagined a24d4503064780790e975cd17495866ae13eef11](https://github.com/Romoslayer/TerraForged-Reimagined/tree/a24d4503064780790e975cd17495866ae13eef11)
 (`HeightmapSmoothing` and `TerraSettings.Smoothing`; `ErosionFilter`'s erosion-brush layout, its
 droplet simulation with the region-wide `apply`, and `TerraSettings.Erosion`; `ErodedNoiseGenerator`'s region
-layout, `getRegion` region cache, `buildRegion`, `erodedHeightNoise`, `generate` and its `INoiseGenerator` delegations, `getNoiseSample` and `sample` included; `TerrainCache` with `getErodedHeightNoise`; and `Generator`'s seed capture (`createState`, `Seeds.get`), chunk-data, hint and drop calls, level queries, `getBaseHeight` and `getBaseColumn`; `ChunkUtil.fillChunk`, `fillSection` and `primeHeightmaps` as `Generator.fillFromNoise` calls them), an unofficial port of TerraForged to Minecraft 26.3,
+layout, `getRegion` region cache, `buildRegion`, `erodedHeightNoise`, `generate` and its `INoiseGenerator` delegations, `getNoiseSample` and `sample` included; `TerrainCache` with `getErodedHeightNoise`; and `Generator`'s seed capture (`createState`, `Seeds.get`), chunk-data, hint and drop calls, level queries, `getBaseHeight`, `getBaseColumn` and `buildTerrain`'s `combineAsync` hand-off to `fillFromNoise`; `ChunkUtil.fillChunk`, `fillSection` and `primeHeightmaps` as `Generator.fillFromNoise` calls them), an unofficial port of TerraForged to Minecraft 26.3,
 MIT, copyright (c) 2020 TerraForged and (c) 2026 Romoslayer. Its license is preserved in
 `native-mods/terraforged/LICENSE-TERRAFORGED-REIMAGINED`.
 
