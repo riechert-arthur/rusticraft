@@ -363,6 +363,8 @@ impl<T: Send + 'static> CacheEntry<'static, T> {
                 if let Err(payload) = &result {
                     record.fail(&**payload);
                 }
+                // Done before the result is sent, as `FutureTask.set` publishes its state before
+                // waking waiters: a getter that has the value (or the failure) sees the entry done.
                 record.done.store(true, Ordering::Release);
                 let _ = sender.send(result);
             }),
@@ -1247,6 +1249,139 @@ z true 0 4 true 1
 z true true true true 3
 z true 0 12 true 1
 p 6 0 3 10
+";
+
+    /// Replays `CacheEntryOrderOracle.java` (`run-order.sh`, `out-order.txt`): Engine 0.3.0's
+    /// `computeAsync` entries are done before any getter has their value or failure (`FutureTask.set`
+    /// publishes the state before waking waiters, as `compute_async` stores `done` before sending
+    /// the result), and a `then` chain completes parent before child, so each function sees its
+    /// parent done. Lines: `c` (a gated chain A → B → C on pools of 4 and 2: done flags before the
+    /// release, what B's and C's functions saw, C's value, done flags after C's `get`), `w` (getters,
+    /// half through `call`, that saw the entry not done after their read returned or panicked, over
+    /// many rounds, without and with a failing task), `N` (a chain on [`ThreadPool::NONE`], done at
+    /// once). Gated with channels, no sleeps, so every line is deterministic. The `w` rounds only
+    /// sample the race a reversed store would open (its window is a few instructions on the task
+    /// thread, which no test can widen without a hook); the order itself is the release store
+    /// before the send.
+    #[test]
+    fn async_cache_entries_complete_before_waiters_see_them() {
+        const ROUNDS: usize = 500;
+        const WAITERS: usize = 3;
+        let mut out = String::new();
+        for size in [4, 2] {
+            let pool = ThreadPool::create(size);
+            let (started_tx, started) = mpsc::channel();
+            let (release, release_rx) = mpsc::channel::<()>();
+            let (started_tx, release_rx) = (Mutex::new(started_tx), Mutex::new(release_rx));
+            let a = Arc::new(CacheEntry::compute_async(
+                move || {
+                    started_tx.lock().unwrap().send(()).unwrap();
+                    release_rx.lock().unwrap().recv().unwrap();
+                    1
+                },
+                &pool,
+            ));
+            started.recv().unwrap();
+            let b_saw = Arc::new(AtomicBool::new(false));
+            let (a_seen, saw) = (Arc::clone(&a), Arc::clone(&b_saw));
+            let b = Arc::new(a.then(&pool, move |value| {
+                saw.store(a_seen.is_done(), Ordering::SeqCst);
+                value + 10
+            }));
+            let c_saw = Arc::new([AtomicBool::new(false), AtomicBool::new(false)]);
+            let (a_seen, b_seen, saw) = (Arc::clone(&a), Arc::clone(&b), Arc::clone(&c_saw));
+            let c = b.then(&pool, move |value| {
+                saw[0].store(b_seen.is_done(), Ordering::SeqCst);
+                saw[1].store(a_seen.is_done(), Ordering::SeqCst);
+                value + 100
+            });
+            let before = format!("{} {} {}", a.is_done(), b.is_done(), c.is_done());
+            release.send(()).unwrap();
+            let value = *c.get();
+            out += &format!(
+                "c {size} {before} {} {} {} {value} {} {} {}\n",
+                b_saw.load(Ordering::SeqCst),
+                c_saw[0].load(Ordering::SeqCst),
+                c_saw[1].load(Ordering::SeqCst),
+                a.is_done(),
+                b.is_done(),
+                c.is_done()
+            );
+        }
+
+        let pool = ThreadPool::create(4);
+        for fail in [false, true] {
+            let (mut got, mut late) = (0, 0);
+            for _ in 0..ROUNDS {
+                let (release, release_rx) = mpsc::channel::<()>();
+                let release_rx = Mutex::new(release_rx);
+                let entry = CacheEntry::compute_async(
+                    move || {
+                        release_rx.lock().unwrap().recv().unwrap();
+                        assert!(!fail, "fail");
+                        7
+                    },
+                    &pool,
+                );
+                let (ready_tx, ready) = mpsc::channel();
+                let reads: Vec<(bool, bool)> = thread::scope(|scope| {
+                    let readers: Vec<_> = (0..WAITERS)
+                        .map(|i| {
+                            let (ready_tx, entry) = (ready_tx.clone(), &entry);
+                            scope.spawn(move || {
+                                ready_tx.send(()).unwrap();
+                                let read = !panics(|| {
+                                    if i % 2 == 1 {
+                                        *entry.call()
+                                    } else {
+                                        *entry.get()
+                                    }
+                                });
+                                (read, entry.is_done())
+                            })
+                        })
+                        .collect();
+                    for _ in 0..WAITERS {
+                        ready.recv().unwrap();
+                    }
+                    if entry.is_done() {
+                        late += 1000;
+                    }
+                    release.send(()).unwrap();
+                    readers.into_iter().map(|r| r.join().unwrap()).collect()
+                });
+                got += reads.iter().filter(|(read, _)| *read).count();
+                late += reads.iter().filter(|(_, done)| !done).count();
+            }
+            out += &format!("w {fail} {} {got} {late}\n", ROUNDS * WAITERS);
+        }
+
+        let none = ThreadPool::NONE;
+        let a = Arc::new(CacheEntry::compute_async(|| 1, &none));
+        let b_saw = Arc::new(AtomicBool::new(false));
+        let (a_seen, saw) = (Arc::clone(&a), Arc::clone(&b_saw));
+        let b = a.then(&none, move |value| {
+            saw.store(a_seen.is_done(), Ordering::SeqCst);
+            value + 10
+        });
+        let before = format!("{} {}", a.is_done(), b.is_done());
+        let value = *b.get();
+        out += &format!(
+            "N {before} {} {value} {} {}\n",
+            b_saw.load(Ordering::SeqCst),
+            a.is_done(),
+            b.is_done()
+        );
+        assert_eq!(out, ASYNC_ORDER_ORACLE);
+    }
+
+    /// `CacheEntryOrderOracle.java`'s output (`out-order.txt`; interpreted and JIT runs agree).
+    const ASYNC_ORDER_ORACLE: &str = "\
+c 4 false false false true true true 111 true true true
+c 2 false false false true true true 111 true true true
+w false 1500 1500 0
+w true 1500 0 0
+N true true true 11 true true
 ";
 
     /// An expiring `Cache` of async entries sweeps one whose task still runs; its holder still gets
