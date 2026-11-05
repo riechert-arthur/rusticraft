@@ -2204,7 +2204,7 @@ always passes, as in Java), the ground `is_steep_at` (un-eroded height noise 12 
 of the block column: the larger height difference times `maxY`, over 24 blocks, above 0.42) and `keeps_snow_cover` (both biomes `freezes` alike at
 the column's height: 0.05 colder per 40 blocks above sea level + 17, snow below 0.15). `getBiomeOverride` (above)
 runs after this and wins. Reimagined's `getBiomeOverride` also widens the beach band to `COAST - BEACH`
-(0.05); `biome_sampler.rs` keeps the jar's 0.005 here.
+(0.05): that is `current_biome_override` (below); `biome_override` keeps the jar's 0.005.
 
 The initial biome selection (`InitialBiomeSelector::initial_biome`) assembles them in `getInitialBiome`'s order
 (Reimagined a24d450, MIT, as above; 6dd607eb and the jar pick `getBiomeMap().get(climateType).getValue(noise)` or
@@ -2272,8 +2272,16 @@ two halves, since the two trees' Engine classes can't share a JVM: 6dd607eb's ov
 continent drawing the continent's four seeds) for the climate fields, `getShape`, `sample` and the seed draws; three
 levels variants, two terrain sets, six runtime seeds and 202 block positions (`int` edges and a signed grid) match
 bit for bit in debug and release builds.
-The surface override now uses the current source's full `COAST - BEACH` shoreline band instead of
-the obsolete 0.005 fringe, so coastal columns remain beach candidates through the coast marker.
+The current surface override (`current_biome_override`, `biome_sampler.rs`) is TerraForged Reimagined a24d450's
+`getBiomeOverride` (MIT, as above): its `beachSize` is `COAST - BEACH` (0.05) instead of the 0.005 of the jar and
+6dd607eb, so `BEACH + beachSize` folds to exactly `COAST` (0.55) and continent noise in (0.505, 0.55] is a beach
+(snowy beach, stony shore) rather than the input biome or a river; the other bands and the river test are the jar's.
+The jar-tested `biome_override` keeps 0.005 (`BEACH_SIZE`; `CURRENT_BEACH_SIZE` is the wide one). A later layer
+(#201) restores 6dd607eb's 0.005 fringe on the current path too. `CurrentBiomeOverrideOracle.java`
+(`.local/terraforged/oracles/biome_override/reimagined/`, `run.sh`) compiles Reimagined's own `BiomeSampler` and runs
+it interpreted and with `-Xcomp` over 30 continent values (each threshold and its neighbouring floats, the floats next
+to 0.55 included), every climate type, Reimagined's 13 built-in terrains and 10 river values; the test matches its
+42,900 overrides and the folded bound's bits, in debug and release.
 
 ## Status: development only
 
