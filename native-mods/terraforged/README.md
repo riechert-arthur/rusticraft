@@ -1147,8 +1147,8 @@ then clamps below it), `max_y >> 1` below 32 (an inverted sea-level pair: a requ
 1`, one below 32 gets 32), each limit's endpoints and one past them, and the sea floor and base height at their
 bounds. TerraForged's newer source tree (6dd607eb) builds these levels the same way: its `TerrainLevels`
 constructor, `copy()` and transforms, `NoiseLevels` and `MathUtil` compile to the jar's bytecode (only the settings
-codec, which is not ported, and `toString` differ; `.local/terraforged/oracles/terrain_levels/version/compare.sh`
-checks it).
+codec, which is not ported, and javac's string concatenation in `toString` differ;
+`.local/terraforged/oracles/terrain_levels/version/compare.sh` checks it).
 
 The terrain-data layer (`terrain_data.rs`, again the mod's classes) adds the per-chunk storage TerraForged's
 generator fills: `Index` (`CHUNK` masks x and z into the chunk, so world coordinates of any chunk, negative ones
