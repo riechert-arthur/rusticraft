@@ -2108,6 +2108,25 @@ future fails; a later sample failure leaves the data unfilled and the chunk is f
 ported: the rest of `fillFromNoise` (`buildStructureTerrain`, Deep Caves, Strata), the surface and carver steps, and
 the registration that would let Horizon call the stage.
 
+The structure terrain columns (`structure_terrain.rs`, `StructureTerrain`) are TerraForged 6dd607eb's
+`worldgen.terrain.StructureTerrain.modify` and its helpers (MIT, as above), the per-column part of `fillFromNoise`'s
+`buildStructureTerrain`. Given the chunk's rigid structure pieces, sorted by their boxes' `minY` (stable, as
+fastutil's sort), each column raises the ground towards every piece standing above it until a piece covering the
+column is found, with Java's `max(4, 20 - length)` blend radius and `pow(alpha, 2 - alpha)` falloff, then fills
+stone from the column's OCEAN_FLOOR_WG height up to the raised level and carves air through the highest covering
+piece, from its floor (box `minY` plus a pool piece's ground-level delta) to its roof; when the highest floor of all
+the pieces, or the column's new surface, is more than 5 blocks above the roof, the roof rises by half that depth
+times an ellipse falloff over the box (`NoiseUtil.round`). `modify` returns the new OCEAN_FLOOR_WG height
+when it changed the column, the value Java writes into `TerrainData`'s height map. Not ported here: collecting the
+pieces (`startsForStructure` with BEARD_BOX/BEARD_THIN structures, `isCloseToChunk(pos, 20)`, rigid pool elements),
+the chunk adapter and the height-map write. Reimagined a24d450 changes the blend radius (`clamp(length * 0.75, 8,
+24)`, collection radius 32) and skips buried structures; the port keeps 6dd607eb's. `StructureTerrainOracle.java`
+(`.local/terraforged/oracles/structure_terrain/`, `run.sh`) compiles 6dd607eb's `StructureTerrain.java` unchanged, with
+fastutil's `ObjectArrayList` and Noise2D's `NoiseUtil`, over stub chunks and runs `buildStructureTerrain`'s column loop
+on 96 generated chunks (negative chunk positions, tied `minY`s, pool ground deltas, surfaces near both build limits);
+the test matches its ordered block writes and height-map writes in debug and release, interpreted and JIT-compiled
+alike.
+
 **World height.** TerraForged's heights count from block 0 up to `levels.maxY` (480 by default), and Reimagined
 widens the overworld to `-64..960` so that its terrain always fits. Horizon 26.3's overworld is `-64..320`, and the
 fill does not rescale anything: it clips to the chunk's build range (`chunk.min_y()` to `min_y + height`). Java
