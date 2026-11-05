@@ -2502,9 +2502,8 @@ It also bundles ten `terrain_noise` files, byte for byte in `data/worldgen/terra
 (same folder in Reimagined, `terrain_noise` instead of `terrain_type`, MIT): the flatlands `plains` and `steppe`, the
 hills `dales`, `hills_1` and `hills_2`, and the mountain ridges `mountains_ridge_1` and `mountains_ridge_2` (6dd607eb
 generates the same bytes in `generated/.../worldgen/terrain/noise/`). The mountains `mountains_1`, `mountains_2` and
-`mountains_3` are TerraForged 6dd607eb's
-generated files (MIT): Reimagined's copies differ (they replace the `Valley` erosion node, which Reimagined's codec
-cannot read, with other nodes), and the port follows the newer source. `decode_current_terrain_noises(&types)`
+`mountains_3` are TerraForged 6dd607eb's generated files (MIT): Reimagined's copies differ (they replace the `Valley`
+erosion node, which Reimagined's codec cannot read, with other nodes), and the port follows the newer source. `decode_current_terrain_noises(&types)`
 decodes them with #185's decoder, their `type` (`terraforged:flats`, `terraforged:hills` or `terraforged:mountains`)
 resolved in the terrain types `decode_current_terrain_types` returned (so the terrains are the world registry's),
 into a `TerrainNoiseAssets` in registry order; its `entry_ids()` (`dales`, `hills_1`, `hills_2`, `mountains_1`,

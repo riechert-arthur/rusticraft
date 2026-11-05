@@ -355,8 +355,9 @@ terraforged:wetland|wetland|wetland/category:WETLAND|wetland/category:WETLAND|WE
     /// `NoiseCodec` (with Engine 0.3.0's `Valley` registered, as TerraForged 6dd607eb's `NoiseCodec` does), its `type`
     /// bound in the terrain-type registry its 18 terrain_type files load, for each bundled terrain_noise file in
     /// registry order, each read from the tree it is bundled from (6dd607eb's generated `mountains_1`, `mountains_2`
-    /// and `mountains_3`, Reimagined's the rest). Fields: key, terrain name/its delegate, whether it is the registry's own
-    /// terrain of that name, weight bits, the raised noise's bounds and the #185 oracle's hash of seed-first samples.
+    /// and `mountains_3`, Reimagined's the rest). Fields: key, terrain name/its delegate, whether it is the registry's
+    /// own terrain of that name, weight bits, the raised noise's bounds and the #185 oracle's hash of seed-first
+    /// samples.
     const NOISE_ORACLE: &str = r##"terraforged:dales|hills/category:LOWLAND|true|weight=3fc00000|min=00000000|max=3f800000|hash=2a75f650c0578dc8
 terraforged:hills_1|hills/category:LOWLAND|true|weight=40000000|min=00000000|max=3f800000|hash=16d5050ff2aba2c1
 terraforged:hills_2|hills/category:LOWLAND|true|weight=40000000|min=00000000|max=3f800000|hash=e013cf848d1b6c6e
@@ -436,9 +437,10 @@ terraforged:steppe|flats/category:FLATLAND|true|weight=3fc00000|min=00000000|max
 
     #[test]
     fn default_overrides_stretch_dales_and_the_mountains_but_not_the_hills() {
-        // `isMountain` matches ids containing "mountain" or "dales", so the default `mountainWidth` (3.5) stretches
-        // dales and the five mountains (fancy mountains are on, so both ridges stay); the two hills and the flatlands
-        // have no override and pass through as the same entries.
+        // `isMountain` matches ids containing "mountain", "dolomites", "torridonian" or "dales" (of the bundled
+        // noises: dales and the mountains), so the default `mountainWidth` (3.5) stretches dales and the five
+        // mountains (fancy mountains are on, so both ridges stay); the two hills and the flatlands have no override
+        // and pass through as the same entries.
         let mut registry = TerrainRegistry::new();
         let types = decode_current_terrain_types(&mut registry).unwrap();
         let noises = decode_current_terrain_noises(&types).unwrap();
