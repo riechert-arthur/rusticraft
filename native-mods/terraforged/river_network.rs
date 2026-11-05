@@ -413,6 +413,10 @@ mod tests {
         terraforged_terrain_levels::NoiseLevels,
     };
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// The oracles' `Environment.CORES` stub: the caches' bucket count, so Rust's cache layout is Java's.
+    const CORES: i32 = 6;
 
     /// FNV-1a over 32-bit values, NaN canonicalised (Java's `floatToIntBits`), as the oracle.
     struct Fold {
@@ -507,10 +511,10 @@ mod tests {
         /// Folds `computeNodes` at every cell of `xs` x `ys` (y outer, as the oracle).
         fn fold(&self, fold: &mut Fold, seed: i32, xs: &[i32], ys: &[i32]) {
             let config = self.config();
-            let cells = CellGenerator::new(config);
+            let cells = CellGenerator::with_concurrency(config, CORES);
             let shape =
                 ShapeGenerator::new(config, ControlPoints::new(WorldControlPoints::default()));
-            let network = RiverNetwork::new(&cells, &shape, config);
+            let network = RiverNetwork::with_concurrency(&cells, &shape, config, CORES);
             for &y in ys {
                 for &x in xs {
                     fold.cell(&network.compute_nodes(seed, x, y));
@@ -540,7 +544,7 @@ mod tests {
         }
     }
 
-    /// Samples every point of `points` on one network (as the oracle's `point`), folding both samples.
+    /// Samples every point of `points` on a new network (as the oracle's `point`), folding both samples.
     fn fold_points(
         fold: &mut Fold,
         setup: &Setup,
@@ -548,9 +552,19 @@ mod tests {
         points: impl IntoIterator<Item = (f32, f32)>,
     ) {
         let config = setup.config();
-        let cells = CellGenerator::new(config);
+        let cells = CellGenerator::with_concurrency(config, CORES);
         let shape = ShapeGenerator::new(config, ControlPoints::new(WorldControlPoints::default()));
-        let network = RiverNetwork::new(&cells, &shape, config);
+        let network = RiverNetwork::with_concurrency(&cells, &shape, config, CORES);
+        fold_network(fold, &network, seed, points);
+    }
+
+    /// [`fold_points`] on a given network (the oracle's `shared` lines reuse one across runtime seeds).
+    fn fold_network<Cells: ContinentCells>(
+        fold: &mut Fold,
+        network: &RiverNetwork<Cells>,
+        seed: i32,
+        points: impl IntoIterator<Item = (f32, f32)>,
+    ) {
         let mut sample = CarverSample::new(&TerrainRegistry::new());
         for (x, y) in points {
             network.sample_nodes(seed, x, y, &mut sample);
@@ -583,6 +597,14 @@ mod tests {
     const POINTS: [f32; 26] = [f32::NAN, f32::NEG_INFINITY, f32::INFINITY, -0.0, 0.0, MIN, -MIN, 1e30, -1e30,
         f32::MAX, -f32::MAX, 2_147_483_520.0, 2_147_483_648.0, -2_147_483_648.0, -2_147_483_520.0, 16_777_216.0,
         -16_777_216.0, 16_777_218.0, 0.5, -0.5, 1.75, -2.25, 123.4, -98.76, 0.999_999_94, -1.0];
+
+    /// One pipeline's stages: network, carver, shape and cells.
+    type Stages<'a, 'b> = (
+        &'a RiverNetwork<'b, CellGenerator>,
+        &'a RiverCarver,
+        &'a ShapeGenerator,
+        &'a CellGenerator,
+    );
 
     /// The river pipeline of one configuration (as `RiverPipelineOracle`'s `pipe`).
     struct Pipeline {
@@ -635,12 +657,12 @@ mod tests {
             &self,
             f: impl FnOnce(&RiverNetwork<CellGenerator>, &RiverCarver, &ShapeGenerator, &CellGenerator),
         ) {
-            let cells = CellGenerator::new(self.config);
+            let cells = CellGenerator::with_concurrency(self.config, CORES);
             let shape = ShapeGenerator::new(
                 self.config,
                 ControlPoints::new(WorldControlPoints::default()),
             );
-            let network = RiverNetwork::new(&cells, &shape, self.config);
+            let network = RiverNetwork::with_concurrency(&cells, &shape, self.config, CORES);
             f(
                 &network,
                 &RiverCarver::new(self.levels, self.config),
@@ -653,19 +675,31 @@ mod tests {
         /// the stand-in height `toHeightNoise(base, 0.35)`, then the pipeline.
         fn shaped(&self, fold: &mut Fold, seed: i32, points: &[(f32, f32)], warp: bool) {
             self.run(|network, carver, shape, cells| {
-                for &(x, y) in points {
-                    if warp {
-                        let (warp_x, warp_y) = network.warp(seed, x, y);
-                        fold.float(warp_x);
-                        fold.float(warp_y);
-                    }
-                    let mut sample = NoiseSample::new(&self.terrains);
-                    shape.sample(cells, seed, x, y, &mut sample);
-                    sample.height_noise = self.levels.to_height_noise(sample.base_noise, 0.35);
-                    network.sample(seed, x, y, &mut sample, carver, &self.terrains);
-                    self.fold(fold, &sample);
-                }
+                self.shaped_on(fold, (network, carver, shape, cells), seed, points, warp);
             });
+        }
+
+        /// [`Self::shaped`] on a given pipeline (the oracle's `shared` line reuses one across runtime seeds).
+        fn shaped_on(
+            &self,
+            fold: &mut Fold,
+            (network, carver, shape, cells): Stages,
+            seed: i32,
+            points: &[(f32, f32)],
+            warp: bool,
+        ) {
+            for &(x, y) in points {
+                if warp {
+                    let (warp_x, warp_y) = network.warp(seed, x, y);
+                    fold.float(warp_x);
+                    fold.float(warp_y);
+                }
+                let mut sample = NoiseSample::new(&self.terrains);
+                shape.sample(cells, seed, x, y, &mut sample);
+                sample.height_noise = self.levels.to_height_noise(sample.base_noise, 0.35);
+                network.sample(seed, x, y, &mut sample, carver, &self.terrains);
+                self.fold(fold, &sample);
+            }
         }
 
         /// The oracle's `synthetic` line (hand-set samples), at runtime seed 42.
@@ -711,6 +745,175 @@ mod tests {
                 }
             });
         }
+    }
+
+    /// [`CellGenerator`] without its cache: every cell and nearest cell computed directly.
+    struct Uncached<'a>(&'a CellGenerator);
+
+    impl ContinentCells for Uncached<'_> {
+        fn cell(&self, seed: i32, x: i32, y: i32) -> CellPoint {
+            self.0.compute_cell(seed, x, y)
+        }
+
+        fn nearest_cell(&self, seed: i32, x: f32, y: f32) -> (i32, i32) {
+            self.0.nearest_cell_with(x, y, |cell_x, cell_y| {
+                self.0.compute_cell(seed, cell_x, cell_y)
+            })
+        }
+
+        fn cell_shape(&self) -> CellShape {
+            self.0.cell_shape()
+        }
+    }
+
+    /// [`CellGenerator`] with its cache, counting the cell lookups (the nearest-cell search's included).
+    struct Counting<'a>(&'a CellGenerator, AtomicUsize);
+
+    impl ContinentCells for Counting<'_> {
+        fn cell(&self, seed: i32, x: i32, y: i32) -> CellPoint {
+            self.1.fetch_add(1, Ordering::Relaxed);
+            self.0.cell(seed, x, y)
+        }
+
+        fn nearest_cell(&self, seed: i32, x: f32, y: f32) -> (i32, i32) {
+            self.0
+                .nearest_cell_with(x, y, |cell_x, cell_y| self.cell(seed, cell_x, cell_y))
+        }
+
+        fn cell_shape(&self) -> CellShape {
+            self.0.cell_shape()
+        }
+    }
+
+    fn pieces_hash(pieces: &RiverPieces) -> (usize, usize, u64) {
+        let mut fold = Fold::new();
+        fold.cell(pieces);
+        (fold.rivers, fold.lakes, fold.hash)
+    }
+
+    fn samples_hash(sample: &CarverSample) -> (usize, u64) {
+        let mut fold = Fold::new();
+        fold_sample(&mut fold, &sample.river);
+        fold_sample(&mut fold, &sample.lake);
+        (fold.rivers, fold.hash)
+    }
+
+    /// The nearest-node sampling with no cache at all: a new piece cache per sample over uncached cells.
+    fn direct_sample(
+        config: ContinentConfig,
+        shape: &ShapeGenerator,
+        cells: &CellGenerator,
+        seed: i32,
+        x: f32,
+        y: f32,
+    ) -> CarverSample {
+        let uncached = Uncached(cells);
+        let network = RiverNetwork::with_concurrency(&uncached, shape, config, CORES);
+        let mut sample = CarverSample::new(&TerrainRegistry::new());
+        network.sample_nodes(seed, x, y, &mut sample);
+        sample
+    }
+
+    /// Both caches never change a result: one network shared by 8 threads, each walking every runtime seed over
+    /// the same 7x7 cells and 4x4 points in its own order (so slots keep changing seed and key), gives the pieces
+    /// and samples of the direct computation.
+    #[test]
+    fn cached_pieces_and_samples_equal_direct_for_many_seeds_and_threads() {
+        let mut seeds = vec![
+            0,
+            1,
+            -1,
+            42,
+            i32::MAX,
+            i32::MIN,
+            -827_614,
+            i32::MAX - 20_106,
+        ];
+        seeds.extend((0..8).map(|i: i32| i.wrapping_mul(0x9e37_79b9_u32 as i32)));
+        for (shape, source) in [
+            (CellShape::Square, CellSource::Perlin),
+            (CellShape::Hexagon, CellSource::Cubic),
+        ] {
+            let setup = Setup::new(shape, source);
+            let config = setup.config();
+            let cells = CellGenerator::with_concurrency(config, CORES);
+            let shape =
+                ShapeGenerator::new(config, ControlPoints::new(WorldControlPoints::default()));
+            let network = RiverNetwork::with_concurrency(&cells, &shape, config, CORES);
+            let uncached = Uncached(&cells);
+            let direct = RiverNetwork::with_concurrency(&uncached, &shape, config, CORES);
+            std::thread::scope(|scope| {
+                for thread in 0..8 {
+                    let (network, direct, seeds, cells, shape) =
+                        (&network, &direct, &seeds, &cells, &shape);
+                    scope.spawn(move || {
+                        let mut sample = CarverSample::new(&TerrainRegistry::new());
+                        for round in 0..seeds.len() {
+                            let seed = seeds[(round * 3 + thread * 5) % seeds.len()];
+                            for y in -3..=3 {
+                                for x in -3..=3 {
+                                    let (x, y) = if thread % 2 == 0 { (x, y) } else { (-y, x) };
+                                    assert_eq!(
+                                        pieces_hash(&network.nodes(seed, x, y)),
+                                        pieces_hash(&direct.compute_nodes(seed, x, y)),
+                                        "{seed} ({x}, {y})"
+                                    );
+                                }
+                            }
+                            for (x, y) in points(&steps(2, 0.6, 0.1), &steps(2, 0.6, -0.3))
+                                .into_iter()
+                                .take(16)
+                            {
+                                network.sample_nodes(seed, x, y, &mut sample);
+                                assert_eq!(
+                                    samples_hash(&sample),
+                                    samples_hash(&direct_sample(config, shape, cells, seed, x, y)),
+                                    "{seed} ({x}, {y})"
+                                );
+                            }
+                        }
+                    });
+                }
+            });
+        }
+    }
+
+    /// What the caches save per sample: without them, `sample_nodes` reads the nearest-cell search's 9 cells, then
+    /// computes the pieces of the 9 cells around it (a new piece list each, reading the cell and its neighbours, and
+    /// theirs for a land cell). With them, a sample whose neighbourhood is cached reads only the 9 cells of
+    /// the nearest-cell search (cache hits) and computes no pieces (every `computeNodes` reads at least one cell).
+    #[test]
+    fn cached_sampling_reads_only_the_nearest_cells() {
+        let config = Setup::new(CellShape::Square, CellSource::Perlin).config();
+        let cells = CellGenerator::with_concurrency(config, CORES);
+        let shape = ShapeGenerator::new(config, ControlPoints::new(WorldControlPoints::default()));
+        let grid = points(&steps(4, 0.25, 0.0625), &steps(4, 0.25, -0.125));
+        let samples = grid.len();
+        let mut sample = CarverSample::new(&TerrainRegistry::new());
+        // Direct: a new piece cache per sample.
+        let counting = Counting(&cells, AtomicUsize::new(0));
+        for &(x, y) in &grid {
+            RiverNetwork::with_concurrency(&counting, &shape, config, CORES).sample_nodes(
+                42,
+                x,
+                y,
+                &mut sample,
+            );
+        }
+        let direct = counting.1.load(Ordering::Relaxed);
+        // Cached: one network, the grid twice; the second pass hits the piece cache everywhere.
+        let counting = Counting(&cells, AtomicUsize::new(0));
+        let network = RiverNetwork::with_concurrency(&counting, &shape, config, CORES);
+        for &(x, y) in &grid {
+            network.sample_nodes(42, x, y, &mut sample);
+        }
+        let cold = counting.1.swap(0, Ordering::Relaxed);
+        for &(x, y) in &grid {
+            network.sample_nodes(42, x, y, &mut sample);
+        }
+        let warm = counting.1.load(Ordering::Relaxed);
+        // 81 samples, about 72 cell reads each without caches (ocean cells stop after one read).
+        assert_eq!((direct, cold, warm), (5810, 895, 9 * samples));
     }
 
     /// TerraForged shares one `RiverGenerator` (warp, carver) across its worker threads.
@@ -790,7 +993,37 @@ mod tests {
                     Pipeline::new(&setup, 0, levels[0]).shaped(&mut fold, seed, &small, true);
                 }
             }
+            let seeds = (fold.rivers, fold.hash);
             line(&mut fold);
+            // The oracle's `shared` line: one pipeline per shape-seed pair across all runtime seeds. The port's
+            // caches hit only on the same seed, so it equals `seeds` (the source's cached run doesn't).
+            let pipelines = BASE.map(|base| {
+                setup.seeds = base;
+                let pipeline = Pipeline::new(&setup, 0, levels[0]);
+                let cells = CellGenerator::with_concurrency(pipeline.config, CORES);
+                let shape = ShapeGenerator::new(
+                    pipeline.config,
+                    ControlPoints::new(WorldControlPoints::default()),
+                );
+                let carver = RiverCarver::new(pipeline.levels, pipeline.config);
+                (pipeline, cells, shape, carver)
+            });
+            let networks = pipelines.each_ref().map(|(p, cells, shape, _)| {
+                RiverNetwork::with_concurrency(cells, shape, p.config, CORES)
+            });
+            for seed in RUNTIME {
+                for ((pipeline, cells, shape, carver), network) in pipelines.iter().zip(&networks) {
+                    pipeline.shaped_on(
+                        &mut fold,
+                        (network, carver, shape, cells),
+                        seed,
+                        &small,
+                        true,
+                    );
+                }
+            }
+            assert_eq!((fold.rivers, fold.hash), seeds, "shared {index}");
+            fold = Fold::new();
             setup.seeds = (0, 0);
             for (min, max) in FALLOFFS {
                 let mut pipeline = Pipeline::new(&setup, 0, levels[0]);
@@ -875,6 +1108,25 @@ mod tests {
                 }
             }
             check_sample(&mut fold, "seeds", seeds[index]);
+            // The oracle's `shared` lines: one network per shape-seed pair across all runtime seeds equals `seeds`
+            // (the source's cached run doesn't: its caches hit on the cell alone).
+            let configs = BASE.map(|base| {
+                setup.seeds = base;
+                setup.config()
+            });
+            let cells = configs.map(|config| CellGenerator::with_concurrency(config, CORES));
+            let shapes = configs.map(|config| {
+                ShapeGenerator::new(config, ControlPoints::new(WorldControlPoints::default()))
+            });
+            let networks: Vec<_> = (0..BASE.len())
+                .map(|i| RiverNetwork::with_concurrency(&cells[i], &shapes[i], configs[i], CORES))
+                .collect();
+            for seed in RUNTIME {
+                for network in &networks {
+                    fold_network(&mut fold, network, seed, seed_points.iter().copied());
+                }
+            }
+            check_sample(&mut fold, "shared", seeds[index]);
             setup.seeds = (0, 0);
             fold_points(&mut fold, &setup, 42, points(&POINTS, &POINTS));
             check_sample(&mut fold, "edges", edges[index]);

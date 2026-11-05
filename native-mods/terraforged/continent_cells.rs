@@ -200,6 +200,19 @@ impl ContinentCells for CellGenerator {
     /// strictly nearest (first wins ties; NaN distances never win). Where `floor` returns `Integer.MAX_VALUE` (huge,
     /// infinite or `-2^31` points) the jar's window wraps and is empty: the answer is cell (0, 0), as in the jar.
     fn nearest_cell(&self, seed: i32, x: f32, y: f32) -> (i32, i32) {
+        self.nearest_cell_with(x, y, |cell_x, cell_y| self.cell(seed, cell_x, cell_y))
+    }
+}
+
+impl CellGenerator {
+    /// [`ContinentCells::nearest_cell`] reading its cells from `cell(x, y)` instead of the cache (with
+    /// [`Self::compute_cell`], the direct computation the cached one must equal).
+    pub fn nearest_cell_with(
+        &self,
+        x: f32,
+        y: f32,
+        mut cell: impl FnMut(i32, i32) -> CellPoint,
+    ) -> (i32, i32) {
         let x = self.shape.adjust_x(x);
         let y = self.shape.adjust_y(y);
         // The rows loop runs forever past `None`; the columns loop only if a row runs.
@@ -217,7 +230,7 @@ impl ContinentCells for CellGenerator {
         let mut distance = f32::MAX;
         for cell_y in rows {
             for cell_x in columns.clone() {
-                let cell = self.cell(seed, cell_x, cell_y);
+                let cell = cell(cell_x, cell_y);
                 // NoiseUtil.dist2(x, y, px, py)
                 let delta_x = x - cell.px;
                 let delta_y = y - cell.py;
@@ -639,5 +652,62 @@ mod tests {
         assert_ne!(original, generator.cell(43, 3, -7));
         generator.cell(42, 100, 200);
         assert_eq!(original, generator.cell(42, 3, -7));
+    }
+
+    /// Runtime seeds for the cache tests: the `int` extremes, the offsets' wrap points and ordinary seeds.
+    fn cache_seeds() -> Vec<i32> {
+        let mut seeds = vec![0, 1, -1, 42, i32::MAX, i32::MIN, -6569, i32::MAX - 6568];
+        seeds.extend((0..56).map(|i: i32| i.wrapping_mul(0x9e37_79b9_u32 as i32)));
+        seeds
+    }
+
+    fn cell_bits(cell: CellPoint) -> [u32; 4] {
+        [cell.px, cell.py, cell.noise, cell.noise0].map(f32::to_bits)
+    }
+
+    /// The cell cache never changes a cell or a nearest cell: one generator shared by 8 threads, each walking every
+    /// seed over the same 9x9 cells in its own order (so slots keep changing seed and key), equals direct computation.
+    #[test]
+    fn cached_cells_equal_direct_for_many_seeds_and_threads() {
+        let seeds = cache_seeds();
+        for (shape, source) in CellShape::VALUES
+            .into_iter()
+            .flat_map(|shape| CellSource::VALUES.map(|source| (shape, source)))
+        {
+            let mut config = ContinentConfig::default();
+            config.shape.cell_shape = shape;
+            config.shape.cell_source = source;
+            let generator = CellGenerator::with_concurrency(config, 6);
+            std::thread::scope(|scope| {
+                for thread in 0..8 {
+                    let (generator, seeds) = (&generator, &seeds);
+                    scope.spawn(move || {
+                        for round in 0..seeds.len() {
+                            let seed = seeds[(round * 7 + thread * 5) % seeds.len()];
+                            for y in -4..=4 {
+                                for x in -4..=4 {
+                                    let (x, y) = if thread % 2 == 0 { (x, y) } else { (-y, x) };
+                                    let cached = generator.cell(seed, x, y);
+                                    let direct = generator.compute_cell(seed, x, y);
+                                    assert_eq!(
+                                        cell_bits(cached),
+                                        cell_bits(direct),
+                                        "{seed} ({x}, {y})"
+                                    );
+                                    let (px, py) = (x as f32 * 0.7 + 0.3, y as f32 * 0.9 - 0.2);
+                                    assert_eq!(
+                                        generator.nearest_cell(seed, px, py),
+                                        generator.nearest_cell_with(px, py, |cx, cy| {
+                                            generator.compute_cell(seed, cx, cy)
+                                        }),
+                                        "{seed} ({px}, {py})"
+                                    );
+                                }
+                            }
+                        }
+                    });
+                }
+            });
+        }
     }
 }
