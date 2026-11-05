@@ -249,7 +249,8 @@ fn alpha(value: f32, minimum: f32, maximum: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::super::{
-        terraforged_continent_config::FloatRange, terraforged_engine::TerrainRegistry,
+        terraforged::Module, terraforged_continent_config::FloatRange,
+        terraforged_engine::TerrainRegistry,
     };
     use super::*;
 
@@ -597,5 +598,66 @@ mod tests {
             );
         }
         assert_eq!(carver.blend_radius, 0.7);
+    }
+
+    /// The carver's erosion (a `RidgeNoise` source, built inline) read seed-first equals the generic seed-first graph
+    /// path (`Module::try_value_seed_first`) over the same builder values, and `carve` reads exactly that value.
+    #[test]
+    fn carver_erosion_matches_the_generic_seed_first_node() {
+        let terrains = TerrainRegistry::new();
+        for rivers_seed in [0, 7, -21221, i32::MAX - 21220, i32::MAX, i32::MIN] {
+            let mut config = config(0);
+            config.rivers.seed = rivers_seed;
+            let carver = RiverCarver::new(levels(0), config);
+            let generic = Module::source(Source::new(
+                SourceKind::Ridge,
+                SourceConfig {
+                    seed: rivers_seed.wrapping_add(21221),
+                    frequency: 128.0,
+                    octaves: 2,
+                    gain: 0.975,
+                    ..SourceConfig::default()
+                },
+            ));
+            for seed in [0, 1, -1, 17, i32::MAX, i32::MIN] {
+                for (x, y) in [
+                    (0.0, 0.0),
+                    (-0.0, 0.125),
+                    (0.003, -0.0071),
+                    (12.34, -56.78),
+                    (NAN, 1.0),
+                    (INF, 2.0),
+                ] {
+                    let erosion = generic.try_value_seed_first(seed, x, y).unwrap();
+                    assert_eq!(
+                        carver.erosion.value_seed_first(seed, x, y).to_bits(),
+                        erosion.to_bits(),
+                        "rivers.seed {rivers_seed} seed {seed} at ({x}, {y})"
+                    );
+                    let fresh = || {
+                        let mut sample = NoiseSample::new(&terrains);
+                        (
+                            sample.continent_noise,
+                            sample.base_noise,
+                            sample.height_noise,
+                        ) = (0.9, 0.65, 0.85);
+                        sample
+                    };
+                    let mut nodes = CarverSample::new(&terrains);
+                    (
+                        nodes.river.position,
+                        nodes.river.level,
+                        nodes.river.distance,
+                    ) = (0.6, 0.4, 0.03);
+                    let (mut carved, mut expected) = (fresh(), fresh());
+                    carver.carve(seed, x, y, &mut carved, &nodes);
+                    carver.carve_with_erosion(erosion, &mut expected, &nodes);
+                    let bits = |s: &NoiseSample| {
+                        [s.base_noise, s.height_noise, s.river_noise].map(f32::to_bits)
+                    };
+                    assert_eq!(bits(&carved), bits(&expected));
+                }
+            }
+        }
     }
 }
