@@ -299,3 +299,10 @@ file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_eroded_noise_generator"
 source = "eroded_noise_generator.rs"
 visibility = "pub"
+
+[[module]]
+id = "terrain_cache"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_terrain_cache"
+source = "terrain_cache.rs"
+visibility = "pub"
