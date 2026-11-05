@@ -313,3 +313,10 @@ file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_generator_facade"
 source = "generator_facade.rs"
 visibility = "pub"
+
+[[module]]
+id = "chunk_fill"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_chunk_fill"
+source = "chunk_fill.rs"
+visibility = "pub"
