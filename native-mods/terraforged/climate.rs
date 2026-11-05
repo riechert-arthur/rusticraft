@@ -27,8 +27,8 @@ use std::sync::Arc;
 use super::{
     terraforged::{
         CellFunction, DistanceFunction, Domain, EdgeFunction, Module, Rand, Source, SourceConfig,
-        SourceKind, cell_vector, clamp, copy_sign, floor, java_max, java_min, map, pow_int, round,
-        sin, value_coord_2d,
+        SourceKind, cell_vector, clamp, copy_sign, floor, java_max, java_min, map, map_current,
+        pow_int, round, sin, value_coord_2d,
     },
     terraforged_engine::{
         BiomeType, Cell, ControlPoints, Levels, Seed, Terrain, TerrainProperties, TerrainRegistry,
@@ -282,6 +282,15 @@ impl Temperature {
         map(value, -1.0, 1.0, 2.0)
     }
 
+    /// The newer source's `Temperature.getValue(int seed, float x, float y)` (TerraForged Reimagined a24d450's Engine,
+    /// over Noise2D 2cb4843): [`Self::value`] with that Noise2D's `NoiseUtil.map` ([`map_current`]); the seed is
+    /// unused. The two maps agree here (range 2), but the call follows the source.
+    pub fn value_current(self, _x: f32, y: f32) -> f32 {
+        let sin = clamp(sin(y * self.frequency), -1.0, 1.0);
+        let value = copy_sign(pow_int(sin, self.power), sin);
+        map_current(value, -1.0, 1.0, 2.0)
+    }
+
     /// As a graph node, with the `Noise` default bounds 0..1.
     pub fn module(self) -> Module {
         Module::custom(0.0, 1.0, move |x, y| self.value(x, y))
@@ -328,6 +337,20 @@ impl Moisture {
         noise = (noise - 0.5) * 2.0;
         let value = copy_sign(pow_int(noise, self.power), noise);
         map(value, -1.0, 1.0, 2.0)
+    }
+
+    /// The newer source's `Moisture.getValue(int seed, float x, float y)` (TerraForged Reimagined a24d450's Engine,
+    /// over Noise2D 2cb4843): the source is sampled seed-first and the final map is that Noise2D's
+    /// ([`map_current`]). Errors only for a source graph with a node not ported to seed-first sampling (never for
+    /// [`Self::new`]'s).
+    pub fn try_value_seed_first(&self, seed: i32, x: f32, y: f32) -> Result<f32, &'static str> {
+        let mut noise = self.source.try_value_seed_first(seed, x, y)?;
+        if self.power < 2 {
+            return Ok(noise);
+        }
+        noise = (noise - 0.5) * 2.0;
+        let value = copy_sign(pow_int(noise, self.power), noise);
+        Ok(map_current(value, -1.0, 1.0, 2.0))
     }
 
     /// As a graph node, with the `Noise` default bounds 0..1.
@@ -682,7 +705,7 @@ fn simplex(seed: i32, scale: i32, octaves: usize) -> Module {
 
 /// `Module.warp(seed, scale, octaves, strength)`: a `DomainWarp` by two Perlin sources (`seed` and
 /// `seed + 1`) and `Source.constant(strength)`.
-fn perlin_warp(seed: i32, scale: i32, octaves: usize, strength: f64) -> Domain {
+pub(crate) fn perlin_warp(seed: i32, scale: i32, octaves: usize, strength: f64) -> Domain {
     Domain::domain_warp(
         source(SourceKind::Perlin, seed, scale, octaves),
         source(SourceKind::Perlin, seed.wrapping_add(1), scale, octaves),
