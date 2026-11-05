@@ -465,7 +465,8 @@ fn module(object: &Obj) -> Result<Module, TerrainAssetError> {
         ),
         // Engine 0.3.0's `Ridge.create`: `new Ridge(seed, octaves, strength, gridSize, amplitude, lacunarity,
         // fallOff, blend)`, then `ridge.wrap(source)`. The constructor checks nothing: zero or negative octaves
-        // sample NaN (0/0), as in Java.
+        // sample NaN (0/0), and a huge count makes every sample run that many octaves (up to 25 source reads
+        // each), as in Java; nothing caps it.
         "Valley" => ErosionRidge::full(
             o.int("seed", 1337),
             o.int("octaves", 1),

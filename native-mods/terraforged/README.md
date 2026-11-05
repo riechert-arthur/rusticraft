@@ -2440,7 +2440,8 @@ octave sources, `CellEdge`, `Const`, `Alpha`, `Bias`, `Boost`, `Clamp`, `Invert`
 `Warp` with `DomainWarp`/`DirectionWarp`, `Blend`, `Terrace`, `AdvTerrace`, `Steps` with an `Interpolation` curve)
 plus `Min` and `Sub`, and Engine 0.3.0's erosion `Valley` (`Ridge.create`: seed 1337, one octave, strength 1, grid
 size 100, amplitude 0.5, lacunarity 2.25, fall-off 0.75 and blend `CONSTANT` by default, read with `asInt`/`asFloat`,
-then `new Ridge(...)` and `wrap(source)`; zero or negative octaves sample NaN, as in Java). TerraForged 6dd607eb's
+then `new Ridge(...)` and `wrap(source)`; zero or negative octaves sample NaN and the octave count is not capped,
+as in Java). TerraForged 6dd607eb's
 `NoiseCodec` registers `Valley` and its generated mountain assets use it; Reimagined a24d450's `NoiseCodec` dropped
 that registration (its comment calls it `Ridge`), so Reimagined itself rejects a `Valley` node: the port follows
 6dd607eb here. The other specs Reimagined registers (`Cell`, `Sin`, `Line`, `Rand`, `Abs`, `Cache`, `Curve`,
