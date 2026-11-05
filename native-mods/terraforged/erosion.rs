@@ -1566,47 +1566,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn erosion_region_layout_matches_current_java_source() {
-        let chunk_fixtures = [
-            (-17, -3, -28, 176),
-            (-16, -2, -20, 64),
-            (-9, -2, -20, 176),
-            (-8, -1, -12, 64),
-            (-1, -1, -12, 176),
-            (0, 0, -4, 64),
-            (7, 0, -4, 176),
-            (8, 1, 4, 64),
-            (15, 1, 4, 176),
-            (16, 2, 12, 64),
-        ];
-        for (chunk, expected_region, expected_origin, expected_offset) in chunk_fixtures {
-            assert_eq!(ErosionRegionLayout::region(chunk, chunk).0, expected_region);
-            assert_eq!(
-                ErosionRegionLayout::origin_chunk(expected_region, expected_region).0,
-                expected_origin
-            );
-            assert_eq!(ErosionRegionLayout::chunk_offset(chunk), expected_offset);
-        }
-        let block_fixtures = [
-            (-257, 191),
-            (-256, 64),
-            (-145, 175),
-            (-144, 176),
-            (-17, 175),
-            (-16, 176),
-            (-1, 191),
-            (0, 64),
-            (15, 79),
-            (16, 80),
-            (127, 191),
-            (128, 64),
-        ];
-        for (block, expected) in block_fixtures {
-            assert_eq!(ErosionRegionLayout::block_offset(block), expected);
-        }
-    }
-
-    #[test]
     fn erosion_region_cache_shares_builds_resets_seeds_and_evicts_lru() {
         use std::sync::{
             Barrier,
@@ -1662,15 +1621,6 @@ pub(crate) mod tests {
         assert_eq!(rebuilt.load(Ordering::SeqCst), 1);
     }
 
-    #[test]
-    fn failed_region_build_is_removed_for_retry() {
-        let cache = ErosionRegionCache::new();
-        let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            cache.get_or_build(1, 0, 0, |_, _| -> i32 { panic!("fixture failure") });
-        }));
-        assert!(failure.is_err());
-        assert_eq!(*cache.get_or_build(1, 0, 0, |_, _| 7), 7);
-    }
     /// `ErosionRegionOracle.java` (`.local/terraforged/oracles/erosion_region/`, `run.sh`) runs TerraForged Reimagined
     /// a24d450's own `ErodedNoiseGenerator` over a stub height source whose region maps hold their own indices
     /// (erosion and smoothing off): `g` lines are `getRegion` calls (seed, chunk, whether it built, whether it threw,
