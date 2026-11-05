@@ -2063,34 +2063,16 @@ impl Module {
                 steps,
                 octaves,
             } => {
-                let value = source.value(x, y);
-                if value <= *blend_min {
-                    return value;
-                }
-                let mask = mask.value(x, y);
-                if mask == 0.0 {
-                    return value;
-                }
-                let mut result = value;
-                let slope = slope.value(x, y);
-                let modulation = modulation.value(x, y);
-                // Java's `for (int i = 1; i <= octaves; ++i)` never ends for `octaves == Integer.MAX_VALUE` (`i`
-                // wraps); this loop stops there.
-                for octave in 1..=*octaves {
-                    let steps = steps.wrapping_mul(octave) as f32;
-                    result = round(result * steps) as f32 / steps;
-                    result += (value - result) * slope;
-                }
-                result = (result + modulation) / *mod_range;
-                let mut alpha = if value > *blend_max {
-                    1.0
-                } else {
-                    (value - *blend_min) / *blend_range
-                };
-                if mask != 1.0 {
-                    alpha *= mask;
-                }
-                lerp(value, result, alpha)
+                let Ok(value) = advanced_terrace(
+                    source.value(x, y),
+                    [*blend_min, *blend_max, *blend_range, *mod_range],
+                    *steps,
+                    *octaves,
+                    || Ok::<_, std::convert::Infallible>(mask.value(x, y)),
+                    || Ok(slope.value(x, y)),
+                    || Ok(modulation.value(x, y)),
+                );
+                value
             }
             ModuleKind::Curve { source, function } => function.apply(source.value(x, y)),
             ModuleKind::VariableCurve {
@@ -2494,36 +2476,15 @@ impl Module {
                 mod_range,
                 steps,
                 octaves,
-            } => {
-                let value = sample(source)?;
-                if value <= *blend_min {
-                    value
-                } else {
-                    let mask = sample(mask)?;
-                    if mask == 0.0 {
-                        value
-                    } else {
-                        let slope = sample(slope)?;
-                        let modulation = sample(modulation)?;
-                        let mut result = value;
-                        for octave in 1..=*octaves {
-                            let step_count = *steps * octave;
-                            result = round(result * step_count as f32) as f32 / step_count as f32;
-                            result += (value - result) * slope;
-                        }
-                        result = (result + modulation) / *mod_range;
-                        let mut alpha = if value > *blend_max {
-                            1.0
-                        } else {
-                            (value - *blend_min) / *blend_range
-                        };
-                        if mask != 1.0 {
-                            alpha *= mask;
-                        }
-                        lerp(value, result, alpha)
-                    }
-                }
-            }
+            } => advanced_terrace(
+                sample(source)?,
+                [*blend_min, *blend_max, *blend_range, *mod_range],
+                *steps,
+                *octaves,
+                || sample(mask),
+                || sample(slope),
+                || sample(modulation),
+            )?,
             // Noise2D 2cb4843's `Cache` keeps one entry per thread keyed by `x == this.x && y == this.y` alone, so a
             // repeated point at another runtime seed returns the first seed's sample. The port keys the shared entry
             // by the seed too (and by the coordinates' bits, as the seedless path does): a hit is always the sample
@@ -3586,6 +3547,47 @@ fn legacy_terrace<E>(
         return Ok(step.value + alpha * range * lower_curve()?);
     }
     Ok(step.value)
+}
+
+/// `AdvancedTerrace.modify` from its source sample on, shared by the seedless and seed-first paths (Engine 0.3.0 and
+/// Noise2D 2cb4843 agree here). The array holds the constructor's `[blendMin, blendMax, blendRange, modRange]`. As in
+/// Java, a sample at or below `blendMin` reads no other child, a zero mask reads neither slope nor modulation, and the
+/// children are read in Java's order: mask, slope, modulation. `steps * i` wraps like Java's `int`. Java's
+/// `for (int i = 1; i <= octaves; i++)` never ends for `octaves == Integer.MAX_VALUE` (`i` wraps); this loop stops there.
+fn advanced_terrace<E>(
+    value: f32,
+    [blend_min, blend_max, blend_range, mod_range]: [f32; 4],
+    steps: i32,
+    octaves: i32,
+    mask: impl FnOnce() -> Result<f32, E>,
+    slope: impl FnOnce() -> Result<f32, E>,
+    modulation: impl FnOnce() -> Result<f32, E>,
+) -> Result<f32, E> {
+    if value <= blend_min {
+        return Ok(value);
+    }
+    let mask = mask()?;
+    if mask == 0.0 {
+        return Ok(value);
+    }
+    let mut result = value;
+    let slope = slope()?;
+    let modulation = modulation()?;
+    for octave in 1..=octaves {
+        let steps = steps.wrapping_mul(octave) as f32;
+        result = round(result * steps) as f32 / steps;
+        result += (value - result) * slope;
+    }
+    result = (result + modulation) / mod_range;
+    let mut alpha = if value > blend_max {
+        1.0
+    } else {
+        (value - blend_min) / blend_range
+    };
+    if mask != 1.0 {
+        alpha *= mask;
+    }
+    Ok(lerp(value, result, alpha))
 }
 
 /// The shortcut test shared by `Module.clamp` and `Module.map`.
@@ -8232,6 +8234,201 @@ mod tests {
                 hash = hash.wrapping_mul(0x100000001b3);
             }
             assert_eq!(hash, expected, "seed {seed}");
+        }
+    }
+
+    /// `SeededAdvancedTerraceEdgeOracle` (`.local/terraforged/oracles/seed_first/run-graphs.sh`): AdvancedTerrace with
+    /// a source fixed at, and one ulp beside, blendMin, blendMax and (first two octaves, at most 64 steps) every step
+    /// value `k / n` and rounding edge `(k + 0.5) / n` (plus NaN, ±inf, ±0, subnormals and values outside 0..1); masks
+    /// 1, 0.5, ±0, -1, NaN and inf; slopes 0, 1, -0.5 and NaN; 0, 1, negative and wrapping (`i32::MAX * i`) steps; 0,
+    /// -1, 1 and 3 octaves; equal, inverted, NaN and infinite blend bounds; zero, infinite and NaN `modRange`; seeded
+    /// children; nested terraces; and advanced terraces of seeded sources.
+    #[test]
+    fn runtime_seeded_advanced_terrace_edges_match_current_noise2d() {
+        let src = |kind, seed, octaves, gain, frequency| {
+            Module::source(Source::new(
+                kind,
+                SourceConfig {
+                    seed,
+                    octaves,
+                    gain,
+                    frequency,
+                    ..SourceConfig::default()
+                },
+            ))
+        };
+        let modulation = src(SourceKind::Simplex2, 802, 3, 0.5, 0.0125);
+        let mask = src(SourceKind::Cubic, 803, 2, 0.975, 0.0078125);
+        let slope = src(SourceKind::Perlin2, 804, 2, 0.5, 0.015625);
+        let zero = src(SourceKind::Simplex, 1337, 0, 0.5, 3.0);
+        let simplex = src(SourceKind::Simplex, i32::MAX, 3, 0.65, 0.125);
+        let perlin = src(SourceKind::Perlin, 801, 4, 0.5, 1.0 / 96.0);
+        let c = Module::constant;
+        let (inf, nan) = (f32::INFINITY, f32::NAN);
+        type Build = Box<dyn Fn(Module) -> Module>;
+        // (blendMin, blendMax, steps, octaves) of the edge table, or None for no edges; source bounds; terrace.
+        type Family = (Option<(f32, f32, i32, i32)>, (f32, f32), Build);
+        fn plain(
+            (bmin, bmax, steps, octaves): (f32, f32, i32, i32),
+            bounds: (f32, f32),
+            modulation: &Module,
+            mask: &Module,
+            slope: &Module,
+        ) -> Family {
+            let (modulation, mask, slope) = (modulation.clone(), mask.clone(), slope.clone());
+            (
+                Some((bmin, bmax, steps, octaves)),
+                bounds,
+                Box::new(move |k: Module| {
+                    k.advanced_terrace(
+                        modulation.clone(),
+                        mask.clone(),
+                        slope.clone(),
+                        bmin,
+                        bmax,
+                        steps,
+                        octaves,
+                    )
+                }),
+            )
+        }
+        let consts =
+            |args, mask: f32, slope: f32| plain(args, (0.0, 1.0), &c(0.1), &c(mask), &c(slope));
+        let fixed =
+            |source: &Module, modulation: &Module, mask: &Module, args: (f32, f32, i32, i32)| {
+                let (source, modulation, mask, slope) = (
+                    source.clone(),
+                    modulation.clone(),
+                    mask.clone(),
+                    slope.clone(),
+                );
+                let (bmin, bmax, steps, octaves) = args;
+                (
+                    None,
+                    (0.0, 1.0),
+                    Box::new(move |_: Module| {
+                        source.clone().advanced_terrace(
+                            modulation.clone(),
+                            mask.clone(),
+                            slope.clone(),
+                            bmin,
+                            bmax,
+                            steps,
+                            octaves,
+                        )
+                    }) as Build,
+                )
+            };
+        let (n_mod, n_mask, n_slope) = (modulation.clone(), mask.clone(), slope.clone());
+        let families: Vec<Family> = vec![
+            consts((0.2, 0.8, 8, 3), 1.0, 0.25),
+            consts((0.2, 0.8, 8, 3), 0.5, 0.25),
+            consts((0.2, 0.8, 8, 3), 0.0, 0.25),
+            consts((0.2, 0.8, 8, 3), -0.0, 0.25),
+            consts((0.2, 0.8, 4, 2), -1.0, -0.5),
+            consts((0.2, 0.8, 4, 2), nan, 0.25),
+            consts((0.2, 0.8, 4, 2), inf, 0.25),
+            consts((0.2, 0.8, 5, 2), 1.0, 0.0),
+            consts((0.2, 0.8, 5, 2), 0.5, 1.0),
+            consts((0.2, 0.8, 5, 2), 1.0, nan),
+            consts((0.2, 0.8, 0, 2), 1.0, 0.25),
+            consts((0.2, 0.8, -4, 2), 0.5, 0.25),
+            consts((0.2, 0.8, i32::MAX, 3), 1.0, 0.25),
+            consts((0.2, 0.8, 6, 0), 0.5, 0.25),
+            consts((0.2, 0.8, 6, -1), 0.5, 0.25),
+            consts((0.2, 0.8, 1, 1), 0.5, 0.25),
+            consts((0.5, 0.5, 4, 2), 1.0, 0.25),
+            consts((0.8, 0.2, 4, 2), 0.5, 0.25),
+            consts((nan, 0.8, 4, 2), 0.5, 0.25),
+            consts((0.2, nan, 4, 2), 0.5, 0.25),
+            consts((-inf, inf, 4, 2), 0.5, 0.25),
+            plain((-0.5, 0.8, 4, 2), (-1.0, -0.1), &c(0.1), &c(0.5), &c(0.25)),
+            plain((0.2, 0.8, 4, 2), (0.0, inf), &c(0.1), &c(0.5), &c(0.25)),
+            plain((0.2, 0.8, 4, 2), (0.0, 1.0), &c(nan), &c(0.5), &c(0.25)),
+            plain((0.2, 0.8, 8, 3), (0.0, 1.0), &modulation, &mask, &slope),
+            plain((0.1, 0.6, 6, 2), (0.0, 1.0), &zero, &c(0.75), &zero),
+            (
+                Some((0.2, 0.8, 4, 2)),
+                (0.0, 1.0),
+                Box::new(move |k: Module| {
+                    let inner = k.advanced_terrace(c(0.1), c(1.0), c(0.25), 0.3, 0.7, 3, 1);
+                    let mask =
+                        n_mask
+                            .clone()
+                            .advanced_terrace(c(0.2), c(0.5), c(0.5), -0.5, 0.5, 2, 2);
+                    inner.advanced_terrace(n_mod.clone(), mask, n_slope.clone(), 0.2, 0.8, 4, 2)
+                }),
+            ),
+            fixed(&perlin, &modulation, &mask, (0.2, 0.8, 8, 3)),
+            fixed(&simplex, &zero, &c(0.5), (-0.25, 0.4, 5, 2)),
+            fixed(&perlin, &modulation, &mask, (0.2, 0.8, i32::MAX, 3)),
+        ];
+        let expected: [(usize, u64); 30] = [
+            (174, 0xfa422d308ce954a7),
+            (174, 0x7b22940c065a2cef),
+            (174, 0x72926e3d17b20a0b),
+            (174, 0x72926e3d17b20a0b),
+            (102, 0xb837e5a665ad42cd),
+            (102, 0x6cda63365272a2e3),
+            (102, 0x8c114d46a972a2e3),
+            (120, 0xfd3edb55f0f74b33),
+            (120, 0x4ca93714cf67c4f1),
+            (120, 0x50c00f04aac5ccbd),
+            (18, 0xda019ab27bf4255b),
+            (18, 0x34d9d7966d9ce513),
+            (18, 0xc8ededf1791a6bc5),
+            (18, 0x79040cf03186942b),
+            (18, 0x79040cf03186942b),
+            (30, 0x65ace3f451975267),
+            (102, 0xd64a3ec83aec2b57),
+            (102, 0x68084fdfe965257d),
+            (102, 0x67fe3584c962e515),
+            (102, 0x6cda63365272a2e3),
+            (102, 0xfacbfbc1557f1655),
+            (102, 0x67d2e2bf018daa07),
+            (102, 0x9778ce34929cbc4f),
+            (102, 0x6cda63365272a2e3),
+            (174, 0x4fbf33c70fe14629),
+            (138, 0xddec5f3f5947c5a1),
+            (102, 0x9df24ec662b0c9db),
+            (12, 0x5994c32209cccc45),
+            (12, 0xec4763a38352470d),
+            (12, 0xdcc0b8891c095125),
+        ];
+        // blendMin, blendMax, and for the first two octaves with `n = steps * i` in 1..=64 every `k / n` and
+        // `(k + 0.5) / n`.
+        let edges = |(bmin, bmax, steps, octaves): (f32, f32, i32, i32)| {
+            let mut out = vec![bmin, bmax];
+            for i in 1..=octaves.min(2) {
+                let n = steps.wrapping_mul(i);
+                if !(1..=64).contains(&n) {
+                    continue;
+                }
+                for k in 0..=n {
+                    out.extend([k as f32 / n as f32, (k as f32 + 0.5) / n as f32]);
+                }
+            }
+            out
+        };
+        let specials = [
+            nan,
+            inf,
+            -inf,
+            0.0,
+            -0.0,
+            0.5,
+            1.0,
+            -1.0,
+            2.0,
+            f32::from_bits(1),
+            -f32::from_bits(1),
+            1.0f32.next_down(),
+        ];
+        for (index, ((args, bounds, build), expected)) in families.iter().zip(expected).enumerate()
+        {
+            let table = args.map_or_else(Vec::new, edges);
+            let fold = seeded_edge_fold(&table, &specials, *bounds, build);
+            assert_eq!(fold, expected, "family {index}");
         }
     }
 
