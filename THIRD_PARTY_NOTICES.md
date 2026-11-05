@@ -14,6 +14,13 @@ MIT, copyright (c) 2018 dags and (c) 2020 TerraForged. Its license is preserved 
 `native-mods/terraforged/LICENSE-NOISE2D`. This is the seed-first API used by the current
 TerraForged source, distinct from the older shaded dependency's seed-replacement API.
 
+The heightmap smoothing in `native-mods/terraforged/erosion.rs` (`HeightmapSmoothing`,
+`HeightmapSmoothingSettings`) is adapted from
+[TerraForged Reimagined a24d4503064780790e975cd17495866ae13eef11](https://github.com/Romoslayer/TerraForged-Reimagined/tree/a24d4503064780790e975cd17495866ae13eef11)
+(`HeightmapSmoothing` and `TerraSettings.Smoothing`), an unofficial port of TerraForged to Minecraft 26.3,
+MIT, copyright (c) 2020 TerraForged and (c) 2026 Romoslayer. Its license is preserved in
+`native-mods/terraforged/LICENSE-TERRAFORGED-REIMAGINED`.
+
 ## wgpu-hal
 
 `third_party/wgpu-hal` is [wgpu-hal](https://github.com/gfx-rs/wgpu) 30.0.1 by the gfx-rs

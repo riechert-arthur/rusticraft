@@ -1936,8 +1936,9 @@ overflowing products included) and 16 coordinates, and replays `ErodedNoiseGener
 The heightmap smoothing (`erosion.rs`, `HeightmapSmoothing` with `HeightmapSmoothingSettings`) comes from neither
 TerraForged version above: it is TerraForged Reimagined 26.3's `worldgen.noise.erosion.HeightmapSmoothing` and
 `TerraSettings.Smoothing` (Romoslayer/TerraForged-Reimagined, branch 26.3, a24d450), an unofficial port whose
-`ErodedNoiseGenerator` smooths the eroded region heightmap after erosion. The 1.18.2-0.3.1 jar and the newer source
-(6dd607eb) never smooth there (`run-smoothing.sh` checks both). The algorithm is Engine's `Smoothing` filter (above) on a
+`ErodedNoiseGenerator` smooths the eroded region heightmap after erosion. It is adapted under Reimagined's MIT licence
+(copyright (c) 2020 TerraForged and (c) 2026 Romoslayer), preserved in `LICENSE-TERRAFORGED-REIMAGINED`. The
+1.18.2-0.3.1 jar and the newer source (6dd607eb) never smooth there (`run-smoothing.sh` checks both). The algorithm is Engine's `Smoothing` filter (above) on a
 bare height array: the same `round(radius + 0.5)` scan radius, `1 - d² / r²` weights and in-place z-then-x passes, but
 no erosion mask, no altitude modifier (every cell smooths evenly) and no absent cells. Its settings are Reimagined's:
 0 iterations (off: TerraForged 0.3.x never smoothed), radius 1.75, rate 0.85, unlike Engine's 1, 1.8 and 0.9. Cells

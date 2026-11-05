@@ -121,6 +121,11 @@ impl std::fmt::Display for NoiseTileSize {
     }
 }
 
+// Adapted from TerraForged Reimagined (https://github.com/Romoslayer/TerraForged-Reimagined, a24d450):
+// `src/main/java/com/terraforged/mod/worldgen/noise/erosion/HeightmapSmoothing.java` and `TerraSettings.Smoothing` in
+// `src/main/java/com/terraforged/mod/worldgen/settings/TerraSettings.java`. MIT License, Copyright (c) 2020 TerraForged,
+// Copyright (c) 2026 Romoslayer; see `LICENSE-TERRAFORGED-REIMAGINED`.
+
 /// TerraForged Reimagined 26.3's `TerraSettings.Smoothing` (the Filters page's smoothing settings): Reimagined's own
 /// settings, not Engine's `FilterSettings.Smoothing` (1 iteration, radius 1.8, rate 0.9) that `terraforged_filters`'
 /// `SmoothingSettings` mirrors. Off by default (0 iterations), as TerraForged 0.3.x never smoothed.
