@@ -2269,11 +2269,14 @@ impl Module {
         }
     }
 
-    /// Noise2D 2cb4843's `getValue(int seed, float x, float y)` for the scalar nodes and `Warp`: every node passes
-    /// the call's seed unchanged to its children (only octave sources add their own seed, see
-    /// [`Source::value_seed_first`]); their arithmetic and evaluation order are the jar's. `Warp` samples its source
-    /// at the domain's seed-first coordinates ([`Domain::try_x_seed_first`]). Nodes not yet ported to seed-first sampling return an
-    /// error instead of falling back to [`Module::value`], which would ignore the seed.
+    /// Noise2D 2cb4843's `getValue(int seed, float x, float y)` for the scalar nodes, `Warp` and the `Base`,
+    /// `Blend` and `VariableBlend` selectors: every node passes the call's seed unchanged to its children (only
+    /// octave sources add their own seed, see [`Source::value_seed_first`]); their arithmetic and evaluation order
+    /// are the jar's. `Warp` samples its source at the domain's seed-first coordinates ([`Domain::try_x_seed_first`]).
+    /// Nodes not yet ported to seed-first sampling return an error instead of falling back to [`Module::value`],
+    /// which would ignore the seed. Selectors evaluate only the children Java evaluates for that control value, so
+    /// an unsupported node in a branch the control skips errors only at the points that reach it: one `Ok` sample
+    /// does not prove the whole graph is supported.
     pub fn try_value_seed_first(&self, seed: i32, x: f32, y: f32) -> Result<f32, &'static str> {
         let sample = |module: &Module| module.try_value_seed_first(seed, x, y);
         Ok(match &self.0.kind {
