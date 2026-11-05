@@ -22,7 +22,7 @@
  * SOFTWARE.
  */
 
-use super::terraforged::round;
+use super::terraforged::{clamp, java_max, java_pow, lerp, round};
 
 #[derive(Clone, Copy, Debug)]
 pub struct Bounds {
@@ -123,10 +123,10 @@ impl StructureTerrain {
 }
 
 pub fn raise(x: i32, z: i32, bounds: Bounds, level: f32, surface: f32, radius: f32) -> f32 {
-    let radius_squared = (radius * radius).max(1.0);
+    let radius_squared = java_max(1.0, radius * radius);
     let alpha = 1.0 - distance_alpha(x, z, bounds, radius_squared);
-    let alpha = f64::from(alpha).powf(f64::from(2.0 - alpha)) as f32;
-    surface + alpha * (level - surface)
+    let alpha = java_pow(alpha, 2.0 - alpha);
+    lerp(surface, level, alpha)
 }
 
 pub fn ellipse_alpha(x: i32, z: i32, bounds: Bounds) -> f32 {
@@ -136,7 +136,9 @@ pub fn ellipse_alpha(x: i32, z: i32, bounds: Bounds) -> f32 {
     let center_z = bounds.min_z.wrapping_add(bounds.max_z) as f32 * 0.5;
     let dx = x as f32 - center_x;
     let dz = z as f32 - center_z;
-    (1.0 - dx * dx / (radius_x * radius_x) - dz * dz / (radius_z * radius_z)).clamp(0.0, 1.0)
+    let qx = dx * dx / (radius_x * radius_x);
+    let qz = dz * dz / (radius_z * radius_z);
+    clamp(1.0 - qx - qz, 0.0, 1.0)
 }
 
 pub fn distance_alpha(x: i32, z: i32, bounds: Bounds, radius_squared: f32) -> f32 {
@@ -234,6 +236,234 @@ mod tests {
                 (column.writes, column.hash),
                 (writes, hash),
                 "{x},{z},{surface}"
+            );
+        }
+    }
+
+    /// `oracles/structure_terrain/` (`run.sh`): TerraForged 6dd607eb's `StructureTerrain.java`, compiled unchanged
+    /// (fastutil's `ObjectArrayList` sort and iterator, Noise2D's `NoiseUtil`), run over stub chunks by
+    /// `buildStructureTerrain`'s loop. Per scenario: kept block writes, their FNV-1a fold (x, y, z, block), the
+    /// height-map writes and their fold (x, z, float bits). Interpreted and JIT runs agree.
+    const JAVA_COLUMNS: [(u32, u32, u64, u32, u64); 96] = [
+        (0, 1040, 0x0961a3d1d3cba1b1, 110, 0x3f200c6b0ed66f28),
+        (1, 5846, 0x459a0533fd4212d5, 220, 0x02de1c706fde55ae),
+        (2, 2671, 0x4ca4d4f92307f58a, 179, 0xaa98e1edd63101b5),
+        (3, 1239, 0x9077f5445ef6f31c, 80, 0x769a2d98f0a31d85),
+        (4, 0, 0xcbf29ce484222325, 0, 0xcbf29ce484222325),
+        (5, 0, 0xcbf29ce484222325, 0, 0xcbf29ce484222325),
+        (6, 4503, 0x87e84e72f212608d, 132, 0x4ee68d20f9921569),
+        (7, 0, 0xcbf29ce484222325, 0, 0xcbf29ce484222325),
+        (8, 2317, 0x552776865983c8c6, 243, 0x7bfc1a2623b96fb9),
+        (9, 3605, 0xdb4cdc58afb12885, 126, 0x47de3b86dd61e62e),
+        (10, 4088, 0xc849031f3fc8d064, 240, 0x90690ac174c662d5),
+        (11, 136, 0x2b1ac9b0b6ba9a7c, 16, 0xc9c4b0c256d62d45),
+        (12, 0, 0xcbf29ce484222325, 0, 0xcbf29ce484222325),
+        (13, 1116, 0x2410fb00a75de82d, 64, 0x13cbb3aeff3381f6),
+        (14, 0, 0xcbf29ce484222325, 0, 0xcbf29ce484222325),
+        (15, 23405, 0xdf451069ecac6dc0, 192, 0xa097b95166b5a1a5),
+        (16, 7493, 0x2c4c7d6f7184e039, 185, 0x87f8aa27c39db39e),
+        (17, 0, 0xcbf29ce484222325, 0, 0xcbf29ce484222325),
+        (18, 0, 0xcbf29ce484222325, 0, 0xcbf29ce484222325),
+        (19, 448, 0x25c5ccabb66918f9, 42, 0x810fae7c5a093120),
+        (20, 2559, 0xf2e9af1d6809f917, 155, 0xd63216007e2dfa55),
+        (21, 193, 0x84948aba7d16dcc2, 42, 0x85d6c2cef3841ac3),
+        (22, 2426, 0x7eb5c34676512c23, 208, 0x7f0f700f9c616605),
+        (23, 14458, 0x63ff63431008b126, 225, 0x378b6958b32f2f11),
+        (24, 0, 0xcbf29ce484222325, 0, 0xcbf29ce484222325),
+        (25, 0, 0xcbf29ce484222325, 0, 0xcbf29ce484222325),
+        (26, 45, 0xcf3edc3a6d8bc7eb, 5, 0x9d7b6acc5c44847d),
+        (27, 9372, 0x59ae2fc0ca6a7936, 253, 0x3f38ae4b81c9e6cd),
+        (28, 546, 0x734384bf9fedb368, 30, 0x957b0d3036aa7336),
+        (29, 9970, 0x4a8f239150ae534a, 241, 0xce7db0ed67f0de87),
+        (30, 9439, 0xc22557b23996a6ec, 256, 0x2d7276456e8f06e5),
+        (31, 0, 0xcbf29ce484222325, 0, 0xcbf29ce484222325),
+        (32, 9277, 0x1aecb1551c8c3973, 235, 0x204b3df1082c8d7c),
+        (33, 262, 0x11b0df495e0402b9, 45, 0x5eaf7da77afbf3a1),
+        (34, 1752, 0x70792c1f49b9451a, 143, 0x2d5d737cc57ff451),
+        (35, 2767, 0xa4e199d382819d91, 135, 0xe88a6bedf3ad1b7f),
+        (36, 4372, 0xd2d5fe11a2ec7cf3, 206, 0x07353627191c8adc),
+        (37, 451, 0xb6f965a94dced141, 45, 0x23b44ecbda0c499e),
+        (38, 0, 0xcbf29ce484222325, 0, 0xcbf29ce484222325),
+        (39, 31655, 0x46d94007f0114f5a, 256, 0x15aa70c76e032825),
+        (40, 0, 0xcbf29ce484222325, 0, 0xcbf29ce484222325),
+        (41, 10665, 0xf963540bc9ecaf2c, 224, 0xeabec3b6f69e2a89),
+        (42, 393, 0x24c07be148e51d24, 36, 0xb5a746a802138c06),
+        (43, 0, 0xcbf29ce484222325, 0, 0xcbf29ce484222325),
+        (44, 1141, 0x89269e726da5e0fa, 92, 0x10b5df56383198ad),
+        (45, 0, 0xcbf29ce484222325, 0, 0xcbf29ce484222325),
+        (46, 1791, 0xed809636df76b043, 163, 0x6e03e5a1e1dbccbf),
+        (47, 5372, 0xbcf00a7d9aa36da9, 147, 0xab5403657c5bc26f),
+        (48, 7626, 0x76ba64cc297b4d7b, 239, 0xc47d5c43dded361c),
+        (49, 226, 0xf42894abd0478ef8, 22, 0xf4d00110f2638e10),
+        (50, 0, 0xcbf29ce484222325, 0, 0xcbf29ce484222325),
+        (51, 2795, 0xad1d019602b14a68, 109, 0xe23fcb424a36577a),
+        (52, 0, 0xcbf29ce484222325, 0, 0xcbf29ce484222325),
+        (53, 3174, 0x4e28fce261f873b0, 221, 0xb06c42f624e9c2c8),
+        (54, 0, 0xcbf29ce484222325, 0, 0xcbf29ce484222325),
+        (55, 40408, 0xbe64ed8c5b1390c4, 256, 0xae365c552a8c0d25),
+        (56, 1554, 0xfaee073fcb778129, 98, 0x86be4fbb35b857f4),
+        (57, 0, 0xcbf29ce484222325, 0, 0xcbf29ce484222325),
+        (58, 1262, 0x768f61bab07503b7, 112, 0x8b7dd47a83ebb005),
+        (59, 0, 0xcbf29ce484222325, 0, 0xcbf29ce484222325),
+        (60, 4698, 0x8c320e44c488f5d0, 243, 0x569a15dc48d49057),
+        (61, 238, 0x62f083084c72c3be, 16, 0x402ff9536af32225),
+        (62, 2322, 0xe2b6b6601adf8512, 256, 0x550317aaaab11625),
+        (63, 30310, 0xfc7b0ffbe3056b09, 256, 0x3372654b2d53e525),
+        (64, 0, 0xcbf29ce484222325, 0, 0xcbf29ce484222325),
+        (65, 5460, 0x6d57cff6cba5bbad, 220, 0x15a863e16b5ba080),
+        (66, 731, 0x89a5ab3cb1472293, 77, 0xa6018a876e4bdf80),
+        (67, 1662, 0x18e750d0d4f5d935, 132, 0x969228b67cfb232c),
+        (68, 13060, 0x1656e42da30b855c, 202, 0x20fb1e98cee00193),
+        (69, 0, 0xcbf29ce484222325, 0, 0xcbf29ce484222325),
+        (70, 0, 0xcbf29ce484222325, 0, 0xcbf29ce484222325),
+        (71, 14069, 0x2f57ce4119e6832d, 154, 0x26e7c9157ad7d2c2),
+        (72, 532, 0xf931062b5bf17c95, 56, 0xbc94cdbf61378f8d),
+        (73, 0, 0xcbf29ce484222325, 0, 0xcbf29ce484222325),
+        (74, 6056, 0x23d5f2f5adc9d86b, 208, 0x1c2bf7dc092c0225),
+        (75, 1387, 0x183f6eaec3f8bc69, 98, 0xdb1e236d70ee40c9),
+        (76, 0, 0xcbf29ce484222325, 0, 0xcbf29ce484222325),
+        (77, 0, 0xcbf29ce484222325, 0, 0xcbf29ce484222325),
+        (78, 0, 0xcbf29ce484222325, 0, 0xcbf29ce484222325),
+        (79, 24555, 0x42c61388b3c69676, 176, 0x7c1e179d8bbb3755),
+        (80, 0, 0xcbf29ce484222325, 0, 0xcbf29ce484222325),
+        (81, 3500, 0xf809ae1e4f505362, 121, 0x3b65cbb69586b07e),
+        (82, 165, 0x464fdb103181e727, 27, 0xfba2f606060b1274),
+        (83, 0, 0xcbf29ce484222325, 0, 0xcbf29ce484222325),
+        (84, 4849, 0x504d4b91d0af7a12, 209, 0x7412f86afe301dbd),
+        (85, 2928, 0xd5452eac4903e844, 208, 0xb1541598e6a57685),
+        (86, 3332, 0x2fdaf6f39bb05339, 95, 0xd9a9a85184931ff5),
+        (87, 8906, 0x3a2a5e52b3ba5ddd, 141, 0x1755d826547be818),
+        (88, 1878, 0x92119601b221a303, 156, 0xeca9c0f4bf73de3f),
+        (89, 249, 0x955478f8b82e341a, 57, 0xb26052527c8aabdb),
+        (90, 0, 0xcbf29ce484222325, 0, 0xcbf29ce484222325),
+        (91, 4865, 0x0a9704871fd33cf3, 244, 0x4c0dfdc03870db35),
+        (92, 0, 0xcbf29ce484222325, 0, 0xcbf29ce484222325),
+        (93, 4257, 0x43f1800445a46252, 189, 0xff947dba50cfc380),
+        (94, 0, 0xcbf29ce484222325, 0, 0xcbf29ce484222325),
+        (95, 0, 0xcbf29ce484222325, 0, 0xcbf29ce484222325),
+    ];
+
+    /// The oracle's stub chunk: stone/air columns over `min_y..max_y`, `ocean_floor` = topmost stone or `min_y - 1`,
+    /// writes outside the build range dropped (as `ProtoChunk.setBlockState`).
+    struct OracleChunk {
+        min_y: i32,
+        max_y: i32,
+        stone: Vec<Vec<bool>>,
+        writes: u32,
+        hash: u64,
+    }
+
+    fn fold(hash: u64, value: i32) -> u64 {
+        (hash ^ u64::from(value as u32)).wrapping_mul(0x100000001b3)
+    }
+
+    impl Columns for OracleChunk {
+        type Error = Infallible;
+        fn ocean_floor(&self, x: i32, z: i32) -> i32 {
+            let column = &self.stone[(((z & 15) << 4) | (x & 15)) as usize];
+            (self.min_y..self.max_y)
+                .rev()
+                .find(|y| column[(y - self.min_y) as usize])
+                .unwrap_or(self.min_y - 1)
+        }
+        fn set(&mut self, x: i32, y: i32, z: i32, fill: Fill) -> Result<(), Self::Error> {
+            if y < self.min_y || y >= self.max_y {
+                return Ok(());
+            }
+            let id = i32::from(fill == Fill::Stone);
+            self.stone[(((z & 15) << 4) | (x & 15)) as usize][(y - self.min_y) as usize] = id != 0;
+            self.hash = fold(fold(fold(fold(self.hash, x), y), z), id);
+            self.writes += 1;
+            Ok(())
+        }
+    }
+
+    /// The oracle's LCG (Java `long` math, `(int) ((state >>> 33) % bound)`).
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn next(&mut self, bound: i32) -> i32 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((self.0 >> 33) % bound as u64) as i32
+        }
+    }
+
+    #[test]
+    fn chunk_scenarios_match_6dd607eb_java() {
+        for (s, writes, hash, sets, heights) in JAVA_COLUMNS {
+            let mut random = Lcg(u64::from(s)
+                .wrapping_mul(0x9E3779B97F4A7C15)
+                .wrapping_add(12345));
+            let (cx, cz) = (random.next(9) - 5, random.next(9) - 5);
+            let (min_y, max_y) = (-64, 320);
+            let base = match s % 8 {
+                6 => 300 + random.next(30),
+                7 => -70 + random.next(10),
+                _ => 40 + random.next(60),
+            };
+            let surface: Vec<i32> = (0..256).map(|_| base + random.next(13) - 6).collect();
+            let count = random.next(8);
+            let shared_y = 40 + random.next(90);
+            let mut pieces = Vec::new();
+            for _ in 0..count {
+                let x0 = cx * 16 + random.next(44) - 14;
+                let z0 = cz * 16 + random.next(44) - 14;
+                let y0 = if random.next(3) == 0 {
+                    shared_y
+                } else if s % 8 == 6 {
+                    280 + random.next(40)
+                } else {
+                    30 + random.next(110)
+                };
+                let bounds = Bounds {
+                    min_x: x0,
+                    min_y: y0,
+                    min_z: z0,
+                    max_x: x0 + random.next(30),
+                    max_y: y0 + random.next(14),
+                    max_z: z0 + random.next(30),
+                };
+                let ground_delta = if random.next(2) == 0 {
+                    0
+                } else {
+                    random.next(7) - 3
+                };
+                pieces.push(Piece {
+                    bounds,
+                    ground_delta,
+                });
+            }
+            let mut chunk = OracleChunk {
+                min_y,
+                max_y,
+                stone: surface
+                    .iter()
+                    .map(|&top| (min_y..max_y).map(|y| y <= top).collect())
+                    .collect(),
+                writes: 0,
+                hash: 0xcbf29ce484222325,
+            };
+            let operation = StructureTerrain::from_rigid_pieces(pieces);
+            let (mut height_sets, mut height_hash) = (0, 0xcbf29ce484222325);
+            for dz in 0..16 {
+                for dx in 0..16 {
+                    let (x, z) = (cx * 16 + dx, cz * 16 + dz);
+                    if let Some(height) = operation.modify(x, z, &mut chunk).unwrap() {
+                        height_hash = fold(
+                            fold(fold(height_hash, x), z),
+                            (height as f32).to_bits() as i32,
+                        );
+                        height_sets += 1;
+                    }
+                }
+            }
+            assert_eq!(
+                (chunk.writes, chunk.hash, height_sets, height_hash),
+                (writes, hash, sets, heights),
+                "scenario {s}"
             );
         }
     }
