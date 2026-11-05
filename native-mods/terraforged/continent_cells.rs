@@ -137,74 +137,6 @@ impl CellGenerator {
         (0.0, 0.0)
     }
 
-    /// `shapeGenerator.getThresholdValue(cell) != 0`: `noise < threshold` is ocean, anything else (NaN included) is
-    /// land. Written as Java's comparison, negated, so NaN stays land.
-    #[allow(clippy::neg_cmp_op_on_partial_ord)]
-    fn is_land(&self, cell: CellPoint) -> bool {
-        !(cell.noise < self.threshold)
-    }
-
-    /// `isValidSpawn(pos, radius, cell)`: every cell at `(dx, dy)` with `dy >= 1` and `dx * dx + dy * dy < radius *
-    /// radius` (the half disc on the +y side, without the centre row) is land. Java `int` math.
-    fn is_valid_spawn(&self, seed: i32, cell_x: i32, cell_y: i32, radius: i32) -> bool {
-        let radius2 = radius.wrapping_mul(radius);
-        for delta_y in -radius..=radius {
-            for delta_x in -radius..=radius {
-                let distance2 = delta_x
-                    .wrapping_mul(delta_x)
-                    .wrapping_add(delta_y.wrapping_mul(delta_y));
-                if delta_y < 1 || distance2 >= radius2 {
-                    continue;
-                }
-                let x = cell_x.wrapping_add(delta_x);
-                let y = cell_y.wrapping_add(delta_y);
-                if !self.is_land(self.compute_cell(seed, x, y)) {
-                    return false;
-                }
-            }
-        }
-        true
-    }
-}
-
-// World generation shares the generator across threads.
-const _: fn() = || {
-    fn shared<T: Send + Sync>() {}
-    shared::<CellGenerator>();
-};
-
-/// The 3-cell loop bounds of `getNearestCell` (and of `RiverGenerator.sample`): `min..=min + 2` in Java `int` math,
-/// empty when the upper bound wraps below. `None` where the jar's loop never ends (upper bound `Integer.MAX_VALUE`:
-/// the counter wraps forever); `floor` of an `f32` never returns `Integer.MAX_VALUE - 1`, so this cannot happen from
-/// `nearest_cell`.
-pub fn window(min: i32) -> Option<RangeInclusive<i32>> {
-    let max = min.wrapping_add(2);
-    (max != i32::MAX).then_some(min..=max)
-}
-
-impl ContinentCells for CellGenerator {
-    /// `getCell`: [`CellGenerator::compute_cell`] through the lossy cell cache, keyed by `PosUtil.pack(x, y)`. A hit
-    /// needs the same key and runtime seed (the source's `LongCache` checks only the key), so this always equals
-    /// `compute_cell(seed, x, y)`.
-    fn cell(&self, seed: i32, x: i32, y: i32) -> CellPoint {
-        *self.cache.compute_if_absent(seed, pack(x, y), |seed, key| {
-            self.compute_cell(seed, unpack_left(key), unpack_right(key))
-        })
-    }
-
-    fn cell_shape(&self) -> CellShape {
-        self.shape
-    }
-
-    /// `getNearestCell`, unpacked: the cell of the 3x3 around `floor(adjusted point)` whose jittered position is
-    /// strictly nearest (first wins ties; NaN distances never win). Where `floor` returns `Integer.MAX_VALUE` (huge,
-    /// infinite or `-2^31` points) the jar's window wraps and is empty: the answer is cell (0, 0), as in the jar.
-    fn nearest_cell(&self, seed: i32, x: f32, y: f32) -> (i32, i32) {
-        self.nearest_cell_with(x, y, |cell_x, cell_y| self.cell(seed, cell_x, cell_y))
-    }
-}
-
-impl CellGenerator {
     /// [`ContinentCells::nearest_cell`] reading its cells from `cell(x, y)` instead of the cache (with
     /// [`Self::compute_cell`], the direct computation the cached one must equal).
     pub fn nearest_cell_with(
@@ -242,6 +174,73 @@ impl CellGenerator {
             }
         }
         nearest
+    }
+
+    /// `shapeGenerator.getThresholdValue(cell) != 0`: `noise < threshold` is ocean, anything else (NaN included) is
+    /// land. Written as Java's comparison, negated, so NaN stays land.
+    #[allow(clippy::neg_cmp_op_on_partial_ord)]
+    fn is_land(&self, cell: CellPoint) -> bool {
+        !(cell.noise < self.threshold)
+    }
+
+    /// `isValidSpawn(pos, radius, cell)`: every cell at `(dx, dy)` with `dy >= 1` and `dx * dx + dy * dy < radius *
+    /// radius` (the half disc on the +y side, without the centre row) is land. Java `int` math.
+    fn is_valid_spawn(&self, seed: i32, cell_x: i32, cell_y: i32, radius: i32) -> bool {
+        let radius2 = radius.wrapping_mul(radius);
+        for delta_y in -radius..=radius {
+            for delta_x in -radius..=radius {
+                let distance2 = delta_x
+                    .wrapping_mul(delta_x)
+                    .wrapping_add(delta_y.wrapping_mul(delta_y));
+                if delta_y < 1 || distance2 >= radius2 {
+                    continue;
+                }
+                let x = cell_x.wrapping_add(delta_x);
+                let y = cell_y.wrapping_add(delta_y);
+                if !self.is_land(self.compute_cell(seed, x, y)) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+}
+
+// World generation shares the generator across threads; with its cache it must still fit in a `Module::custom`
+// closure (Send + Sync + RefUnwindSafe), as the continent noise wraps it.
+const _: fn() = || {
+    fn shared<T: Send + Sync + std::panic::RefUnwindSafe>() {}
+    shared::<CellGenerator>();
+};
+
+/// The 3-cell loop bounds of `getNearestCell` (and of `RiverGenerator.sample`): `min..=min + 2` in Java `int` math,
+/// empty when the upper bound wraps below. `None` where the jar's loop never ends (upper bound `Integer.MAX_VALUE`:
+/// the counter wraps forever); `floor` of an `f32` never returns `Integer.MAX_VALUE - 1`, so this cannot happen from
+/// `nearest_cell`.
+pub fn window(min: i32) -> Option<RangeInclusive<i32>> {
+    let max = min.wrapping_add(2);
+    (max != i32::MAX).then_some(min..=max)
+}
+
+impl ContinentCells for CellGenerator {
+    /// `getCell`: [`CellGenerator::compute_cell`] through the lossy cell cache, keyed by `PosUtil.pack(x, y)`. A hit
+    /// needs the same key and runtime seed (the source's `LongCache` checks only the key), so this always equals
+    /// `compute_cell(seed, x, y)`.
+    fn cell(&self, seed: i32, x: i32, y: i32) -> CellPoint {
+        *self.cache.compute_if_absent(seed, pack(x, y), |seed, key| {
+            self.compute_cell(seed, unpack_left(key), unpack_right(key))
+        })
+    }
+
+    fn cell_shape(&self) -> CellShape {
+        self.shape
+    }
+
+    /// `getNearestCell`, unpacked: the cell of the 3x3 around `floor(adjusted point)` whose jittered position is
+    /// strictly nearest (first wins ties; NaN distances never win). Where `floor` returns `Integer.MAX_VALUE` (huge,
+    /// infinite or `-2^31` points) the jar's window wraps and is empty: the answer is cell (0, 0), as in the jar.
+    fn nearest_cell(&self, seed: i32, x: f32, y: f32) -> (i32, i32) {
+        self.nearest_cell_with(x, y, |cell_x, cell_y| self.cell(seed, cell_x, cell_y))
     }
 }
 
