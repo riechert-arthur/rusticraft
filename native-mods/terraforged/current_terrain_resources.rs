@@ -127,6 +127,9 @@ pub fn current_terrain_type_documents() -> [(&'static str, &'static str); TERRAI
     ]
 }
 
+/// Decodes the bundled terrain types into `registry`, which must be the world's own (terrains are compared by
+/// identity) and still unshared: call it before the registry goes behind an `Arc`. Decoding again into the same
+/// registry registers nothing new.
 pub fn decode_current_terrain_types(
     registry: &mut TerrainRegistry,
 ) -> Result<TerrainTypeAssets, TerrainAssetRegistryError> {
@@ -223,6 +226,22 @@ terraforged:wetland|wetland|wetland/category:WETLAND|wetland/category:WETLAND|WE
                 .unwrap()
                 .is_same(&torridonian)
         );
+    }
+
+    #[test]
+    fn decoding_again_into_the_same_registry_reuses_its_terrains() {
+        // Java's `getOrCreate` returns the registered terrain, so a second load (a world reopened with the same
+        // registry) registers nothing new.
+        let mut registry = TerrainRegistry::new();
+        let first = decode_current_terrain_types(&mut registry).unwrap();
+        let count = registry.terrains().len();
+        assert_eq!(count, 18); // 16 built-ins, then torridonian and dolomites
+        let second = decode_current_terrain_types(&mut registry).unwrap();
+        assert_eq!(registry.terrains().len(), count);
+        for ((key, a), (_, b)) in first.iter().zip(second.iter()) {
+            assert!(a.terrain().is_same(b.terrain()), "{key}");
+            assert!(a.parent().is_same(b.parent()), "{key}");
+        }
     }
 
     #[test]
