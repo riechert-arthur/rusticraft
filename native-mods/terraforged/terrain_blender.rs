@@ -79,6 +79,7 @@ impl TerrainNoise {
         &self.noise
     }
 
+    /// `weight()` (also [`Weighted::weight`]), callable without the trait in scope.
     pub fn weight(&self) -> f32 {
         self.weight
     }
