@@ -362,3 +362,10 @@ file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_current_surface_biomes"
 source = "current_surface_biomes.rs"
 visibility = "pub"
+
+[[module]]
+id = "biome_registry"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_biome_registry"
+source = "biome_registry.rs"
+visibility = "pub"
