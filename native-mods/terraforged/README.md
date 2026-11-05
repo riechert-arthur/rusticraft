@@ -1300,9 +1300,18 @@ reuses the biome override's stubs) runs the jar's own bytecode over 12 hashes, 1
 past 2^24), 14 jitters (signed zeros, a subnormal, huge, infinite and NaN) and 27 sample coordinates (the same kinds)
 for 6 seeds; the test matches its 177,604 results bit for bit, in debug and release.
 
-The continent configuration (`continent_config.rs`) ports TerraForged 1.18.2-0.3.1's
-`worldgen.noise.continent.config` package: `ContinentConfig` with its `Shape`, `Noise` and `Rivers` parts,
-`RiverConfig` and `FloatRange`, with the jar's defaults, river and lake presets, `copy` and the width-only `scale`.
+The continent configuration (`continent_config.rs`) ports TerraForged 1.18.2-0.3.1's `worldgen.noise.continent.config`
+package: `ContinentConfig` with its `Shape`, `Noise` and `Rivers` parts, the mod's own `RiverConfig` (not Engine's)
+and `FloatRange`. They are plain structs with the jar's defaults (cell size 400, jitter 0.75, threshold 0.525, base
+falloff 0.01..0.25, `SQUARE` cells from `PERLIN` noise, falloffs 1.5 and 1, lake density 0.75), the river and lake
+presets, `copy`, and `scale`, which multiplies the three widths but not erosion or the depths; `FloatRange::at` is
+`NoiseUtil.lerp`, unclamped. The jar has no codec for them, so none is ported. The seeds stay 0 until the cell
+generator and the river pipeline read them (the jar only ever sets `seed0` and `seed1`). Nothing uses the
+configuration yet: the continent shape and cell generator come next. `ContinentConfigOracle.java`
+(`.local/terraforged/oracles/continent_config/`, which reuses the biome override's stubs) runs the jar's own bytecode
+over every default and 26 edge values (signed zeros, subnormals, `int`-precision limits, infinities, NaN) for `at`,
+`scale`, `copy` and the presets' `copy`/`scale` chains; the test matches its 89,024 results and every default bit for
+bit, in debug and release.
 
 ## Status: development only
 
