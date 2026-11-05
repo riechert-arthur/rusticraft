@@ -672,6 +672,14 @@ mod tests {
         }
     }
 
+    /// TerraForged shares one `RiverGenerator` (warp, carver) across its worker threads.
+    #[test]
+    fn river_pipeline_is_send_and_sync() {
+        fn shared<T: Send + Sync>() {}
+        shared::<RiverNetwork<'static, CellGenerator>>();
+        shared::<RiverCarver>();
+    }
+
     /// `RiverPipelineOracle.java` (`.local/terraforged/oracles/river_pipeline/run.sh`): the newer source's public
     /// `RiverGenerator.sample(seed, x, y, NoiseSample)` end to end (warp, nearest nodes, seed-first erosion carve),
     /// caches bypassed, per configuration in `SHAPES` x `SOURCES` order: a 25x25 grid over the shape's sample at two
