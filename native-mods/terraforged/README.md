@@ -2142,9 +2142,8 @@ fills every section of the chunk's build range from one of two 4x4 layers: secti
 one keeps its surface biome there), all other sections the surface layer. A sampler error comes back before any
 section is written, as Java's exception leaves the chunk untouched. Like Reimagined it fills the sections directly,
 so 26.3's `ChunkAccess.fillBiomesFromNoise` decorations (blending, below-zero retrogen of upgraded chunks) do not
-apply. The samplers are the caller's closures: TerraForged's biome sampler, the cave layer, the seed the generator
-passes them (`createBiomes` uses the captured seed) and the mapping onto Horizon's biome registry come with later
-layers, as does the `createBiomes` hook itself (its terrain-cache hint included).
+apply. The samplers are the caller's closures; `TerraForgedGenerator::create_biomes` (below) passes TerraForged's
+surface and cave samplers at the captured seed. The mapping onto Horizon's biome registry comes with a later layer.
 
 `BiomeChunkFillOracle.java` (`.local/terraforged/oracles/biome_chunk_fill/`, `run.sh`) extracts Reimagined's
 `fillNoiseBiomes`, `isCaveBiomeSection` and `isCaveBiomeQuart` verbatim from `ChunkUtil.java` and runs them with
@@ -2164,8 +2163,7 @@ asks for, first reads a coarser mask (seed + 987541, frequency `1F / 1600F`) and
 column keeps its surface biome) below 0.62. It takes block coordinates: Reimagined's `Source.getLayerBiome` shifts
 the quart coordinates by 2 and passes the captured world seed. TerraForged 6dd607eb has the choice noise and the
 two pools but no mask, no layer lookup and no fallback; the pools themselves (biome names onto Horizon's registry)
-and the `Source` wrapper come with later layers, and Reimagined's startup warning about incomplete cave biomes is not
-ported.
+come with a later layer, and Reimagined's startup warning about incomplete cave biomes is not ported.
 
 `CaveBiomeSamplerOracle.java` (`.local/terraforged/oracles/cave_biome_sampler/`, `run.sh`) compiles Reimagined's
 own `CaveBiomeSampler`, `WeightMap`, `MathUtil`, `Noise` and `NoiseUtil` from source with stub registries and runs
@@ -2290,7 +2288,7 @@ override, which wins. It takes block coordinates and the runtime seed; the heigh
 one and its first error is returned, even where the override then replaces the biome (Java reads it in
 `getInitialBiome` first). The pools and the override biomes come from the caller (building them from the registry is
 a later layer), sharing one `Arc` per biome; Reimagined's debug `reportSlope` survey and `Source`'s per-column cache
-are not ported, and nothing fills chunks with it yet. `.local/terraforged/oracles/current_surface_biomes/` (`run.sh`)
+are not ported; `create_biomes` (below) fills chunks with it. `.local/terraforged/oracles/current_surface_biomes/` (`run.sh`)
 records, in a 6dd607eb JVM, what `sampleBiome` reads from the real `Sampler` and newer-source `NoiseGenerator` (the
 continent, the rivers and the five height reads of 7,272 columns: three levels variants, two terrain sets, six
 runtime seeds, `int`-edge and grid positions), then runs Reimagined's real `BiomeSampler`, `Sampler` and
@@ -2298,10 +2296,34 @@ runtime seeds, `int`-edge and grid positions), then runs Reimagined's real `Biom
 and empty pools, highland pools sharing the normal biome, mountain usages and wetland chances). The test matches
 every biome name, in debug and release builds.
 
+The chunk biome hook (`TerraForgedGenerator::create_biomes`, `generator_facade.rs`) is TerraForged Reimagined
+a24d450's `Generator.createBiomes` (MIT, as above): it hints the chunk to the terrain cache with the captured seed
+(`Seeds.get` of the level seed), then runs the biome chunk fill over `Source`'s two layers at that same seed (`Source
+.withSeed` keeps `(int) levelSeed`): the surface layer is `getSurfaceBiome`, whose `compute` calls the surface biome
+sampler at block `x << 2`, `z << 2` of the quart column, and the cave layer `getLayerBiome`, the cave biome sampler's
+`get_layer_biome` at the same block coordinates (Java `int` wrap on both). The two samplers are built once per world
+and shared by every chunk, as `Source`'s memoized `Parts` are (`surface_biome_sampler` builds the surface one over the
+generator's own un-eroded noise; a sampler over another generator is refused). Java runs the fill on its executor, the
+port on the calling thread. A failing surface sample (a custom module with no seed-first form) is an `Err` before any
+section is written, after the hint (Java's future fails the same way). `Source`'s per-column surface `LossyCache` is
+not ported: it caches the same values, and `createBiomes` asks each quart column once. The biome names onto
+Horizon's registry and the registration of the hook are later layers.
+
+`ChunkBiomeOracle.java` (`.local/terraforged/oracles/chunk_biomes/`, `run.sh`, after `oracles/noise_generator/run.sh`)
+runs it end to end in two JVMs, as the surface biome oracle does: 6dd607eb's real `Sampler` and the newer source's
+`NoiseGenerator` record what the surface sampler reads at every quart column of 17 chunks (negative, far and
+`int`-limit chunks); then Reimagined's `fillNoiseBiomes` and `Source` members, copied verbatim (its `LossyCache`
+included), with its real `BiomeBuffer2D`, `BiomeSampler` and `CaveBiomeSampler(800, ..)`, fill stub 26.3 chunk
+sections from that record, interpreted and with `-Xcomp`: three levels variants, two terrain sets, six runtime seeds
+(the low halves of level seeds with high bits set), the four pool configurations of the surface biome oracle, three
+cave registries (unique cave biomes, only `terraforged:cave`, none), and six build ranges from `128..192` to
+`-2032..2032`. The test matches every cell of every section (612 chunks per configuration) in debug and release
+builds.
+
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives, the biome climate types, the climate settings, the climate module, the climate stage, the continent factory, the generator context, the heightmap, the world generator factory, TerraForged's terrain levels, its terrain data, its terrain generator, its terrain-blend utilities, its terrain blender with its nearest-terrain search (and the newer source's seed-first blender), noise-graph reseeding, the cave noise primitives, the biome viability rules, the biome overrides (and TerraForged Reimagined's wider beach band), the continent control points, the continent cell primitives, the continent configuration, the continent shape blending, the continent cell generator with its spawn-offset search, the continent river nodes, the continent river carver's arithmetic, the continent river networks with their nearest-node sampling and their warped, carved river sampling, the newer source's seed-first noise sources, scalar noise graphs, domain warps, selectors, graph caches, terraces, legacy terraces, advanced terraces, curves, transforms (steps, frequency, gradient and modulation), special sources (boost, cell, cell edge and sine) and lines, and its bounded concurrent lossy cache with the continent's cell and
-river-piece caches on it, the continent noise module that joins the continent layers, the newer source's terrain height sampler with its bordered chunk generation and its nearest-terrain search, the erosion tile geometry, and TerraForged Reimagined's heightmap smoothing, erosion brushes, hydraulic erosion filter, eroded-region cache, eroded region build, eroded chunk generation, terrain cache, generator queries, chunk fill, the terrain stage hand-off to it, the biome chunk fill, the cave biome sampler, the biome pool fallback, the surface-biome decisions, the initial biome selection, the current climate noise, the biome sampler bridge and the surface biome sampler. They change nothing in the game, so there is
+river-piece caches on it, the continent noise module that joins the continent layers, the newer source's terrain height sampler with its bordered chunk generation and its nearest-terrain search, the erosion tile geometry, and TerraForged Reimagined's heightmap smoothing, erosion brushes, hydraulic erosion filter, eroded-region cache, eroded region build, eroded chunk generation, terrain cache, generator queries, chunk fill, the terrain stage hand-off to it, the biome chunk fill, the cave biome sampler, the biome pool fallback, the surface-biome decisions, the initial biome selection, the current climate noise, the biome sampler bridge, the surface biome sampler and the chunk biome hook. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
