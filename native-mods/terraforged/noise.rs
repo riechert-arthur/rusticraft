@@ -8987,6 +8987,313 @@ mod tests {
     }
 
     #[test]
+    fn runtime_seeded_transform_edges_match_current_noise2d() {
+        // `SeededTransformEdgeOracle.java` (`.local/terraforged/oracles/seed_first/`): Steps, Freq, Grad and Modulate
+        // families around a fixed value at and one ulp beside every edge, plus the specials.
+        let src = |kind, seed, octaves, gain, frequency| {
+            Module::source(Source::new(
+                kind,
+                SourceConfig {
+                    seed,
+                    octaves,
+                    gain,
+                    frequency,
+                    ..SourceConfig::default()
+                },
+            ))
+        };
+        let simplex2 = src(SourceKind::Simplex2, 802, 3, 0.5, 0.0125);
+        let cubic = src(SourceKind::Cubic, 803, 2, 0.975, 0.0078125);
+        let perlin2 = src(SourceKind::Perlin2, 804, 2, 0.5, 0.015625);
+        let zero = src(SourceKind::Simplex, 1337, 0, 0.5, 3.0);
+        let simplex = src(SourceKind::Simplex, i32::MAX, 3, 0.65, 0.125);
+        let c = Module::constant;
+        let (inf, nan) = (f32::INFINITY, f32::NAN);
+        let lin = CurveFunction::Interpolation(Interpolation::Linear);
+        let c3 = CurveFunction::Interpolation(Interpolation::Curve3);
+        let c4 = CurveFunction::Interpolation(Interpolation::Curve4);
+        type Family = (Vec<f32>, Box<dyn Fn(Module) -> Module>);
+        let family = |table: &[f32], build: Box<dyn Fn(Module) -> Module>| -> Family {
+            (table.to_vec(), build)
+        };
+        let st = |steps: Module, min: Module, max: Module, curve: CurveFunction, table: &[f32]| {
+            family(
+                table,
+                Box::new(move |k: Module| k.steps(steps.clone(), min.clone(), max.clone(), curve)),
+            )
+        };
+        let gr = |lower: Module, upper: Module, strength: Module, table: &[f32]| {
+            family(
+                table,
+                Box::new(move |k: Module| {
+                    k.gradient(lower.clone(), upper.clone(), strength.clone())
+                }),
+            )
+        };
+        let quarters = [0.0, 0.25, 0.5, 0.75, 1.0];
+        let alphas = [
+            0.9375, 0.8125, 0.6875, 0.5625, 0.4375, 0.3125, 0.1875, 0.0625,
+        ];
+        let families: Vec<Family> = vec![
+            st(c(4.0), c(0.0), c(0.0), lin, &quarters),
+            st(c(4.0), c(0.25), c(0.75), lin, &alphas),
+            st(c(4.0), c(0.25), c(0.75), c3, &alphas),
+            st(
+                c(3.0),
+                c(0.0),
+                c(1.0),
+                c4,
+                &[0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0],
+            ),
+            st(c(4.0), c(0.75), c(0.25), lin, &quarters),
+            st(c(4.0), c(-inf), c(0.5), lin, &[0.5, 0.25]),
+            st(c(4.0), c(0.0), c(inf), lin, &[0.25]),
+            st(c(4.0), c(nan), c(0.5), lin, &[0.25]),
+            st(c(4.0), c(0.0), c(nan), lin, &[]),
+            st(c(0.0), c(0.0), c(0.0), lin, &[]),
+            st(c(0.0), c(0.25), c(0.75), lin, &[]),
+            st(c(nan), c(0.0), c(0.0), lin, &[]),
+            st(c(inf), c(0.25), c(0.75), lin, &[]),
+            st(c(-3.0), c(0.0), c(0.0), lin, &[1.0 / 3.0]),
+            st(c(1e10), c(0.0), c(0.0), lin, &[2147483647.0 / 1e10]),
+            st(c(2.5), c(0.25), c(0.75), lin, &[0.0, 0.4, 0.8]),
+            st(perlin2.clone(), simplex2.clone(), cubic.clone(), c3, &[0.5]),
+            family(&[], {
+                let graph = simplex.clone().steps(c(5.0), c(0.1), c(0.9), c3);
+                Box::new(move |_| graph.clone())
+            }),
+            family(&[], {
+                let graph = zero.clone().steps(c(4.0), c(-inf), c(0.5), lin);
+                Box::new(move |_| graph.clone())
+            }),
+            family(&[0.0, 1.0], {
+                let source = simplex2.clone();
+                Box::new(move |k| source.clone().frequency(k, c(1.0)))
+            }),
+            family(&[0.0], {
+                let source = simplex2.clone();
+                Box::new(move |k| source.clone().frequency(c(1.0), k))
+            }),
+            family(&[0.5], {
+                let source = cubic.clone();
+                Box::new(move |k: Module| source.clone().frequency(k.clone(), k))
+            }),
+            family(&[], {
+                let graph = cubic.clone().frequency(simplex2.clone(), perlin2.clone());
+                Box::new(move |_| graph.clone())
+            }),
+            family(&[1.0], {
+                let source = simplex.clone().frequency(c(2.0), c(0.5));
+                Box::new(move |k| source.clone().frequency(k, c(3.0)))
+            }),
+            gr(c(0.25), c(0.75), c(0.5), &[0.25, 0.75, 0.5]),
+            gr(c(0.5), c(0.5), c(0.5), &[0.5]),
+            gr(c(0.75), c(0.25), c(0.5), &[0.25, 0.75]),
+            gr(c(0.0), c(1.0), c(1.0), &[0.0, 1.0]),
+            gr(c(0.25), c(0.75), c(nan), &[0.25, 0.75]),
+            gr(c(0.25), c(0.75), c(inf), &[0.25, 0.75]),
+            gr(c(0.25), c(0.75), c(-inf), &[0.25, 0.75]),
+            gr(c(nan), c(0.75), c(0.5), &[0.75]),
+            gr(c(0.25), c(nan), c(0.5), &[0.25]),
+            gr(c(-inf), c(inf), c(0.5), &[]),
+            gr(c(0.0), c(1.0), c(2.0), &[0.0, 1.0]),
+            gr(simplex2.clone(), cubic.clone(), perlin2.clone(), &[0.5]),
+            family(&[], {
+                let graph = simplex.clone().gradient(c(0.3), c(0.6), zero.clone());
+                Box::new(move |_| graph.clone())
+            }),
+            family(&[0.0, 0.25, 0.5, 0.75, 1.0, -0.25], {
+                let source = simplex2.clone();
+                Box::new(move |k| source.clone().modulate(k, c(8.0)))
+            }),
+            family(&[0.0], {
+                let source = simplex2.clone();
+                Box::new(move |k| source.clone().modulate(c(0.125), k))
+            }),
+            family(&[0.0], {
+                let source = simplex2.clone();
+                Box::new(move |k| source.clone().modulate(c(0.0), k))
+            }),
+            family(&[0.5], {
+                let source = cubic.clone();
+                Box::new(move |k: Module| source.clone().modulate(k.clone(), k))
+            }),
+            family(&[], {
+                let graph = cubic.clone().modulate(simplex2.clone(), perlin2.clone());
+                Box::new(move |_| graph.clone())
+            }),
+            family(&[0.5], {
+                let source = simplex.clone().frequency(c(2.0), c(0.5));
+                Box::new(move |k: Module| {
+                    source
+                        .clone()
+                        .modulate(k.clone(), c(16.0))
+                        .steps(c(5.0), c(0.2), c(0.8), c3)
+                        .gradient(c(0.2), c(0.8), k)
+                })
+            }),
+        ];
+        let expected: [(usize, u64); 43] = [
+            (29, 0x799fc40fffee46ed),
+            (38, 0xcbb54ff77ac56b47),
+            (38, 0x7b0b51a240baa9dd),
+            (26, 0x0a40ba6c4e0edfe1),
+            (29, 0x799fc40fffee46ed),
+            (20, 0x5d6d66b59c4d1805),
+            (17, 0xdcc3b28a3a6c3e8d),
+            (17, 0xfc713680a16c3e8d),
+            (14, 0x2d2fae0b58f76195),
+            (14, 0x2d2fae0b58f76195),
+            (14, 0x2d2fae0b58f76195),
+            (14, 0x2d2fae0b58f76195),
+            (14, 0x0237d760cbf74efb),
+            (17, 0x1232920fc761067d),
+            (17, 0xcca7c5a31b1efd07),
+            (23, 0x8bf0f6c0f6ac28c9),
+            (17, 0x8127e985c99335e3),
+            (14, 0xe142c10009dc8f19),
+            (14, 0x2ee0893bd7f76195),
+            (20, 0x2e024ba8020321e7),
+            (17, 0x0968862af114f142),
+            (17, 0x9122b9caf18b8b8d),
+            (14, 0xe8b0142b368d2729),
+            (17, 0xb4792bae9d7dc621),
+            (23, 0xb1e3da127dc387a1),
+            (17, 0x938fbc783b57c0d1),
+            (20, 0x90d1d936eba1f249),
+            (20, 0x57ad3c9b2ae3c319),
+            (20, 0x423f2ee5e4dc314d),
+            (20, 0xd5eaac050fdc314d),
+            (20, 0x07a705c0a1dc314d),
+            (17, 0xd33e593fdf891935),
+            (17, 0x10831c111a65ccd1),
+            (14, 0x2d2fae0b58f76195),
+            (20, 0x2774c1094a77a5fb),
+            (17, 0x515a53addc4370e9),
+            (14, 0x7dca395465e4f1d5),
+            (32, 0xa9c3b9d011b17667),
+            (17, 0xc95bea9f29ae54f2),
+            (17, 0x7ae8bd2763820402),
+            (17, 0xf003984473628472),
+            (14, 0xc49bf035e22bd601),
+            (17, 0xe5b4ddb4f80e8720),
+        ];
+        let specials = [
+            nan,
+            inf,
+            -inf,
+            0.0,
+            -0.0,
+            0.5,
+            1.0,
+            -1.0,
+            2.0,
+            f32::from_bits(1),
+            -f32::from_bits(1),
+            1.0f32.next_down(),
+            1e30,
+            -1e30,
+        ];
+        for (index, ((table, build), expected)) in families.iter().zip(expected).enumerate() {
+            let fold = seeded_edge_fold(table, &specials, (0.0, 1.0), build);
+            assert_eq!(fold, expected, "family {index}");
+        }
+    }
+
+    #[test]
+    fn seeded_transforms_match_reseeding_and_read_children_lazily() {
+        // Over non-Perlin sources with finite, nonzero ranges, reseeding and seed-first sampling seed the same sources,
+        // so they give the same bits.
+        let src = |kind, seed, octaves| {
+            Module::source(Source::new(
+                kind,
+                SourceConfig {
+                    seed,
+                    octaves,
+                    frequency: 0.2,
+                    ..SourceConfig::default()
+                },
+            ))
+        };
+        let source = src(SourceKind::Simplex, i32::MAX, 2);
+        let a = src(SourceKind::Cubic, -91, 3);
+        let b = src(SourceKind::Simplex2, i32::MIN, 2);
+        let c = Module::constant;
+        let curve = CurveFunction::Interpolation(Interpolation::Curve3);
+        let graphs = [
+            source.clone().steps(c(4.0), c(0.25), c(0.75), curve),
+            source
+                .clone()
+                .steps(a.clone().scale(c(8.0)), b.clone(), a.clone(), curve),
+            source.clone().frequency(a.clone(), b.clone()),
+            source.clone().gradient(a.clone(), b.clone(), a.clone()),
+            source.clone().modulate(a.clone(), b.clone().scale(c(20.0))),
+            source
+                .clone()
+                .modulate(b.clone(), c(4.0))
+                .frequency(c(0.5), a.clone()),
+        ];
+        for (index, graph) in graphs.iter().enumerate() {
+            for seed in [0, 1, -1, 17, i32::MAX, i32::MIN] {
+                let reseeded = graph.with_seed(i64::from(seed));
+                for (x, y) in [(0.0, 0.0), (12.34, -56.78), (-0.0, 3.5), (1e30, 3.0)] {
+                    assert_eq!(
+                        canonical_bits([graph.try_value_seed_first(seed, x, y).unwrap()]),
+                        canonical_bits([reseeded.value(x, y)]),
+                        "graph {index}, seed {seed}, ({x}, {y})"
+                    );
+                }
+            }
+        }
+        // Steps, Freq and Modulate read every child; Grad reads strength and lower bound only at or below its upper
+        // bound (Java returns the source sample above it).
+        let unsupported = unsupported_seeded_node(0.5);
+        let u = || unsupported.clone();
+        let failing = [
+            u().steps(c(4.0), c(0.25), c(0.75), curve),
+            c(0.5).steps(u(), c(0.25), c(0.75), curve),
+            c(0.5).steps(c(4.0), u(), c(0.75), curve),
+            c(0.5).steps(c(4.0), c(0.25), u(), curve),
+            c(0.5)
+                .steps(c(4.0), c(0.0), c(0.0), curve)
+                .frequency(u(), c(1.0)),
+            u().frequency(c(1.0), c(1.0)),
+            c(0.5).frequency(c(1.0), u()),
+            u().gradient(c(0.25), c(0.75), c(0.5)),
+            c(0.5).gradient(c(0.25), u(), c(0.5)),
+            c(0.5).gradient(u(), c(0.75), c(0.5)),
+            c(0.5).gradient(c(0.25), c(0.75), u()),
+            u().modulate(c(0.25), c(1.0)),
+            c(0.5).modulate(u(), c(1.0)),
+            c(0.5).modulate(c(0.25), u()),
+        ];
+        for (index, graph) in failing.iter().enumerate() {
+            assert!(
+                graph.try_value_seed_first(1, 0.0, 0.0).is_err(),
+                "graph {index}"
+            );
+        }
+        let above = c(0.9).gradient(u(), c(0.75), u());
+        assert_eq!(above.try_value_seed_first(1, 0.0, 0.0), Ok(0.9));
+        assert_eq!(above.value(0.0, 0.0), 0.9);
+        // Freq reads its controls at the original point and samples the source at the scaled one; Modulate moves the
+        // point by `sin`/`cos` of the direction turn times the strength.
+        let probe = a.clone().frequency(c(3.0), c(-2.0));
+        assert_eq!(
+            probe.try_value_seed_first(7, 1.5, 2.5).unwrap().to_bits(),
+            a.try_value_seed_first(7, 4.5, -5.0).unwrap().to_bits()
+        );
+        let probe = a.clone().modulate(c(0.25), c(10.0));
+        let (dx, dy) = (sin(0.25 * PI2) * 10.0, cos(0.25 * PI2) * 10.0);
+        assert_eq!(
+            probe.try_value_seed_first(7, 1.5, 2.5).unwrap().to_bits(),
+            a.try_value_seed_first(7, 1.5 + dx, 2.5 + dy)
+                .unwrap()
+                .to_bits()
+        );
+    }
+
+    #[test]
     fn module_graph_matches_engine_0_3_0() {
         let base = Module::source(Source::new(
             SourceKind::Simplex,
