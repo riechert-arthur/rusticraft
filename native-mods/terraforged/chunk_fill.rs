@@ -47,9 +47,13 @@ use crate::{heightmap::HeightmapType, registry::BlockStateId};
 /// Java's `primeHeightmaps`: OCEAN_FLOOR_WG from the height, WORLD_SURFACE_WG from `max(sea_level, height)`,
 /// ignoring river water levels.
 ///
-/// The build range clips the blocks (Java throws an `ArrayIndexOutOfBoundsException` instead, reading a
-/// section outside the chunk): the result is the window of the fill Java makes in a chunk tall enough to hold
-/// the terrain. The heightmaps take Java's heights unchanged.
+/// The build range clips the fill (Java throws an `ArrayIndexOutOfBoundsException` instead, reading a section
+/// outside the chunk): the blocks are the window of the fill Java makes in a chunk tall enough to hold the
+/// terrain. Terrain above the top is cut off at the top block; a column whose height is below the bottom gets no
+/// stone, but its water still fills from the bottom up to its water level. Heightmap heights above the top are
+/// stored as the top (first available `min_y + height`; Java stores a higher value when its bit storage holds
+/// it and throws otherwise), and heights below the bottom leave the map at `min_y`, as in Java. Heights at the
+/// `int` extremes (infinite or NaN noise) neither wrap nor panic.
 pub fn fill_chunk<B: TerrainBlockStates>(
     sea_level: i32,
     chunk: &mut TerrainChunk<'_, B>,
@@ -130,14 +134,22 @@ fn fill_columns<B: TerrainBlockStates>(
     }
     chunk.ensure_heightmap(HeightmapType::OceanFloorWg);
     chunk.ensure_heightmap(HeightmapType::WorldSurfaceWg);
+    let top = top as i32;
     for z in 0..16 {
         for x in 0..16 {
             let (floor, _) = column(x, z);
             let surface = sea_level.max(floor);
             // `getFiller(surface, floor)`.
             let surface_state = if surface <= floor { stone } else { water };
-            chunk.update_heightmap(HeightmapType::OceanFloorWg, x, floor, z, stone)?;
-            chunk.update_heightmap(HeightmapType::WorldSurfaceWg, x, surface, z, surface_state)?;
+            // Heights above the build range are stored as its top; `update` ignores the ones below it.
+            chunk.update_heightmap(HeightmapType::OceanFloorWg, x, floor.min(top), z, stone)?;
+            chunk.update_heightmap(
+                HeightmapType::WorldSurfaceWg,
+                x,
+                surface.min(top),
+                z,
+                surface_state,
+            )?;
         }
     }
     Ok(())
@@ -283,6 +295,68 @@ mod tests {
         }
     }
 
+    /// TerraForged's terrain is taller than 26.3's -64..320: the fill is cut off at the top block and the
+    /// heightmaps stop at the top, where Java throws.
+    #[test]
+    fn fill_chunk_clips_terrain_above_vanilla_build_height() {
+        let blocks = registry();
+        let terrains = TerrainRegistry::new();
+        // 0.8 * 480 = 384: stone to 384 (above the top block, 319); the river column's water level, 125, is under it.
+        let terrain = terrain(&terrains, 0.8);
+        assert_eq!(terrain.height_at(1, 0), 384);
+        let mut chunk = chunk(&blocks, -64, 384);
+        fill_chunk(62, &mut chunk, &terrain, STONE, WATER).unwrap();
+        for x in 0..2 {
+            assert_eq!(chunk.block(x, -64, 0), STONE);
+            assert_eq!(chunk.block(x, 319, 0), STONE);
+            for kind in [HeightmapType::OceanFloorWg, HeightmapType::WorldSurfaceWg] {
+                assert_eq!(first_available(&chunk, kind, x, 0), 320);
+            }
+        }
+    }
+
+    /// Heights at the `int` extremes (infinite and NaN noise) neither wrap nor panic, in the tallest chunk
+    /// Horizon allows (-2032..2032).
+    #[test]
+    fn fill_chunk_handles_extreme_heights() {
+        let blocks = registry();
+        let terrains = TerrainRegistry::new();
+        // NoiseUtil.floor(+inf) is Integer.MAX_VALUE, and so is floor(-inf) (MIN_VALUE - 1 wraps).
+        for noise in [f32::INFINITY, f32::NEG_INFINITY] {
+            let terrain = terrain(&terrains, noise);
+            assert_eq!(terrain.height_at(1, 0), i32::MAX);
+            let mut chunk = chunk(&blocks, -2032, 4064);
+            fill_chunk(62, &mut chunk, &terrain, STONE, WATER).unwrap();
+            for y in [-2032, 0, 125, 126, 2031] {
+                assert_eq!(chunk.block(0, y, 0), STONE);
+                assert_eq!(chunk.block(1, y, 0), STONE);
+            }
+            for kind in [HeightmapType::OceanFloorWg, HeightmapType::WorldSurfaceWg] {
+                assert_eq!(first_available(&chunk, kind, 1, 0), 2032);
+            }
+        }
+        let terrain = terrain(&terrains, f32::NAN);
+        let solid = terrain.height_at(1, 0);
+        assert_eq!((terrain.min(), terrain.max()), (solid, solid));
+        let mut chunk = chunk(&blocks, -2032, 4064);
+        fill_chunk(62, &mut chunk, &terrain, STONE, WATER).unwrap();
+        assert_eq!(chunk.block(1, -2032, 0), STONE);
+        assert_eq!(chunk.block(1, solid, 0), STONE);
+        assert_eq!(chunk.block(1, solid + 1, 0), WATER);
+        assert_eq!(chunk.block(1, 62, 0), WATER);
+        assert_eq!(chunk.block(1, 63, 0), AIR);
+        assert_eq!(chunk.block(0, 125, 0), WATER);
+        assert_eq!(chunk.block(0, 126, 0), AIR);
+        assert_eq!(
+            first_available(&chunk, HeightmapType::OceanFloorWg, 1, 0),
+            solid + 1
+        );
+        assert_eq!(
+            first_available(&chunk, HeightmapType::WorldSurfaceWg, 1, 0),
+            63
+        );
+    }
+
     // ChunkFillOracle.java's case generator and digest (`.local/terraforged/oracles/chunk_fill/`).
     struct Lcg(i64);
 
@@ -346,9 +420,6 @@ mod tests {
     fn fill_matches_java_chunk_util() {
         let blocks = registry();
         for (index, case) in CASES.iter().enumerate() {
-            if [3, 4, 9, 12, 13].contains(&index) {
-                continue; // Java throws in the case's own chunk
-            }
             let [min_y, height, sea, lo, hi, base_lo, base_hi, river, nan] = *case;
             let mut lcg = Lcg(0x9E37_79B9_7F4A_7C15_u64 as i64 ^ index as i64);
             let (mut solid, mut water) = ([0; 256], [0; 256]);
@@ -395,8 +466,9 @@ mod tests {
             for kind in [HeightmapType::OceanFloorWg, HeightmapType::WorldSurfaceWg] {
                 for z in 0..16 {
                     for x in 0..16 {
-                        // Clamped to the build range, as the oracle's digest.
-                        let y = first_available(&chunk, kind, x, z).clamp(min_y, min_y + height);
+                        // The port stores no height outside the build range; the oracle's digest clamps Java's.
+                        let y = first_available(&chunk, kind, x, z);
+                        assert!((min_y..=min_y + height).contains(&y), "case {index}: {y}");
                         for byte in y.to_le_bytes() {
                             hash = fnv(hash, byte);
                         }
