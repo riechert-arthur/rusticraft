@@ -2320,10 +2320,57 @@ cave registries (unique cave biomes, only `terraforged:cave`, none), and six bui
 `-2032..2032`. The test matches every cell of every section (612 chunks per configuration) in debug and release
 builds.
 
+The biome registry pools (`RegistryBiomeMap`, `biome_registry.rs`) are TerraForged Reimagined a24d450's
+`BiomeMapManager` with `BiomeUtil`'s classification (MIT, as above). A registry entry is plain data here
+(`RegistryBiome`: its key, base temperature, downfall, precipitation and tags); `from_generator_data` reads Horizon's
+loaded biome registry and its resolved tags. Binding the pools to the live biome ids is a later layer. How a biome, a
+mod's included, ends up in a pool:
+
+1. It must be in the overworld list: tagged `minecraft:is_overworld`, or named by a climate file. A mod biome with
+   neither is never placed.
+2. If climate files name it (`data/terraforged/worldgen/climate/<climate>.json`, `{"namespace:path": weight}`, a bare
+   path meaning `minecraft:`), it goes into each of those climates at that weight and nowhere else. A file's biomes
+   enter the pool in `ClimateType`'s hash-map order (fastutil's `Object2FloatOpenHashMap` over `Identifier.hashCode`),
+   not file order, and that is the pool's order. Names missing from the registry are skipped. Reimagined ships all
+   eleven files empty, so by default every biome is placed automatically.
+3. Otherwise it is placed at weight 1, unless it is a cave biome (`terraforged:non_surface`, or a path starting with
+   `cave/` or ending with `_caves`) or a water biome (the ocean, deep ocean, river and beach tags, or
+   `minecraft:stony_shore`); the cave sampler and the position override place those. Its climate is the first rule
+   that applies: `is_badlands` or `has_structure/village_desert` gives desert; `is_savanna` savanna; `is_jungle`
+   tropical rainforest; `is_taiga` tundra if it snows (precipitation and a base temperature below 0.15), else taiga;
+   `is_forest` tundra if it snows, temperate rainforest at a downfall of 0.8 or more, else temperate forest. Anything
+   else (most mod biomes carry none of these tags) is placed by its own climate: the base temperature normalized
+   over -0.7..1.2 and the downfall over 0..1, looked up in Reimagined's clamped climate table. Biomes are placed in
+   `BIOME_SORTER` order: path first, then namespace (`terralith:alpine_grove` comes before `minecraft:badlands`, and
+   `a:plains` before `minecraft:plains`).
+4. A climate left without biomes borrows the nearest climate's pool (the pool fallback above).
+5. The dry pool drops each climate's `terraforged:wetland` biomes (a climate of only wetlands keeps its full pool). The
+   highland pool keeps only `terraforged:highland` biomes, and climates left empty borrow again. Both weigh every biome
+   1, whatever its climate-file weight.
+
+The three `terraforged:` tags start from Reimagined's bundled tag files (swamp and mangrove swamp; the windswept,
+peak, slope, grove and badlands biomes; the four vanilla cave biomes and `terraforged:cave`), since Horizon's data has
+none. A data pack's own tag adds to them, but a replacing one (`"replace": true`) can't remove them. Every list and
+pool holds the same `Arc` per biome. Not ported: climate files named after no climate type (Reimagined adds their
+biomes to the overworld list only), the log lines, and the case where Reimagined's lazily loaded `BiomeType` ranges are
+still unloaded (then every climate distance is 0; the port always uses the loaded table, as the pool fallback does).
+6dd607eb and the 1.18.2-0.3.1 jar classify untagged biomes as grassland, keep water and cave biomes in the pools, and
+have no dry or highland pools and no borrowing.
+
+`BiomeRegistryOracle.java` (`.local/terraforged/oracles/biome_registry/`, `run.sh`) compiles Reimagined's own
+`BiomeMapManager`, `BiomeUtil` and `ClimateType` (climate files go through its codec), with its `WeightMap` and
+`BiomeType`, against stub registries, holders and tags, and runs them interpreted and with `-Xcomp` over: 26.3's 67
+biomes and their tags (from Horizon's prepared bundle) with Reimagined's empty default climate files; those plus 13
+mod-like biomes (untagged, a `cave/` path, mod wetland, highland, forest, taiga and ocean tags, one outside the
+overworld, and `a:plains`); the same with climate files (unknown, bare, ignored and non-overworld keys, and a 30-entry
+file that makes the hash map grow); vanilla with every tag but `is_overworld` removed, and with none; and 4,000 random
+registries and climate files. The tests (the vanilla ones through `from_generator_data`, skipped without the bundle)
+match the overworld list and every pool's biomes, order, weight bands and sharing, in debug and release builds.
+
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives, the biome climate types, the climate settings, the climate module, the climate stage, the continent factory, the generator context, the heightmap, the world generator factory, TerraForged's terrain levels, its terrain data, its terrain generator, its terrain-blend utilities, its terrain blender with its nearest-terrain search (and the newer source's seed-first blender), noise-graph reseeding, the cave noise primitives, the biome viability rules, the biome overrides (and TerraForged Reimagined's wider beach band), the continent control points, the continent cell primitives, the continent configuration, the continent shape blending, the continent cell generator with its spawn-offset search, the continent river nodes, the continent river carver's arithmetic, the continent river networks with their nearest-node sampling and their warped, carved river sampling, the newer source's seed-first noise sources, scalar noise graphs, domain warps, selectors, graph caches, terraces, legacy terraces, advanced terraces, curves, transforms (steps, frequency, gradient and modulation), special sources (boost, cell, cell edge and sine) and lines, and its bounded concurrent lossy cache with the continent's cell and
-river-piece caches on it, the continent noise module that joins the continent layers, the newer source's terrain height sampler with its bordered chunk generation and its nearest-terrain search, the erosion tile geometry, and TerraForged Reimagined's heightmap smoothing, erosion brushes, hydraulic erosion filter, eroded-region cache, eroded region build, eroded chunk generation, terrain cache, generator queries, chunk fill, the terrain stage hand-off to it, the biome chunk fill, the cave biome sampler, the biome pool fallback, the surface-biome decisions, the initial biome selection, the current climate noise, the biome sampler bridge, the surface biome sampler and the chunk biome hook. They change nothing in the game, so there is
+river-piece caches on it, the continent noise module that joins the continent layers, the newer source's terrain height sampler with its bordered chunk generation and its nearest-terrain search, the erosion tile geometry, and TerraForged Reimagined's heightmap smoothing, erosion brushes, hydraulic erosion filter, eroded-region cache, eroded region build, eroded chunk generation, terrain cache, generator queries, chunk fill, the terrain stage hand-off to it, the biome chunk fill, the cave biome sampler, the biome pool fallback, the surface-biome decisions, the initial biome selection, the current climate noise, the biome sampler bridge, the surface biome sampler, the chunk biome hook and the biome registry pools. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
