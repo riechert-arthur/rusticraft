@@ -29,11 +29,19 @@ use super::{
 };
 use std::sync::Arc;
 
+/// `CaveBiomeSampler.OFFSET`: added (Java `int` wrap) to the seed for the biome-choice noise.
 pub const OFFSET: i32 = 124_897;
+/// Reimagined's `MASK_OFFSET`: added (Java `int` wrap) to the seed for the coverage mask.
 pub const MASK_OFFSET: i32 = 987_541;
+/// Reimagined's `maskFrequency` (`1F / 1600F`).
 pub const MASK_FREQUENCY: f32 = 1.0 / 1600.0;
+/// Reimagined's `maskThreshold`: a column with a mask below it has no cave biome.
 pub const MASK_THRESHOLD: f32 = 0.62;
 
+/// TerraForged Reimagined's `CaveBiomeSampler`: equal-weight `WeightMap`s for `CaveType.GLOBAL` and
+/// `CaveType.UNIQUE`, chosen by one simplex noise at `1 / scale`. Coordinates are BLOCK coordinates: Reimagined's
+/// `Source.getLayerBiome(x, z)` takes quart coordinates and passes `x << 2`, `z << 2` (Java `int` wrap) with
+/// the captured `(int)` world seed, so the layer that wires #159's quart cave closure must shift the same way.
 pub struct CaveBiomeSampler<T> {
     scale: i32,
     frequency: f32,
@@ -42,6 +50,12 @@ pub struct CaveBiomeSampler<T> {
 }
 
 impl<T> CaveBiomeSampler<T> {
+    /// `new CaveBiomeSampler(scale, biomeMapManager)` (Reimagined's `Source` uses 800) over pools the caller
+    /// builds: `global` is `terraforged:cave` when the registry has it (else empty), `special` the registry's
+    /// biomes in registry order that pass `BiomeUtil.isNonSurface` (`ModTags.NON_SURFACE`, or a path starting with
+    /// `cave/` or ending with `_caves`). An empty `special` falls back to `global` (the same values), as
+    /// Reimagined does; both empty means every lookup is `None` (Java's null). Reimagined's startup warning about
+    /// incomplete cave biomes is not ported.
     pub fn new(scale: i32, global: Vec<Arc<T>>, mut special: Vec<Arc<T>>) -> Self {
         if special.is_empty() {
             special = global.clone();
@@ -62,6 +76,7 @@ impl<T> CaveBiomeSampler<T> {
         self.frequency
     }
 
+    /// `getUnderGroundBiome(seed, x, z, type)`: `None` where Java returns null (empty pool, NaN noise).
     pub fn get_underground_biome(
         &self,
         seed: i32,
@@ -76,6 +91,8 @@ impl<T> CaveBiomeSampler<T> {
         }
     }
 
+    /// Reimagined's `getLayerBiome(seed, x, z)`: the UNIQUE cave biome where the coarse mask reaches
+    /// [`MASK_THRESHOLD`], else `None` (the column keeps its surface biome).
     pub fn get_layer_biome(&self, seed: i32, x: i32, z: i32) -> Option<&Arc<T>> {
         let mask = sample(seed.wrapping_add(MASK_OFFSET), x, z, MASK_FREQUENCY);
         if mask < MASK_THRESHOLD {
@@ -86,6 +103,7 @@ impl<T> CaveBiomeSampler<T> {
     }
 }
 
+/// `CaveBiomeSampler.sample`: `NoiseUtil.clamp((1 + Noise.singleSimplex(x * f, z * f, seed)) * 0.5F, 0, 1)`.
 pub fn sample(seed: i32, x: i32, z: i32, frequency: f32) -> f32 {
     let nx = x as f32 * frequency;
     let nz = z as f32 * frequency;
