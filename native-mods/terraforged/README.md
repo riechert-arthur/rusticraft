@@ -2410,8 +2410,8 @@ jitter 0.8, blending 0.4, seed offset 0, global vertical scale 1, fancy mountain
 terrains change: ids containing `mountain`, `dolomites`, `torridonian` or `dales` (case-sensitive) are widened by
 `freq(1 / 3.5)`. Turning fancy mountains off drops every id containing `ridge` (all of them dropped keeps the input).
 A terrain with no entry, no global scale and no stretch keeps the same `Arc`; a rebuilt one goes through
-`TerrainNoise`'s constructor again, so a noise that reports a minimum below 5/255 (any clamped one) is raised again,
-as in Java. Nothing calls the pass yet: decoding and loading the terrain registry (#185, #186) come first, and the
+`TerrainNoise`'s constructor again, so a noise that reports a minimum below 5/255 (such as one ending in the earlier raise's
+`clamp(0, 1)`, which reports 0) is raised again, as in Java. Nothing calls the pass yet: decoding and loading the terrain registry (#185, #186) come first, and the
 `@Range` clamps are only applied by Reimagined's unported `SettingsSerializer`. `TerrainOverridesOracle.java`
 (`.local/terraforged/oracles/terrain_overrides/`, `run.sh`) copies `applyTerrainOverrides` and `isMountain` verbatim
 from Reimagined's `GeneratorPreset`, compiles them with Reimagined's `TerraSettings` onto the real `TerrainNoise` and

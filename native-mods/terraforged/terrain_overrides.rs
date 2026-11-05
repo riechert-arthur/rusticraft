@@ -34,8 +34,8 @@ use super::{
 use std::sync::Arc;
 
 /// Reimagined's `GeneratorPreset.applyTerrainOverrides(terrains, ids, settings)`: `ids[i]` is `terrains[i]`'s registry
-/// id as `RegistryKey.entryIds` lists it (the caller zips the two listings, so their lengths must match: panics
-/// otherwise, where Java would read past a shorter list).
+/// id as `RegistryKey.entryIds` lists it. The caller zips the two listings of one registry, so their lengths must
+/// match: this panics otherwise (Java throws on a shorter id list unless it returns early, and ignores extra ids).
 ///
 /// A mountain width that is not `> 0` (zero, negative, NaN) counts as 1. With no entries, a global vertical scale of
 /// exactly 1, fancy mountains on and a width of 1, the input comes back unchanged. Otherwise, in input order: with
