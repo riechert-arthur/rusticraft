@@ -297,7 +297,9 @@ impl ErosionBrushes {
             .iter()
             .map(|weight| weight / disc.weight_sum)
             .collect();
-        let length = map_size.wrapping_mul(map_size) as usize;
+        // Java's `new int[mapSize * mapSize][]`: the square wraps, and a negative one throws.
+        let length = usize::try_from(map_size.wrapping_mul(map_size))
+            .expect("ErosionFilter's map size squared must not wrap negative (Java throws)");
         let mut brushes = Self {
             offsets,
             weights,
@@ -752,5 +754,98 @@ pub(crate) mod tests {
             assert_eq!(offsets.len(), expected_count);
             assert_eq!(brush_hash(offsets, weights), expected_hash);
         }
+    }
+
+    /// FNV-1a over every cell's absolute brush (point count, then `index + offset` and the raw
+    /// weight bits), as `ErosionBrushOracle` folds it.
+    fn absolute_brush_digest(brushes: &ErosionBrushes, length: usize) -> (u64, usize) {
+        let fold = |hash: u64, value: i32| (hash ^ value as u32 as u64).wrapping_mul(1099511628211);
+        let mut digest = 0xcbf29ce484222325;
+        let mut points = 0;
+        for index in 0..length {
+            let (offsets, weights) = brushes.brush(index);
+            digest = fold(digest, offsets.len() as i32);
+            for (&offset, &weight) in offsets.iter().zip(weights) {
+                digest = fold(digest, (index as i32).wrapping_add(offset));
+                digest = fold(digest, weight.to_bits() as i32);
+            }
+            points += offsets.len();
+        }
+        (digest, points)
+    }
+
+    /// `.local/terraforged/oracles/erosion_brushes/run.sh` builds Reimagined's own `ErosionFilter`
+    /// (and 6dd607eb's and the 1.18.2-0.3.1 jar's, which give the same brush for every cell) and
+    /// digests every cell's brush for these sizes, negative and wrapping ones included.
+    #[test]
+    fn erosion_brushes_match_reimagined_java() {
+        let fixtures = [
+            (-16, 256, 0, 0xd80ac658736bb725_u64),
+            (-1, 1, 0, 0xaf63bd4c8601b7df_u64),
+            (65536, 0, 0, 0xcbf29ce484222325_u64),
+            (0, 0, 0, 0xcbf29ce484222325_u64),
+            (1, 1, 1, 0x50a396d1e2a7310c_u64),
+            (2, 4, 16, 0xbbf76556bd76f085_u64),
+            (3, 9, 81, 0x4cceeed5e7ff1400_u64),
+            (5, 25, 625, 0x0d68d8b1e2a60f65_u64),
+            (7, 49, 2341, 0xa1b907e6c24cfe17_u64),
+            (12, 144, 11936, 0x215955d284d71a81_u64),
+            (13, 169, 14725, 0xf4f7e58a4c3df30d_u64),
+            (14, 196, 17804, 0xeb7e45ce751c3913_u64),
+            (15, 225, 21173, 0x795d614d50411829_u64),
+            (16, 256, 24832, 0xcf952a5812f2fb45_u64),
+            (17, 289, 28781, 0x3d531d7a5c65c321_u64),
+            (20, 400, 42368, 0x1afd2431e90b9329_u64),
+            (31, 961, 114517, 0xf06a6e9b3f0eb559_u64),
+            (32, 1024, 122816, 0x37a272f77f8d4625_u64),
+            (80, 6400, 862208, 0xdcf80d9e03c14145_u64),
+            (144, 20736, 2887424, 0x23fb9c9798624345_u64),
+            (256, 65536, 9289792, 0x984e42ceb4f41025_u64),
+        ];
+        for (size, cells, expected_points, expected_digest) in fixtures {
+            let brushes = ErosionBrushes::new(size);
+            let (digest, points) = absolute_brush_digest(&brushes, cells);
+            assert_eq!(
+                (points, digest),
+                (expected_points, expected_digest),
+                "size {size}"
+            );
+        }
+    }
+
+    /// Reimagined only changes how the brushes are stored: every cell's points, order and weight
+    /// bits are those of Engine's `Erosion.initBrushes` at radius 7 (the same code as 6dd607eb's and
+    /// the jar's `ErosionFilter`), ported as `terraforged_filters::ErosionBrushes`.
+    #[test]
+    fn erosion_brushes_match_engine_brushes_at_radius_seven() {
+        for size in [1, 2, 7, 13, 14, 15, 16, 17, 20, 31, 32, 80] {
+            let brushes = ErosionBrushes::new(size);
+            let engine = super::super::terraforged_filters::ErosionBrushes::new(
+                size as usize,
+                ErosionBrushes::RADIUS,
+            );
+            for index in 0..(size * size) as usize {
+                let (offsets, weights) = brushes.brush(index);
+                let (indices, engine_weights) = engine.get(index);
+                let absolute: Vec<usize> = offsets
+                    .iter()
+                    .map(|&offset| (index as i32 + offset) as usize)
+                    .collect();
+                assert_eq!(absolute, indices, "size {size} cell {index}");
+                let bits = |w: &[f32]| w.iter().map(|w| w.to_bits()).collect::<Vec<_>>();
+                assert_eq!(
+                    bits(weights),
+                    bits(engine_weights),
+                    "size {size} cell {index}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "must not wrap negative")]
+    fn erosion_brushes_panic_where_java_throws() {
+        // 46341² wraps to a negative `int`: Java's array allocation throws.
+        ErosionBrushes::new(46341);
     }
 }
