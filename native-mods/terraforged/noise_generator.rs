@@ -1006,4 +1006,50 @@ chunk 2 1 -2147483648 -40 -16 c04ac2241d15e3ce 0";
         }
         assert!(ocean && land);
     }
+
+    /// Unlike Java's thread-local `NoiseData`, a chunk doesn't depend on what the thread generated before: worker
+    /// threads generating the chunks in different orders at once get the sequential results.
+    #[test]
+    fn chunks_do_not_depend_on_the_thread_or_order() {
+        let generator = generator(0, 1);
+        let digest = |chunk_x: i32, chunk_z: i32| {
+            let mut out = 0;
+            generator
+                .generate(-17, chunk_x, chunk_z, |data| {
+                    let mut fold = Fold::new();
+                    for index in 0..data.index().length() {
+                        fold.float(data.height().get_index(index));
+                        fold.float(data.river().get_index(index));
+                    }
+                    fold.sample(data.sample());
+                    out = fold.0;
+                })
+                .unwrap();
+            out
+        };
+        let sequential: Vec<u64> = CHUNKS.iter().map(|&(x, z)| digest(x, z)).collect();
+        std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..4)
+                .map(|worker| {
+                    let digest = &digest;
+                    scope.spawn(move || {
+                        let mut order: Vec<usize> = (0..CHUNKS.len()).collect();
+                        order.rotate_left(worker * 3 % CHUNKS.len());
+                        if worker % 2 == 1 {
+                            order.reverse();
+                        }
+                        order
+                            .into_iter()
+                            .map(|i| (i, digest(CHUNKS[i].0, CHUNKS[i].1)))
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            for worker in workers {
+                for (i, value) in worker.join().unwrap() {
+                    assert_eq!(value, sequential[i]);
+                }
+            }
+        });
+    }
 }
