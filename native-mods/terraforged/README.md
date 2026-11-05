@@ -2179,9 +2179,20 @@ the pool of the nearest climate type that had biomes of its own before any filli
 on. Distance is between the midpoints of the types' temperature and moisture ranges (#93's `BiomeType`), temperature
 counted twice (`(2 dt)^2 + dm^2`, f32 in Java's order); ties go to the first type in enum order, and when every pool
 is empty nothing is filled (Reimagined's `BiomeSampler` then falls back to plains). The borrowing climate shares the
-donor's pool. Reimagined's debug log line is returned instead as a list of `BorrowedPool`s. TerraForged 6dd607eb and
+donor's pool. Reimagined's debug log line is returned instead as a list of `BorrowedPool`s. Reimagined's
+`BiomeType` only fills its ranges when its lazy `Lookup` loads (the first `BiomeType.get`); before that every range,
+so every distance, is 0 and the first non-empty type in enum order wins. In a normal start `getWeightsMap` has
+already classified biomes through `BiomeType.get` (`BiomeUtil.getByClimate`), so the ranges are loaded; the port
+always uses them (#93's table, which equals Reimagined's baked `biome_types.bin`). TerraForged 6dd607eb and
 the 1.18.2-0.3.1 jar have no fallback (an empty climate gets plains). Building the pools (the registry's climate
 weights, the dry and highland filters) comes with a later layer.
+
+`BiomePoolOracle.java` (`.local/terraforged/oracles/biome_pool/`, `run.sh`) copies `fillEmptyClimates`,
+`distance` and `midpoint` verbatim from Reimagined's `BiomeMapManager` and runs them with Reimagined's own
+`WeightMap` and `BiomeType` (its baked lookup loaded), interpreted and with `-Xcomp`: every type's ranges, all 121
+distances, and all 177,147 combinations of the 11 types' pools being absent, present but empty, or holding biomes
+(weights 1, 0, NaN or none). The tests match every range and distance bit and every resulting pool, in debug and
+release builds.
 
 ## Status: development only
 
