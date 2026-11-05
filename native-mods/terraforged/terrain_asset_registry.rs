@@ -77,7 +77,8 @@ impl TerrainTypeAsset {
 /// Registry keys as Minecraft 26.3 keys them: each key is read as an `Identifier` (`namespace:path`, no namespace
 /// meaning `minecraft`); a key that is not one, or two keys naming the same identifier, is an error. Sorted by
 /// `Identifier.compareTo` (path, then namespace), the order `RegistryDataLoader` registers entries in and
-/// `RegistryKey.entries`/`entryIds` list them in.
+/// `RegistryKey.entries`/`entryIds` list them in. Key errors come first (an invalid key in input order, then the
+/// first duplicate in sorted order), before any entry is decoded.
 fn sorted_keys<K, J>(
     entries: impl IntoIterator<Item = (K, J)>,
     kind: &str,
@@ -206,7 +207,8 @@ pub fn decode_terrain_type_asset(
 /// registered in registry order (see [`sorted_keys`]), so a parent must sort before the terrains naming it, and the
 /// terrain ids this assigns do not depend on the input order. (26.3 decodes a registry's files in parallel, so in
 /// Java a custom parent that is itself an asset resolves only if its file happened to decode first; Reimagined's own
-/// assets name only built-in parents.) The first failing entry, in that order, is the error.
+/// assets name only built-in parents.) The first failing entry, in that order, is the error; the terrains decoded
+/// before it stay registered (Java fails the whole load), so discard `registry` on an error.
 pub fn decode_terrain_type_assets<K, J>(
     entries: impl IntoIterator<Item = (K, J)>,
     registry: &mut TerrainRegistry,
