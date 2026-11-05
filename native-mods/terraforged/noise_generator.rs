@@ -43,6 +43,12 @@ pub const CONTINENT_OFFSET: i64 = 18_749_560;
 /// `NoiseGenerator.heightMultiplier`.
 const HEIGHT_MULTIPLIER: f32 = 1.2;
 
+// TerraForged samples one generator from its worker threads (each with its own blender and sample).
+const _: fn() = || {
+    fn shareable<T: Send + Sync>() {}
+    shareable::<NoiseGenerator>();
+};
+
 /// The newer source tree's `NoiseGenerator` (6dd607eb, `worldgen.noise`): a block's terrain sample. It scales the
 /// block position by the noise levels' frequency (`getNoiseCoord`), samples the continent
 /// ([`ContinentNoise::sample_continent`]), then the height by the continent noise's band (deep ocean below
@@ -251,72 +257,72 @@ mod tests {
     /// copied, the test checks the coverage itself): the newer source's own
     /// `NoiseGenerator` constructor over Noise2D 2cb4843, continent caches bypassed, a fresh generator per runtime seed.
     const EXPECTED: &str = "\
-grid 0 0 0 b9013fcbbfc1d7b2\n\
+grid 0 0 0 cccfc1e3f1470373\n\
 edges 0 0 0 278c0722de69dac2\n\
 fedges 0 0 0 191cd9eb3274e819\n\
-grid 0 0 42 90c55e523d82b9be\n\
-grid 0 0 -17 ac5a36464f44926\n\
-grid 0 0 2147483647 c897a256b45479ab\n\
-grid 0 0 -2147483648 f933d492b60dce05\n\
+grid 0 0 42 ce26ac8d7e67bc44\n\
+grid 0 0 -17 648fa9a5248d77ea\n\
+grid 0 0 2147483647 f897187f984c850c\n\
+grid 0 0 -2147483648 cba8134c4ba7512c\n\
 edges 0 0 -2147483648 c6a1e778cd886032\n\
 fedges 0 0 -2147483648 9adc7d79941cd78a\n\
-grid 0 0 -8763214 14a1da06a4752966\n\
-grid 0 0 -21491124 52f8e0d4415f1ee7\n\
-grid 0 1 0 c051cb30c74aa5bd\n\
+grid 0 0 -8763214 36c44c3e457a6622\n\
+grid 0 0 -21491124 9ffb966b3f81929\n\
+grid 0 1 0 cfc225d15311d598\n\
 edges 0 1 0 69a11925fce4d140\n\
 fedges 0 1 0 3812527c12ec3214\n\
-grid 0 1 42 961c75281a2f557a\n\
-grid 0 1 -17 7aaa6de2afa17227\n\
-grid 0 1 2147483647 f51d1134c565ce00\n\
-grid 0 1 -2147483648 e8e3706fbbfa8fd4\n\
+grid 0 1 42 688d79dda6134bd0\n\
+grid 0 1 -17 27451b0e39b9a1e7\n\
+grid 0 1 2147483647 3810b22d5c0b6b7f\n\
+grid 0 1 -2147483648 d3c9eb71daed0555\n\
 edges 0 1 -2147483648 6534be3e100000c0\n\
 fedges 0 1 -2147483648 581431ee737ea4df\n\
-grid 0 1 -8763214 d2bce78835e761ae\n\
-grid 0 1 -21491124 48c372e3815d8799\n\
-grid 1 0 0 669cba6169e5b6e0\n\
+grid 0 1 -8763214 d7c3cdc63608776a\n\
+grid 0 1 -21491124 85b47edc33b79587\n\
+grid 1 0 0 2401f7f2d2315767\n\
 edges 1 0 0 bc334141902df3fd\n\
 fedges 1 0 0 57ee311302bf1298\n\
-grid 1 0 42 74de7dde64fe503\n\
-grid 1 0 -17 88bb2ee0edbc293\n\
-grid 1 0 2147483647 75ef3be416a1f5be\n\
-grid 1 0 -2147483648 6e79528bd500b016\n\
+grid 1 0 42 7a2735abfa17bf9a\n\
+grid 1 0 -17 7e2b5311023397ea\n\
+grid 1 0 2147483647 510e7bb6ba49b491\n\
+grid 1 0 -2147483648 9501f40fba47a51c\n\
 edges 1 0 -2147483648 7ec7e2d52ef831fa\n\
 fedges 1 0 -2147483648 ec6124621821786f\n\
-grid 1 0 -8763214 161c7ee907bb708d\n\
-grid 1 0 -21491124 337dc37640eee032\n\
-grid 1 1 0 40b8eab3a812d9e8\n\
+grid 1 0 -8763214 119f5b38e304be01\n\
+grid 1 0 -21491124 1227208c8d3e0879\n\
+grid 1 1 0 2f2d9d688739122f\n\
 edges 1 1 0 af9be7ef4d224467\n\
 fedges 1 1 0 4de9d76f2c4f62e6\n\
-grid 1 1 42 943d3beba3c9ebb7\n\
-grid 1 1 -17 459b04a513c4f009\n\
-grid 1 1 2147483647 839f69c197550ade\n\
-grid 1 1 -2147483648 10e62f6a83cbed4d\n\
+grid 1 1 42 cbc649d719956dbe\n\
+grid 1 1 -17 a5c59bce1dd16754\n\
+grid 1 1 2147483647 5a3d4115522e4549\n\
+grid 1 1 -2147483648 ea92522f6d33d0cf\n\
 edges 1 1 -2147483648 5b291e89a07eac0\n\
 fedges 1 1 -2147483648 632e55550729c892\n\
-grid 1 1 -8763214 460e5b3fdb6979aa\n\
-grid 1 1 -21491124 ec45d755358aec94\n\
-grid 2 0 0 3fae765d77be5c0a\n\
+grid 1 1 -8763214 a13b82e11809726\n\
+grid 1 1 -21491124 c10ec9d1b3fa570b\n\
+grid 2 0 0 39493eff9afa0654\n\
 edges 2 0 0 1c6756b2a0c91acc\n\
 fedges 2 0 0 7e599ad772d4f67d\n\
-grid 2 0 42 a8bb11b88649686c\n\
-grid 2 0 -17 9f4987871a8e1026\n\
-grid 2 0 2147483647 b8b48ea197d501\n\
-grid 2 0 -2147483648 3c7824a5d15b06f8\n\
+grid 2 0 42 afe78db9342efa50\n\
+grid 2 0 -17 e539f916f7cac028\n\
+grid 2 0 2147483647 442b9628f06721ed\n\
+grid 2 0 -2147483648 c3d7d47aa2c9b5ea\n\
 edges 2 0 -2147483648 cb8a848a182ba19e\n\
 fedges 2 0 -2147483648 1782deb5c726f847\n\
-grid 2 0 -8763214 6f10c867ecdcccc6\n\
-grid 2 0 -21491124 9635452d859235b5\n\
-grid 2 1 0 dae48ef2b09e71ed\n\
+grid 2 0 -8763214 6764195a5f73ac53\n\
+grid 2 0 -21491124 fa0b72ab62fa389\n\
+grid 2 1 0 6de99002797f6d8f\n\
 edges 2 1 0 7c3ea12f2a197021\n\
 fedges 2 1 0 ca1485566ab1df21\n\
-grid 2 1 42 5c3f08bd81924638\n\
-grid 2 1 -17 d0620644b58c07d3\n\
-grid 2 1 2147483647 7f816b45bd75f7f0\n\
-grid 2 1 -2147483648 2947f0f4078c651e\n\
+grid 2 1 42 b917d2e117fb6114\n\
+grid 2 1 -17 b2d263bd5f1412d\n\
+grid 2 1 2147483647 c5a04e54d619bc24\n\
+grid 2 1 -2147483648 92d3f1fdb3faef18\n\
 edges 2 1 -2147483648 ff38609f76ea11e\n\
 fedges 2 1 -2147483648 88854414c13b7c74\n\
-grid 2 1 -8763214 30e049475cab28ac\n\
-grid 2 1 -21491124 66528ea82c0a2602";
+grid 2 1 -8763214 7ed4dab378e57239\n\
+grid 2 1 -21491124 3ed3d59af446ef82";
 
     const RUNTIME: [i32; 7] = [0, 42, -17, i32::MAX, i32::MIN, -8_763_214, -21_491_124];
     const EDGE_INTS: [i32; 10] = [
@@ -480,9 +486,10 @@ grid 2 1 -21491124 66528ea82c0a2602";
         let mut fold = Fold::new();
         let mut branches = [0; 5];
         let mut lines = Vec::new();
+        // One sample for the whole grid, as chunk generation reuses one: fields a branch leaves alone carry over.
+        let mut sample = NoiseSample::new(&terrains);
         for j in -8..=8 {
             for i in -8..=8 {
-                let mut sample = NoiseSample::new(&terrains);
                 generator
                     .sample(seed, i * 613 - 211, j * 587 + 97, &mut sample, &mut blender)
                     .unwrap();

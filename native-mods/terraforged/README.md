@@ -1869,7 +1869,7 @@ from. `NoiseGeneratorOracle.java` (`.local/terraforged/oracles/noise_generator/`
 `NoiseGenerator` constructor over Noise2D 2cb4843, with the continent caches bypassed and a fresh generator per runtime
 seed. It covers three `TerrainLevels`, a constant terrain set and a four-terrain set (simplex, Perlin, scaled ridge and
 billow noises, seeds up to `Integer.MAX_VALUE`), and seven runtime seeds (the `int` extremes, -8763214 and -21491124
-included). Each case samples a 17×17 grid that reaches all four height branches, 100 integer edge positions
+included). Each case samples a 17×17 grid that reaches all four height branches (into one reused sample, as chunk generation does), 100 integer edge positions
 (`Integer.MIN_VALUE`/`MAX_VALUE` included), and 144 float noise coordinates (signed zeros, subnormals, NaN and
 infinity, where Java throws and the port panics). The test matches its 66 folded grid and edge lines bit for bit, in debug and
 release.
