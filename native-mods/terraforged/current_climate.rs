@@ -65,6 +65,12 @@ pub struct CurrentClimateNoise {
     temperature: ClimateAxis<Temperature>,
 }
 
+// World generation shares one climate noise across threads.
+const _: fn() = || {
+    fn shared<T: Send + Sync>() {}
+    shared::<CurrentClimateNoise>();
+};
+
 /// `settings.climate.<axis>.apply(core).warp(first).warp(second)`.
 struct ClimateAxis<T> {
     core: T,
@@ -245,7 +251,7 @@ impl CurrentClimateNoise {
         px = CELL_SHAPE.adjust_x(px);
         py = CELL_SHAPE.adjust_y(py);
         self.sample_biome(seed, px, py, sample);
-        sample.climate_type = BiomeType::at_climate(sample.temperature, sample.moisture);
+        sample.climate_type = BiomeType::at_climate_clamped(sample.temperature, sample.moisture);
         if matches!(
             sample.climate_type,
             BiomeType::ColdSteppe | BiomeType::Steppe
@@ -322,8 +328,9 @@ mod tests {
     /// `CurrentClimateOracle.java` (`.local/terraforged/oracles/current_climate/`, `run.sh`): Reimagined a24d450's
     /// own `ClimateNoise`, `Seed`, `Settings`, `Moisture`, `Temperature` and `BiomeType` compiled from source,
     /// interpreted and with `-Xcomp`. Per variant: the root seed's next draw after the constructor and an FNV-1a fold
-    /// of every sample's four float bits and climate type; then a fold of `BiomeType.get` over a 1025² grid.
-    const EXPECTED: [&str; 13] = [
+    /// of every sample's four float bits and climate type; then a fold of `BiomeType.get` over a 1025² grid from -0.5
+    /// to 1.5 (clamped indices).
+    const EXPECTED: [&str; 14] = [
         "v 0 18749564 bc9efcf98064af2f",
         "v 1 18749568 1568f4897a4a9173",
         "v 2 12349 446990327354f5ba",
@@ -336,12 +343,13 @@ mod tests {
         "v 9 46 70e884a8e56d4f66",
         "v 10 18749571 2d8ecacf0a68e996",
         "v 11 31341 83c24cdf93ec1e38",
-        "t f6c331fb517e7087",
+        "v 12 560 cd01642bac3dc666",
+        "t 9202e7bcea055432",
     ];
 
     /// root, pre-draws, biome size, warp scale, warp strength, macro, edge type, edge scale, edge octaves, edge
     /// strength, temperature offset, scale, falloff, moisture offset, scale, falloff (the oracle's `INTS`).
-    const INTS: [[i32; 16]; 12] = [
+    const INTS: [[i32; 16]; 13] = [
         [
             18749560, 0, 220, 150, 80, 0, 0, 24, 2, 24, 0, 7, 2, 8461, 6, 1,
         ],
@@ -398,9 +406,10 @@ mod tests {
             18749560, 7, 220, 150, 80, 0, 0, 24, 2, 24, 0, 7, 2, 8461, 6, 1,
         ],
         [31337, 0, 64, 300, 250, 5, 0, 24, 2, 24, 0, 7, 0, 8461, 6, 0],
+        [555, 1, 220, 150, 80, 0, 0, 24, 2, 24, 0, 7, 2, 8461, 6, 1],
     ];
     /// Edge gain, lacunarity; temperature min, max, bias; moisture min, max, bias (the oracle's `FLOATS`).
-    const FLOATS: [[f32; 8]; 12] = [
+    const FLOATS: [[f32; 8]; 13] = [
         [0.5, 2.65, 0.0, 0.98, 0.1, 0.0, 1.0, -0.05],
         [0.5, 2.65, 0.0, 0.98, 0.1, 0.0, 1.0, -0.05],
         [0.5, 2.65, 0.0, 0.98, 0.1, 0.0, 1.0, -0.05],
@@ -413,6 +422,9 @@ mod tests {
         [0.4, 2.2, 0.0, 0.98, 0.1, 0.0, 1.0, -0.05],
         [0.5, 2.65, 0.0, 0.98, 0.1, 0.0, 1.0, -0.05],
         [0.5, 2.65, 0.1, 0.9, -0.3, 0.05, 0.95, 0.4],
+        // NaN bounds pass every value through the range's clamp: climate values leave 0..1 and the type lookup
+        // clamps its indices.
+        [0.5, 2.65, f32::NAN, f32::NAN, 1.0, f32::NAN, 0.5, -1.0],
     ];
     /// Noise2D's `Source` entries the oracle uses, in its order (`SIMPLEX_RIDGE` builds a simplex2 noise).
     const EDGE_TYPES: [SourceKind; 8] = [
@@ -514,11 +526,11 @@ mod tests {
             actual.push(format!("v {variant} {draws} {hash:016x}"));
         }
         let mut hash = 0xcbf2_9ce4_8422_2325;
-        for t in 0..=1024 {
-            for m in 0..=1024 {
+        for t in -256..=768 {
+            for m in -256..=768 {
                 hash = fold(
                     hash,
-                    BiomeType::at_climate(t as f32 / 1024.0, m as f32 / 1024.0) as i32,
+                    BiomeType::at_climate_clamped(t as f32 / 512.0, m as f32 / 512.0) as i32,
                 );
             }
         }

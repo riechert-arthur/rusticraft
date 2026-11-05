@@ -2243,17 +2243,17 @@ cell's hash (or, with `macroNoiseSize` above 0, from the hash of its `floorDiv` 
 sqrt(d1 / d2)`, and moisture and temperature at the cell's point; and then the climate type, with Java's temporary
 cold steppe and steppe to grassland swap. Every noise gets the runtime seed. `ClimateSettings::terra_defaults()` are
 Reimagined's `TerraSettings.Climate` defaults (biome size 220, macro noise off, edge strength 24), not Engine's.
-Reimagined's `BiomeType` reads a baked table and clamps its indices where Engine's throws; the indices never leave
-the table here (moisture and temperature are clamped to 0..1, NaN rounds to 0), and the two agree over the test grid.
+Reimagined's `BiomeType` reads a baked table (equal to Engine's over the test grid) and clamps its indices where
+Engine's throws (`BiomeType::at_climate_clamped`): NaN climate bounds let moisture and temperature leave 0..1.
 
 `CurrentClimateOracle.java` (`.local/terraforged/oracles/current_climate/`, `run.sh`) compiles Reimagined's own
 `ClimateNoise` with its Engine `Seed`, `Settings`, `Moisture`, `Temperature`, `BiomeType` (and `biome_types.bin`) and
-vendored Noise2D from source, with one stub (the asset `TerrainType`), interpreted and with `-Xcomp`: 12 settings
+vendored Noise2D from source, with one stub (the asset `TerrainType`), interpreted and with `-Xcomp`: 13 settings
 variants (TerraSettings' defaults, macro sizes 0 to 20, edge strengths 0 to 500 over all eight edge noise types,
-`int`-edge root seeds and seed offsets, swapped, out-of-range and narrow climate ranges, falloffs 0 to 10) with up to
+`int`-edge root seeds and seed offsets, swapped, out-of-range, narrow and NaN climate ranges, falloffs 0 to 10) with up to
 seven seed draws before the constructor, each sampled at 8 runtime seeds and 181 positions (zeros of both signs,
 fractions, 2^24, 1e10, infinities, NaN, subnormals and a signed grid): the seed draws and a fold of every sample's
-bits match, as does `BiomeType.get` over a 1025x1025 grid, in debug and release builds.
+bits match, as does `BiomeType.get` over a 1025x1025 grid from -0.5 to 1.5, in debug and release builds.
 
 ## Status: development only
 
