@@ -820,7 +820,6 @@ mod tests {
             )
             .unwrap();
         }
-        let points = points();
         for s in 0..SEEDS.len() {
             let terrains = SETS[SET_OF[s]]
                 .iter()
