@@ -418,6 +418,15 @@ impl Terrain {
         self.0.category
     }
 
+    /// `getDelegate() instanceof Terrain parent`: the terrain this one delegates to, or `None` when it delegates to
+    /// its category.
+    pub fn parent(&self) -> Option<&Terrain> {
+        match &self.0.delegate {
+            TerrainDelegate::Terrain(parent) => Some(parent),
+            TerrainDelegate::Category(_) => None,
+        }
+    }
+
     /// `NoiseUtil.valCoord2D(name.hashCode(), 0, 0)`, with Java's UTF-16 string hash.
     pub fn render_hue(&self) -> f32 {
         let hash = self.name().encode_utf16().fold(0_i32, |hash, unit| {

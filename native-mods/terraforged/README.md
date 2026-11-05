@@ -2449,10 +2449,37 @@ bounds and a hash of 294 seed-first samples over seven seeds (`sync.py` copies i
 The tests match every line, reading "err" where Java decodes a graph that only throws; the asset lines are checked
 when Reimagined's sources are unpacked locally (the assets are not copied into this repository).
 
+`terrain_asset_registry.rs` loads the `terrain_type` and `terrain_noise` registries from (registry key, JSON) pairs,
+after TerraForged Reimagined a24d450's asset `TerrainType` (`DIRECT`, `forName`, its engine `TerrainType.get` and
+`getOrCreate`) and `RegistryKey.entries`/`entryIds`. Keys are read as 26.3 `Identifier`s (no namespace means
+`minecraft`); an invalid or repeated key is an error. Entries are decoded in registry order, `Identifier.compareTo`
+(path, then namespace), so the terrain ids they get do not depend on the input order, and the noises come back in
+that order with their `entryIds` (`terraforged:` keys by path alone) for `apply_terrain_overrides`. A terrain type's
+`parent` names a registered terrain by its exact name, else `none` (not an error, as in Java); its `name` returns
+the terrain already registered under it (keeping that terrain's own parent) or registers a new one delegating to
+`parent`. A terrain noise whose `type` is not in the loaded types is an error. Differences from Java:
+
+- Minecraft 26.3 decodes a registry's files in parallel, so in Java a parent that is itself a terrain-type asset
+  resolves only if its file happened to be decoded first. Here a parent must sort before the types naming it.
+  Reimagined's own assets only name built-in parents.
+- The registry is Engine 0.3.0's, not Reimagined's rewritten engine. Engine's names compare ignoring case, so a
+  name that differs only in case from a registered terrain (Reimagined registers `Hills` beside `hills`) is an
+  error. Its built-ins differ from Reimagined's: Engine has `ocean` (Reimagined: `shallow_ocean`) and
+  `mountain_chain`, `volcano` and `volcano_pipe`, which Reimagined lacks (so its `ocean`, `mountain_chain`, `volcano`
+  and `volcano_pipe` assets make new terrains under `none` there, and keep the built-ins here). Engine's `badlands`
+  is a flatland and `plateau` a lowland; Reimagined makes `badlands` a lowland and `plateau` a highland.
+- On an error the types decoded before it stay registered (Java fails the whole load): discard the registry.
+
+`TerrainAssetRegistryOracle.java` (`.local/terraforged/oracles/terrain_asset_registry/`, `run.sh`) compiles
+Reimagined's asset and engine `TerrainType` from source against Minecraft 26.3's server jar (strict JSON, DFU,
+`Identifier`) and runs 31 terrain-type cases in one registry (built-in, custom, unknown and case-variant parents,
+existing names, duplicate JSON keys, wrong field types) and 4 key-order cases, interpreted and JIT-compiled; the
+tests match every line except the two case-variant names, which are errors here.
+
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives, the biome climate types, the climate settings, the climate module, the climate stage, the continent factory, the generator context, the heightmap, the world generator factory, TerraForged's terrain levels, its terrain data, its terrain generator, its terrain-blend utilities, its terrain blender with its nearest-terrain search (and the newer source's seed-first blender), noise-graph reseeding, the cave noise primitives, the biome viability rules, the biome overrides (and TerraForged Reimagined's wider beach band), the continent control points, the continent cell primitives, the continent configuration, the continent shape blending, the continent cell generator with its spawn-offset search, the continent river nodes, the continent river carver's arithmetic, the continent river networks with their nearest-node sampling and their warped, carved river sampling, the newer source's seed-first noise sources, scalar noise graphs, domain warps, selectors, graph caches, terraces, legacy terraces, advanced terraces, curves, transforms (steps, frequency, gradient and modulation), special sources (boost, cell, cell edge and sine) and lines, and its bounded concurrent lossy cache with the continent's cell and
-river-piece caches on it, the continent noise module that joins the continent layers, the newer source's terrain height sampler with its bordered chunk generation and its nearest-terrain search, the erosion tile geometry, and TerraForged Reimagined's heightmap smoothing, erosion brushes, hydraulic erosion filter, eroded-region cache, eroded region build, eroded chunk generation, terrain cache, generator queries, chunk fill, the terrain stage hand-off to it, the biome chunk fill, the cave biome sampler, the biome pool fallback, the surface-biome decisions, the initial biome selection, the current climate noise, the biome sampler bridge, the surface biome sampler, the chunk biome hook, the biome registry pools, their live biome bindings, the biome settings, the terrain overrides and the terrain asset decoder. They change nothing in the game, so there is
+river-piece caches on it, the continent noise module that joins the continent layers, the newer source's terrain height sampler with its bordered chunk generation and its nearest-terrain search, the erosion tile geometry, and TerraForged Reimagined's heightmap smoothing, erosion brushes, hydraulic erosion filter, eroded-region cache, eroded region build, eroded chunk generation, terrain cache, generator queries, chunk fill, the terrain stage hand-off to it, the biome chunk fill, the cave biome sampler, the biome pool fallback, the surface-biome decisions, the initial biome selection, the current climate noise, the biome sampler bridge, the surface biome sampler, the chunk biome hook, the biome registry pools, their live biome bindings, the biome settings, the terrain overrides, the terrain asset decoder and the terrain-type and terrain-noise registries. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
