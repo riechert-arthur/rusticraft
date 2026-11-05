@@ -502,7 +502,7 @@ grid 2 1 -21491124 3ed3d59af446ef82";
         f32::INFINITY,
     ];
 
-    fn levels(variant: usize) -> TerrainLevels {
+    pub(crate) fn levels(variant: usize) -> TerrainLevels {
         match variant {
             0 => TerrainLevels::new(false, 1.0, -64, 480, 128, 62, 22),
             1 => TerrainLevels::new(false, 1.0, -64, 256, 128, 62, 22),
@@ -512,7 +512,7 @@ grid 2 1 -21491124 3ed3d59af446ef82";
 
     /// `createContinentNoise(levels)`'s settings. Java sets the continent scale and control points after building the
     /// context; the context reads only the seed and the world properties, so setting them first is the same.
-    fn continent_settings(levels: TerrainLevels) -> GeneratorSettings {
+    pub(crate) fn continent_settings(levels: TerrainLevels) -> GeneratorSettings {
         let mut settings = GeneratorSettings::default();
         settings.world.seed = CONTINENT_OFFSET;
         settings.world.properties.sea_level = levels.sea_level;
@@ -562,7 +562,7 @@ grid 2 1 -21491124 3ed3d59af446ef82";
         NoiseGenerator::new(levels, ContinentNoise::new(levels, context), land)
     }
 
-    fn terrain_set(context: &GeneratorContext, set: usize) -> Vec<Arc<TerrainNoise>> {
+    pub(crate) fn terrain_set(context: &GeneratorContext, set: usize) -> Vec<Arc<TerrainNoise>> {
         let terrain = |name: &str, weight: f32, noise: Module| {
             Arc::new(TerrainNoise::new(
                 context.terrain.get_by_name(name).unwrap(),
