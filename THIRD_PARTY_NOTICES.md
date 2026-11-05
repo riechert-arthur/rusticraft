@@ -14,10 +14,11 @@ MIT, copyright (c) 2018 dags and (c) 2020 TerraForged. Its license is preserved 
 `native-mods/terraforged/LICENSE-NOISE2D`. This is the seed-first API used by the current
 TerraForged source, distinct from the older shaded dependency's seed-replacement API.
 
-The heightmap smoothing in `native-mods/terraforged/erosion.rs` (`HeightmapSmoothing`,
-`HeightmapSmoothingSettings`) is adapted from
+The heightmap smoothing and the erosion brushes in `native-mods/terraforged/erosion.rs` (`HeightmapSmoothing`,
+`HeightmapSmoothingSettings`, `ErosionBrushes`, `ErosionFilterSettings`) are adapted from
 [TerraForged Reimagined a24d4503064780790e975cd17495866ae13eef11](https://github.com/Romoslayer/TerraForged-Reimagined/tree/a24d4503064780790e975cd17495866ae13eef11)
-(`HeightmapSmoothing` and `TerraSettings.Smoothing`), an unofficial port of TerraForged to Minecraft 26.3,
+(`HeightmapSmoothing` and `TerraSettings.Smoothing`; `ErosionFilter`'s erosion-brush layout and
+`TerraSettings.Erosion`), an unofficial port of TerraForged to Minecraft 26.3,
 MIT, copyright (c) 2020 TerraForged and (c) 2026 Romoslayer. Its license is preserved in
 `native-mods/terraforged/LICENSE-TERRAFORGED-REIMAGINED`.
 
