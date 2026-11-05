@@ -2261,14 +2261,17 @@ impl Module {
         }
     }
 
-    /// Noise2D 2cb4843's `getValue(int seed, float x, float y)` for the scalar nodes, `Warp` and the `Base`,
-    /// `Blend`, `VariableBlend`, `Select` and `MultiBlend` selectors: every node passes the call's seed unchanged to its children (only
-    /// octave sources add their own seed, see [`Source::value_seed_first`]); their arithmetic and evaluation order
-    /// are the jar's. `Warp` samples its source at the domain's seed-first coordinates ([`Domain::try_x_seed_first`]).
+    /// Noise2D 2cb4843's `getValue(int seed, float x, float y)` for the scalar nodes, `Warp`, the `Base`,
+    /// `Blend`, `VariableBlend`, `Select` and `MultiBlend` selectors, `Cache` and `Terrace`: every node passes the
+    /// call's seed unchanged to its children (only octave sources add their own seed, see
+    /// [`Source::value_seed_first`]); their arithmetic and evaluation order are the jar's (`Cache` also keys its
+    /// entry by the seed). `Warp` samples its source at the domain's seed-first coordinates ([`Domain::try_x_seed_first`]).
     /// Nodes not yet ported to seed-first sampling return an error instead of falling back to [`Module::value`],
-    /// which would ignore the seed. Selectors evaluate only the children Java evaluates for that control value, so
-    /// an unsupported node in a branch the control skips errors only at the points that reach it: one `Ok` sample
-    /// does not prove the whole graph is supported.
+    /// which would ignore the seed. Selectors and `Terrace` evaluate only the children Java evaluates for that
+    /// sample (a terrace reads its ramp and cliff only inside a step's window, its ramp height only above the ramp),
+    /// so an unsupported node in a branch the sample skips errors only at the points that reach it: one `Ok` sample
+    /// does not prove the whole graph is supported. Where Java throws (a `MultiBlend` slot outside its sources, a
+    /// NaN terrace sample, a terrace without steps), this panics, as [`Module::value`] does.
     pub fn try_value_seed_first(&self, seed: i32, x: f32, y: f32) -> Result<f32, &'static str> {
         let sample = |module: &Module| module.try_value_seed_first(seed, x, y);
         Ok(match &self.0.kind {
@@ -2445,6 +2448,46 @@ impl Module {
                     sample(&max.source)?,
                     interpolation.apply(alpha),
                 )
+            }
+            ModuleKind::Terrace {
+                source,
+                ramp,
+                cliff,
+                ramp_height,
+                steps,
+                max_index,
+                ..
+            } => {
+                let noise_value = clamp(sample(source)?, 0.0, 0.999999);
+                let index = floor(noise_value * steps.len() as f32);
+                // Only a NaN sample (index -1) or a terrace without steps leaves the array, where Java throws.
+                let step = usize::try_from(index)
+                    .ok()
+                    .and_then(|index| steps.get(index))
+                    .expect("Terrace samples a step outside its steps, where Java throws");
+                let index = index as usize;
+                if index as i32 == *max_index || noise_value < step.lower_bound {
+                    step.value
+                } else if noise_value > step.upper_bound {
+                    steps[index + 1].value
+                } else {
+                    let ramp = 1.0 - sample(ramp)? * 0.5;
+                    let cliff = 1.0 - sample(cliff)? * 0.5;
+                    let alpha =
+                        (noise_value - step.lower_bound) / (step.upper_bound - step.lower_bound);
+                    let mut value = step.value;
+                    if alpha > ramp {
+                        let next = &steps[index + 1];
+                        let ramp_alpha = (alpha - ramp) / (1.0 - ramp);
+                        value += (next.value - value) * ramp_alpha * sample(ramp_height)?;
+                    }
+                    if alpha > cliff {
+                        let next = &steps[index + 1];
+                        let cliff_alpha = (alpha - cliff) / (1.0 - cliff);
+                        value = lerp(value, next.value, cliff_alpha);
+                    }
+                    value
+                }
             }
             // Noise2D 2cb4843's `Cache` keeps one entry per thread keyed by `x == this.x && y == this.y` alone, so a
             // repeated point at another runtime seed returns the first seed's sample. The port keys the shared entry
@@ -3764,14 +3807,10 @@ mod tests {
         assert_eq!((count, acc), (9216, 0x79cb_944a));
     }
 
+    /// A node `try_value_seed_first` rejects: a custom module (a Java class implementing `Module`), which has no
+    /// seed parameter to pass the runtime seed to.
     fn unsupported_seeded_node(value: f32) -> Module {
-        Module::constant(value).terrace(
-            Module::constant(0.0),
-            Module::constant(1.0),
-            Module::constant(0.5),
-            4,
-            0.25,
-        )
+        Module::custom(value, value, move |_, _| value)
     }
 
     #[test]
@@ -7420,6 +7459,372 @@ mod tests {
         let cache = unsupported.cache();
         assert!(cache.try_value_seed_first(17, 1.0, 2.0).is_err());
         assert!(cache.try_value_seed_first(-91, 1.0, 2.0).is_err());
+    }
+
+    #[test]
+    fn runtime_seeded_terrace_matches_current_noise2d() {
+        let source = Module::source(Source::new(
+            SourceKind::Simplex,
+            SourceConfig {
+                seed: i32::MAX,
+                octaves: 3,
+                gain: 0.65,
+                frequency: 0.125,
+                lacunarity: 2.0,
+                interpolation: Interpolation::Curve3,
+            },
+        ));
+        let ramp = Module::source(Source::new(
+            SourceKind::Perlin2,
+            SourceConfig {
+                seed: -91,
+                octaves: 2,
+                gain: 0.5,
+                frequency: 0.25,
+                lacunarity: 2.0,
+                interpolation: Interpolation::Curve3,
+            },
+        ));
+        let cliff = Module::source(Source::new(
+            SourceKind::Simplex2,
+            SourceConfig {
+                seed: 17,
+                octaves: 2,
+                gain: 0.5,
+                frequency: 0.0625,
+                lacunarity: 2.0,
+                interpolation: Interpolation::Curve3,
+            },
+        ));
+        let height = Module::source(Source::new(
+            SourceKind::Perlin,
+            SourceConfig {
+                seed: 1234,
+                octaves: 1,
+                gain: 0.5,
+                frequency: 0.5,
+                lacunarity: 2.0,
+                interpolation: Interpolation::Curve3,
+            },
+        ));
+        let terrace = source.terrace(ramp, cliff, height, 7, 0.35);
+        for (seed, expected) in [0, 17, -91, i32::MAX].into_iter().zip([
+            0xa9cf707ca11f7949,
+            0x89d50db38b44a5ba,
+            0xe3348fd1ddadf84f,
+            0x2cf2f48543c12e94,
+        ]) {
+            let mut hash = 0xcbf29ce484222325u64;
+            for (x, y) in [
+                (0.0, 0.0),
+                (0.125, -0.75),
+                (12.34, 56.78),
+                (-1234.5, 987.25),
+            ] {
+                hash ^= u64::from(terrace.try_value_seed_first(seed, x, y).unwrap().to_bits());
+                hash = hash.wrapping_mul(0x100000001b3);
+            }
+            assert_eq!(hash, expected, "seed {seed}");
+        }
+        // The oracle's `boundary` lines: a fixed source (0..1 bounds) at, inside and outside five steps' windows.
+        let boundaries = [-1.0, 0.0, 0.05, 0.1, 0.2, 0.5, 0.9, 0.999999, 1.0, 2.0].map(|value| {
+            Module::node(ModuleKind::Constant(value), 0.0, 1.0)
+                .terrace(
+                    Module::constant(0.4),
+                    Module::constant(0.7),
+                    Module::constant(0.8),
+                    5,
+                    0.25,
+                )
+                .try_value_seed_first(17, 0.0, 0.0)
+                .unwrap()
+                .to_bits()
+        });
+        assert_eq!(
+            boundaries,
+            [
+                0x00000000, 0x00000000, 0x3daaaaab, 0x3e800000, 0x3e800000, 0x3f000000, 0x3f800000,
+                0x3f800000, 0x3f800000, 0x3f800000,
+            ]
+        );
+    }
+
+    /// `SeededTerraceEdgeOracle` (`.local/terraforged/oracles/seed_first/run-graphs.sh`): Terrace with a source fixed
+    /// at, and one ulp beside, every step's value and window bounds (the constructor's table) and every index edge
+    /// `k / steps` (plus NaN, ±inf, ±0, subnormals and values outside 0..1); 0, 1, 2, 5, 7, 64 and 1000 steps; zero,
+    /// one, inverted, negative and NaN blend ranges; ramps and cliffs pinned to 0 or 1, NaN and infinite ramp heights;
+    /// zero, wide, narrow and infinite source ranges; seeded ramp/cliff/height sources; nested terraces; and terraces
+    /// of seeded sources. Samples where Java throws (a NaN sample, no steps) fold as `0xffffffff`, where the port
+    /// panics.
+    #[test]
+    fn runtime_seeded_terrace_edges_match_current_noise2d() {
+        let src = |kind, seed, octaves, gain, frequency| {
+            Module::source(Source::new(
+                kind,
+                SourceConfig {
+                    seed,
+                    octaves,
+                    gain,
+                    frequency,
+                    ..SourceConfig::default()
+                },
+            ))
+        };
+        let ramp = src(SourceKind::Perlin2, -91, 2, 0.5, 0.25);
+        let cliff = src(SourceKind::Simplex2, 17, 2, 0.5, 0.0625);
+        let height = src(SourceKind::Perlin, 1234, 1, 0.5, 0.5);
+        let zero = src(SourceKind::Simplex, 1337, 0, 0.5, 3.0);
+        let cubic = src(SourceKind::Cubic, -91, 2, 0.5, 0.25);
+        let simplex = src(SourceKind::Simplex, i32::MAX, 3, 0.65, 0.125);
+        let perlin = src(SourceKind::Perlin, 53, 2, 0.5, 0.5);
+        let c = Module::constant;
+        let (inf, nan) = (f32::INFINITY, f32::NAN);
+        type Build = Box<dyn Fn(Module) -> Module>;
+        let plain = |steps, blend: f32, ramp: Module, cliff: Module, height: Module| {
+            Box::new(move |k: Module| {
+                k.terrace(ramp.clone(), cliff.clone(), height.clone(), steps, blend)
+            }) as Build
+        };
+        let consts = |steps, blend| plain(steps, blend, c(0.4), c(0.7), c(0.8));
+        let seeded =
+            |steps, blend| plain(steps, blend, ramp.clone(), cliff.clone(), height.clone());
+        let fixed = |source: &Module,
+                     steps,
+                     blend,
+                     ramp: &Module,
+                     cliff: &Module,
+                     height: &Module| {
+            let (source, ramp, cliff, height) =
+                (source.clone(), ramp.clone(), cliff.clone(), height.clone());
+            Box::new(move |_: Module| {
+                source
+                    .clone()
+                    .terrace(ramp.clone(), cliff.clone(), height.clone(), steps, blend)
+            }) as Build
+        };
+        let (nested_cubic, nested_cliff) = (cubic.clone(), cliff.clone());
+        // (steps of the edge table or None for no edges, blend, source bounds, terrace)
+        let families: Vec<(Option<usize>, f32, (f32, f32), Build)> = vec![
+            (Some(0), 0.25, (0.0, 1.0), consts(0, 0.25)),
+            (Some(1), 0.25, (0.0, 1.0), consts(1, 0.25)),
+            (Some(1), 0.25, (0.5, 0.5), consts(1, 0.25)),
+            (Some(2), 0.25, (0.0, 1.0), consts(2, 0.25)),
+            (Some(5), 0.25, (0.0, 1.0), consts(5, 0.25)),
+            (Some(7), 0.35, (0.0, 1.0), seeded(7, 0.35)),
+            (Some(64), 0.5, (0.0, 1.0), seeded(64, 0.5)),
+            (Some(1000), 0.1, (0.0, 1.0), consts(1000, 0.1)),
+            (Some(5), 0.0, (0.0, 1.0), consts(5, 0.0)),
+            (Some(5), 1.0, (0.0, 1.0), consts(5, 1.0)),
+            (Some(5), 1.5, (0.0, 1.0), consts(5, 1.5)),
+            (Some(5), -0.5, (0.0, 1.0), consts(5, -0.5)),
+            (Some(5), nan, (0.0, 1.0), consts(5, nan)),
+            (
+                Some(5),
+                0.25,
+                (0.0, 1.0),
+                plain(5, 0.25, c(0.0), c(2.0), c(0.8)),
+            ),
+            (
+                Some(5),
+                0.25,
+                (0.0, 1.0),
+                plain(5, 0.25, c(2.0), c(0.0), c(nan)),
+            ),
+            (
+                Some(5),
+                0.25,
+                (0.0, 1.0),
+                plain(5, 0.25, c(nan), c(inf), c(inf)),
+            ),
+            (Some(4), 0.25, (-1.0, 1.0), consts(4, 0.25)),
+            (Some(4), 0.25, (0.0, 0.5), consts(4, 0.25)),
+            (Some(3), 0.25, (0.0, inf), consts(3, 0.25)),
+            (
+                Some(6),
+                0.3,
+                (0.0, 1.0),
+                plain(6, 0.3, zero.clone(), cubic.clone(), simplex.clone()),
+            ),
+            (
+                Some(5),
+                0.25,
+                (0.0, 1.0),
+                Box::new(move |k: Module| {
+                    let inner = k.terrace(c(0.4), c(0.7), c(0.8), 3, 0.2);
+                    let ramp = nested_cubic.clone().terrace(c(0.4), c(0.7), c(0.8), 4, 0.5);
+                    inner.terrace(ramp, nested_cliff.clone(), c(1.0), 5, 0.25)
+                }),
+            ),
+            (
+                None,
+                0.0,
+                (0.0, 1.0),
+                fixed(&simplex, 7, 0.35, &ramp, &cliff, &height),
+            ),
+            (
+                None,
+                0.0,
+                (0.0, 1.0),
+                fixed(&simplex, 1, 0.35, &ramp, &cliff, &height),
+            ),
+            (
+                None,
+                0.0,
+                (0.0, 1.0),
+                fixed(&perlin, 64, 0.5, &cubic, &zero, &simplex),
+            ),
+        ];
+        let expected: [(usize, u64); 24] = [
+            (18, 0x2119df8b19ee9821),
+            (30, 0x962f09fee93f2a61),
+            (30, 0x962f09fee93f2a61),
+            (42, 0x5cf4a394fc005bd3),
+            (78, 0x17bcf3e0f34db697),
+            (102, 0x64253079cba9b63e),
+            (786, 0xf95cff3f3aafa9e2),
+            (12018, 0x83e3f9604c1f2e55),
+            (78, 0x45d0e71922dcb3fd),
+            (78, 0x22e2943cef5ec9f3),
+            (78, 0x9ec99c7685dec9f3),
+            (78, 0x1c86a9fe14672b7d),
+            (78, 0xb42be868e5a124c7),
+            (78, 0x3fb4a8854088c719),
+            (78, 0x07a1a73b5e5ec9f3),
+            (78, 0x71101621135ec9f3),
+            (66, 0xc90882f17fe04349),
+            (66, 0xa5e3254c0268d349),
+            (54, 0xd2092bd1e2c6ff49),
+            (90, 0xd74a9e768040c84f),
+            (78, 0xb637f2a9331518c1),
+            (12, 0xffed50e4d69499ad),
+            (12, 0x5f8be96e8a503db5),
+            (12, 0x785df491993d4365),
+        ];
+        // The constructor's step table (value, lower, upper per step), the index edges `k / steps` and 0.999999.
+        let edges = |steps: usize, blend_range: f32, (min, max): (f32, f32)| {
+            let spacing = (max - min) / (steps as i32 - 1) as f32;
+            let mut out = Vec::new();
+            for i in 0..steps {
+                let value = i as f32 * spacing;
+                let bound = (spacing - spacing * blend_range) / 2.0;
+                out.extend([value, value - bound, value + bound]);
+            }
+            out.extend((0..=steps).map(|k| k as f32 / steps as f32));
+            out.push(0.999999);
+            out
+        };
+        let specials = [
+            nan,
+            inf,
+            -inf,
+            0.0,
+            -0.0,
+            0.5,
+            1.0,
+            -1.0,
+            2.0,
+            f32::from_bits(1),
+            -f32::from_bits(1),
+            0.999999f32.next_up(),
+        ];
+        let seeds = [0, 1, -1, 17, i32::MAX, i32::MIN, -987654321];
+        let points = [
+            (0.0, 0.0),
+            (12.34, 56.78),
+            (-1234.5, 987.25),
+            (-0.0, 3.5),
+            (f32::NAN, 1.0),
+            (f32::INFINITY, 2.0),
+        ];
+        for (index, ((steps, blend, bounds, build), expected)) in
+            families.iter().zip(expected).enumerate()
+        {
+            let table = steps.map_or_else(Vec::new, |steps| edges(steps, *blend, *bounds));
+            let values: Vec<f32> = table
+                .iter()
+                .flat_map(|&e| [e, e.next_down(), e.next_up()])
+                .chain(specials)
+                .collect();
+            let mut hash = 0xcbf29ce484222325u64;
+            for &v in &values {
+                // A Java module returning `v` with the family's bounds.
+                let graph = build(Module::node(ModuleKind::Constant(v), bounds.0, bounds.1));
+                for seed in seeds {
+                    for (x, y) in points {
+                        let bits = match std::panic::catch_unwind(|| {
+                            graph.try_value_seed_first(seed, x, y)
+                        }) {
+                            Ok(value) => {
+                                let value = value.unwrap();
+                                if value.is_nan() {
+                                    0x7fc0_0000
+                                } else {
+                                    value.to_bits()
+                                }
+                            }
+                            Err(_) => 0xffff_ffff,
+                        };
+                        hash = (hash ^ u64::from(bits)).wrapping_mul(0x100000001b3);
+                    }
+                }
+            }
+            assert_eq!((values.len(), hash), expected, "family {index}");
+        }
+    }
+
+    #[test]
+    fn seeded_terrace_matches_reseeding_and_evaluates_children_lazily() {
+        // Over non-Perlin sources with finite, nonzero ranges, reseeding and seed-first sampling seed the same
+        // sources and use the same steps (both from the constructor's bounds), so they give the same bits.
+        let src = |kind, seed, octaves| {
+            Module::source(Source::new(
+                kind,
+                SourceConfig {
+                    seed,
+                    octaves,
+                    frequency: 0.2,
+                    ..SourceConfig::default()
+                },
+            ))
+        };
+        let source = src(SourceKind::Simplex, i32::MAX, 2);
+        let ramp = src(SourceKind::Cubic, -91, 3);
+        let cliff = src(SourceKind::Simplex2, i32::MIN, 2);
+        let height = src(SourceKind::Ridge, 17, 2);
+        for steps in [1, 2, 7, 64] {
+            let graph =
+                source
+                    .clone()
+                    .terrace(ramp.clone(), cliff.clone(), height.clone(), steps, 0.35);
+            for seed in [0, 1, -1, 17, i32::MAX, i32::MIN] {
+                let reseeded = graph.with_seed(i64::from(seed));
+                for (x, y) in [(0.0, 0.0), (12.34, -56.78), (-0.0, 3.5), (1e30, 3.0)] {
+                    assert_eq!(
+                        canonical_bits([graph.try_value_seed_first(seed, x, y).unwrap()]),
+                        canonical_bits([reseeded.value(x, y)]),
+                        "steps {steps}, seed {seed}, ({x}, {y})"
+                    );
+                }
+            }
+        }
+        // Five steps over 0..1 (windows ±0.09375 around 0, 0.25, ...; ramp 0.8, cliff 0.65): flat samples read no
+        // child, the window reads ramp and cliff, and only alpha above the ramp reads the ramp height.
+        let unsupported = unsupported_seeded_node(0.5);
+        let c = Module::constant;
+        let terrace = |value, ramp: &Module, cliff: &Module, height: &Module| {
+            Module::node(ModuleKind::Constant(value), 0.0, 1.0)
+                .terrace(ramp.clone(), cliff.clone(), height.clone(), 5, 0.25)
+                .try_value_seed_first(1, 0.0, 0.0)
+        };
+        for value in [0.12, 0.999] {
+            assert!(terrace(value, &unsupported, &unsupported, &unsupported).is_ok());
+        }
+        for value in [0.05, 0.25, 0.34] {
+            assert!(terrace(value, &unsupported, &c(0.7), &c(0.8)).is_err());
+            assert!(terrace(value, &c(0.4), &unsupported, &c(0.8)).is_err());
+        }
+        assert!(terrace(0.25, &c(0.4), &c(0.7), &unsupported).is_ok());
+        assert!(terrace(0.34, &c(0.4), &c(0.7), &unsupported).is_err());
     }
 
     #[test]
