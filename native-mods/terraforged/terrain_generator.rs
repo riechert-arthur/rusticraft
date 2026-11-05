@@ -102,18 +102,20 @@ pub fn available_processors() -> i32 {
     std::thread::available_parallelism().map_or(1, |n| i32::try_from(n.get()).unwrap_or(i32::MAX))
 }
 
-/// The part of TerraForged's `INoiseGenerator` that `TerrainGenerator` uses. As in the mod, the seed is
-/// bound into the generator (Java's `with(seed, levels)`), so calls take only coordinates. The rest of the
-/// interface (`with`, `getContinent`, `getNoiseSample`, `sample`, `find`) comes with the noise generator.
+/// The part of TerraForged's `INoiseGenerator` that `TerrainGenerator` uses, seed-first as in the newer source
+/// (6dd607eb: `getHeightNoise(seed, x, z)`, `generate(seed, chunkX, chunkZ, consumer)`). The 1.18.2-0.3.1 jar binds
+/// the seed into the generator instead (`with(seed, levels)`) and its calls take only coordinates; a jar caller passes
+/// the seed it bound, which a jar generator ignores. The rest of the interface (`getContinent`, `getNoiseSample`,
+/// `sample`, `find`) is not part of the trait yet.
 pub trait NoiseGenerator: Send + Sync {
     fn levels(&self) -> NoiseLevels;
 
     fn terrain_levels(&self) -> TerrainLevels;
 
-    fn height_noise(&self, x: i32, z: i32) -> f32;
+    fn height_noise(&self, seed: i32, x: i32, z: i32) -> f32;
 
     /// Fills one chunk's `NoiseData` and hands it to `consumer` (Java's `Consumer<NoiseData>`).
-    fn generate(&self, chunk_x: i32, chunk_z: i32, consumer: &mut dyn FnMut(&NoiseData));
+    fn generate(&self, seed: i32, chunk_x: i32, chunk_z: i32, consumer: &mut dyn FnMut(&NoiseData));
 
     /// `getNoiseCoord`: `coord * getLevels().frequency` in `float` math.
     fn noise_coordinate(&self, coordinate: i32) -> f32 {
@@ -123,8 +125,8 @@ pub trait NoiseGenerator: Send + Sync {
 
 type TerrainDataFactory = Box<dyn Fn() -> TerrainData + Send + Sync>;
 
-/// TerraForged's `worldgen.terrain.TerrainGenerator` (1.18.2-0.3.1): turns a noise generator's chunk noise
-/// into `TerrainData`. Its pool (capacity `Environment.CORES`) never hands out restored data: every
+/// TerraForged's `worldgen.terrain.TerrainGenerator` (1.18.2-0.3.1; the newer source's only adds the seed parameters):
+/// turns a noise generator's chunk noise into `TerrainData`. Its pool (capacity `Environment.CORES`) never hands out restored data: every
 /// `generate` fills a fresh `TerrainData`.
 pub struct TerrainGenerator<N> {
     levels: TerrainLevels,
@@ -150,18 +152,20 @@ impl<N: NoiseGenerator> TerrainGenerator<N> {
         self.terrain_data_pool.restore(terrain_data);
     }
 
-    pub fn generate(&self, chunk_x: i32, chunk_z: i32) -> TerrainData {
+    /// `generate(seed, chunkX, chunkZ)` (the jar's `generate(chunkX, chunkZ)` with its bound seed).
+    pub fn generate(&self, seed: i32, chunk_x: i32, chunk_z: i32) -> TerrainData {
         let mut terrain_data = self.terrain_data_pool.take();
         self.noise_generator
-            .generate(chunk_x, chunk_z, &mut |noise_data| {
+            .generate(seed, chunk_x, chunk_z, &mut |noise_data| {
                 terrain_data.accept(noise_data)
             });
         terrain_data
     }
 
-    /// `getHeight(x, z)`: `levels.getHeight(levels.getScaledHeight(noise.getHeightNoise(x, z)))`.
-    pub fn height(&self, x: i32, z: i32) -> i32 {
-        let height_noise = self.noise_generator.height_noise(x, z);
+    /// `getHeight(seed, x, z)`: `levels.getHeight(levels.getScaledHeight(noise.getHeightNoise(seed, x, z)))` (the
+    /// jar's `getHeight(x, z)` with its bound seed).
+    pub fn height(&self, seed: i32, x: i32, z: i32) -> i32 {
+        let height_noise = self.noise_generator.height_noise(seed, x, z);
         self.levels.height(self.levels.scaled_height(height_noise))
     }
 }
@@ -241,6 +245,8 @@ mod tests {
         kind: i32,
         terrains: Arc<TerrainRegistry>,
         generated: AtomicI32,
+        /// The jar's stub generator has no seed: the test checks the seed is passed through, never used.
+        seed: i32,
     }
 
     impl NoiseGenerator for Noise {
@@ -252,11 +258,19 @@ mod tests {
             self.levels
         }
 
-        fn height_noise(&self, x: i32, z: i32) -> f32 {
+        fn height_noise(&self, seed: i32, x: i32, z: i32) -> f32 {
+            assert_eq!(seed, self.seed);
             value(x, z, 1, self.kind)
         }
 
-        fn generate(&self, chunk_x: i32, chunk_z: i32, consumer: &mut dyn FnMut(&NoiseData)) {
+        fn generate(
+            &self,
+            seed: i32,
+            chunk_x: i32,
+            chunk_z: i32,
+            consumer: &mut dyn FnMut(&NoiseData),
+        ) {
+            assert_eq!(seed, self.seed);
             self.generated.fetch_add(1, Ordering::SeqCst);
             let mut data = NoiseData::new(&self.terrains);
             let mut sample = NoiseSample::new(&self.terrains);
@@ -265,7 +279,7 @@ mod tests {
                     let wx = chunk_x.wrapping_shl(4).wrapping_add(x);
                     let wz = chunk_z.wrapping_shl(4).wrapping_add(z);
                     sample.reset(&self.terrains);
-                    sample.height_noise = self.height_noise(wx, wz);
+                    sample.height_noise = self.height_noise(seed, wx, wz);
                     sample.base_noise = value(wx, wz, 2, self.kind);
                     sample.river_noise = if hash(wx, wz, 3) & 3 == 0 {
                         0.0
@@ -348,8 +362,11 @@ mod tests {
             (134_217_727, -134_217_728),
             (i32::MAX, i32::MIN),
         ];
+        // The jar's generators bind their seed (`with`); its stub ignores it, so any seed gives the jar's bits.
+        let seeds = [0, -1, i32::MIN, 1_234_567_891];
         for (l, &level) in levels.iter().enumerate() {
             for kind in 0..2 {
+                let seed = seeds[l];
                 let generator = TerrainGenerator::new(
                     level,
                     Noise {
@@ -357,13 +374,14 @@ mod tests {
                         kind,
                         terrains: Arc::clone(&terrains),
                         generated: AtomicI32::new(0),
+                        seed,
                     },
                 );
                 let noise = generator.noise_generator();
                 write!(out, "H {l} {kind} true").unwrap();
                 for z in coords {
                     for x in coords {
-                        write!(out, " {}", generator.height(x, z)).unwrap();
+                        write!(out, " {}", generator.height(seed, x, z)).unwrap();
                     }
                 }
                 for c in coords {
@@ -371,7 +389,7 @@ mod tests {
                 }
                 out.push('\n');
                 for (cx, cz) in chunks {
-                    let data = generator.generate(cx, cz);
+                    let data = generator.generate(seed, cx, cz);
                     write!(
                         out,
                         "G {l} {kind} {cx} {cz} {} false {} {} {}",
@@ -429,6 +447,7 @@ mod tests {
                 kind: 0,
                 terrains: Arc::clone(&terrains),
                 generated: AtomicI32::new(0),
+                seed: 42,
             },
         );
         let snapshot = |data: &TerrainData| {
@@ -452,7 +471,7 @@ mod tests {
         let expected: Vec<String> = chunks
             .iter()
             .map(|&(x, z)| {
-                let data = generator.generate(x, z);
+                let data = generator.generate(42, x, z);
                 let text = snapshot(&data);
                 generator.restore(data);
                 text
@@ -465,7 +484,7 @@ mod tests {
                         chunks
                             .iter()
                             .map(|&(x, z)| {
-                                let data = generator.generate(x, z);
+                                let data = generator.generate(42, x, z);
                                 let text = snapshot(&data);
                                 generator.restore(data);
                                 text

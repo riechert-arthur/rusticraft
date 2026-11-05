@@ -29,7 +29,7 @@ use super::{
     terraforged_engine::{ControlPoints, Terrain, TerrainProperties},
     terraforged_terrain_blender::{Blender, TerrainBlender},
     terraforged_terrain_data::{NoiseData, NoiseSample},
-    terraforged_terrain_levels::TerrainLevels,
+    terraforged_terrain_levels::{NoiseLevels, TerrainLevels},
     terraforged_util::{pack, unpack_left_float, unpack_right_float},
 };
 
@@ -343,7 +343,39 @@ impl NoiseGenerator {
     }
 }
 
-/// `createOceanTerrain`: `Source.simplex(OCEAN_OFFSET, 64, 3).scale(0.4)`.
+/// The newer source's `INoiseGenerator` methods that `TerrainGenerator` calls, delegating to the seed-first
+/// [`NoiseGenerator::height_noise`] and [`NoiseGenerator::generate`] with the call's seed. Those return `Err` only for
+/// a graph with a custom (closure) module, which TerraForged's graphs never contain; the trait has no error, so this
+/// panics there, as Java throws out of `getHeightNoise`/`generate`. The trait's `levels` is Java's `getLevels` (the
+/// noise levels); the inherent [`NoiseGenerator::levels`] is `getTerrainLevels`, which method calls on the struct
+/// itself pick.
+impl super::terraforged_terrain_generator::NoiseGenerator for NoiseGenerator {
+    fn levels(&self) -> NoiseLevels {
+        self.levels.noise_levels
+    }
+
+    fn terrain_levels(&self) -> TerrainLevels {
+        self.levels
+    }
+
+    fn height_noise(&self, seed: i32, x: i32, z: i32) -> f32 {
+        NoiseGenerator::height_noise(self, seed, x, z)
+            .unwrap_or_else(|error| panic!("NoiseGenerator.getHeightNoise: {error}"))
+    }
+
+    fn generate(
+        &self,
+        seed: i32,
+        chunk_x: i32,
+        chunk_z: i32,
+        consumer: &mut dyn FnMut(&NoiseData),
+    ) {
+        NoiseGenerator::generate(self, seed, chunk_x, chunk_z, consumer)
+            .unwrap_or_else(|error| panic!("NoiseGenerator.generate: {error}"));
+    }
+}
+
+/// `createOceanTerrain`:`Source.simplex(OCEAN_OFFSET, 64, 3).scale(0.4)`.
 fn create_ocean_terrain() -> Module {
     Module::source(Source::new(
         SourceKind::Simplex,
@@ -362,6 +394,7 @@ mod tests {
     use super::super::{
         terraforged_context::{GeneratorContext, GeneratorSettings},
         terraforged_terrain_blender::TerrainNoise,
+        terraforged_terrain_data::TerrainData,
     };
     use super::*;
     use std::{
@@ -1013,6 +1046,68 @@ chunk 2 1 -2147483648 -40 -16 c04ac2241d15e3ce 0";
                 assert!(data.sample().terrain_type.is_same(&last.terrain_type));
             })
             .unwrap();
+    }
+
+    /// `TerrainGenerator` reaches the seed-first methods through the trait with the call's seed: its heights and chunk
+    /// data are the inherent `height_noise`/`generate` ones, and a failing chunk panics (Java throws).
+    #[test]
+    fn terrain_generator_calls_the_seeded_generator() {
+        use super::super::terraforged_terrain_generator::{
+            NoiseGenerator as INoiseGenerator, TerrainGenerator,
+        };
+        let reference = generator(0, 1);
+        let levels = reference.levels();
+        let terrain = TerrainGenerator::new(levels, generator(0, 1));
+        assert_eq!(
+            INoiseGenerator::levels(terrain.noise_generator())
+                .frequency
+                .to_bits(),
+            levels.noise_levels.frequency.to_bits()
+        );
+        for seed in [0, -17, i32::MIN] {
+            for (x, z) in [(0, 0), (-640, -256), (384, 256), (-1, 12_345)] {
+                let noise = reference.height_noise(seed, x, z).unwrap();
+                assert_eq!(
+                    terrain.height(seed, x, z),
+                    levels.height(levels.scaled_height(noise))
+                );
+            }
+            let data = terrain.generate(seed, -40, -16);
+            reference
+                .generate(seed, -40, -16, |noise| {
+                    let mut expected = TerrainData::new(levels);
+                    expected.accept(noise);
+                    for z in 0..16 {
+                        for x in 0..16 {
+                            assert_eq!(
+                                data.height().get(x, z).to_bits(),
+                                expected.height().get(x, z).to_bits()
+                            );
+                            assert_eq!(
+                                data.river().get(x, z).to_bits(),
+                                expected.river().get(x, z).to_bits()
+                            );
+                            assert_eq!(data.height_at(x, z), expected.height_at(x, z));
+                        }
+                    }
+                })
+                .unwrap();
+            terrain.restore(data);
+        }
+        let custom = generator_with(0, |context| {
+            vec![Arc::new(TerrainNoise::new(
+                context.terrain.get_by_name("hills").unwrap(),
+                1.0,
+                Module::custom(0.0, 1.0, |_, _| 0.25),
+            ))]
+        });
+        let (chunk_x, chunk_z) = (-8..=8)
+            .map(|i| ((i * 613 - 211) >> 4, 97 >> 4))
+            .find(|&(x, z)| custom.generate(0, x, z, |_| {}).is_err())
+            .unwrap();
+        let failing = TerrainGenerator::new(levels, custom);
+        let result = catch_unwind(AssertUnwindSafe(|| failing.generate(0, chunk_x, chunk_z)));
+        assert!(result.is_err());
     }
 
     /// A chunk with a land cell fails on a custom terrain noise without calling the consumer (Java throws out of the
