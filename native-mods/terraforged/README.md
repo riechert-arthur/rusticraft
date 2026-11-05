@@ -2114,12 +2114,18 @@ The structure terrain columns (`structure_terrain.rs`, `StructureTerrain`) are T
 fastutil's sort), each column raises the ground towards every piece standing above it until a piece covering the
 column is found, with Java's `max(4, 20 - length)` blend radius and `pow(alpha, 2 - alpha)` falloff, then fills
 stone from the column's OCEAN_FLOOR_WG height up to the raised level and carves air through the highest covering
-piece, from its floor (box `minY` plus a pool piece's ground-level delta) to its roof, raised by half the depth to the
-highest piece floor or surface above it inside an ellipse over the box. `modify` returns the new OCEAN_FLOOR_WG height
+piece, from its floor (box `minY` plus a pool piece's ground-level delta) to its roof; when the highest floor of all
+the pieces, or the column's new surface, is more than 5 blocks above the roof, the roof rises by half that depth
+times an ellipse falloff over the box (`NoiseUtil.round`). `modify` returns the new OCEAN_FLOOR_WG height
 when it changed the column, the value Java writes into `TerrainData`'s height map. Not ported here: collecting the
 pieces (`startsForStructure` with BEARD_BOX/BEARD_THIN structures, `isCloseToChunk(pos, 20)`, rigid pool elements),
 the chunk adapter and the height-map write. Reimagined a24d450 changes the blend radius (`clamp(length * 0.75, 8,
-24)`, collection radius 32) and skips buried structures; the port keeps 6dd607eb's.
+24)`, collection radius 32) and skips buried structures; the port keeps 6dd607eb's. `StructureTerrainOracle.java`
+(`.local/terraforged/oracles/structure_terrain/`, `run.sh`) compiles 6dd607eb's `StructureTerrain.java` unchanged, with
+fastutil's `ObjectArrayList` and Noise2D's `NoiseUtil`, over stub chunks and runs `buildStructureTerrain`'s column loop
+on 96 generated chunks (negative chunk positions, tied `minY`s, pool ground deltas, surfaces near both build limits);
+the test matches its ordered block writes and height-map writes in debug and release, interpreted and JIT-compiled
+alike.
 
 **World height.** TerraForged's heights count from block 0 up to `levels.maxY` (480 by default), and Reimagined
 widens the overworld to `-64..960` so that its terrain always fits. Horizon 26.3's overworld is `-64..320`, and the

@@ -24,6 +24,7 @@
 
 use super::terraforged::{clamp, java_max, java_pow, lerp, round};
 
+/// A structure piece's `BoundingBox` (inclusive block bounds).
 #[derive(Clone, Copy, Debug)]
 pub struct Bounds {
     pub min_x: i32,
@@ -34,6 +35,8 @@ pub struct Bounds {
     pub max_z: i32,
 }
 
+/// One rigid structure piece `StructureTerrain`'s constructor keeps; `ground_delta` is a pool piece's
+/// `getGroundLevelDelta()` (0 for any other piece, as `getPieceY`).
 #[derive(Clone, Copy, Debug)]
 pub struct Piece {
     pub bounds: Bounds,
@@ -41,33 +44,45 @@ pub struct Piece {
 }
 
 impl Piece {
+    /// `getPieceY`: the box's `minY` plus the ground delta (Java `int` wrap).
     pub fn floor(self) -> i32 {
         self.bounds.min_y.wrapping_add(self.ground_delta)
     }
 }
 
+/// The two blocks `modify` writes: `Blocks.STONE` (raising) and `Blocks.AIR` (carving).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Fill {
     Stone,
     Air,
 }
 
+/// The chunk as `modify` sees it: `ocean_floor` is `chunk.getHeight(OCEAN_FLOOR_WG, x, z)` (the topmost
+/// motion-blocking block, reflecting earlier writes), `set` is `setBlockState(pos, state, false)` (a chunk drops
+/// writes outside its build range, as `ProtoChunk` does). Coordinates are world block coordinates.
 pub trait Columns {
     type Error;
     fn ocean_floor(&self, x: i32, z: i32) -> i32;
     fn set(&mut self, x: i32, y: i32, z: i32, fill: Fill) -> Result<(), Self::Error>;
 }
 
+/// TerraForged 6dd607eb's `worldgen.terrain.StructureTerrain` without its constructor's piece collection.
 pub struct StructureTerrain {
     pieces: Vec<Piece>,
 }
 
 impl StructureTerrain {
+    /// The constructor's `rigids.sort(PIECE_SORTER)`: pieces by box `minY`, stable (fastutil's sort), from the
+    /// pieces the caller collected (BEARD_BOX/BEARD_THIN starts, close to the chunk, rigid pool elements).
     pub fn from_rigid_pieces(mut pieces: Vec<Piece>) -> Self {
         pieces.sort_by_key(|piece| piece.bounds.min_y);
         Self { pieces }
     }
 
+    /// `modify(x, z, chunk, terrainData)` for one column (world block coordinates): raises the ground towards the
+    /// pieces above it, carves the highest piece covering the column, and returns the new OCEAN_FLOOR_WG height
+    /// when it raised or carved (the value Java writes into `terrainData.getHeight()`), else `None`. A failed write
+    /// stops at once with the error (Java has none).
     pub fn modify<C: Columns>(
         &self,
         x: i32,
@@ -122,6 +137,7 @@ impl StructureTerrain {
     }
 }
 
+/// `StructureTerrain.raise`: the surface lerped towards `level` by `pow(alpha, 2 - alpha)` of the distance alpha.
 pub fn raise(x: i32, z: i32, bounds: Bounds, level: f32, surface: f32, radius: f32) -> f32 {
     let radius_squared = java_max(1.0, radius * radius);
     let alpha = 1.0 - distance_alpha(x, z, bounds, radius_squared);
@@ -129,6 +145,7 @@ pub fn raise(x: i32, z: i32, bounds: Bounds, level: f32, surface: f32, radius: f
     lerp(surface, level, alpha)
 }
 
+/// `getEllipseDistAlpha`: `1 - (dx/rx)^2 - (dz/rz)^2` over the box's centre, clamped to 0..1.
 pub fn ellipse_alpha(x: i32, z: i32, bounds: Bounds) -> f32 {
     let radius_x = bounds.max_x.wrapping_sub(bounds.min_x).wrapping_add(1) as f32 * 0.5;
     let radius_z = bounds.max_z.wrapping_sub(bounds.min_z).wrapping_add(1) as f32 * 0.5;
@@ -141,6 +158,8 @@ pub fn ellipse_alpha(x: i32, z: i32, bounds: Bounds) -> f32 {
     clamp(1.0 - qx - qz, 0.0, 1.0)
 }
 
+/// `getDistAlpha(x, z, box, radius2)`: the squared distance outside the box (`int` math) over `radius_squared`,
+/// 0 inside the box, 1 at or beyond the radius, else its square root.
 pub fn distance_alpha(x: i32, z: i32, bounds: Bounds, radius_squared: f32) -> f32 {
     let dx = 0.max(
         bounds
@@ -193,6 +212,8 @@ mod tests {
         }
     }
 
+    /// The PR's original fixture (`oracles/structure_terrain/run_structure_columns_oracle.py`: 6dd607eb's methods
+    /// from `modify` on over one column, folding only y and the block).
     #[test]
     fn column_edits_match_original_java_methods() {
         let low = Piece {
@@ -468,6 +489,7 @@ mod tests {
         }
     }
 
+    /// Equal `minY`s keep the caller's order (fastutil's stable sort): the first piece's ground delta wins.
     #[test]
     fn tied_piece_heights_keep_input_order() {
         let bounds = Bounds {
