@@ -23,10 +23,14 @@
  */
 
 use super::terraforged_terrain_generator::available_processors;
-use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::{
+    panic::RefUnwindSafe,
+    sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard},
+};
 
-/// The removal listener of a [`ConcurrentLossyCache`] (Java's `Consumer<T> removalListener`).
-pub type RemovalListener<T> = Box<dyn Fn(Arc<T>) + Send + Sync>;
+/// The removal listener of a [`ConcurrentLossyCache`] (Java's `Consumer<T> removalListener`). It is
+/// `RefUnwindSafe` so that a cache stays usable inside `Module::custom` closures.
+pub type RemovalListener<T> = Box<dyn Fn(Arc<T>) + Send + Sync + RefUnwindSafe>;
 
 /// One slot of a bucket: Java's `keys[index]` and `values[index]`, plus the seed the value was
 /// computed with (see [`ConcurrentLossyCache`]). An empty slot has Java's initial key `Long.MIN_VALUE`.
@@ -365,6 +369,12 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn caches_are_shareable() {
+        fn shareable<T: Send + Sync + RefUnwindSafe>() {}
+        shareable::<ConcurrentLossyCache<Vec<u64>>>();
     }
 
     #[test]
