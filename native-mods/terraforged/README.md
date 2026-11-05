@@ -1601,13 +1601,19 @@ release, check which children each sample reads, and that reseeding gives the sa
 `LegacyTerrace` (`Module.legacyTerrace(lowerCurve, upperCurve, steps, blendRange)`) is seed-first too: Noise2D
 2cb4843's class is the jar's apart from the seed parameter. The source is sampled with the call's seed, clamped to 0..1
 and rounded (`NoiseUtil.round(value * maxIndex)`) to an index into the step table fixed in the constructor (shared with
-the seedless path). Inside a step's window, and below the first step or above the last, it returns the step value
+the seedless path). Inside a step's window, and below the first step's window or above the last's, it returns the step value
 without reading a curve; below the window it eases down from the previous step through Curve3 scaled by `upperCurve`,
 above it up to the next step scaled by `lowerCurve`, each curve sampled with the call's seed. As in Java, a sample
 below the first step's window returns that step without checking the upper window (a blend range above 1 inverts
 the windows). No `NoiseUtil.map` is involved. A NaN sample rounds to the first step; a legacy terrace without steps
 panics where Java throws. `TerraForgedSeededLegacyTerraceOracle.java` (the PR's legacy terrace over seeded
-Simplex/Perlin2/Simplex2 sources, four seeds, four points) runs in the same `run-graphs.sh`.
+Simplex/Perlin2/Simplex2 sources, four seeds, four points) and `SeededLegacyTerraceEdgeOracle.java` (24 families with
+the source at and one ulp beside every step value, window bound and rounding edge `(k + 0.5) / maxIndex`, plus NaN,
+±inf, ±0 and subnormals; 0, 1, 2, 5, 7, 64 and 1000 steps; zero, one, inverted, negative and NaN blend ranges; zero,
+NaN and infinite curves; zero, wide, narrow and infinite source ranges; nested legacy terraces and legacy terraces of
+seeded sources; seven seeds including both `int` extremes; six points with NaN, infinity and -0) run in the same
+`run-graphs.sh` (`.local/terraforged/oracles/seed_first/`, outside Git); the tests match both bit for bit in debug and
+release, check which curve each sample reads, and that reseeding gives the same bits over non-Perlin sources.
 
 The bounded concurrent lossy cache (`lossy_cache.rs`, `ConcurrentLossyCache`) ports the newer source tree's
 `LossyCache.Concurrent` and its `LossyCache.Stamped` buckets (`com.terraforged.mod.util.storage`, 6dd607eb). The
