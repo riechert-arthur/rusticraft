@@ -6116,6 +6116,62 @@ mod tests {
         }
     }
 
+    /// The river network (#125) and `ContinentNoise` (#128) inline their `Domain.warp(x, y, constant)` as
+    /// `x + (-0.5 + axis) * strength`; that is the generic seed-first `DomainWarp` bit for bit (its `Map` of a 0..1
+    /// axis is `-0.5 + value`), so either can move onto [`Domain`] without changing output.
+    #[test]
+    fn seeded_domain_warp_matches_inlined_river_and_continent_warps() {
+        let simplex = |seed| {
+            Source::new(
+                SourceKind::Simplex,
+                SourceConfig {
+                    seed,
+                    frequency: 30.0,
+                    ..SourceConfig::default()
+                },
+            )
+        };
+        let perlin2 = |seed| {
+            Source::new(
+                SourceKind::Perlin2,
+                SourceConfig {
+                    seed,
+                    octaves: 3,
+                    lacunarity: 2.2,
+                    frequency: 3.0,
+                    gain: 0.3,
+                    ..SourceConfig::default()
+                },
+            )
+        };
+        let cases = [
+            (simplex(8_657_124), simplex(5_123_678), 0.004),
+            (perlin2(-1_234_567), perlin2(i32::MAX), 0.2),
+        ];
+        for (warp_x, warp_y, strength) in cases {
+            let domain = Domain::domain_warp(
+                Module::source(warp_x.clone()),
+                Module::source(warp_y.clone()),
+                Module::constant(strength),
+            );
+            for seed in [0, 17, -91, i32::MIN, i32::MAX] {
+                for i in -20..20 {
+                    let (x, y) = (i as f32 * 0.173 - 0.031, i as f32 * -2.71 + 1e4);
+                    let inlined_x = x + (-0.5 + warp_x.value_seed_first(seed, x, y)) * strength;
+                    let inlined_y = y + (-0.5 + warp_y.value_seed_first(seed, x, y)) * strength;
+                    assert_eq!(
+                        domain.try_x_seed_first(seed, x, y).unwrap().to_bits(),
+                        inlined_x.to_bits()
+                    );
+                    assert_eq!(
+                        domain.try_y_seed_first(seed, x, y).unwrap().to_bits(),
+                        inlined_y.to_bits()
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn seeded_domains_propagate_unsupported_children() {
         let unsupported = Module::constant(0.5).cache();
