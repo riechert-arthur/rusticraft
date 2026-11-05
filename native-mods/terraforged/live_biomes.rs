@@ -97,6 +97,13 @@ pub struct LiveBiomeBindings {
     cave: CaveBiomeSampler<BiomeId>,
 }
 
+// Chunk workers share one set of bindings (and the surface sampler built over it).
+const _: () = {
+    const fn send_sync<T: Send + Sync>() {}
+    send_sync::<LiveBiomeBindings>();
+    send_sync::<CurrentSurfaceBiomeSampler<'static, BiomeId>>();
+};
+
 impl LiveBiomeBindings {
     /// [`Self::bind`] over Horizon's loaded biome registry and its resolved tags.
     pub fn from_generator_data(
