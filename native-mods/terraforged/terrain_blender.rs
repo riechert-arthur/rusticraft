@@ -32,6 +32,7 @@ use super::terraforged_util::{
     pack_floats, unpack_left, unpack_left_float, unpack_right, unpack_right_float,
 };
 use std::cell::RefCell;
+use std::convert::Infallible;
 use std::sync::Arc;
 
 /// `TerrainBlender.REGION_SEED_OFFSET`, added to the world seed's low 32 bits for the cell hashes.
@@ -101,6 +102,11 @@ impl Weighted for TerrainNoise {
 /// generator: the point is warped and scaled into a grid of jittered cells; each cell's hash picks a terrain from the
 /// weight map, and points near the border of their nearest cell blend in the neighbouring cells' terrain noises.
 /// As in the jar, the seed is bound when the blender is built; [`TerrainBlender::with_seed`] builds a new one.
+///
+/// The `try_*_seed_first` methods are the newer source's (6dd607eb) seed-first `TerrainBlender`, whose bytecode is
+/// the jar's but for the seed: the cells hash from the call's `seed + 21491124` (the constructor's seed reaches
+/// only the warp, whose noises add the call's seed to their own, as Noise2D 2cb4843 does, like every terrain
+/// noise). They return an error where a module is not seed-first (a custom module) instead of sampling it seedless.
 pub struct TerrainBlender {
     region_seed: i32,
     scale: i32,
@@ -167,17 +173,13 @@ impl TerrainBlender {
     /// blenders, which is the same since `getValue` overwrites all its state). Its cache is cleared afterwards, so
     /// it holds no terrain past the call; a nested call on the same thread uses a fresh blender.
     pub fn value(&self, x: f32, z: f32) -> f32 {
-        thread_local! {
-            static BLENDER: RefCell<Blender> = RefCell::new(Blender::new());
-        }
-        BLENDER.with(|blender| match blender.try_borrow_mut() {
-            Ok(mut blender) => {
-                let value = self.value_with(x, z, &mut blender);
-                blender.cache.clear();
-                value
-            }
-            Err(_) => self.value_with(x, z, &mut Blender::new()),
-        })
+        with_local_blender(|blender| self.value_with(x, z, blender))
+    }
+
+    /// The newer source's `getValue(seed, x, z)`: [`TerrainBlender::try_value_with_seed_first`] with this thread's
+    /// [`Blender`], as [`TerrainBlender::value`].
+    pub fn try_value_seed_first(&self, seed: i32, x: f32, z: f32) -> Result<f32, &'static str> {
+        with_local_blender(|blender| self.try_value_with_seed_first(seed, x, z, blender))
     }
 
     /// `getValue(x, z, blender)`: finds the point's cells, then blends. Panics where Java throws: when no cell's
@@ -188,6 +190,28 @@ impl TerrainBlender {
         let region_z = self.warp.y(x, z) * self.frequency;
         get_cell(self.region_seed, region_x, region_z, self.jitter, blender);
         blender.value(x, z, self.blending, &self.terrains)
+    }
+
+    /// The newer source's `getValue(seed, x, z, blender)`: the warp read seed-first (x, then z), the cells hashed
+    /// from `seed + REGION_SEED_OFFSET` (Java `int` wrap; the constructor's seed is not used there), then
+    /// [`Blender::try_value_seed_first`]. Panics where [`TerrainBlender::value_with`] does.
+    pub fn try_value_with_seed_first(
+        &self,
+        seed: i32,
+        x: f32,
+        z: f32,
+        blender: &mut Blender,
+    ) -> Result<f32, &'static str> {
+        let region_x = self.warp.try_x_seed_first(seed, x, z)? * self.frequency;
+        let region_z = self.warp.try_y_seed_first(seed, x, z)? * self.frequency;
+        get_cell(
+            seed.wrapping_add(REGION_SEED_OFFSET),
+            region_x,
+            region_z,
+            self.jitter,
+            blender,
+        );
+        blender.try_value_seed_first(seed, x, z, self.blending, &self.terrains)
     }
 
     /// `getBlenderResource()`: a fresh [`Blender`].
@@ -217,23 +241,63 @@ impl TerrainBlender {
         max_radius: i32,
         terrain: &Terrain,
     ) -> Option<PositionFinder<impl FnMut(&mut SpiralIterator) -> i64 + use<>>> {
+        let (lower, upper) = self.band(terrain)?;
+        let spiral = self.iterator(x, z, min_radius, max_radius);
+        Some(self.finder(self.region_seed, lower, upper, spiral))
+    }
+
+    /// The newer source's `findNearest(seed, x, z, minRadius, maxRadius, terrain)`: [`TerrainBlender::find_nearest`]
+    /// with the spiral from [`TerrainBlender::try_iterator_seed_first`] and the cells hashed from `seed +
+    /// REGION_SEED_OFFSET` (`int` wrap). `Ok(None)` (Java's null) when no terrain noise has the name; the warp is read
+    /// only after that lookup, as in Java.
+    pub fn try_find_nearest_seed_first(
+        &self,
+        seed: i32,
+        x: f32,
+        z: f32,
+        min_radius: i32,
+        max_radius: i32,
+        terrain: &Terrain,
+    ) -> Result<Option<PositionFinder<impl FnMut(&mut SpiralIterator) -> i64 + use<>>>, &'static str>
+    {
+        let Some((lower, upper)) = self.band(terrain) else {
+            return Ok(None);
+        };
+        let spiral = self.try_iterator_seed_first(seed, x, z, min_radius, max_radius)?;
+        Ok(Some(self.finder(
+            seed.wrapping_add(REGION_SEED_OFFSET),
+            lower,
+            upper,
+            spiral,
+        )))
+    }
+
+    /// `findNearest`'s lookup: the band (`getBand`, unpacked) of the first terrain noise whose terrain has the
+    /// terrain's name (`String.equals`), or `None` (Java's null).
+    fn band(&self, terrain: &Terrain) -> Option<(f32, f32)> {
         let noise = self
             .terrains
             .find(|candidate| candidate.terrain().name() == terrain.name())?;
         let band = self.terrains.band(noise);
-        let lower = unpack_left_float(band);
-        let upper = unpack_right_float(band);
-        let (seed, jitter, frequency) = (self.region_seed, self.jitter, self.frequency);
-        Some(
-            self.iterator(x, z, min_radius, max_radius)
-                .finder(move |spiral| {
-                    let position = find(seed, jitter, lower, upper, spiral);
-                    pack_floats(
-                        unpack_left_float(position) / frequency,
-                        unpack_right_float(position) / frequency,
-                    )
-                }),
-        )
+        Some((unpack_left_float(band), unpack_right_float(band)))
+    }
+
+    /// `findNearest`'s finder lambda over `spiral`, hashing the cells from `region_seed`.
+    fn finder(
+        &self,
+        region_seed: i32,
+        lower: f32,
+        upper: f32,
+        spiral: SpiralIterator,
+    ) -> PositionFinder<impl FnMut(&mut SpiralIterator) -> i64 + use<>> {
+        let (jitter, frequency) = (self.jitter, self.frequency);
+        spiral.finder(move |spiral| {
+            let position = find(region_seed, jitter, lower, upper, spiral);
+            pack_floats(
+                unpack_left_float(position) / frequency,
+                unpack_right_float(position) / frequency,
+            )
+        })
     }
 
     /// `iterator(x, z, minRadius, maxRadius)`: the [`SpiralIterator`] of cells around the point's warped,
@@ -243,6 +307,43 @@ impl TerrainBlender {
         let region_z = self.warp.y(x, z) * self.frequency;
         SpiralIterator::new(floor(region_x), floor(region_z), min_radius, max_radius)
     }
+
+    /// The newer source's `iterator(seed, x, z, min, max)`: [`TerrainBlender::iterator`] with the warp read
+    /// seed-first.
+    pub fn try_iterator_seed_first(
+        &self,
+        seed: i32,
+        x: f32,
+        z: f32,
+        min_radius: i32,
+        max_radius: i32,
+    ) -> Result<SpiralIterator, &'static str> {
+        let region_x = self.warp.try_x_seed_first(seed, x, z)? * self.frequency;
+        let region_z = self.warp.try_y_seed_first(seed, x, z)? * self.frequency;
+        Ok(SpiralIterator::new(
+            floor(region_x),
+            floor(region_z),
+            min_radius,
+            max_radius,
+        ))
+    }
+}
+
+/// Runs `f` with this thread's [`Blender`] (`localBlender`; one per thread is shared by all blenders and by both
+/// sampling paths, which is the same since `getValue` overwrites all its state), clearing its cache afterwards so
+/// it holds no terrain past the call; a nested call on the same thread uses a fresh blender.
+fn with_local_blender<T>(f: impl FnOnce(&mut Blender) -> T) -> T {
+    thread_local! {
+        static BLENDER: RefCell<Blender> = RefCell::new(Blender::new());
+    }
+    BLENDER.with(|blender| match blender.try_borrow_mut() {
+        Ok(mut blender) => {
+            let value = f(&mut blender);
+            blender.cache.clear();
+            value
+        }
+        Err(_) => f(&mut Blender::new()),
+    })
 }
 
 /// `TerrainBlender.Blender`: the nine cells around the last point (hashes and squared distances), its nearest two
@@ -296,9 +397,27 @@ impl Blender {
 
     /// `getCentreValue(x, z, terrains)`: the nearest cell's terrain noise, uncached.
     pub fn centre_value(&self, x: f32, z: f32, terrains: &WeightMap<TerrainNoise>) -> f32 {
-        terrain_at(terrains, self.centre_noise_index())
-            .noise()
-            .value(x, z)
+        let Ok(value) = self.centre_value_by(terrains, seedless(x, z));
+        value
+    }
+
+    /// The newer source's `getCentreValue(seed, x, z, terrains)`: [`Blender::centre_value`] sampled seed-first.
+    pub fn try_centre_value_seed_first(
+        &self,
+        seed: i32,
+        x: f32,
+        z: f32,
+        terrains: &WeightMap<TerrainNoise>,
+    ) -> Result<f32, &'static str> {
+        self.centre_value_by(terrains, seed_first(seed, x, z))
+    }
+
+    fn centre_value_by<E>(
+        &self,
+        terrains: &WeightMap<TerrainNoise>,
+        mut sample: impl FnMut(&Module) -> Result<f32, E>,
+    ) -> Result<f32, E> {
+        sample(terrain_at(terrains, self.centre_noise_index()).noise())
     }
 
     /// `getValue(x, z, blending, terrains)`: the nearest cell's noise when the point is closer to its cell than
@@ -311,15 +430,37 @@ impl Blender {
         blending: f32,
         terrains: &WeightMap<TerrainNoise>,
     ) -> f32 {
+        let Ok(value) = self.value_by(blending, terrains, seedless(x, z));
+        value
+    }
+
+    /// The newer source's `getValue(seed, x, z, blending, terrains)`: [`Blender::value`] sampled seed-first.
+    pub fn try_value_seed_first(
+        &mut self,
+        seed: i32,
+        x: f32,
+        z: f32,
+        blending: f32,
+        terrains: &WeightMap<TerrainNoise>,
+    ) -> Result<f32, &'static str> {
+        self.value_by(blending, terrains, seed_first(seed, x, z))
+    }
+
+    fn value_by<E>(
+        &mut self,
+        blending: f32,
+        terrains: &WeightMap<TerrainNoise>,
+        sample: impl FnMut(&Module) -> Result<f32, E>,
+    ) -> Result<f32, E> {
         let nearest = self.distance(self.closest_index);
         let nearest2 = self.distance(self.closest_index2);
         let border_distance = (nearest + nearest2) * 0.5;
         let blend_radius = border_distance * blending;
         let blend_start = border_distance - blend_radius;
         if nearest <= blend_start {
-            self.centre_value(x, z, terrains)
+            self.centre_value_by(terrains, sample)
         } else {
-            self.blended_value(x, z, nearest, nearest2, blend_radius, terrains)
+            self.blended_value_by(nearest, nearest2, blend_radius, terrains, sample)
         }
     }
 
@@ -336,12 +477,49 @@ impl Blender {
         blend_range: f32,
         terrains: &WeightMap<TerrainNoise>,
     ) -> f32 {
+        let Ok(value) =
+            self.blended_value_by(nearest, nearest2, blend_range, terrains, seedless(x, z));
+        value
+    }
+
+    /// The newer source's `getBlendedValue(seed, x, z, nearest, nearest2, blendRange, terrains)`:
+    /// [`Blender::blended_value`] sampled seed-first. The first error ends the sum (nothing more is sampled or
+    /// cached).
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_blended_value_seed_first(
+        &mut self,
+        seed: i32,
+        x: f32,
+        z: f32,
+        nearest: f32,
+        nearest2: f32,
+        blend_range: f32,
+        terrains: &WeightMap<TerrainNoise>,
+    ) -> Result<f32, &'static str> {
+        self.blended_value_by(
+            nearest,
+            nearest2,
+            blend_range,
+            terrains,
+            seed_first(seed, x, z),
+        )
+    }
+
+    fn blended_value_by<E>(
+        &mut self,
+        nearest: f32,
+        nearest2: f32,
+        blend_range: f32,
+        terrains: &WeightMap<TerrainNoise>,
+        mut sample: impl FnMut(&Module) -> Result<f32, E>,
+    ) -> Result<f32, E> {
         self.cache.clear();
-        let mut sum_noise = self.cache_value(self.closest_index, x, z, terrains);
+        let mut sum_noise = self.cache_value(self.closest_index, terrains, &mut sample)?;
         let mut sum_weight = weight(nearest, nearest, blend_range);
         let nearest_weight2 = weight(nearest2, nearest, blend_range);
         if nearest_weight2 > 0.0 {
-            sum_noise += self.cache_value(self.closest_index2, x, z, terrains) * nearest_weight2;
+            sum_noise +=
+                self.cache_value(self.closest_index2, terrains, &mut sample)? * nearest_weight2;
             sum_weight += nearest_weight2;
         }
         for index in 0..9 {
@@ -350,35 +528,45 @@ impl Blender {
             }
             let sample_weight = weight(self.distance(index), nearest, blend_range);
             if sample_weight > 0.0 {
-                sum_noise += self.cache_value(index, x, z, terrains) * sample_weight;
+                sum_noise += self.cache_value(index, terrains, &mut sample)? * sample_weight;
                 sum_weight += sample_weight;
             }
         }
-        clamp(sum_noise / sum_weight, 0.0, 1.0)
+        Ok(clamp(sum_noise / sum_weight, 0.0, 1.0))
     }
 
-    /// `getCacheValue(index, x, z, terrains)`: the cell's terrain sample from the cache; a NaN there (missing, or
-    /// a NaN sample) is sampled again and put back, as Java's `Float.isNaN` test does.
-    fn cache_value(
+    /// `getCacheValue(index, x, z, terrains)` (the newer source's adds the seed): the cell's terrain sample from the
+    /// cache; a NaN there (missing, or a NaN sample) is sampled again and put back, as Java's `Float.isNaN` test
+    /// does. A failed seed-first sample stores nothing.
+    fn cache_value<E>(
         &mut self,
         index: i32,
-        x: f32,
-        z: f32,
         terrains: &WeightMap<TerrainNoise>,
-    ) -> f32 {
+        sample: &mut impl FnMut(&Module) -> Result<f32, E>,
+    ) -> Result<f32, E> {
         let terrain = terrain_at(terrains, self.noise_index(index));
         let mut value = self.cache.get(terrain);
         if value.is_nan() {
-            value = terrain.noise().value(x, z);
+            value = sample(terrain.noise())?;
             self.cache.put(terrain, value);
         }
-        value
+        Ok(value)
     }
 
     /// `getNoiseIndex(index)`: `MathUtil.rand(hashes[index])`.
     fn noise_index(&self, index: i32) -> f32 {
         random(self.hashes[slot(index)])
     }
+}
+
+/// The jar's terrain-noise read: `noise.getValue(x, z)`.
+fn seedless(x: f32, z: f32) -> impl FnMut(&Module) -> Result<f32, Infallible> {
+    move |noise| Ok(noise.value(x, z))
+}
+
+/// The newer source's terrain-noise read: `noise.getValue(seed, x, z)` (Noise2D 2cb4843).
+fn seed_first(seed: i32, x: f32, z: f32) -> impl FnMut(&Module) -> Result<f32, &'static str> {
+    move |noise| noise.try_value_seed_first(seed, x, z)
 }
 
 /// A Java array index: panics for one outside the array (-1 included) where Java throws.
@@ -632,7 +820,6 @@ mod tests {
             )
             .unwrap();
         }
-        let points = points();
         for s in 0..SEEDS.len() {
             let terrains = SETS[SET_OF[s]]
                 .iter()
@@ -641,30 +828,43 @@ mod tests {
             let blender =
                 TerrainBlender::new(SEEDS[s], SCALES[s], JITTERS[s], BLENDINGS[s], terrains);
             writeln!(out, "B {s} {}", blender.region_seed).unwrap();
-            let mut resource = blender.blender_resource();
-            for (p, &(x, z)) in points.iter().enumerate() {
-                let value = match try_value(|| blender.value_with(x, z, &mut resource)) {
-                    Some(a) => {
-                        let b = blender.value(x, z);
-                        assert_eq!(a.to_bits(), b.to_bits(), "fresh and reused blenders agree");
-                        h(a)
-                    }
-                    None => "throw".to_owned(),
-                };
-                let name = catch_unwind(AssertUnwindSafe(|| {
-                    blender.terrain(&resource).name().to_owned()
-                }))
-                .unwrap_or_else(|_| "throw".to_owned());
-                writeln!(
-                    out,
-                    "P {s} {p} {value} {} {} {name}",
-                    resource.closest_index(),
-                    resource.closest_index2(),
-                )
-                .unwrap();
-            }
+            point_lines(&mut out, &format!("P {s}"), &blender, |x, z, resource| {
+                Ok((blender.value_with(x, z, resource), blender.value(x, z)))
+            });
         }
         out
+    }
+
+    /// One "P" line per oracle point: the value through one reused resource (and, if it differs, the thread's
+    /// blender), the resource's closest pair and terrain; "throw" where Java throws (the port panics).
+    fn point_lines(
+        out: &mut String,
+        prefix: &str,
+        blender: &TerrainBlender,
+        value: impl Fn(f32, f32, &mut Blender) -> Result<(f32, f32), &'static str>,
+    ) {
+        let mut resource = blender.blender_resource();
+        for (p, (x, z)) in points().into_iter().enumerate() {
+            let value = match catch_unwind(AssertUnwindSafe(|| value(x, z, &mut resource))) {
+                Ok(Ok((a, b))) => {
+                    assert_eq!(a.to_bits(), b.to_bits(), "fresh and reused blenders agree");
+                    h(a)
+                }
+                Ok(Err(error)) => panic!("unexpected error: {error}"),
+                Err(_) => "throw".to_owned(),
+            };
+            let name = catch_unwind(AssertUnwindSafe(|| {
+                blender.terrain(&resource).name().to_owned()
+            }))
+            .unwrap_or_else(|_| "throw".to_owned());
+            writeln!(
+                out,
+                "{prefix} {p} {value} {} {} {name}",
+                resource.closest_index(),
+                resource.closest_index2(),
+            )
+            .unwrap();
+        }
     }
 
     #[test]
@@ -679,8 +879,10 @@ mod tests {
         let blender = TerrainBlender::new(1, 64, 0.8, 0.65, vec![terrain(&registry, 1, 1.0, 1)]);
         let hills = registry.get_by_name("hills").unwrap();
         let finder = blender.find_nearest(0.0, 0.0, 1, 2, &hills);
+        let seed_first = blender.try_find_nearest_seed_first(17, 0.0, 0.0, 1, 2, &hills);
         drop(blender);
         owned(finder);
+        owned(seed_first);
     }
 
     #[test]
@@ -807,15 +1009,19 @@ mod tests {
 
     /// The lines `TerrainBlenderOracle.search` prints: per blender (the nine above, then one over set 7, whose
     /// first two noises are both named "hills") and start point, the cells `iterator(x, z, 1, 2)` visits, then per
-    /// query terrain and radii four finder steps (`hasNext`, then `next`'s packed floats) or "null"/"throw".
-    fn search_lines() -> String {
+    /// query terrain and radii four finder steps (`hasNext`, then `next`'s packed floats) or "null"/"throw". With
+    /// `runtime` (indices into [`RUNTIME`]), `TerrainBlenderSourceOracle.search`'s seed-first lines instead: one run
+    /// per runtime seed, its index after the blender's.
+    fn search_lines(runtime: Option<&[usize]>) -> String {
         let registry = TerrainRegistry::new();
         // Same name as the registry's hills, another instance and id; a name differing only in case; a terrain in no set.
         let hills_copy = Terrain::new(99, "hills", TerrainCategory::Flatland);
         let hills_case = Terrain::new(98, "Hills", TerrainCategory::Flatland);
         let river = registry.get_by_name("river").unwrap();
         let mut out = String::new();
-        for s in 0..=SEEDS.len() {
+        let runs: Vec<Option<usize>> =
+            runtime.map_or(vec![None], |runs| runs.iter().copied().map(Some).collect());
+        for (s, run) in (0..=SEEDS.len()).flat_map(|s| runs.iter().map(move |&run| (s, run))) {
             let (config, set) = if s == SEEDS.len() {
                 (0, 7)
             } else {
@@ -840,42 +1046,40 @@ mod tests {
                 hills_case.clone(),
                 river.clone(),
             ];
+            let tag = run.map_or(String::new(), |r| format!(" {r}"));
             for (p, &(x, z)) in SEARCH_POINTS.iter().enumerate() {
-                write!(out, "I {s} {p}").unwrap();
-                for position in blender.iterator(x, z, 1, 2) {
+                write!(out, "I {s}{tag} {p}").unwrap();
+                let spiral = match run {
+                    None => blender.iterator(x, z, 1, 2),
+                    Some(r) => blender
+                        .try_iterator_seed_first(RUNTIME[r], x, z, 1, 2)
+                        .unwrap(),
+                };
+                for position in spiral {
                     write!(out, " {},{}", unpack_left(position), unpack_right(position)).unwrap();
                 }
                 out.push('\n');
                 for (q, query) in queries.iter().enumerate() {
                     for (r, &(min, max)) in RADII.iter().enumerate() {
-                        write!(out, "F {s} {p} {q} {r}").unwrap();
-                        let Some(mut finder) = blender.find_nearest(x, z, min, max, query) else {
-                            out.push_str(" null\n");
-                            continue;
-                        };
-                        for _ in 0..4 {
-                            let more = finder.has_next();
-                            let Ok(position) = catch_unwind(AssertUnwindSafe(|| finder.next()))
-                            else {
-                                out.push_str(" throw");
-                                break;
-                            };
-                            assert_eq!(
-                                position.is_some(),
-                                more,
-                                "next is None exactly when has_next is false"
-                            );
-                            let position = position.unwrap_or(0);
-                            write!(
-                                out,
-                                " {}:{},{}",
-                                u8::from(more),
-                                h(unpack_left_float(position)),
-                                h(unpack_right_float(position)),
-                            )
-                            .unwrap();
+                        write!(out, "F {s}{tag} {p} {q} {r}").unwrap();
+                        match run {
+                            None => {
+                                finder_steps(&mut out, blender.find_nearest(x, z, min, max, query))
+                            }
+                            Some(seed) => finder_steps(
+                                &mut out,
+                                blender
+                                    .try_find_nearest_seed_first(
+                                        RUNTIME[seed],
+                                        x,
+                                        z,
+                                        min,
+                                        max,
+                                        query,
+                                    )
+                                    .unwrap(),
+                            ),
                         }
-                        out.push('\n');
                     }
                 }
             }
@@ -883,9 +1087,42 @@ mod tests {
         out
     }
 
+    /// Four finder steps (`hasNext`, then `next`'s packed floats), "null" for no finder, "throw" where Java throws.
+    fn finder_steps<F: FnMut(&mut SpiralIterator) -> i64>(
+        out: &mut String,
+        finder: Option<PositionFinder<F>>,
+    ) {
+        let Some(mut finder) = finder else {
+            out.push_str(" null\n");
+            return;
+        };
+        for _ in 0..4 {
+            let more = finder.has_next();
+            let Ok(position) = catch_unwind(AssertUnwindSafe(|| finder.next())) else {
+                out.push_str(" throw");
+                break;
+            };
+            assert_eq!(
+                position.is_some(),
+                more,
+                "next is None exactly when has_next is false"
+            );
+            let position = position.unwrap_or(0);
+            write!(
+                out,
+                " {}:{},{}",
+                u8::from(more),
+                h(unpack_left_float(position)),
+                h(unpack_right_float(position)),
+            )
+            .unwrap();
+        }
+        out.push('\n');
+    }
+
     #[test]
     fn nearest_terrain_search_matches_the_jar() {
-        let out = search_lines();
+        let out = search_lines(None);
         let lines: Vec<_> = out.lines().collect();
         assert_eq!(lines.len(), 4030);
         // Ring 1 then ring 2 around the warped cell, each from its (-r, -r) corner along +x, +z, -x, -z.
@@ -919,5 +1156,109 @@ mod tests {
         assert!(lines[3702].starts_with("F 9 2 2 0 1:4191054f,c32f21e7"));
         assert_eq!(lines.iter().filter(|l| l.ends_with(" null")).count(), 1794);
         assert_eq!(fnv(&out), 0xb76e_5dcb_6b68_055a);
+    }
+
+    /// `TerrainBlenderSourceOracle`'s runtime seeds: 0, small, both `int` extremes (the seed sums wrap) and
+    /// -21491124 (region seed 0).
+    const RUNTIME: [i32; 6] = [0, 17, -91, i32::MAX, i32::MIN, -21_491_124];
+    /// The seed-first search runs' runtime seeds (indices into [`RUNTIME`]).
+    const SEARCH_RUNTIME: [usize; 3] = [0, 2, 4];
+
+    /// The lines `TerrainBlenderSourceOracle` prints (`.local/terraforged/oracles/terrain_blender/source/`, the
+    /// newer source's classes on Noise2D 2cb4843): the nine blenders' points at each runtime seed, then the searches.
+    fn source_oracle_lines() -> String {
+        let registry = TerrainRegistry::new();
+        let mut out = String::new();
+        for s in 0..SEEDS.len() {
+            let terrains = SETS[SET_OF[s]]
+                .iter()
+                .map(|&(t, weight, n)| terrain(&registry, t, weight, n))
+                .collect();
+            let blender =
+                TerrainBlender::new(SEEDS[s], SCALES[s], JITTERS[s], BLENDINGS[s], terrains);
+            for (r, &seed) in RUNTIME.iter().enumerate() {
+                point_lines(
+                    &mut out,
+                    &format!("P {s} {r}"),
+                    &blender,
+                    |x, z, resource| {
+                        Ok((
+                            blender.try_value_with_seed_first(seed, x, z, resource)?,
+                            blender.try_value_seed_first(seed, x, z)?,
+                        ))
+                    },
+                );
+            }
+        }
+        out + &search_lines(Some(&SEARCH_RUNTIME))
+    }
+
+    #[test]
+    fn seed_first_terrain_blender_matches_terraforged_source() {
+        let out = source_oracle_lines();
+        let lines: Vec<_> = out.lines().collect();
+        assert_eq!(lines.len(), 15_978);
+        // Runtime seed 0 hashes the cells from 21491124, not the jar's `(int) 91 + 21491124`: another cell and terrain.
+        assert_eq!(lines[0], "P 0 0 0 3f5cdecb 3 4 mountains");
+        assert_eq!(
+            lines[3889],
+            "F 0 0 0 0 0 1:43079af8,c2b02a6c 1:43066656,42c771e4 1:42bd7b31,43077546 1:41241195,4301e1d7"
+        );
+        assert_eq!(lines.iter().filter(|l| l.ends_with(" null")).count(), 5382);
+        assert_eq!(fnv(&out), 0xdc8a_34ed_c8bb_226a);
+    }
+
+    #[test]
+    fn seed_first_at_runtime_seed_0_is_the_jar_built_with_seed_0() {
+        // The cells hash from `seed + 21491124` either way and the warp and noises add 0; Perlin ignores the call's
+        // seed and no source here has a zero or infinite range, where Noise2D 2cb4843's map differs.
+        let jar = oracle_lines();
+        let source = source_oracle_lines();
+        let jar: Vec<_> = jar
+            .lines()
+            .filter(|line| line.starts_with("P 1 "))
+            .collect();
+        let source: Vec<_> = source
+            .lines()
+            .filter_map(|line| line.strip_prefix("P 1 0 "))
+            .map(|line| format!("P 1 {line}"))
+            .collect();
+        assert_eq!(jar.len(), 72);
+        assert_eq!(jar, source);
+    }
+
+    #[test]
+    fn seed_first_reports_noises_without_a_seed_first_form() {
+        let registry = TerrainRegistry::new();
+        let custom = Arc::new(TerrainNoise::new(
+            registry.get_by_name("hills").unwrap(),
+            1.0,
+            Module::custom(0.5, 1.0, |_, _| 0.5),
+        ));
+        let flats = terrain(&registry, 0, 1.0, 0);
+        // Only the custom noise: the centre path fails, seedless sampling still works.
+        let alone = TerrainBlender::new(91, 64, 0.8, 0.0, vec![custom.clone()]);
+        assert!(alone.try_value_seed_first(0, 37.25, -91.5).is_err());
+        assert_eq!(alone.value(37.25, -91.5).to_bits(), 0.5f32.to_bits());
+        // Mixed and fully blended: points whose blend reaches the custom noise fail, the others (sampled after
+        // failures, through the same resource) still succeed.
+        let mixed = TerrainBlender::new(91, 64, 0.8, 1.0, vec![flats, custom]);
+        let mut resource = mixed.blender_resource();
+        let (mut failed, mut passed) = (0, 0);
+        for (x, z) in points().into_iter().skip(SPECIAL_POINTS.len()) {
+            match mixed.try_value_with_seed_first(17, x, z, &mut resource) {
+                Ok(_) => passed += 1,
+                Err(_) => failed += 1,
+            }
+        }
+        assert!(failed > 0 && passed > 0, "{failed} failed, {passed} passed");
+        // A terrain absent from the blender: no finder, and no warp read is needed for that answer.
+        let river = registry.get_by_name("river").unwrap();
+        assert!(
+            mixed
+                .try_find_nearest_seed_first(0, 0.0, 0.0, 1, 2, &river)
+                .unwrap()
+                .is_none()
+        );
     }
 }
