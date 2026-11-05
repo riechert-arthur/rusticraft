@@ -1165,8 +1165,8 @@ gradient and water level, bit for bit.
 The terrain-generator layer (`terrain_generator.rs`, the mod's `TerrainGenerator` and `ObjectPool` as in the
 1.18.2-0.3.1 jar) turns a noise generator's chunk `NoiseData` into `TerrainData` and answers `getHeight` (height noise
 scaled by `TerrainLevels`). `NoiseGenerator` is the part of the mod's `INoiseGenerator` it calls; as in the jar, the
-seed is bound into the noise generator, so calls take coordinates only. The mod's noise generator itself (continent
-noise and the terrain blender) is not ported yet. The pool keeps the mod's quirk: `take` always builds a new value
+seed is bound into the noise generator, so calls take coordinates only. The mod's noise generator itself is not ported
+yet (its continent noise is: `ContinentNoise`, below; its terrain blender too). The pool keeps the mod's quirk: `take` always builds a new value
 (the polled one is dropped), so every `generate` fills a fresh `TerrainData` and restored data is never reused; its
 capacity is `Environment.CORES` (the processor count) and `forCacheSize` uses `NoiseUtil.floor`. Its test replays
 `TerrainGeneratorOracle.java` (in `.local/terraforged/oracles/terrain_generator/`), which runs the jar's classes over
@@ -1358,7 +1358,8 @@ origin cell itself is never visited) and returns the jittered position of the fi
 (`getThresholdValue` is not 0: noise at or above the threshold, NaN included) whose spawn neighbourhood (`isValidSpawn`
 with radius 3: the ten cells at `dy` 1 or 2 and `dx` -2 to 2) is all land, or `(0, 0)` if there is none (like the jar,
 only after walking all ~4·10^10 cells when no land is near the origin). The jar recomputes it on every call
-(`ContinentNoise` keeps the answer in a field), so the port caches nothing; the runtime seed shifts both cell seeds as
+(`ContinentNoise` keeps the answer in a field; the port's `ContinentNoise` keeps one per runtime seed, below), so
+`world_offset` caches nothing; the runtime seed shifts both cell seeds as
 for every cell. `ContinentSpawnOracle.java` (same folder, `spawn.txt`) runs the jar's `getWorldOffset` for both cell
 shapes and all three sources over seed pairs drawn through Engine's `Seed` from `long` world seeds
 (`Long.MIN_VALUE`/`MAX_VALUE`, values that wrap `seed1` past `Integer.MAX_VALUE`) and the `int`-extreme seed pairs, NaN
@@ -1552,10 +1553,44 @@ direct one doesn't. The Rust tests run the cached path (6 buckets) against all o
 (equal to `seeds`), and compare the cached cells, nearest cells, pieces and samples with a fully direct computation
 over 64 and 16 runtime seeds on 8 threads sharing one generator.
 
+`ContinentNoise` (`continent_noise.rs`) ports the newer source's `ContinentNoise` (6dd607eb), the continent module that
+joins these layers. Its constructor draws `seed0`, `seed1` (`createContinent`) and the two warp seeds from the context's
+`Seed`, in that order, and builds the cell generator, the shape, the river network and the river carver from one
+`ContinentConfig` with `continentScale` as its scale. Both samplers scale world coordinates by `1F / continentScale`,
+warp them with Noise2D 2cb4843's `Domain.warp` of two seed-first Perlin2 sources (3 octaves, lacunarity 2.2, frequency 3,
+gain 0.3) by a constant 0.2 (each axis adds `(value - 0.5) * 0.2f`, as for the river warp), and add the spawn offset;
+`sample_continent` then runs the shape's 5×5 blend and sets the terrain from `ContinentPoints.getTerrainType`,
+`sample_river` the river pipeline. Terrains come from the context's registry (`context.terrain`), so they are the
+world's built-ins. On this path the shape runs as the newer source does: its `ShapeGenerator` and `ContinentPoints`
+are the jar's bytecode (with the seed passed down; `version/compare.sh` below checks it), but they call Noise2D
+2cb4843's `NoiseUtil.map`, so `ShapeGenerator::sample_current`, `base_noise_current` and `falloff_current` (and
+`continent_points::falloff_current`) use `map_current`: 1 instead of NaN where a range is zero or infinite (equal base
+falloffs, an inland control point of 1, a zero deep-ocean point under a negative input). `sample`, `base_noise` and
+`falloff` keep the jar's `map` for the jar-tested layers. The two versions differ in the spawn offset: the jar computes
+`getWorldOffset()` once, in its constructor, and keeps it in a field; the newer source calls `getWorldOffset(seed)` on
+every sample, which computes it for the first caller's runtime seed and then returns that one for every seed. The port
+computes each runtime seed's offset on its first sample and keeps it (up to 64 seeds, then it starts over), so two
+runtime seeds never share an offset; with one seed per world, as TerraForged samples, the result is the source's. The
+jar's seedless samplers are not ported (they equal runtime seed 0 where the maps agree). Checks: `version/compare.sh`
+(`.local/terraforged/oracles/continent_noise/`, outside Git; `methods.py` from the river-network check) finds
+`ContinentPoints` identical and `ShapeGenerator` differing only in the seed, and `ContinentNoise` in the seed and the
+offset's storage. `ContinentNoiseOracle.java` (`run.sh`, same folder) runs the compiled source's `ContinentNoise` with
+both caches bypassed over six configs (continent scales 400, 3000, 1000, 1, -400 and 0; custom, default, invalid and
+inland-1 control points; two `TerrainLevels`; `long` world seeds), each at six runtime seeds (the `int` extremes
+included) on an 11×11 grid a little over a third of a cell apart, plus 26×26 edge points (NaN, infinities, signed zeros,
+subnormals, float extremes, ±2^31) at runtime seed 0, folding both samples' continent, base, height and river noise
+and terrain ids, the seed draws and each seed's offset; the jar's run equals the source's runtime-seed-0 lines except
+for the inland-1 config, as expected. Its `shared` lines (one `ContinentNoise` at every runtime seed in turn) show the
+source's first-seed offset; the test checks that the port's equal its `fresh` lines (a new one per seed). The jar's
+continent-shape and continent-points oracles rerun with Noise2D 2cb4843 first on the class path give the `_current`
+variants' expected values (only the zero-range and infinite-range cases change). The tests match all of it bit for bit,
+in debug and release; twelve threads sampling one `ContinentNoise` at six runtime seeds at once get the same
+lines, and past 64 seeds the offset store starts over without mixing seeds up.
+
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives, the biome climate types, the climate settings, the climate module, the climate stage, the continent factory, the generator context, the heightmap, the world generator factory, TerraForged's terrain levels, its terrain data, its terrain generator, its terrain-blend utilities, its terrain blender with its nearest-terrain search, noise-graph reseeding, the cave noise primitives, the biome viability rules, the biome overrides, the continent control points, the continent cell primitives, the continent configuration, the continent shape blending, the continent cell generator with its spawn-offset search, the continent river nodes, the continent river carver's arithmetic, the continent river networks with their nearest-node sampling and their warped, carved river sampling, the newer source's seed-first noise sources, and its bounded concurrent lossy cache with the continent's cell and
-river-piece caches on it. They change nothing in the game, so there is
+river-piece caches on it, and the continent noise module that joins the continent layers. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
