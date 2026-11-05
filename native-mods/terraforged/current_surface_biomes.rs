@@ -87,6 +87,11 @@ impl<'a, T> CurrentSurfaceBiomeSampler<'a, T> {
         }
     }
 
+    /// The generator whose noise the sampler reads (the climate's continent and the height noise).
+    pub const fn noise(&self) -> &'a NoiseGenerator {
+        self.noise
+    }
+
     /// `sampleBiome(seed, x, z)` at block coordinates (`Source.compute` passes quart `x << 2`, `z << 2`) for the
     /// runtime seed. `base_temperature` is a biome's `getBaseTemperature`; `override_biome` resolves a surface
     /// override (`biomeMapManager.get(key)`, see [`BiomeOverride::key`]) and is never called with
@@ -132,7 +137,7 @@ pub fn surface_biome<T, E>(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::super::{
         terraforged_biome_sampler::PLAINS,
         terraforged_current_biome_sampler::tests::{generator, points},
@@ -143,7 +148,7 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
-    const WETLANDS: WetlandSettings = WetlandSettings {
+    pub(crate) const WETLANDS: WetlandSettings = WetlandSettings {
         river_size: 0.75,
         coast_size: 0.7,
         chance: 1.0,
@@ -263,7 +268,7 @@ minecraft:frozen_river=176 minecraft:ocean=168 minecraft:river=1904 minecraft:sn
 minecraft:warm_ocean=120 plains=634 snowy_plains=825 swamp=1158 taiga=719 windswept_hills=855\n\
 ";
 
-    const NAMES: [&str; 10] = [
+    pub(crate) const NAMES: [&str; 10] = [
         "forest",
         "birch_forest",
         "taiga",
@@ -275,22 +280,22 @@ minecraft:warm_ocean=120 plains=634 snowy_plains=825 swamp=1158 taiga=719 windsw
         "meadow",
         "grove",
     ];
-    const TEMPS: [f32; 10] = [0.7, 0.6, 0.25, 0.0, 2.0, 0.2, 0.8, 0.95, 0.5, -0.2];
-    const USAGE: [f32; 4] = [1.0, 0.5, 0.75, 1.0];
-    const CHANCE: [f32; 4] = [1.0, 0.5, 1.0, 0.25];
+    pub(crate) const TEMPS: [f32; 10] = [0.7, 0.6, 0.25, 0.0, 2.0, 0.2, 0.8, 0.95, 0.5, -0.2];
+    pub(crate) const USAGE: [f32; 4] = [1.0, 0.5, 0.75, 1.0];
+    pub(crate) const CHANCE: [f32; 4] = [1.0, 0.5, 1.0, 0.25];
     const SEEDS: [i32; 6] = [0, 42, -17, i32::MAX, i32::MIN, -8_763_214];
 
     /// The oracle's `pools(manager, k)`: per climate type `c`, a wet pool of two biomes (weights 1 and 2; empty for
     /// `k == 3` and `c % 4 == 1`), a dry pool of one (absent for `k == 1` and `c % 3 == 0`) and a highland pool of
     /// two (absent for `k == 2` and even `c`), whose second biome is the wet pool's first, all over one shared `Arc`
     /// per biome.
-    fn pools(palette: &[Arc<String>], k: usize) -> [BiomePools<String>; 3] {
+    pub(crate) fn pools<T>(palette: &[Arc<T>], k: usize) -> [BiomePools<T>; 3] {
         let map = |weights: &[f32], index: &[usize]| {
             let values = index.iter().map(|&i| Arc::clone(&palette[i])).collect();
             Arc::new(WeightMap::new(values, weights))
         };
         let (mut wet, mut dry, mut highland) = Default::default();
-        let [wet_pools, dry_pools, highland_pools]: [&mut BiomePools<String>; 3] =
+        let [wet_pools, dry_pools, highland_pools]: [&mut BiomePools<T>; 3] =
             [&mut wet, &mut dry, &mut highland];
         for climate in BiomeType::VALUES {
             let c = climate as usize;

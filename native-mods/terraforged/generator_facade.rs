@@ -25,17 +25,27 @@
 // Adapted from TerraForged Reimagined (https://github.com/Romoslayer/TerraForged-Reimagined, a24d450):
 // `src/main/java/com/terraforged/mod/worldgen/Generator.java` (`createState`'s seed capture, `getSeed`,
 // `getChunkData`, `getChunkDataAsync`, `getMinY`, `getSeaLevel`, `getGenDepth`, the terrain-cache hints and drop,
-// `getBaseHeight`, `getBaseColumn`, and `buildTerrain`'s hand-off to `fillFromNoise`) and `Seeds.java`. MIT License, Copyright (c) 2020 TerraForged, Copyright (c)
-// 2026 Romoslayer; see `LICENSE-TERRAFORGED-REIMAGINED`.
+// `getBaseHeight`, `getBaseColumn`, `buildTerrain`'s hand-off to `fillFromNoise`, and `createBiomes`), `Seeds.java`
+// and `worldgen/biome/Source.java` (`withSeed`, `getSurfaceBiome`, `getLayerBiome`, `compute`). MIT License,
+// Copyright (c) 2020 TerraForged, Copyright (c) 2026 Romoslayer; see `LICENSE-TERRAFORGED-REIMAGINED`.
 
 use super::{
+    super::biome_chunk::{BiomeChunk, BiomeFillError},
     super::terrain::{TerrainBlockStates, TerrainChunk, TerrainError},
+    terraforged_biome_chunk_fill::fill_noise_biomes,
+    terraforged_biome_map::BiomePools,
+    terraforged_biome_sampler::{BiomeOverride, WetlandSettings},
+    terraforged_cave_biome_sampler::CaveBiomeSampler,
     terraforged_chunk_fill::fill_chunk,
+    terraforged_current_surface_biomes::CurrentSurfaceBiomeSampler,
     terraforged_eroded_noise_generator::ErodedNoiseGenerator,
+    terraforged_noise_generator::NoiseGenerator,
     terraforged_terrain_cache::{TerrainCache, TerrainDataHandle, TerrainTask},
     terraforged_terrain_levels::TerrainLevels,
 };
 use crate::registry::BlockStateId;
+use horizon_core::position::ChunkPos;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicI64, Ordering};
 
 /// `Seeds.get(long)`: the level seed as TerraForged's noise uses it, narrowed to a Java `int` (its low 32 bits).
@@ -196,6 +206,75 @@ impl TerraForgedGenerator {
         Ok(terrain)
     }
 
+    /// The un-eroded noise generator under the terrain cache (Reimagined's `ErodedNoiseGenerator` delegates
+    /// `getHeightNoise`, the levels and the continent to it), which the biome samplers read.
+    pub fn noise_generator(&self) -> &NoiseGenerator {
+        self.terrain.noise_generator().generator()
+    }
+
+    /// `new BiomeSampler(noiseGenerator, biomeMapManager)` over this generator's noise, as `Source`'s memoized
+    /// `Parts` builds it: see [`CurrentSurfaceBiomeSampler::new`]. Building it draws the climate noise, which is not
+    /// cheap: build ONE per world and share it across chunk workers (it is `Send + Sync`), never one per chunk.
+    pub fn surface_biome_sampler<'a, T>(
+        &'a self,
+        wet: &'a BiomePools<T>,
+        dry: &'a BiomePools<T>,
+        highland: &'a BiomePools<T>,
+        plains: &'a Arc<T>,
+        wetlands: WetlandSettings,
+        mountain_usage: f32,
+    ) -> CurrentSurfaceBiomeSampler<'a, T> {
+        CurrentSurfaceBiomeSampler::new(
+            self.noise_generator(),
+            wet,
+            dry,
+            highland,
+            plains,
+            wetlands,
+            mountain_usage,
+        )
+    }
+
+    /// Reimagined's `createBiomes`: `terrainCache().hint(seed, chunk.getPos())` with the captured [`Self::seed`],
+    /// then `ChunkUtil.fillNoiseBiomes(chunk, biomeSource, ..)` ([`fill_noise_biomes`]) over `Source`'s two
+    /// layers at the same seed (`Source.withSeed` keeps `(int) levelSeed`, which is `Seeds.get`). Per quart column
+    /// (quart `x`, `z`): `getSurfaceBiome` = `compute`'s `sampleBiome(seed, x << 2, z << 2)` on `surface` (block
+    /// coordinates, Java `int` wrap), `getLayerBiome` = `cave.get_layer_biome(seed, x << 2, z << 2)`. The hint comes
+    /// first, as Java hints before it schedules the fill; Java fills on its executor, the port on the calling
+    /// thread. `surface` must come from [`Self::surface_biome_sampler`] (built once per world; panics if it reads
+    /// another generator's noise); `cave` is Reimagined's `CaveBiomeSampler(800, manager)`, also built once.
+    /// `base_temperature` and `override_biome` are as in [`CurrentSurfaceBiomeSampler::sample_biome`].
+    ///
+    /// `Err` with the surface sampler's first error (a custom module with no seed-first form, where Java's future
+    /// fails) before any section is written; the hint has happened by then, as in Java. Not ported: `Source`'s
+    /// per-column `LossyCache` of surface biomes (a cache of the same values: `createBiomes` asks each quart column
+    /// once, so only repeated queries would hit it) and its debug `reportCaveLayer` survey.
+    pub fn create_biomes<T: Clone>(
+        &self,
+        chunk: &mut BiomeChunk<T>,
+        position: ChunkPos,
+        surface: &CurrentSurfaceBiomeSampler<'_, T>,
+        cave: &CaveBiomeSampler<T>,
+        base_temperature: impl Fn(&T) -> f32,
+        override_biome: impl Fn(BiomeOverride) -> Arc<T>,
+    ) -> Result<(), BiomeFillError<&'static str>> {
+        assert!(
+            std::ptr::eq(surface.noise(), self.noise_generator()),
+            "create_biomes: the surface sampler was not built over this generator"
+        );
+        let seed = self.seed();
+        self.terrain.hint(seed, position.x, position.z);
+        fill_biomes(
+            seed,
+            chunk,
+            position,
+            surface,
+            cave,
+            base_temperature,
+            override_biome,
+        )
+    }
+
     /// `terrainCache().drop(seed, pos)`, as `applyBiomeDecoration` calls it with `Seeds.get(region.getSeed())`.
     pub fn drop_chunk(&self, seed: i32, chunk_x: i32, chunk_z: i32) {
         self.terrain.remove(seed, chunk_x, chunk_z);
@@ -239,6 +318,38 @@ impl TerraForgedGenerator {
     }
 }
 
+/// [`TerraForgedGenerator::create_biomes`]'s fill at `seed`, without the hint.
+fn fill_biomes<T: Clone>(
+    seed: i32,
+    chunk: &mut BiomeChunk<T>,
+    position: ChunkPos,
+    surface: &CurrentSurfaceBiomeSampler<'_, T>,
+    cave: &CaveBiomeSampler<T>,
+    base_temperature: impl Fn(&T) -> f32,
+    override_biome: impl Fn(BiomeOverride) -> Arc<T>,
+) -> Result<(), BiomeFillError<&'static str>> {
+    fill_noise_biomes(
+        chunk,
+        position,
+        |x, z| {
+            surface
+                .sample_biome(
+                    seed,
+                    x.wrapping_shl(2),
+                    z.wrapping_shl(2),
+                    &base_temperature,
+                    &override_biome,
+                )
+                .map(|biome| T::clone(&biome))
+        },
+        |x, z| {
+            Ok(cave
+                .get_layer_biome(seed, x.wrapping_shl(2), z.wrapping_shl(2))
+                .map(|biome| T::clone(biome)))
+        },
+    )
+}
+
 fn base_height_from_noise(
     levels: TerrainLevels,
     base_noise: f32,
@@ -275,8 +386,12 @@ mod tests {
     use super::super::{
         terraforged::Module,
         terraforged_chunk_fill::tests::{AIR, Properties, STONE, WATER, digest, registry},
+        terraforged_current_biome_sampler::tests::generator as climate_generator,
+        terraforged_current_surface_biomes::tests::{CHANCE, NAMES, TEMPS, USAGE, WETLANDS, pools},
+        terraforged_engine::BiomeType,
         terraforged_erosion::{ErosionFilterSettings, HeightmapSmoothingSettings},
         terraforged_noise_generator::tests::{generator, generator_with},
+        terraforged_terrain_blend_util::WeightMap,
         terraforged_terrain_blender::TerrainNoise,
     };
     use super::*;
@@ -776,5 +891,334 @@ f 3 -1875000 1874999 128 64 3bed1c90e336aeb8 same
             }
         }
         assert_eq!(java.next(), None);
+    }
+
+    /// The pools of [`create_biomes_hints_and_fills_both_layers`]: every climate type gets one biome.
+    fn one(biome: &Arc<&'static str>) -> BiomePools<&'static str> {
+        let mut pools = BiomePools::default();
+        for climate in BiomeType::VALUES {
+            pools.insert(
+                climate,
+                Arc::new(WeightMap::new(vec![Arc::clone(biome)], &[1.0])),
+            );
+        }
+        pools
+    }
+
+    fn named(replacement: BiomeOverride) -> Arc<&'static str> {
+        Arc::new(replacement.key().unwrap())
+    }
+
+    /// `createBiomes` hints the chunk with the captured (narrowed) seed, then fills it at that seed from both layers;
+    /// a sampler built over another generator is refused; a failing surface sample is an `Err` that writes nothing.
+    #[test]
+    fn create_biomes_hints_and_fills_both_layers() {
+        let g = facade(0, 0, 0, 25, 0);
+        g.capture_seed((5_i64 << 32) | 7);
+        let (land, cave_biome) = (Arc::new("land"), Arc::new("minecraft:lush_caves"));
+        let pools = one(&land);
+        let plains = Arc::new("plains");
+        let surface = g.surface_biome_sampler(&pools, &pools, &pools, &plains, WETLANDS, 1.0);
+        let cave = CaveBiomeSampler::new(800, Vec::new(), vec![Arc::clone(&cave_biome)]);
+        // A chunk whose columns all pass the cave mask at seed 7 and one where none does (found by search).
+        let mask = |position: ChunkPos| {
+            let cave = &cave;
+            (0..16).filter(move |i| {
+                let x = (position.x.wrapping_shl(4) >> 2)
+                    .wrapping_add(i & 3)
+                    .wrapping_shl(2);
+                let z = (position.z.wrapping_shl(4) >> 2)
+                    .wrapping_add(i >> 2)
+                    .wrapping_shl(2);
+                cave.get_layer_biome(7, x, z).is_some()
+            })
+        };
+        let mut caves = (0..4096)
+            .map(|i| ChunkPos::new(i % 64 * 7 - 200, i / 64 * 7 - 200))
+            .filter(|p| mask(*p).count() == 16);
+        let deep = caves.next().unwrap();
+        let shallow = (0..4096)
+            .map(|i| ChunkPos::new(i % 64 * 7 - 200, i / 64 * 7 - 200))
+            .find(|p| mask(*p).count() == 0)
+            .unwrap();
+        for position in [deep, shallow] {
+            let mut chunk = BiomeChunk::new(position, -64, 384, "").unwrap();
+            assert!(g.terrain.is_empty());
+            g.create_biomes(&mut chunk, position, &surface, &cave, |_| 0.8, named)
+                .unwrap();
+            // Hinted with `Seeds.get` of the level seed (7), not the raw level seed.
+            assert_eq!(g.terrain.len(), 1);
+            g.drop_chunk(7, position.x, position.z);
+            assert!(g.terrain.is_empty());
+
+            let mut direct = BiomeChunk::new(position, -64, 384, "").unwrap();
+            fill_biomes(7, &mut direct, position, &surface, &cave, |_| 0.8, named).unwrap();
+            let cells = |chunk: &BiomeChunk<&'static str>| {
+                (0..24)
+                    .flat_map(|i| chunk.section(i).unwrap().to_vec())
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(cells(&chunk), cells(&direct));
+            for quart in 0..16 {
+                let (x, z) = (quart & 3, quart >> 2);
+                let column = [
+                    position.x.wrapping_shl(2) + x,
+                    0,
+                    position.z.wrapping_shl(2) + z,
+                ];
+                let expected = surface
+                    .sample_biome(7, column[0] << 2, column[2] << 2, |_| 0.8, named)
+                    .unwrap();
+                // Surface layer from y 0 up, cave layer in sections wholly below y 0 where the mask passes.
+                for y in [0, 16, 79] {
+                    assert_eq!(*chunk.noise_biome([column[0], y, column[2]]), *expected);
+                }
+                let below = *chunk.noise_biome([column[0], -1, column[2]]);
+                if position == deep {
+                    assert_eq!(below, *cave_biome);
+                } else {
+                    assert_eq!(below, *expected);
+                }
+            }
+        }
+
+        let other = facade(0, 0, 0, 25, 0);
+        let foreign = other.surface_biome_sampler(&pools, &pools, &pools, &plains, WETLANDS, 1.0);
+        let mut chunk = BiomeChunk::new(deep, -64, 384, "").unwrap();
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| {
+                g.create_biomes(&mut chunk, deep, &foreign, &cave, |_| 0.8, named)
+            }))
+            .is_err()
+        );
+
+        let failing = TerraForgedGenerator::new(
+            levels(0),
+            ErodedNoiseGenerator::new(
+                generator_with(0, |context| {
+                    vec![Arc::new(TerrainNoise::new(
+                        context.terrain.get_by_name("hills").unwrap(),
+                        1.0,
+                        Module::custom(0.0, 1.0, |_, _| 0.25),
+                    ))]
+                }),
+                ErosionFilterSettings::default(),
+                HeightmapSmoothingSettings::default(),
+            ),
+        );
+        let surface = failing.surface_biome_sampler(&pools, &pools, &pools, &plains, WETLANDS, 1.0);
+        // The chunk holding block (3, -4), where `failed_samples_are_errors`' height noise fails.
+        let land = ChunkPos::new(0, -1);
+        let mut chunk = BiomeChunk::new(land, -64, 384, "unset").unwrap();
+        // The fill without the hint (the hinted terrain task would fail on a worker thread, as Java's future does).
+        assert!(matches!(
+            fill_biomes(
+                failing.seed(),
+                &mut chunk,
+                land,
+                &surface,
+                &cave,
+                |_| 0.8,
+                named
+            ),
+            Err(BiomeFillError::Resolve(_))
+        ));
+        assert!((0..24).all(|i| chunk.section(i).unwrap().iter().all(|b| *b == "unset")));
+    }
+
+    /// `.local/terraforged/oracles/chunk_biomes/` (`run.sh`, after `../noise_generator/run.sh`): half A records what
+    /// `sampleBiome` reads at every quart column of [`CHUNKS`] from 6dd607eb's real `Sampler` and the newer source's
+    /// `NoiseGenerator`; half B runs Reimagined a24d450's `ChunkUtil.fillNoiseBiomes` and `Source` members (verbatim)
+    /// with its real `BiomeBuffer2D`, `BiomeSampler` and `CaveBiomeSampler(800, ..)` over that record, into a stub of
+    /// 26.3's chunk sections, interpreted and with `-Xcomp`. Per levels variant, terrain set and configuration `k`
+    /// (`current_surface_biomes`' pools and settings; cave registry [`CAVES`]`[k % 3]`): the chunk count and a fold of
+    /// every cell's biome name of every chunk in each of [`RANGES`], over the six runtime seeds (level seeds
+    /// `0x5eed << 32 | seed`); then every name's cell count. The chunks go through [`fill_biomes`] at the captured
+    /// seed: `create_biomes` without its hint, which would start a region build per chunk
+    /// ([`create_biomes_hints_and_fills_both_layers`] checks that the two fill alike).
+    const JAVA_CHUNK_BIOMES: &str = "\
+chunks 0 0 0 612 d4c7cad5da07f811\n\
+chunks 0 0 1 612 51716f377b22a051\n\
+chunks 0 0 2 612 745a7ce6694001f1\n\
+chunks 0 0 3 612 52ac1e830a431a71\n\
+chunks 0 1 0 612 487fc13996d41f71\n\
+chunks 0 1 1 612 fd7283d7ea631e31\n\
+chunks 0 1 2 612 b60dc3edb5c85331\n\
+chunks 0 1 3 612 15857e069c5b05f1\n\
+chunks 1 0 0 612 51b91c0c6a023bd1\n\
+chunks 1 0 1 612 51716f377b22a051\n\
+chunks 1 0 2 612 3733ff00527d7971\n\
+chunks 1 0 3 612 34d91d227c3adc31\n\
+chunks 1 1 0 612 4a51d8dbb3774ab1\n\
+chunks 1 1 1 612 370e149de7f19b31\n\
+chunks 1 1 2 612 30be269c281b88f1\n\
+chunks 1 1 3 612 af8c7e212939cff1\n\
+chunks 2 0 0 612 db3e34095f2cccf1\n\
+chunks 2 0 1 612 e16b9b3746229951\n\
+chunks 2 0 2 612 3ee8c325c15ca71\n\
+chunks 2 0 3 612 f7f74751ff6c5fd1\n\
+chunks 2 1 0 612 cdeb6f2d15c64c71\n\
+chunks 2 1 1 612 7811194c655e47b1\n\
+chunks 2 1 2 612 14c3fcfe068e0471\n\
+chunks 2 1 3 612 be86604fd2db591\n\
+names birch_forest=1188800 desert=893184 forest=800128 grove=1478048 jungle=3426688 meadow=2668736 \
+minecraft:beach=1089536 minecraft:deep_cold_ocean=1749888 minecraft:deep_frozen_ocean=7199744 \
+minecraft:deep_lukewarm_ocean=2437120 minecraft:deep_ocean=6500480 minecraft:dripstone_caves=874752 \
+minecraft:frozen_river=466944 minecraft:lush_caves=600576 minecraft:river=6505280 plains=545280 \
+snowy_plains=852736 swamp=3688736 taiga=669280 terraforged:cave=1253376 \
+terraforged:cave/deep=1031424 windswept_hills=1707552\n\
+";
+
+    const CHUNKS: [(i32, i32); 17] = [
+        (0, 0),
+        (-1, -1),
+        (-2, 3),
+        (7, -5),
+        (100, -100),
+        (-250, 400),
+        (97, -61),
+        (194, -122),
+        (291, -183),
+        (-388, 244),
+        (485, 305),
+        (-582, -366),
+        (1_874_999, -1_875_000),
+        ((1 << 27) - 1, -(1 << 27)),
+        (1 << 27, -(1 << 27) - 1),
+        (i32::MAX, i32::MIN),
+        (0x1234_5678, -0x0abc_def1),
+    ];
+    const RANGES: [(i32, i32); 6] = [
+        (-64, 384),
+        (0, 256),
+        (-2032, 4064),
+        (128, 64),
+        (-64, 64),
+        (-16, 32),
+    ];
+    const CAVES: [&[&str]; 3] = [
+        &[
+            "minecraft:dripstone_caves",
+            "terraforged:cave",
+            "terraforged:cave/deep",
+            "minecraft:lush_caves",
+        ],
+        &["terraforged:cave"],
+        &[],
+    ];
+    const SEEDS: [i32; 6] = [0, 42, -17, i32::MAX, i32::MIN, -8_763_214];
+
+    /// `new CaveBiomeSampler(800, manager)` over the oracle's registry (the palette, then `caves`): GLOBAL is
+    /// `terraforged:cave`, UNIQUE the registry's biomes in order whose path starts with `cave/` or ends with `_caves`.
+    fn cave_sampler(caves: &[&'static str]) -> CaveBiomeSampler<&'static str> {
+        let path = |name: &str| {
+            name.split_once(':')
+                .map_or(name, |(_, path)| path)
+                .to_string()
+        };
+        let global = caves
+            .iter()
+            .filter(|name| **name == "terraforged:cave")
+            .map(|name| Arc::new(*name))
+            .collect();
+        let special = caves
+            .iter()
+            .filter(|name| {
+                let path = path(name);
+                path.starts_with("cave/") || path.ends_with("_caves")
+            })
+            .map(|name| Arc::new(*name))
+            .collect();
+        CaveBiomeSampler::new(800, global, special)
+    }
+
+    fn chunk_biome_lines() -> Vec<String> {
+        let palette: Vec<Arc<&'static str>> = NAMES.iter().map(|name| Arc::new(*name)).collect();
+        let plains = Arc::new("plains");
+        let temperature = |biome: &&'static str| {
+            NAMES
+                .iter()
+                .position(|name| name == biome)
+                .map_or(0.8, |i| TEMPS[i])
+        };
+        let configs: Vec<_> = (0..4).map(|k| pools(&palette, k)).collect();
+        let caves: Vec<_> = (0..3).map(|c| cave_sampler(CAVES[c])).collect();
+        let mut counts = std::collections::BTreeMap::new();
+        let mut hashes = std::collections::HashMap::new();
+        let mut lines = Vec::new();
+        for variant in 0..3 {
+            for set in 0..2 {
+                let mut folds = [(0, 0xcbf2_9ce4_8422_2325_u64); 4];
+                for seed in SEEDS {
+                    let g = TerraForgedGenerator::new(
+                        levels(variant),
+                        ErodedNoiseGenerator::new(
+                            climate_generator(variant, set),
+                            ErosionFilterSettings::default(),
+                            HeightmapSmoothingSettings::default(),
+                        ),
+                    );
+                    g.capture_seed((0x5eed_i64 << 32) | i64::from(seed as u32));
+                    assert_eq!(g.seed(), seed);
+                    for (k, [wet, dry, highland]) in configs.iter().enumerate() {
+                        let wetlands = WetlandSettings {
+                            chance: CHANCE[k],
+                            ..WETLANDS
+                        };
+                        let surface = g
+                            .surface_biome_sampler(wet, dry, highland, &plains, wetlands, USAGE[k]);
+                        let (chunks, hash) = &mut folds[k];
+                        for (x, z) in CHUNKS {
+                            let position = ChunkPos::new(x, z);
+                            for (min_y, height) in RANGES {
+                                let mut chunk =
+                                    BiomeChunk::new(position, min_y, height, "").unwrap();
+                                fill_biomes(
+                                    g.seed(),
+                                    &mut chunk,
+                                    position,
+                                    &surface,
+                                    &caves[k % 3],
+                                    temperature,
+                                    |replacement| Arc::new(replacement.key().unwrap()),
+                                )
+                                .unwrap();
+                                let mut i = 0;
+                                while let Some(section) = chunk.section(i) {
+                                    for name in section {
+                                        let value =
+                                            *hashes.entry(*name).or_insert_with(|| fnv(name));
+                                        *hash = (*hash ^ value).wrapping_mul(0x100_0000_01b3);
+                                        *counts.entry(*name).or_insert(0_u64) += 1;
+                                    }
+                                    i += 1;
+                                }
+                                *hash = (*hash ^ 0xff).wrapping_mul(0x100_0000_01b3);
+                                *chunks += 1;
+                            }
+                        }
+                    }
+                }
+                for (k, (chunks, hash)) in folds.iter().enumerate() {
+                    lines.push(format!("chunks {variant} {set} {k} {chunks} {hash:x}"));
+                }
+            }
+        }
+        let mut names = String::from("names");
+        for (name, count) in counts {
+            names.push_str(&format!(" {name}={count}"));
+        }
+        lines.push(names);
+        lines
+    }
+
+    #[test]
+    fn chunk_biomes_match_reimagined_java() {
+        let expected: Vec<&str> = JAVA_CHUNK_BIOMES.lines().collect();
+        let actual = chunk_biome_lines();
+        assert_eq!(actual.len(), expected.len());
+        for (actual, expected) in actual.iter().zip(expected) {
+            assert_eq!(actual, expected);
+        }
     }
 }
