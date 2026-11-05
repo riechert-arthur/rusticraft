@@ -26,6 +26,9 @@
 // `TerrainNoise.CODEC` and `NoiseCodec.CODEC` (`SuperCodec`, `DataUtil.toData`, Cereal's `DataSpec`/`SubSpec`/
 // `DataValue` and the noise specs `NoiseSpec` registers), as Minecraft 26.3 reads a `worldgen/terrain_noise` file.
 // MIT License, Copyright (c) 2020 TerraForged, Copyright (c) 2026 Romoslayer; see `LICENSE-TERRAFORGED-REIMAGINED`.
+// The `Valley` spec is not Reimagined's (a24d450's `NoiseCodec` dropped it): it is Engine 0.3.0's erosion
+// `Ridge.spec()`/`Ridge.create`, which TerraForged 6dd607eb's `NoiseCodec` registers (MIT, TerraForged; see
+// `LICENSE-TERRAFORGED`).
 
 use super::terraforged::{
     CurveFunction, DistanceFunction, Domain, EdgeFunction, ErosionMode, ErosionRidge,
@@ -58,8 +61,9 @@ fn error<T>(message: impl Into<String>) -> Result<T, TerrainAssetError> {
 }
 
 /// Every spec name Reimagined's `NoiseSpec` registers (`MidPointCurve` and `SCurve` are only sub-specs of
-/// `CurveFunc`; `AddWarp` and `CompoundWarp` register under `CumulativeWarp`'s name).
-const SPEC_NAMES: &str = "Abs Add AdvTerrace Alpha Base Bias Billow Blend Boost Cache Cell CellEdge Clamp Const Cubic CumulativeWarp Curve DirectionWarp DomainWarp Freq Grad Interpolation Invert LegacyTerrace Line Map Max Min Modulate Mult MultiBlend Perlin Perlin2 Pow PowCurve Rand Ridge Scale Select Simplex Simplex2 SimplexRidge Sin Steps Sub Terrace Threshold VariBlend VariCurve Vec2f Vec2i Warp";
+/// `CurveFunc`; `AddWarp` and `CompoundWarp` register under `CumulativeWarp`'s name), plus Engine 0.3.0's `Valley`,
+/// which 6dd607eb's `NoiseCodec` registers.
+const SPEC_NAMES: &str = "Abs Add AdvTerrace Alpha Base Bias Billow Blend Boost Cache Cell CellEdge Clamp Const Cubic CumulativeWarp Curve DirectionWarp DomainWarp Freq Grad Interpolation Invert LegacyTerrace Line Map Max Min Modulate Mult MultiBlend Perlin Perlin2 Pow PowCurve Rand Ridge Scale Select Simplex Simplex2 SimplexRidge Sin Steps Sub Terrace Threshold Valley VariBlend VariCurve Vec2f Vec2i Warp";
 
 fn registered(name: &str) -> bool {
     SPEC_NAMES.split(' ').any(|spec| spec == name)
@@ -117,8 +121,9 @@ pub fn decode_terrain_asset(
 /// Supported specs: the octave sources (`Perlin`, `Perlin2`, `Simplex`, `Simplex2`, `Cubic`, `Ridge`, `Billow`,
 /// `SimplexRidge`), `CellEdge`, `Const`, `Alpha`, `Bias`, `Boost`, `Clamp`, `Invert`, `Map`, `Pow`, `PowCurve`,
 /// `Scale`, `Warp` (with `DomainWarp` or `DirectionWarp`), `Blend`, `Terrace`, `AdvTerrace`, `Steps` (with an
-/// `Interpolation` curve), `Add`, `Mult`, `Max`, `Min` and `Sub`: every node the 14 Reimagined terrain assets use.
-/// The other registered specs, which Java reads, return an "unsupported" error here.
+/// `Interpolation` curve), `Add`, `Mult`, `Max`, `Min` and `Sub`: every node the 14 Reimagined terrain assets use;
+/// and Engine 0.3.0's erosion `Valley` (registered by 6dd607eb, whose generated mountain assets use it; Reimagined
+/// a24d450 rejects it). The other registered specs, which Java reads, return an "unsupported" error here.
 pub fn decode_noise(json: &str) -> Result<Module, TerrainAssetError> {
     match data_of(json)? {
         Data::Obj(object) => module(&object),
@@ -458,6 +463,9 @@ fn module(object: &Obj) -> Result<Module, TerrainAssetError> {
             o.child("slope_max")?,
             curve(o.fields.get("curve"))?,
         ),
+        // Engine 0.3.0's `Ridge.create`: `new Ridge(seed, octaves, strength, gridSize, amplitude, lacunarity,
+        // fallOff, blend)`, then `ridge.wrap(source)`. The constructor checks nothing: zero or negative octaves
+        // sample NaN (0/0), as in Java.
         "Valley" => ErosionRidge::full(
             o.int("seed", 1337),
             o.int("octaves", 1),
@@ -704,6 +712,44 @@ pub(crate) mod tests {
         assert_eq!(rust.join("\n"), ASSET_ORACLE.trim_end());
     }
 
+    /// TerraForged 6dd607eb's generated `terrain/noise` assets that use Engine's `Valley` (`mountains_1..3`), read
+    /// where the TerraForged sources are unpacked locally (not copied here); skipped when absent.
+    #[test]
+    fn valley_assets_match_terraforged_java() {
+        const ASSETS: &str = "generated/resources/default/data/terraforged/worldgen/terrain/noise";
+        let root = std::env::var_os("TERRAFORGED_SOURCE")
+            .map(std::path::PathBuf::from)
+            .into_iter()
+            .chain(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .ancestors()
+                    .flat_map(|dir| {
+                        [
+                            ".local/terraforged/terraforged-source",
+                            "terraforged-source",
+                        ]
+                        .map(|tree| dir.join(tree))
+                    }),
+            )
+            .map(|tree| tree.join(ASSETS))
+            .find(|dir| dir.is_dir());
+        let Some(root) = root else {
+            eprintln!(
+                "skipping: TerraForged 6dd607eb's generated terrain noise assets are not unpacked"
+            );
+            return;
+        };
+        let rust: Vec<String> = SOURCE_ASSET_ORACLE
+            .lines()
+            .map(|java| {
+                let name = java.split_once(' ').unwrap().0;
+                let file = name.strip_prefix("6dd607eb/").unwrap();
+                line(name, &std::fs::read_to_string(root.join(file)).unwrap())
+            })
+            .collect();
+        assert_eq!(rust.join("\n"), SOURCE_ASSET_ORACLE.trim_end());
+    }
+
     /// `.local/terraforged/oracles/terrain_asset/cases.txt` (name, tab, the asset's JSON); `sync.py` there copies it.
     const CASES: &str = r#"const	{"type":"terraforged:hills","weight":1.5,"noise":{"type":"Const","value":0.25}}
 const_default	{"type":"terraforged:hills","weight":1.5,"noise":{"type":"Const"}}
@@ -858,10 +904,38 @@ noise_type_two	{"type":"terraforged:hills","weight":1.5,"noise":{"type":["Const"
 noise_unsupported_line	{"type":"terraforged:hills","weight":1.5,"noise":{"type":"Line"}}
 seed_exponent_min	{"type":"terraforged:hills","weight":1.5,"noise":{"type":"Perlin","seed":1e-9223372036854775808,"frequency":0.02}}
 seed_exponent_overflow	{"type":"terraforged:hills","weight":1.5,"noise":{"type":"Perlin","seed":1e99999999999999999999,"frequency":0.02}}
+valley_constant	{"type":"terraforged:mountains","weight":1.25,"noise":{"type":"Valley","seed":310154,"octaves":2,"strength":0.65,"grid_size":128,"amplitude":0.15,"lacunarity":3.1,"fall_off":0.8,"blend":"CONSTANT","source":{"type":"Perlin","seed":7,"octaves":2,"frequency":0.01}}}
+valley_input_linear	{"type":"terraforged:mountains","weight":1.25,"noise":{"type":"Valley","seed":310154,"octaves":2,"strength":0.65,"grid_size":128,"amplitude":0.15,"lacunarity":3.1,"fall_off":0.8,"blend":"INPUT_LINEAR","source":{"type":"Perlin","seed":7,"octaves":2,"frequency":0.01}}}
+valley_output_linear	{"type":"terraforged:mountains","weight":1.25,"noise":{"type":"Valley","seed":310154,"octaves":2,"strength":0.65,"grid_size":128,"amplitude":0.15,"lacunarity":3.1,"fall_off":0.8,"blend":"OUTPUT_LINEAR","source":{"type":"Perlin","seed":7,"octaves":2,"frequency":0.01}}}
+valley_defaults	{"type":"terraforged:mountains","weight":1.25,"noise":{"type":"Valley","source":{"type":"Perlin","seed":7,"octaves":2,"frequency":0.01}}}
+valley_missing_source	{"type":"terraforged:mountains","weight":1.25,"noise":{"type":"Valley","seed":310154,"octaves":2,"strength":0.65,"grid_size":128,"amplitude":0.15,"lacunarity":3.1,"fall_off":0.8}}
+valley_list_source	{"type":"terraforged:mountains","weight":1.25,"noise":{"type":"Valley","seed":310154,"octaves":2,"strength":0.65,"grid_size":128,"amplitude":0.15,"lacunarity":3.1,"fall_off":0.8,"source":[{"type":"Perlin","seed":7,"octaves":2,"frequency":0.01}]}}
+valley_bad_blend	{"type":"terraforged:mountains","weight":1.25,"noise":{"type":"Valley","seed":310154,"octaves":2,"strength":0.65,"grid_size":128,"amplitude":0.15,"lacunarity":3.1,"fall_off":0.8,"blend":"SIDEWAYS","source":{"type":"Perlin","seed":7,"octaves":2,"frequency":0.01}}}
+valley_lowercase_blend	{"type":"terraforged:mountains","weight":1.25,"noise":{"type":"Valley","seed":310154,"octaves":2,"strength":0.65,"grid_size":128,"amplitude":0.15,"lacunarity":3.1,"fall_off":0.8,"blend":"constant","source":{"type":"Perlin","seed":7,"octaves":2,"frequency":0.01}}}
+valley_number_blend	{"type":"terraforged:mountains","weight":1.25,"noise":{"type":"Valley","seed":310154,"octaves":2,"strength":0.65,"grid_size":128,"amplitude":0.15,"lacunarity":3.1,"fall_off":0.8,"blend":1,"source":{"type":"Perlin","seed":7,"octaves":2,"frequency":0.01}}}
+valley_zero_octaves	{"type":"terraforged:mountains","weight":1.25,"noise":{"type":"Valley","seed":5,"octaves":0,"grid_size":64,"source":{"type":"Perlin","seed":7,"octaves":2,"frequency":0.01}}}
+valley_negative_octaves	{"type":"terraforged:mountains","weight":1.25,"noise":{"type":"Valley","seed":5,"octaves":-2,"grid_size":64,"source":{"type":"Perlin","seed":7,"octaves":2,"frequency":0.01}}}
+valley_fraction_octaves	{"type":"terraforged:mountains","weight":1.25,"noise":{"type":"Valley","seed":5,"octaves":2.9,"grid_size":64,"source":{"type":"Perlin","seed":7,"octaves":2,"frequency":0.01}}}
+valley_many_octaves	{"type":"terraforged:mountains","weight":1.25,"noise":{"type":"Valley","seed":5,"octaves":6,"grid_size":300,"blend":"OUTPUT_LINEAR","source":{"type":"Perlin","seed":7,"octaves":2,"frequency":0.01}}}
+valley_seed_wrap	{"type":"terraforged:mountains","weight":1.25,"noise":{"type":"Valley","seed":2147483648,"grid_size":64,"source":{"type":"Perlin","seed":7,"octaves":2,"frequency":0.01}}}
+valley_seed_double	{"type":"terraforged:mountains","weight":1.25,"noise":{"type":"Valley","seed":1e10,"grid_size":64,"source":{"type":"Perlin","seed":7,"octaves":2,"frequency":0.01}}}
+valley_seed_bool	{"type":"terraforged:mountains","weight":1.25,"noise":{"type":"Valley","seed":true,"grid_size":64,"source":{"type":"Perlin","seed":7,"octaves":2,"frequency":0.01}}}
+valley_string_strength	{"type":"terraforged:mountains","weight":1.25,"noise":{"type":"Valley","strength":"0.5","grid_size":64,"source":{"type":"Perlin","seed":7,"octaves":2,"frequency":0.01}}}
+valley_module_amplitude	{"type":"terraforged:mountains","weight":1.25,"noise":{"type":"Valley","octaves":3,"amplitude":{"type":"Const","value":0.5},"grid_size":64,"source":{"type":"Perlin","seed":7,"octaves":2,"frequency":0.01}}}
+valley_float_rounding	{"type":"terraforged:mountains","weight":1.25,"noise":{"type":"Valley","strength":0.65000000000000002220446049250313,"grid_size":96.00000000000001,"blend":"INPUT_LINEAR","source":{"type":"Perlin","seed":7,"octaves":2,"frequency":0.01}}}
+valley_zero_grid	{"type":"terraforged:mountains","weight":1.25,"noise":{"type":"Valley","grid_size":0,"source":{"type":"Perlin","seed":7,"octaves":2,"frequency":0.01}}}
+valley_negative_grid	{"type":"terraforged:mountains","weight":1.25,"noise":{"type":"Valley","grid_size":-50,"strength":-0.25,"blend":"OUTPUT_LINEAR","source":{"type":"Perlin","seed":7,"octaves":2,"frequency":0.01}}}
+valley_long_grid	{"type":"terraforged:mountains","weight":1.25,"noise":{"type":"Valley","grid_size":4294967297,"source":{"type":"Perlin","seed":7,"octaves":2,"frequency":0.01}}}
+valley_const_sentinel	{"type":"terraforged:mountains","weight":1.25,"noise":{"type":"Valley","grid_size":64,"source":{"type":"Const","value":-1}}}
+valley_nested	{"type":"terraforged:mountains","weight":1.25,"noise":{"type":"Valley","seed":11,"grid_size":80,"blend":"INPUT_LINEAR","source":{"type":"Valley","seed":12,"octaves":2,"grid_size":40,"source":{"type":"Perlin","seed":7,"octaves":2,"frequency":0.01}}}}
+valley_in_add	{"type":"terraforged:mountains","weight":1.25,"noise":{"type":"Add","modules":[{"type":"Valley","grid_size":64,"source":{"type":"Perlin","seed":7,"octaves":2,"frequency":0.01}},{"type":"Const","value":0.1}]}}
+valley_bad_source	{"type":"terraforged:mountains","weight":1.25,"noise":{"type":"Valley","grid_size":64,"source":{"type":"Line"}}}
+valley_null_field	{"type":"terraforged:mountains","weight":1.25,"noise":{"type":"Valley","grid_size":64,"blend":null,"source":{"type":"Perlin","seed":7,"octaves":2,"frequency":0.01}}}
+steps_valley_curve	{"type":"terraforged:hills","weight":1.5,"noise":{"type":"Steps","source":{"type":"Perlin","seed":7,"octaves":2,"frequency":0.01},"steps":{"type":"Const","value":5},"slope_min":{"type":"Const","value":0.05},"slope_max":{"type":"Const","value":0.75},"curve":{"type":"Valley","mode":"CURVE3"}}}
 "#;
 
     /// `.local/terraforged/oracles/terrain_asset/run.sh`'s `out.txt` up to the asset lines.
-    const ORACLE: &str = r#"specs Abs Add AdvTerrace Alpha Base Bias Billow Blend Boost Cache Cell CellEdge Clamp Const Cubic CumulativeWarp Curve DirectionWarp DomainWarp Freq Grad Interpolation Invert LegacyTerrace Line Map Max Min Modulate Mult MultiBlend Perlin Perlin2 Pow PowCurve Rand Ridge Scale Select Simplex Simplex2 SimplexRidge Sin Steps Sub Terrace Threshold VariBlend VariCurve Vec2f Vec2i Warp
+    const ORACLE: &str = r#"specs Abs Add AdvTerrace Alpha Base Bias Billow Blend Boost Cache Cell CellEdge Clamp Const Cubic CumulativeWarp Curve DirectionWarp DomainWarp Freq Grad Interpolation Invert LegacyTerrace Line Map Max Min Modulate Mult MultiBlend Perlin Perlin2 Pow PowCurve Rand Ridge Scale Select Simplex Simplex2 SimplexRidge Sin Steps Sub Terrace Threshold Valley VariBlend VariCurve Vec2f Vec2i Warp
 const ok type=terraforged:hills weight=3fc00000 min=3e800000 max=3e800000 hash=3d608a822f1743bd
 const_default ok type=terraforged:hills weight=3fc00000 min=3f800000 max=3f800000 hash=7b15fa60031743bd
 const_neg_zero ok type=terraforged:hills weight=3fc00000 min=00000000 max=3f800000 hash=123df1760ad9a6eb
@@ -1015,6 +1089,40 @@ noise_type_two err
 noise_unsupported_line err
 seed_exponent_min err
 seed_exponent_overflow err
+valley_constant ok type=terraforged:mountains weight=3fa00000 min=00000000 max=3f800000 hash=0ffc7153f1573476
+valley_input_linear ok type=terraforged:mountains weight=3fa00000 min=00000000 max=3f800000 hash=2c6f1a4588e91719
+valley_output_linear ok type=terraforged:mountains weight=3fa00000 min=00000000 max=3f800000 hash=8bd7c66018449b79
+valley_defaults ok type=terraforged:mountains weight=3fa00000 min=00000000 max=3f800000 hash=154df07c9b85c4f5
+valley_missing_source err
+valley_list_source err
+valley_bad_blend err
+valley_lowercase_blend err
+valley_number_blend err
+valley_zero_octaves ok type=terraforged:mountains weight=3fa00000 min=00000000 max=3f800000 hash=13a61517ea9743bd
+valley_negative_octaves ok type=terraforged:mountains weight=3fa00000 min=00000000 max=3f800000 hash=13a61517ea9743bd
+valley_fraction_octaves ok type=terraforged:mountains weight=3fa00000 min=00000000 max=3f800000 hash=f7560e0989b3e1e9
+valley_many_octaves ok type=terraforged:mountains weight=3fa00000 min=00000000 max=3f800000 hash=5994a5f98a66bae6
+valley_seed_wrap ok type=terraforged:mountains weight=3fa00000 min=00000000 max=3f800000 hash=cf8cf9c07fb3eb5a
+valley_seed_double ok type=terraforged:mountains weight=3fa00000 min=00000000 max=3f800000 hash=aba0af7d4d8896ac
+valley_seed_bool ok type=terraforged:mountains weight=3fa00000 min=00000000 max=3f800000 hash=cf8cf9c07fb3eb5a
+valley_string_strength ok type=terraforged:mountains weight=3fa00000 min=00000000 max=3f800000 hash=f8f6b15e7b666866
+valley_module_amplitude ok type=terraforged:mountains weight=3fa00000 min=00000000 max=3f800000 hash=46a1c54318031757
+valley_float_rounding ok type=terraforged:mountains weight=3fa00000 min=00000000 max=3f800000 hash=80953898bc56ebf2
+valley_zero_grid ok type=terraforged:mountains weight=3fa00000 min=00000000 max=3f800000 hash=7b15fa60031743bd
+valley_negative_grid ok type=terraforged:mountains weight=3fa00000 min=00000000 max=3f800000 hash=176939b733532bf4
+valley_long_grid ok type=terraforged:mountains weight=3fa00000 min=00000000 max=3f800000 hash=bba50aae60aed6b0
+valley_const_sentinel ok type=terraforged:mountains weight=3fa00000 min=00000000 max=3f800000 hash=94225aa940417b51
+valley_nested ok type=terraforged:mountains weight=3fa00000 min=00000000 max=3f800000 hash=617cab86f2abfe88
+valley_in_add ok type=terraforged:mountains weight=3fa00000 min=3dcccccd max=3f8ccccd hash=3f3ec99cdc3e7fe3
+valley_bad_source err
+valley_null_field err
+steps_valley_curve err
+"#;
+
+    /// `out.txt`'s `6dd607eb/` lines: TerraForged 6dd607eb's generated assets that use `Valley`.
+    const SOURCE_ASSET_ORACLE: &str = r#"6dd607eb/mountains_1.json ok type=terraforged:mountains weight=3fa00000 min=00000000 max=3f800000 hash=572329a5df58853d
+6dd607eb/mountains_2.json ok type=terraforged:mountains weight=3fa00000 min=00000000 max=3f800000 hash=ca4419f386874a92
+6dd607eb/mountains_3.json ok type=terraforged:mountains weight=3fa00000 min=00000000 max=3f800000 hash=166d75b93555c110
 "#;
 
     /// The rest of `out.txt`: Reimagined's 14 `terrain_noise` assets.

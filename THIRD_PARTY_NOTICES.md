@@ -7,6 +7,9 @@
 and its Engine 0.3.0/Noise2D dependencies by TerraForged. The unavailable dependency source was
 recovered from bytecode shipped in TerraForged's official 0.3.1 alpha 2 jar. The code is licensed
 under MIT; its notice is preserved in `native-mods/terraforged/LICENSE-TERRAFORGED`.
+The terrain-noise decoder's `Valley` spec in `native-mods/terraforged/terrain_asset.rs` is Engine 0.3.0's erosion
+`Ridge.spec()` and `Ridge.create`, as TerraForged's `NoiseCodec` registers it (TerraForged Reimagined, credited below,
+no longer registers it).
 
 The seed-first source API additionally follows
 [Noise2D 2cb48431148a321f74319d7ef0ea61b26bf8e59c](https://github.com/TerraForged/Noise2D/tree/2cb48431148a321f74319d7ef0ea61b26bf8e59c),
