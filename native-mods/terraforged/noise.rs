@@ -8536,6 +8536,89 @@ mod tests {
     }
 
     #[test]
+    fn seeded_curves_match_reseeding_and_read_every_child() {
+        // Over non-Perlin sources with finite, nonzero ranges, reseeding and seed-first sampling seed the same
+        // sources and fix the same power-curve bounds, so they give the same bits. A MidPointCurve or SCurve cannot
+        // be reseeded (the jar and Noise2D 2cb4843's Cereal both throw), but samples seed-first.
+        let src = |kind, seed, octaves| {
+            Module::source(Source::new(
+                kind,
+                SourceConfig {
+                    seed,
+                    octaves,
+                    frequency: 0.2,
+                    ..SourceConfig::default()
+                },
+            ))
+        };
+        let source = src(SourceKind::Simplex, i32::MAX, 2);
+        let midpoint = src(SourceKind::Cubic, -91, 3);
+        let gradient = src(SourceKind::Simplex2, i32::MIN, 2);
+        let graphs = [
+            source
+                .clone()
+                .curve(CurveFunction::Interpolation(Interpolation::Curve4)),
+            source.clone().variable_curve(midpoint, gradient),
+            source.clone().power_curve(0.8),
+            source.clone().power_curve(2.5).power_curve(0.5),
+        ];
+        for (index, graph) in graphs.iter().enumerate() {
+            for seed in [0, 1, -1, 17, i32::MAX, i32::MIN] {
+                let reseeded = graph.with_seed(i64::from(seed));
+                for (x, y) in [(0.0, 0.0), (12.34, -56.78), (-0.0, 3.5), (1e30, 3.0)] {
+                    assert_eq!(
+                        canonical_bits([graph.try_value_seed_first(seed, x, y).unwrap()]),
+                        canonical_bits([reseeded.value(x, y)]),
+                        "graph {index}, seed {seed}, ({x}, {y})"
+                    );
+                }
+            }
+        }
+        for function in [
+            CurveFunction::Midpoint {
+                midpoint: 0.4,
+                steepness: 6.0,
+            },
+            CurveFunction::s_curve(0.5, -0.2),
+        ] {
+            let graph = source.clone().curve(function);
+            assert!(graph.try_value_seed_first(i32::MIN, 1.0, 2.0).is_ok());
+            assert!(std::panic::catch_unwind(|| graph.with_seed(5)).is_err());
+        }
+        // Curve and PowerCurve read only their source; VariableCurve reads all three children (Java has no early exit).
+        let unsupported = unsupported_seeded_node(0.5);
+        let c = Module::constant;
+        let midpoint_curve = CurveFunction::Midpoint {
+            midpoint: 0.5,
+            steepness: 4.0,
+        };
+        assert!(
+            unsupported
+                .clone()
+                .curve(midpoint_curve)
+                .try_value_seed_first(1, 0.0, 0.0)
+                .is_err()
+        );
+        assert!(
+            unsupported
+                .clone()
+                .power_curve(0.8)
+                .try_value_seed_first(1, 0.0, 0.0)
+                .is_err()
+        );
+        for (s, m, g) in [
+            (&unsupported, &c(0.5), &c(4.0)),
+            (&c(0.5), &unsupported, &c(4.0)),
+            (&c(0.5), &c(0.5), &unsupported),
+        ] {
+            let graph = s.clone().variable_curve(m.clone(), g.clone());
+            assert!(graph.try_value_seed_first(1, 0.0, 0.0).is_err());
+        }
+        let graph = c(f32::NAN).variable_curve(c(f32::NAN), c(4.0));
+        assert!(graph.try_value_seed_first(1, 0.0, 0.0).unwrap().is_nan());
+    }
+
+    #[test]
     fn runtime_seeded_curves_match_current_noise2d() {
         let source = |kind, seed, frequency, octaves, gain| {
             Module::source(Source::new(
