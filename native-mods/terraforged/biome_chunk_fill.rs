@@ -55,7 +55,7 @@ pub fn is_cave_biome_quart(quart_y: i32) -> bool {
 /// column has a cave biome, the surface buffer otherwise. Within each band the biome is constant down the column.
 ///
 /// `position` must be the chunk's own position (Java reads `chunk.getPos()`; Horizon's `BiomeChunk` keeps it
-/// private). A failing sampler returns its error before any section is
+/// private), or this panics before writing anything. A failing sampler returns its error before any section is
 /// written, as Java's exception does. Like Reimagined, it fills the sections directly (`LevelChunkSection
 /// .fillBiomesFromNoise`), so 26.3's blending and below-zero retrogen decorations of
 /// `ChunkAccess.fillBiomesFromNoise` do not apply.
@@ -87,6 +87,10 @@ pub fn fill_noise_biomes<T: Clone, E>(
         min_quart.wrapping_shl(2),
         max_quart.wrapping_shl(2).wrapping_add(3),
         |quart| {
+            assert!(
+                quart[0] & !3 == origin_x && quart[2] & !3 == origin_z,
+                "fill_noise_biomes: {position:?} is not the biome chunk's position"
+            );
             // BiomeBuffer2D: `z << 2 | x` of the quart's low two bits; the band is chosen per section.
             let index = ((quart[2] & 3) << 2 | (quart[0] & 3)) as usize;
             let values = if any_cave && is_cave_biome_section(quart[1] >> 2) {
@@ -377,5 +381,13 @@ mod tests {
             assert_eq!(*line, format!("{i} {:016x}", stub.digest(&chunk)));
         }
         assert_eq!(expected.len(), 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "is not the biome chunk's position")]
+    fn wrong_position_panics() {
+        let mut chunk = BiomeChunk::new(ChunkPos::new(1, 1), -64, 384, -1).unwrap();
+        let stub = Stub::new(0, 3, 0);
+        let _ = stub.fill(&mut chunk, ChunkPos::new(1, 2));
     }
 }
