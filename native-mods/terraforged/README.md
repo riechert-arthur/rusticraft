@@ -63,13 +63,13 @@ like Java's `int`, and a zero `modRange` divides by zero. Where Engine loops for
 
 The curve layer adds Engine's curve modifiers: `Curve` (`Module.curve(CurveFunc)`, with an `Interpolation`, a
 `MidPointCurve` or an `SCurve`), `VariableCurve` (`Module.curve(mid, steepness)` with noise controls), `PowerCurve`
-(`Module.powCurve(n)`) and `Steps` (`Module.steps(steps, slopeMin, slopeMax, curve)`). All of them report their source's
-bounds, as Engine's modifiers do, even where the output is 0..1. Their tests check raw bits against a Java oracle,
-including Engine's quirks: midpoint and variable curves use `NoiseUtil.exp`, `(1 + x / 256)^256`, rather than
-`Math.exp`; `SCurve` raises a negative `upper` to `-lower`; `PowerCurve` fixes its curve from the source's bounds when
-it is built, so a constant source samples NaN (or 1 for a zero power); `Steps` truncates like Java's `(int)`, so without
-a slope window (`slopeMax <= slopeMin`) it rounds samples towards zero onto its steps. `NoiseUtil.pow` keeps
-`Math.pow`'s NaN for a NaN power and for a base of ±1 with an infinite power.
+(`Module.powCurve(n)`) and `Steps` (`Module.steps(steps, slopeMin, slopeMax, curve)`). All of them report their source's bounds, as Engine's
+modifiers do, even where the output is 0..1. Their tests check raw bits against a Java oracle, including Engine's
+quirks: midpoint and variable curves use `NoiseUtil.exp`, `(1 + x / 256)^256`, rather than `Math.exp`; `SCurve` raises a
+negative `upper` to `-lower`; `PowerCurve` fixes its curve from the source's bounds when it is built, so a constant
+source samples NaN (or 1 for a zero power); `Steps` truncates like Java's `(int)`, so without a slope window (`slopeMax
+<= slopeMin`) it rounds samples towards zero onto its steps. `NoiseUtil.pow` keeps `Math.pow`'s NaN for a NaN power and
+for a base of ±1 with an infinite power.
 
 The scalar layer adds `Freq` (`Module.freq(x, y)`), which scales the coordinates before sampling its source, `Grad`
 (`Module.grad(lower, upper, strength)`), which raises samples at or below `upper` to a power falling to `1 - strength`
@@ -1494,7 +1494,7 @@ range`), so a zero range (0 octaves) or an infinite one (a huge gain) gives 1 in
 path uses that `map` (`map_current`), and `Source::value`/`value_seeded` keep the jar's. Reseeding (`Module::with_seed`,
 above) stays the jar's mechanism: a reseeded source gives the seed-first bits for the same seed where the two maps
 agree, except for Perlin and Perlin2 (reseeding changes their seed; seed-first sampling does not). The eight octave sources,
-the scalar graph nodes, the domain warps, the five selectors, `Cache`, `Terrace`, `LegacyTerrace`, `AdvancedTerrace` and the curves (below) are seed-first so far; the other nodes are not. `SeedFirstOracle.java` and `JarSeedOracle.java`
+the scalar graph nodes, the domain warps, the five selectors, `Cache`, `Terrace`, `LegacyTerrace`, `AdvancedTerrace`, the curves and `Steps`/`Freq`/`Grad`/`Modulate` (below) are seed-first so far; the other nodes are not. `SeedFirstOracle.java` and `JarSeedOracle.java`
 (`.local/terraforged/oracles/seed_first/`, outside Git; `run.sh` compiles Noise2D 2cb4843 from source) fold every
 kind over seven configs (0 octaves, negative gain and lacunarity, an infinite range), five config seeds, eight runtime
 seeds (both `int` extremes) and ten points (NaN, infinity, -0); the tests match both tables bit for bit in debug and
@@ -1655,6 +1655,27 @@ NaN, infinity and -0) run in the same `run-graphs.sh` (`.local/terraforged/oracl
 tests match both bit for bit in debug and release, check which children each sample reads, and that reseeding gives
 the same bits over non-Perlin sources.
 
+`Steps` (`Module.steps(steps, slopeMin, slopeMax, curve)`), `Freq` (`Module.freq(x, y)`), `Grad`
+(`Module.grad(lower, upper, strength)`) and `Modulate` (`Module.mod(direction, strength)`) are seed-first too: Noise2D
+2cb4843's classes are the jar's apart from the seed parameter (and `Steps`'s `NoiseUtil.map`), so both paths share one
+helper. Every child is sampled with the call's seed, in Java's order: `Steps` reads its source, slope min, slope max and
+step count (a zero or negative slope range rounds the sample down to a step, `(int)` saturating like
+Java's); `Freq` reads its x and y frequencies at the original point, then the source at `(x * fx, y * fy)`; `Grad` reads
+its source and upper bound and, unless the source sample is above the upper bound, its strength and lower bound (`Math.pow` through
+`java_pow`); `Modulate` reads its direction and strength, then the source at the point moved by `NoiseUtil.sin`/`cos` of
+`direction * PI2` times the strength. `Steps` is the one that calls `NoiseUtil.map`, so the seed-first path maps with
+`map_current`: an infinite slope range gives 1 there, the jar's path NaN. Java throws nowhere here; NaN controls give NaN
+as in Java (a `0 * inf` offset moves the point to NaN). `Boost` is not seed-first yet. `TerraForgedSeededTransformOracle.java`
+(the PR's four graphs over seeded Perlin/Simplex/Ridge/Perlin2 sources, four seeds, four points) and
+`SeededTransformEdgeOracle.java` (43 families with a fixed value at and one ulp beside every step height, slope-window
+edge, gradient bound and quarter turn, plus NaN, ±inf, ±0, subnormals and ±1e30; zero, negative, infinite and NaN slope
+ranges; zero, NaN, infinite, negative, fractional and `int`-saturating step counts; equal, inverted, NaN and infinite
+gradient bounds; NaN, infinite and power-raising strengths; zero and infinite modulation strengths; seeded and 0-octave
+children; a nested graph of all four; seven seeds including both `int` extremes; six points with NaN, infinity and -0)
+run in the same `run-graphs.sh` (`.local/terraforged/oracles/seed_first/`, outside Git); the tests match both bit for
+bit in debug and release, check which children each sample reads, and that reseeding gives the same bits over
+non-Perlin sources.
+
 The bounded concurrent lossy cache (`lossy_cache.rs`, `ConcurrentLossyCache`) ports the newer source tree's
 `LossyCache.Concurrent` and its `LossyCache.Stamped` buckets (`com.terraforged.mod.util.storage`, 6dd607eb). The
 1.18.2-0.3.1 jar has the same class in `util.map` without the seed (`computeIfAbsent(long, Long2ObjectFunction)`) and
@@ -1751,7 +1772,7 @@ lines, and past 64 seeds the offset store starts over without mixing seeds up.
 
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives, the biome climate types, the climate settings, the climate module, the climate stage, the continent factory, the generator context, the heightmap, the world generator factory, TerraForged's terrain levels, its terrain data, its terrain generator, its terrain-blend utilities, its terrain blender with its nearest-terrain search, noise-graph reseeding, the cave noise primitives, the biome viability rules, the biome overrides, the continent control points, the continent cell primitives, the continent configuration, the continent shape blending, the continent cell generator with its spawn-offset search, the continent river nodes, the continent river carver's arithmetic, the continent river networks with their nearest-node sampling and their warped, carved river sampling, the newer source's seed-first noise sources, scalar noise graphs, domain warps, selectors, graph caches, terraces, legacy terraces advanced terraces and curves, and its bounded concurrent lossy cache with the continent's cell and
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives, the biome climate types, the climate settings, the climate module, the climate stage, the continent factory, the generator context, the heightmap, the world generator factory, TerraForged's terrain levels, its terrain data, its terrain generator, its terrain-blend utilities, its terrain blender with its nearest-terrain search, noise-graph reseeding, the cave noise primitives, the biome viability rules, the biome overrides, the continent control points, the continent cell primitives, the continent configuration, the continent shape blending, the continent cell generator with its spawn-offset search, the continent river nodes, the continent river carver's arithmetic, the continent river networks with their nearest-node sampling and their warped, carved river sampling, the newer source's seed-first noise sources, scalar noise graphs, domain warps, selectors, graph caches, terraces, legacy terraces, advanced terraces, curves and transforms (steps, frequency, gradient and modulation), and its bounded concurrent lossy cache with the continent's cell and
 river-piece caches on it, and the continent noise module that joins the continent layers. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 

@@ -3668,9 +3668,10 @@ fn power_curve_value(value: f32, midpoint: f32, power: f32) -> f32 {
 /// 2cb4843 agree here apart from the seed and `Steps`'s `map`, the jar's [`map`] or 2cb4843's [`map_current`]).
 /// `sample(module, x, y)` reads a child. Children are read in Java's order and only where Java reads them:
 /// `Steps` reads its source, then slope min, slope max and step count; `Freq` its x and y frequencies (at the
-/// original point), then the source at `(x * fx, y * fy)`; `Grad` its source and upper bound, then (below the upper
-/// bound) strength and lower bound; `Modulate` its direction and strength, then the source at the point moved by
-/// `NoiseUtil.sin`/`cos` of `direction * PI2` times the strength. `(int)` casts saturate (NaN to 0) like Java's.
+/// original point), then the source at `(x * fx, y * fy)`; `Grad` its source and upper bound, then (unless the
+/// source is above the upper bound) strength and lower bound; `Modulate` its direction and strength, then the source
+/// at the point moved by `NoiseUtil.sin`/`cos` of `direction * PI2` times the strength. `(int)` casts saturate (NaN
+/// to 0) like Java's.
 fn transform_value<E>(
     kind: &ModuleKind,
     x: f32,
@@ -9245,8 +9246,8 @@ mod tests {
                 }
             }
         }
-        // Steps, Freq and Modulate read every child; Grad reads strength and lower bound only at or below its upper
-        // bound (Java returns the source sample above it).
+        // Steps, Freq and Modulate read every child; Grad reads strength and lower bound unless the source is above
+        // its upper bound (Java returns the source sample there).
         let unsupported = unsupported_seeded_node(0.5);
         let u = || unsupported.clone();
         let failing = [
