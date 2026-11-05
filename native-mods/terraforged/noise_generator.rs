@@ -393,6 +393,7 @@ fn create_ocean_terrain() -> Module {
 mod tests {
     use super::super::{
         terraforged_context::{GeneratorContext, GeneratorSettings},
+        terraforged_erosion::tests::smooth_and_digest,
         terraforged_terrain_blender::TerrainNoise,
         terraforged_terrain_data::TerrainData,
     };
@@ -987,6 +988,48 @@ chunk 2 1 -2147483648 -40 -16 c04ac2241d15e3ce 0";
         }
         // The river valleys' carry-over is exercised.
         assert!(lines.iter().any(|line| !line.ends_with(" 0")));
+    }
+
+    /// `HeightmapSmoothingOracle.java`'s `realrow` digests (`noise_generator/run-smoothing.sh`): Reimagined 26.3's
+    /// `HeightmapSmoothing` over the 18x18 heights of real `NoiseData` from `generate` (set 0: the constant stub
+    /// terrain; set 1: the noise terrains), four chunks (two river valleys) × settings rows 1, 2, 5 and 6.
+    #[test]
+    fn smoothing_real_noise_data_matches_reimagined_java() {
+        const EXPECTED: [&str; 8] = [
+            "realrow 0 0 0 e4cf8254fc3c9e49",
+            "realrow 0 0 -2147483648 5e7bf7921d3410ef",
+            "realrow 0 1 0 ed60790b454c7273",
+            "realrow 0 1 -2147483648 39e5dbe7ac268480",
+            "realrow 2 0 0 fad54f5c46d9a60b",
+            "realrow 2 0 -2147483648 e633326342234f18",
+            "realrow 2 1 0 108e177bf4285967",
+            "realrow 2 1 -2147483648 1d9fa5c297d8462b",
+        ];
+        let mut lines = Vec::new();
+        for variant in [0, 2] {
+            for set in 0..2 {
+                for seed in [0, i32::MIN] {
+                    let generator = generator(variant, set);
+                    let mut digest = 0xcbf2_9ce4_8422_2325;
+                    for (chunk_x, chunk_z) in [(0, 0), (-7, 12), (24, 16), (-40, -16)] {
+                        let mut heights = Vec::new();
+                        generator
+                            .generate(seed, chunk_x, chunk_z, |data| {
+                                heights = (0..data.index().length())
+                                    .map(|index| data.height().get_index(index))
+                                    .collect();
+                            })
+                            .unwrap();
+                        assert_eq!(heights.len(), 18 * 18);
+                        for row in [1, 2, 5, 6] {
+                            smooth_and_digest(&mut digest, &mut heights.clone(), 18, row);
+                        }
+                    }
+                    lines.push(format!("realrow {variant} {set} {seed} {digest:x}"));
+                }
+            }
+        }
+        assert_eq!(lines, EXPECTED);
     }
 
     /// `generate` fills each cell with `sample`'s output at that position from the previous cell's sample, and

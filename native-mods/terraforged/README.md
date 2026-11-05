@@ -1933,10 +1933,27 @@ overflowing products included) and 16 coordinates, and replays `ErodedNoiseGener
 (`collectNeighbours`, `generateCenterChunk`, `awaitNeighbours`) for six radii and five chunks (negative ones and the
 `int` extremes, where the chunk offsets wrap). The test matches its 63 lines bit for bit, in debug and release.
 
+The heightmap smoothing (`erosion.rs`, `HeightmapSmoothing` with `HeightmapSmoothingSettings`) comes from neither
+TerraForged version above: it is TerraForged Reimagined 26.3's `worldgen.noise.erosion.HeightmapSmoothing` and
+`TerraSettings.Smoothing` (Romoslayer/TerraForged-Reimagined, branch 26.3, a24d450), an unofficial port whose
+`ErodedNoiseGenerator` smooths the eroded region heightmap after erosion. It is adapted under Reimagined's MIT licence
+(copyright (c) 2020 TerraForged and (c) 2026 Romoslayer), preserved in `LICENSE-TERRAFORGED-REIMAGINED`. The
+1.18.2-0.3.1 jar and the newer source (6dd607eb) never smooth there (`run-smoothing.sh` checks both). The algorithm is Engine's `Smoothing` filter (above) on a
+bare height array: the same `round(radius + 0.5)` scan radius, `1 - d² / r²` weights and in-place z-then-x passes, but
+no erosion mask, no altitude modifier (every cell smooths evenly) and no absent cells. Its settings are Reimagined's:
+0 iterations (off: TerraForged 0.3.x never smoothed), radius 1.75, rate 0.85, unlike Engine's 1, 1.8 and 0.9. Cells
+closer than the scan radius to the edge never move; a map shorter than `length²` panics where Java throws.
+`HeightmapSmoothingOracle.java` (`.local/terraforged/oracles/noise_generator/`, `run-smoothing.sh`) compiles
+Reimagined's own class and settings and runs them, interpreted and JIT-compiled alike, over 24 settings rows (off,
+active, zero, negative, NaN, infinite and subnormal radii and rates) × 3 maps (smooth, random, and with NaN, infinities,
+-0 and subnormals) × 8 lengths up to Reimagined's 256, and over the heights of real `NoiseData` from the newer
+source's `NoiseGenerator.generate` (both terrain sets, two `TerrainLevels`, two runtime seeds, four chunks). The tests
+match its 25 settings digests and 8 real-data digests bit for bit, in debug and release.
+
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives, the biome climate types, the climate settings, the climate module, the climate stage, the continent factory, the generator context, the heightmap, the world generator factory, TerraForged's terrain levels, its terrain data, its terrain generator, its terrain-blend utilities, its terrain blender with its nearest-terrain search (and the newer source's seed-first blender), noise-graph reseeding, the cave noise primitives, the biome viability rules, the biome overrides, the continent control points, the continent cell primitives, the continent configuration, the continent shape blending, the continent cell generator with its spawn-offset search, the continent river nodes, the continent river carver's arithmetic, the continent river networks with their nearest-node sampling and their warped, carved river sampling, the newer source's seed-first noise sources, scalar noise graphs, domain warps, selectors, graph caches, terraces, legacy terraces, advanced terraces, curves, transforms (steps, frequency, gradient and modulation), special sources (boost, cell, cell edge and sine) and lines, and its bounded concurrent lossy cache with the continent's cell and
-river-piece caches on it, the continent noise module that joins the continent layers, and the newer source's terrain height sampler with its bordered chunk generation and its nearest-terrain search. They change nothing in the game, so there is
+river-piece caches on it, the continent noise module that joins the continent layers, the newer source's terrain height sampler with its bordered chunk generation and its nearest-terrain search, the erosion tile geometry, and TerraForged Reimagined's heightmap smoothing. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
