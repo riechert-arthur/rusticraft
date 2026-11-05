@@ -1407,10 +1407,27 @@ signed zeros. It also covers incoming river noise and river-then-lake precedence
 height, river noise, terrain) bit for bit, in debug and release.
 
 The continent river network (`river_network.rs`) ports `computeNodes` of the newer source tree's
-`worldgen.noise.continent.river.RiverGenerator`: the river and lake pieces of one cell. A land cell connects to its
-lowest neighbour and receives every higher neighbour whose own lowest neighbour it is; each connection is two displaced
-segments to the shared border, plus a third to the neighbour's point when that neighbour is ocean. A source cell (no
-inflow) may also get a lake. The nearest-node sampling, the river warp and the piece cache come later.
+`worldgen.noise.continent.river.RiverGenerator`: the river and lake pieces of one cell. An ocean cell (threshold value
+0) has none. A land cell first takes the rivers of every higher neighbour whose strictly lowest neighbour it is (the
+inflows, neighbours in `DIRS` order), then its own river to its lowest neighbour (the last one at or below its own
+value); a source cell (no inflow) whose lowest neighbour is ocean gets nothing ("chode-rivers" are culled). Each
+connection is two segments to the shared border, bent sideways by `MathUtil.rand` draws at `seed + 20107`, `9803` and
+`28387` with `MathUtil.hash(seed + 827614, x, y)`, plus a third on to the neighbour when its `noise` field is below the
+threshold. A source cell also gets a lake when its hash's draw (`hash + 37171`) is at most `lakeDensity` or its base
+noise is below 0.25. All seed and coordinate offsets wrap like Java `int`s. Version check (`version/compare.sh` in
+`.local/terraforged/oracles/river_network/`, compiling the newer source's continent package with stubs and comparing
+`javap` per method): `MathUtil` and the arithmetic are the same as in the 1.18.2-0.3.1 jar; only the seed differs. The
+jar's generator draws from `config.rivers.seed` and reads cells without a runtime seed; the newer source passes its
+runtime seed to both and never reads `rivers.seed` (which, in the newer source, only seeds the carver's erosion at
+`rivers.seed + 21221`, #125). So the jar computes a newer-source world of runtime seed `s` when given shape seeds
+`seed0 + s`, `seed1 + s` and `rivers.seed = s`. `RiverNetworkOracle.java` runs both the jar's and the compiled
+source's private `computeNodes` that way (and checks they agree) over both cell shapes and all three noise sources: a
+13×13 grid at seed 42, nine runtime seeds near the `int` offsets' wrap points with three shape-seed pairs, cells at
+the `int` extremes, and edge lake densities, thresholds and jitters (NaN, infinities, signed zeros). The tests match
+the piece counts and the hash of every node's float bits, in order, in debug and release. The nearest-node sampling,
+the river warp, the carver call and the piece and cell caches come later (#123–#127). The oracle bypasses the
+continent's cell cache: the jar's cache returns evicted cell points to a pool that later cells overwrite, which could
+change a cell still in use when two of the 21 cells read share a slot (not in these grids, on a 12-core run).
 
 ## Status: development only
 
