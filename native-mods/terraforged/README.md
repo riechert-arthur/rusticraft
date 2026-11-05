@@ -1342,7 +1342,7 @@ lossy cache whose pool always hands out fresh points, so the cache never changes
 directly (the cache is a later layer). The jar has no runtime seed: `ContinentNoise.createContinent` binds the world
 seed by drawing `seed0` and `seed1` from the generator context's `Seed`. The port's `seed` parameters are the newer
 source's runtime seed, added (Java `int` wrap) to both seeds; 0 gives the jar's cells, and seed `s` over `(a, b)`
-equals seed 0 over `(a + s, b + s)`. The spawn-offset search and the river generator come later.
+equals seed 0 over `(a + s, b + s)`. The river generator comes later.
 `ContinentCellsOracle.java` (`.local/terraforged/oracles/continent_cells/`, with a `Mth` stub plus the biome override's
 and terrain levels' stubs) runs the jar's own `ContinentGenerator` (its constructor, cache and pool) and
 `ShapeGenerator` over 8 seed pairs (`int` extremes and wrapping sample seeds), 10 jitters (signed zeros, a subnormal,
@@ -1351,9 +1351,25 @@ nearest-cell searches per generator over NaN, infinite, signed-zero, subnormal, 
 shape's blended outputs over the same points, for both cell shapes and all three sources; the test matches its 942,336
 results bit for bit, in debug and release.
 
+`world_offset` ports the jar's spawn-offset search, `ContinentGenerator.getWorldOffset`: it walks `SpiralIterator(0, 0,
+0, 100000)` (rings 1 to 100,000 around cell (0, 0), each from its `(-r, -r)` corner along +x, +y, -x, then -y; the
+origin cell itself is never visited) and returns the jittered position of the first cell that is land
+(`getThresholdValue` is not 0: noise at or above the threshold, NaN included) whose spawn neighbourhood (`isValidSpawn`
+with radius 3: the ten cells at `dy` 1 or 2 and `dx` -2 to 2) is all land, or `(0, 0)` if there is none (like the jar,
+only after walking all ~4·10^10 cells when no land is near the origin). The jar recomputes it on every call
+(`ContinentNoise` keeps the answer in a field), so the port caches nothing; the runtime seed shifts both cell seeds as
+for every cell. `ContinentSpawnOracle.java` (same folder, `spawn.txt`) runs the jar's `getWorldOffset` for both cell
+shapes and all three sources over seed pairs drawn through Engine's `Seed` from `long` world seeds
+(`Long.MIN_VALUE`/`MAX_VALUE`, values that wrap `seed1` past `Integer.MAX_VALUE`) and the `int`-extreme seed pairs, NaN
+and zero jitters, thresholds 0.525, 0, 0.25, -inf and NaN, and thresholds equal to and one float either side of the
+first cell's noise and of its neighbourhood's least noise; it also runs the same loop at radii 0 to 3 over the jar's
+`SpiralIterator`, private `computeCell` and `isValidSpawn` (checked against `getWorldOffset`) at every cell noise near
+the origin and one float above it, so each answer depends on the search order. The tests match its seed pairs and 45,552
+hashed floats bit for bit, in debug and release.
+
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives, the biome climate types, the climate settings, the climate module, the climate stage, the continent factory, the generator context, the heightmap, the world generator factory, TerraForged's terrain levels, its terrain data, its terrain generator, its terrain-blend utilities, its terrain blender with its nearest-terrain search, noise-graph reseeding, the cave noise primitives, the biome viability rules, the biome overrides, the continent control points, the continent cell primitives, the continent configuration, the continent shape blending, and the continent cell generator. They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives, the biome climate types, the climate settings, the climate module, the climate stage, the continent factory, the generator context, the heightmap, the world generator factory, TerraForged's terrain levels, its terrain data, its terrain generator, its terrain-blend utilities, its terrain blender with its nearest-terrain search, noise-graph reseeding, the cave noise primitives, the biome viability rules, the biome overrides, the continent control points, the continent cell primitives, the continent configuration, the continent shape blending, and the continent cell generator with its spawn-offset search. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
