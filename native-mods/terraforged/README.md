@@ -2080,7 +2080,7 @@ bodies (copied, since `Generator` needs Minecraft's `ChunkGenerator`) on Reimagi
 `NoiseLevels` and `ErodedNoiseGenerator` over the newer source's `NoiseGenerator`, interpreted and JIT-compiled alike:
 the query math over signed zeros, subnormals, huge values, infinities and NaN for three level sets, `Seeds.get`, and
 thirteen end-to-end positions (four seeds, negative blocks, `int` limits, the world border); the tests match them bit
-for bit in debug and release. Its end-to-end heights are Reimagined's eroded ones, so the tests take those from
+for bit in debug and release. That oracle's end-to-end heights are Reimagined's eroded ones, so the tests take those from
 `oracles/generator_facade/6dd607eb/` (`run.sh`, after the same e2e setup) instead: `extract.py` copies 6dd607eb's
 `getBaseHeight` and `getBaseColumn` verbatim and runs them with 6dd607eb's real `Seeds.get(RandomState)`, `TerrainLevels`
 and `NoiseLevels` over the newer source's `NoiseGenerator.getNoiseSample`, for all six heightmap types, at the same
