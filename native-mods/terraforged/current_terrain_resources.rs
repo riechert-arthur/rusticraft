@@ -32,7 +32,7 @@ use super::terraforged_terrain_asset_registry::{
 /// The number of bundled terrain types.
 pub const TERRAIN_TYPE_COUNT: usize = 18;
 /// The number of bundled terrain noises.
-pub const TERRAIN_NOISE_COUNT: usize = 8;
+pub const TERRAIN_NOISE_COUNT: usize = 10;
 
 /// TerraForged Reimagined a24d450's `terrain_type` registry files
 /// (<https://github.com/Romoslayer/TerraForged-Reimagined/tree/a24d4503064780790e975cd17495866ae13eef11>,
@@ -148,11 +148,11 @@ pub fn decode_current_terrain_types(
 /// `data/worldgen/terrain_noise/`:
 ///
 /// - TerraForged Reimagined a24d450's flatlands `plains` and `steppe`, hills `dales`, `hills_1` and `hills_2`, and
-///   mountain `mountains_ridge_1`
+///   mountains `mountains_ridge_1` and `mountains_ridge_2`
 ///   (<https://github.com/Romoslayer/TerraForged-Reimagined/tree/a24d4503064780790e975cd17495866ae13eef11>,
 ///   `src/main/resources/default/data/terraforged/worldgen/terrain_noise/`, MIT, (c) 2020 TerraForged, (c) 2026
 ///   Romoslayer; TerraForged 6dd607eb generates the same bytes);
-/// - TerraForged 6dd607eb's generated `mountains_1` and `mountains_2`
+/// - TerraForged 6dd607eb's generated `mountains_1`, `mountains_2` and `mountains_3`
 ///   (<https://github.com/TerraForged/TerraForged/tree/6dd607ebfd41a3b7274e090b1f2cf565d53d1d44>,
 ///   `generated/resources/default/data/terraforged/worldgen/terrain/noise/`, MIT, (c) 2020 TerraForged), which use
 ///   Engine 0.3.0's erosion `Valley` node; Reimagined's copies replace that node (its codec cannot read it), and the
@@ -202,9 +202,21 @@ pub fn current_terrain_noise_documents() -> [(&'static str, &'static str); TERRA
             )),
         ),
         (
+            "terraforged:mountains_3",
+            text(crate::terraforged_data!(
+                "worldgen/terrain_noise/mountains_3.json"
+            )),
+        ),
+        (
             "terraforged:mountains_ridge_1",
             text(crate::terraforged_data!(
                 "worldgen/terrain_noise/mountains_ridge_1.json"
+            )),
+        ),
+        (
+            "terraforged:mountains_ridge_2",
+            text(crate::terraforged_data!(
+                "worldgen/terrain_noise/mountains_ridge_2.json"
             )),
         ),
     ]
@@ -342,15 +354,18 @@ terraforged:wetland|wetland|wetland/category:WETLAND|wetland/category:WETLAND|WE
     /// `oracles/current_terrain_resources/` (`run.sh`, noises.txt): Reimagined a24d450's `TerrainNoise` over its real
     /// `NoiseCodec` (with Engine 0.3.0's `Valley` registered, as TerraForged 6dd607eb's `NoiseCodec` does), its `type`
     /// bound in the terrain-type registry its 18 terrain_type files load, for each bundled terrain_noise file in
-    /// registry order, each read from the tree it is bundled from (6dd607eb's generated `mountains_1` and
-    /// `mountains_2`, Reimagined's the rest). Fields: key, terrain name/its delegate, whether it is the registry's own
-    /// terrain of that name, weight bits, the raised noise's bounds and the #185 oracle's hash of seed-first samples.
+    /// registry order, each read from the tree it is bundled from (6dd607eb's generated `mountains_1`, `mountains_2`
+    /// and `mountains_3`, Reimagined's the rest). Fields: key, terrain name/its delegate, whether it is the registry's
+    /// own terrain of that name, weight bits, the raised noise's bounds and the #185 oracle's hash of seed-first
+    /// samples.
     const NOISE_ORACLE: &str = r##"terraforged:dales|hills/category:LOWLAND|true|weight=3fc00000|min=00000000|max=3f800000|hash=2a75f650c0578dc8
 terraforged:hills_1|hills/category:LOWLAND|true|weight=40000000|min=00000000|max=3f800000|hash=16d5050ff2aba2c1
 terraforged:hills_2|hills/category:LOWLAND|true|weight=40000000|min=00000000|max=3f800000|hash=e013cf848d1b6c6e
 terraforged:mountains_1|mountains/category:HIGHLAND|true|weight=3fa00000|min=00000000|max=3f800000|hash=572329a5df58853d
 terraforged:mountains_2|mountains/category:HIGHLAND|true|weight=3fa00000|min=00000000|max=3f800000|hash=ca4419f386874a92
+terraforged:mountains_3|mountains/category:HIGHLAND|true|weight=3fa00000|min=00000000|max=3f800000|hash=166d75b93555c110
 terraforged:mountains_ridge_1|mountains/category:HIGHLAND|true|weight=3fa00000|min=00000000|max=3f800000|hash=2e4f26a6d2b720af
+terraforged:mountains_ridge_2|mountains/category:HIGHLAND|true|weight=3fa00000|min=00000000|max=3f800000|hash=ae6266c76fcd7cce
 terraforged:plains|flats/category:FLATLAND|true|weight=40200000|min=00000000|max=3f800000|hash=54dcba40e02603d8
 terraforged:steppe|flats/category:FLATLAND|true|weight=3fc00000|min=00000000|max=3f800000|hash=93dd73538804253f"##;
 
@@ -396,7 +411,9 @@ terraforged:steppe|flats/category:FLATLAND|true|weight=3fc00000|min=00000000|max
                 "hills_2",
                 "mountains_1",
                 "mountains_2",
+                "mountains_3",
                 "mountains_ridge_1",
+                "mountains_ridge_2",
                 "plains",
                 "steppe"
             ]
@@ -413,16 +430,17 @@ terraforged:steppe|flats/category:FLATLAND|true|weight=3fc00000|min=00000000|max
         let values: Vec<_> = noises.into_values().collect();
         let applied = apply_terrain_overrides(&values, &ids, &settings);
         assert_eq!(applied.len(), TERRAIN_NOISE_COUNT);
-        assert!(Arc::ptr_eq(&applied[6], &plains)); // a full-id key matches no terraforged: entry
-        assert_eq!(applied[7].weight().to_bits(), 4.0_f32.to_bits());
-        assert_eq!(applied[7].terrain().name(), "flats");
+        assert!(Arc::ptr_eq(&applied[8], &plains)); // a full-id key matches no terraforged: entry
+        assert_eq!(applied[9].weight().to_bits(), 4.0_f32.to_bits());
+        assert_eq!(applied[9].terrain().name(), "flats");
     }
 
     #[test]
     fn default_overrides_stretch_dales_and_the_mountains_but_not_the_hills() {
-        // `isMountain` matches ids containing "mountain" or "dales", so the default `mountainWidth` (3.5) stretches
-        // dales and the three mountains (fancy mountains are on, so `mountains_ridge_1` stays); the two hills and the
-        // flatlands have no override and pass through as the same entries.
+        // `isMountain` matches ids containing "mountain", "dolomites", "torridonian" or "dales" (of the bundled
+        // noises: dales and the mountains), so the default `mountainWidth` (3.5) stretches dales and the five
+        // mountains (fancy mountains are on, so both ridges stay); the two hills and the flatlands have no override
+        // and pass through as the same entries.
         let mut registry = TerrainRegistry::new();
         let types = decode_current_terrain_types(&mut registry).unwrap();
         let noises = decode_current_terrain_noises(&types).unwrap();
@@ -433,7 +451,14 @@ terraforged:steppe|flats/category:FLATLAND|true|weight=3fc00000|min=00000000|max
         assert!(settings.general.fancy_mountains);
         let applied = apply_terrain_overrides(&values, &ids, &settings);
         assert_eq!(applied.len(), TERRAIN_NOISE_COUNT);
-        let stretched = ["dales", "mountains_1", "mountains_2", "mountains_ridge_1"];
+        let stretched = [
+            "dales",
+            "mountains_1",
+            "mountains_2",
+            "mountains_3",
+            "mountains_ridge_1",
+            "mountains_ridge_2",
+        ];
         for ((id, applied), original) in ids.iter().zip(&applied).zip(&values) {
             if stretched.contains(&id.as_str()) {
                 assert!(!Arc::ptr_eq(applied, original), "{id}");
@@ -455,9 +480,10 @@ terraforged:steppe|flats/category:FLATLAND|true|weight=3fc00000|min=00000000|max
     }
 
     #[test]
-    fn fancy_mountains_off_drops_the_mountain_ridge() {
+    fn fancy_mountains_off_drops_the_mountain_ridges() {
         // `applyTerrainOverrides` drops every id containing "ridge" when fancy mountains are off: of the bundled
-        // noises only `mountains_ridge_1`. With a width of 1 nothing is stretched, so the others pass through.
+        // noises `mountains_ridge_1` and `mountains_ridge_2`. With a width of 1 nothing is stretched, so the others
+        // pass through.
         let mut registry = TerrainRegistry::new();
         let types = decode_current_terrain_types(&mut registry).unwrap();
         let noises = decode_current_terrain_noises(&types).unwrap();
@@ -467,14 +493,15 @@ terraforged:steppe|flats/category:FLATLAND|true|weight=3fc00000|min=00000000|max
         settings.general.fancy_mountains = false;
         settings.general.mountain_width = 1.0;
         let applied = apply_terrain_overrides(&values, &ids, &settings);
-        let ridge = ids.iter().position(|id| id == "mountains_ridge_1").unwrap();
-        let kept: Vec<_> = values
+        let ridges = ["mountains_ridge_1", "mountains_ridge_2"];
+        let kept: Vec<_> = ids
             .iter()
-            .enumerate()
-            .filter(|&(i, _)| i != ridge)
+            .zip(&values)
+            .filter(|(id, _)| !ridges.contains(&id.as_str()))
             .map(|(_, noise)| noise)
             .collect();
-        assert_eq!(applied.len(), TERRAIN_NOISE_COUNT - 1);
+        assert_eq!(kept.len(), TERRAIN_NOISE_COUNT - 2); // both ridges are bundled
+        assert_eq!(applied.len(), kept.len());
         for (applied, original) in applied.iter().zip(kept) {
             assert!(Arc::ptr_eq(applied, original));
         }
