@@ -2127,7 +2127,7 @@ digest, the five cases where Java throws in the case's own chunk included.
 hand-off end to end: Reimagined's real `TerrainCache.combineAsync`, `TerrainGenerator`, `TerrainData`,
 `TerrainLevels` and `ErodedNoiseGenerator` over the newer source's `NoiseGenerator`, with `fillChunk` and
 `primeHeightmaps` copied onto the chunk-fill oracle's stub chunk (`oracles/chunk_fill/ChunkStage.java`), interpreted
-and JIT-compiled alike. Seven chunks over four level sets and seeds (negative chunks, the world border) are filled in
+and JIT-compiled alike. Seven chunks over three level sets and four seeds (negative chunks, the world border) are filled in
 the `-64..320`, `-64..480`, `-64..960`, `0..256` and `128..192` build ranges (terrain above the top of one and
 below the bottom of the other); the test matches every block and both heightmaps of
 each, bit for bit, including the ranges where Java's own chunk throws.
