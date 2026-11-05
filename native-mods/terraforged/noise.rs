@@ -1273,9 +1273,12 @@ struct TerraceStep {
     upper_bound: f32,
 }
 
-/// The coordinate and sample a `Cache` holds (Engine's `Cache.Value`; `None` is its `empty` state).
+/// The coordinate and sample a `Cache` holds (Engine's `Cache.Value`; `None` is its `empty` state). `seed` is the
+/// runtime seed of a seed-first sample (`try_value_seed_first`) and `None` for the seedless `value`, so the two paths
+/// (which use different `NoiseUtil.map`s) and two runtime seeds never share an entry.
 #[derive(Clone, Copy)]
 struct CacheValue {
+    seed: Option<i32>,
     x: f32,
     y: f32,
     value: f32,
@@ -2203,21 +2206,10 @@ impl Module {
             // very same input; with `==`, -0.0 would hit +0.0's entry (and NaN never hits), which could make a sample
             // depend on which coordinate another thread sampled last.
             ModuleKind::Cache { source, value } => {
-                let key = (x.to_bits(), y.to_bits());
-                if let Ok(Some(cached)) = value.try_lock().as_deref()
-                    && (cached.x.to_bits(), cached.y.to_bits()) == key
-                {
-                    return cached.value;
-                }
-                let result = source.value(x, y);
-                if let Ok(mut cached) = value.try_lock() {
-                    *cached = Some(CacheValue {
-                        x,
-                        y,
-                        value: result,
-                    });
-                }
-                result
+                let Ok(value) = cache_lookup(value, None, x, y, || {
+                    Ok::<_, std::convert::Infallible>(source.value(x, y))
+                });
+                value
             }
             ModuleKind::Select {
                 control,
@@ -2454,19 +2446,12 @@ impl Module {
                     interpolation.apply(alpha),
                 )
             }
+            // Noise2D 2cb4843's `Cache` keeps one entry per thread keyed by `x == this.x && y == this.y` alone, so a
+            // repeated point at another runtime seed returns the first seed's sample. The port keys the shared entry
+            // by the seed too (and by the coordinates' bits, as the seedless path does): a hit is always the sample
+            // the uncached graph gives. A failed child stores nothing.
             ModuleKind::Cache { source, value } => {
-                let mut cached = value.lock().expect("TerraForged cache lock poisoned");
-                if !cached.empty && x == cached.x && y == cached.y {
-                    return Ok(cached.value);
-                }
-                let result = sample(source)?;
-                *cached = CacheValue {
-                    x,
-                    y,
-                    value: result,
-                    empty: false,
-                };
-                result
+                cache_lookup(value, Some(seed), x, y, || sample(source))?
             }
             _ => return Err("runtime-seeded sampling is not implemented for this graph node"),
         })
@@ -3668,6 +3653,29 @@ pub fn sin(radians: f32) -> f32 {
 /// `NoiseUtil.cos`: `sin(r + 1.5708f)`.
 pub fn cos(radians: f32) -> f32 {
     sin(radians + f32::from_bits(0x3fc9_0ff9))
+}
+
+/// `Cache`'s lookup for both sampling paths: a hit needs the same `seed` key (`None` for the seedless path) and the
+/// same coordinate bits. The lock is only tried, and only while the entry is copied in or out, never while `compute`
+/// runs: a busy cache samples its source, threads never wait on each other and a panicking source cannot poison it.
+fn cache_lookup<E>(
+    entry: &std::sync::Mutex<Option<CacheValue>>,
+    seed: Option<i32>,
+    x: f32,
+    y: f32,
+    compute: impl FnOnce() -> Result<f32, E>,
+) -> Result<f32, E> {
+    if let Ok(Some(cached)) = entry.try_lock().as_deref()
+        && cached.seed == seed
+        && (cached.x.to_bits(), cached.y.to_bits()) == (x.to_bits(), y.to_bits())
+    {
+        return Ok(cached.value);
+    }
+    let value = compute()?;
+    if let Ok(mut cached) = entry.try_lock() {
+        *cached = Some(CacheValue { seed, x, y, value });
+    }
+    Ok(value)
 }
 
 #[cfg(test)]
@@ -7218,9 +7226,63 @@ mod tests {
         }
     }
 
+    /// The graphs of `TerraForgedSeededCacheOracle.java` (`.local/terraforged/oracles/seed_first/`), with or
+    /// without their caches.
+    fn seeded_cache_graph(graph: usize, cached: bool) -> Module {
+        let cache = |m: Module| if cached { m.cache() } else { m };
+        let source = |kind, seed, frequency, octaves, gain| {
+            Module::source(Source::new(
+                kind,
+                SourceConfig {
+                    seed,
+                    frequency,
+                    octaves,
+                    gain,
+                    ..SourceConfig::default()
+                },
+            ))
+        };
+        let simplex = || source(SourceKind::Simplex, i32::MAX, 0.125, 2, 0.65);
+        match graph {
+            0 => cache(simplex()),
+            1 => {
+                let s = cache(simplex());
+                Module::add(vec![s.clone(), s.scale(Module::constant(0.5))])
+            }
+            2 => cache(Module::add(vec![
+                source(SourceKind::Perlin2, -91, 0.25, 3, 0.5),
+                simplex(),
+            ])),
+            3 => cache(cache(simplex()).bias(Module::constant(0.1))),
+            4 => cache(source(SourceKind::Simplex, 1337, 3.0, 0, 0.5)),
+            _ => {
+                let s = cache(source(SourceKind::Ridge, 5, 0.5, 2, 0.5));
+                cache(Module::add(vec![
+                    Module::multiply(vec![s.clone(), cache(simplex())]),
+                    s,
+                ]))
+            }
+        }
+    }
+
+    const SEEDED_CACHE_SEEDS: [i32; 5] = [0, 17, -91, i32::MIN, i32::MAX];
+    const SEEDED_CACHE_POINTS: [(f32, f32); 8] = [
+        (0.0, 0.0),
+        (0.125, -0.75),
+        (12.34, 56.78),
+        (-1234.5, 987.25),
+        (f32::NAN, 1.0),
+        (f32::INFINITY, -2.0),
+        (-0.0, 0.0),
+        (3.0e9, -3.0e9),
+    ];
+
+    /// What Java shows deterministically (one thread, fresh caches, a repeated point keeps its seed) matches the
+    /// Noise2D 2cb4843 oracle; where 2cb4843's coordinate-only key returns another seed's sample ("stale"), the port
+    /// gives the uncached sample instead.
     #[test]
-    fn seeded_cache_matches_noise2d_seed_and_coordinate_keys() {
-        let source = Module::source(Source::new(
+    fn runtime_seeded_caches_match_current_noise2d() {
+        let perlin2 = Module::source(Source::new(
             SourceKind::Perlin2,
             SourceConfig {
                 seed: i32::MAX,
@@ -7231,7 +7293,8 @@ mod tests {
                 interpolation: Interpolation::Curve3,
             },
         ));
-        let cache = source.clone().cache();
+        // Perlin2 ignores the call seed, so these repeats are seed-safe in Java too.
+        let cache = perlin2.clone().cache();
         for ((seed, x, y), expected) in [
             ((17, 1.25, -3.5), 0x3f0a_9872),
             ((-91, 1.25, -3.5), 0x3f0a_9872),
@@ -7240,17 +7303,115 @@ mod tests {
             ((i32::MAX, f32::NAN, 0.0), 0x7fc0_0000),
             ((0, f32::NAN, 0.0), 0x7fc0_0000),
         ] {
+            let value = cache.try_value_seed_first(seed, x, y).unwrap();
+            assert_eq!(canonical_bits([value]), [expected]);
+        }
+        let zero_cache = perlin2.cache();
+        assert_eq!(
+            bits([
+                zero_cache.try_value_seed_first(17, -0.0, 0.0).unwrap(),
+                zero_cache.try_value_seed_first(-91, 0.0, 0.0).unwrap(),
+            ]),
+            [0x3f00_0000, 0x3f00_0000]
+        );
+
+        let seq: [u64; 6] = [
+            0xafd0b59969690279,
+            0x585880270ff8956d,
+            0x22f5f16f69d0212b,
+            0xfcc69f28dbdddd7b,
+            0xd82ac363a10b8965,
+            0x47368fac9224d9a7,
+        ];
+        // (Java's first sample at seed 17, its cached sample at seed -91, the uncached sample at seed -91).
+        let stale: [[u32; 3]; 6] = [
+            [0x3e4e29a8, 0x3e4e29a8, 0x3e81cb2a],
+            [0x3e9a9f3e, 0x3e9a9f3e, 0x3ec2b0bf],
+            [0x3f40c2cd, 0x3f40c2cd, 0x3f4e1df8],
+            [0x3e9a4807, 0x3e9a4807, 0x3eb4fe5d],
+            [0x3f800000, 0x3f800000, 0x3f800000],
+            [0x3f847a91, 0x3f847a91, 0x3ebcdede],
+        ];
+        for graph in 0..6 {
+            for cached in [true, false] {
+                let module = seeded_cache_graph(graph, cached);
+                let mut hash: u64 = 0xcbf29ce484222325;
+                for seed in SEEDED_CACHE_SEEDS {
+                    for (x, y) in SEEDED_CACHE_POINTS {
+                        for _ in 0..2 {
+                            let value = module.try_value_seed_first(seed, x, y).unwrap();
+                            hash = (hash ^ canonical_bits([value])[0] as u64)
+                                .wrapping_mul(0x100000001b3);
+                        }
+                    }
+                }
+                assert_eq!(hash, seq[graph], "graph {graph}, cached {cached}");
+            }
+            let module = seeded_cache_graph(graph, true);
+            let (x, y) = SEEDED_CACHE_POINTS[2];
+            let [first, _, uncached] = stale[graph];
             assert_eq!(
-                cache.try_value_seed_first(seed, x, y).unwrap().to_bits(),
-                expected
+                bits([module.try_value_seed_first(17, x, y).unwrap()]),
+                [first]
+            );
+            assert_eq!(
+                bits([module.try_value_seed_first(-91, x, y).unwrap()]),
+                [uncached]
             );
         }
+    }
 
-        let zero_cache = source.cache();
-        let negative_zero = zero_cache.try_value_seed_first(17, -0.0, 0.0).unwrap();
-        let positive_zero = zero_cache.try_value_seed_first(-91, 0.0, 0.0).unwrap();
-        assert_eq!(negative_zero.to_bits(), 0x3f00_0000);
-        assert_eq!(positive_zero.to_bits(), negative_zero.to_bits());
+    /// One cache shared by threads that interleave runtime seeds at the same points, and the seedless path on the
+    /// same entry, always give the uncached sample.
+    #[test]
+    fn seeded_cache_matches_uncached_across_seeds_and_threads() {
+        for graph in 0..6 {
+            let cached = seeded_cache_graph(graph, true);
+            let uncached = seeded_cache_graph(graph, false);
+            std::thread::scope(|scope| {
+                for thread in 0..8 {
+                    let (cached, uncached) = (&cached, &uncached);
+                    scope.spawn(move || {
+                        for i in 0..1500usize {
+                            let seed = SEEDED_CACHE_SEEDS[(i + thread) % 5];
+                            let (x, y) = SEEDED_CACHE_POINTS[(i / 5) % 8];
+                            let expected = uncached.try_value_seed_first(seed, x, y).unwrap();
+                            let value = cached.try_value_seed_first(seed, x, y).unwrap();
+                            assert_eq!(canonical_bits([value]), canonical_bits([expected]));
+                            if i % 7 == 0 {
+                                assert_eq!(
+                                    canonical_bits([cached.value(x, y)]),
+                                    canonical_bits([uncached.value(x, y)])
+                                );
+                            }
+                        }
+                    });
+                }
+            });
+        }
+        // A zero-octave source gives 1 seed-first (Noise2D 2cb4843's map) and NaN seedless (the jar's): the two paths
+        // never read each other's entry, and the seedless `value` and `with_seed` keep their bits.
+        let zero = seeded_cache_graph(4, true);
+        assert_eq!(
+            bits([zero.try_value_seed_first(17, 1.0, 2.0).unwrap()]),
+            [0x3f800000]
+        );
+        assert!(zero.value(1.0, 2.0).is_nan());
+        assert_eq!(
+            bits([zero.try_value_seed_first(17, 1.0, 2.0).unwrap()]),
+            [0x3f800000]
+        );
+        for graph in 0..6 {
+            let cached = seeded_cache_graph(graph, true);
+            let uncached = seeded_cache_graph(graph, false);
+            for (x, y) in SEEDED_CACHE_POINTS {
+                let _ = cached.try_value_seed_first(-91, x, y);
+                assert_eq!(
+                    canonical_bits([cached.value(x, y), cached.with_seed(17).value(x, y)]),
+                    canonical_bits([uncached.value(x, y), uncached.with_seed(17).value(x, y)])
+                );
+            }
+        }
     }
 
     #[test]
