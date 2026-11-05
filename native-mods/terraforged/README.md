@@ -2016,12 +2016,33 @@ an `Err` where Java throws: the build is not cached, its waiters get the same `E
 levels, both terrain sets, four seeds, negative regions, smoothing on and off, the jar's droplet lifetime),
 interpreted and JIT-compiled alike. The test matches every map bit for bit (a digest of all 65536 floats) and four
 cached column heights per region, in debug and release; others check that cached heights equal uncached builds on
-eight threads, and that failed builds are errors and not cached. Chunk generation from the regions comes later.
+eight threads, and that failed builds are errors and not cached.
+
+Chunk generation (`ErodedNoiseGenerator::generate`, also the seed-first `NoiseGenerator` trait's `generate`) is
+Reimagined's `ErodedNoiseGenerator.generate` (a24d450, MIT, as above): it reads the chunk's eroded region (building it
+if needed), then fills the chunk and its one-block border (`dz` then `dx`, -1..16, Java `int` math) with each
+position's raw terrain sample, its height replaced by the region's (from the chunk's offset in the region's map; a
+border position reads the region's own margin, not the neighbouring region, as Java does, so it can differ from the
+neighbouring chunk's edge), then the rivers carved. Java samples each position into its own `NoiseSample` of a pooled
+`NoiseResource`: a new resource starts every position from the defaults, while a reused one carries the river noise
+over from the same position of the chunk that used it before, so Java's output depends on which chunks shared a
+resource (the oracle's `pool` lines show it: chunk (25, 16) right after (24, 16) on one resource differs from a fresh
+fill). The port starts every position from the defaults (Java's new resource) and fills a new `NoiseData` per call,
+so a chunk never depends on the chunks or threads before it. A failed region build is an `Err` (the trait panics) where
+Java throws out of `generate`; a later failure (a failing sample, or a panic, the consumer's included) is logged and the
+chunk left unfilled, as Java's `catch (Throwable)` does. The trait's `height_noise` and `levels`, and `find`, stay on the
+un-eroded generator, as in Reimagined. `ErodedChunkOracle.java` (same folder, `run-chunks.sh`) runs Reimagined's real
+`generate` (its resource pool cleared before every chunk) over twelve chunks in three settings groups (seeds 0,
+`i32::MIN` and `i32::MAX`; negative chunks, chunks on both sides of region boundaries, region corners, river chunks, and
+chunks whose block coordinates wrap at the `int` limits), interpreted and JIT-compiled alike; the test matches every
+element of each chunk's `NoiseData` bit for bit, in debug and release. Others check that cached chunks equal uncached
+builds on eight threads and in any order, that a failed region build is an `Err`, and that a panicking consumer is
+caught and logged.
 
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives, the biome climate types, the climate settings, the climate module, the climate stage, the continent factory, the generator context, the heightmap, the world generator factory, TerraForged's terrain levels, its terrain data, its terrain generator, its terrain-blend utilities, its terrain blender with its nearest-terrain search (and the newer source's seed-first blender), noise-graph reseeding, the cave noise primitives, the biome viability rules, the biome overrides, the continent control points, the continent cell primitives, the continent configuration, the continent shape blending, the continent cell generator with its spawn-offset search, the continent river nodes, the continent river carver's arithmetic, the continent river networks with their nearest-node sampling and their warped, carved river sampling, the newer source's seed-first noise sources, scalar noise graphs, domain warps, selectors, graph caches, terraces, legacy terraces, advanced terraces, curves, transforms (steps, frequency, gradient and modulation), special sources (boost, cell, cell edge and sine) and lines, and its bounded concurrent lossy cache with the continent's cell and
-river-piece caches on it, the continent noise module that joins the continent layers, the newer source's terrain height sampler with its bordered chunk generation and its nearest-terrain search, the erosion tile geometry, and TerraForged Reimagined's heightmap smoothing, erosion brushes, hydraulic erosion filter, eroded-region cache and eroded region build. They change nothing in the game, so there is
+river-piece caches on it, the continent noise module that joins the continent layers, the newer source's terrain height sampler with its bordered chunk generation and its nearest-terrain search, the erosion tile geometry, and TerraForged Reimagined's heightmap smoothing, erosion brushes, hydraulic erosion filter, eroded-region cache, eroded region build and eroded chunk generation. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development

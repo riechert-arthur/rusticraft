@@ -23,27 +23,34 @@
  */
 
 // Adapted from TerraForged Reimagined (https://github.com/Romoslayer/TerraForged-Reimagined, a24d450):
-// `buildRegion`, `erodedHeightNoise`, `erodedHeight` and `getRegion` of
-// `src/main/java/com/terraforged/mod/worldgen/noise/erosion/ErodedNoiseGenerator.java`. MIT License, Copyright (c) 2020
-// TerraForged, Copyright (c) 2026 Romoslayer; see `LICENSE-TERRAFORGED-REIMAGINED`.
+// `buildRegion`, `erodedHeightNoise`, `erodedHeight`, `getRegion`, `generate`, `find`, `getHeightNoise`,
+// `getLevels` and `getTerrainLevels` of
+// `src/main/java/com/terraforged/mod/worldgen/noise/erosion/ErodedNoiseGenerator.java`. MIT License, Copyright (c)
+// 2020 TerraForged, Copyright (c) 2026 Romoslayer; see `LICENSE-TERRAFORGED-REIMAGINED`.
 
 use super::{
+    terraforged_engine::Terrain,
     terraforged_erosion::{
         ErosionFilter, ErosionFilterSettings, ErosionRegionCache, ErosionRegionLayout,
         ErosionResource, HeightmapSmoothing, HeightmapSmoothingSettings,
     },
     terraforged_noise_generator::NoiseGenerator,
-    terraforged_terrain_data::NoiseSample,
+    terraforged_terrain_data::{NoiseData, NoiseSample},
+    terraforged_terrain_generator::NoiseGenerator as NoiseGeneratorContract,
+    terraforged_terrain_levels::{NoiseLevels, TerrainLevels},
 };
-use std::sync::Arc;
+use std::{
+    panic::{AssertUnwindSafe, catch_unwind},
+    sync::Arc,
+};
 
-/// TerraForged Reimagined 26.3's `ErodedNoiseGenerator` (Romoslayer/TerraForged-Reimagined a24d450), so far its
-/// region build and the eroded column height: erosion runs once per [`ErosionRegionLayout`] region (8x8 chunks plus 4
-/// chunks of margin, a 256x256 map) over the raw terrain heights of the wrapped [`NoiseGenerator`], then the optional
-/// [`HeightmapSmoothing`], and the result is cached per region and seed ([`ErosionRegionCache`], Java's `getRegion`).
-/// Neither the 1.18.2-0.3.1 jar nor the newer source (6dd607eb) has regions: they erode a `NoiseTileSize` tile per
-/// chunk. Reimagined's `NoiseGenerator.sampleTerrain`/`sampleRiver` are 6dd607eb's, which [`NoiseGenerator`] ports.
-/// Chunk generation from the regions (`generate`) is not ported yet.
+/// TerraForged Reimagined 26.3's `ErodedNoiseGenerator` (Romoslayer/TerraForged-Reimagined a24d450): erosion runs
+/// once per [`ErosionRegionLayout`] region (8x8 chunks plus 4 chunks of margin, a 256x256 map) over the raw terrain
+/// heights of the wrapped [`NoiseGenerator`], then the optional [`HeightmapSmoothing`], and the result is cached per
+/// region and seed ([`ErosionRegionCache`], Java's `getRegion`). Neither the 1.18.2-0.3.1 jar nor the newer source
+/// (6dd607eb) has regions: they erode a `NoiseTileSize` tile per chunk. Reimagined's
+/// `NoiseGenerator.sampleTerrain`/`sampleRiver` are 6dd607eb's, which [`NoiseGenerator`] ports. Chunks are filled
+/// from the regions ([`Self::generate`]); the plain height and `find` stay on the un-eroded generator.
 pub struct ErodedNoiseGenerator {
     erosion: ErosionFilter,
     generator: NoiseGenerator,
@@ -106,6 +113,92 @@ impl ErodedNoiseGenerator {
             })
     }
 
+    /// `generate(seed, chunkX, chunkZ, consumer)`: fills one chunk's [`NoiseData`] (the chunk and its one-block border,
+    /// `dz` then `dx` from `NoiseData::MIN` to `MAX - 1`, at `(chunk << 4) + d`, `int` wrap) and hands it to `consumer`
+    /// once. Each position takes the base, continent and terrain fields from the raw terrain sample
+    /// ([`NoiseGenerator::sample_terrain`]), its height from the chunk's eroded region (the region's map at
+    /// [`ErosionRegionLayout::chunk_offset`] `+ d`: a border position reads the region's own margin, not the
+    /// neighbouring region, as in Java, so it can differ from the neighbouring chunk's edge), then the rivers carve it
+    /// ([`NoiseGenerator::sample_river`]).
+    ///
+    /// Java fills every position into its own `NoiseSample` of a pooled `NoiseResource`, so a new resource starts each
+    /// position from the defaults (river noise 1), while a reused one carries the river noise the carver multiplies
+    /// over from the same position of whichever chunk used that resource before. The port resets the sample at every
+    /// position (Java's new resource), so a chunk's data never depends on the chunks generated before it or on which
+    /// thread generated them; it also fills a new `NoiseData` per call, whose own `sample` stays the defaults (Java
+    /// never writes it here).
+    ///
+    /// `Err` (and no `consumer` call) where the region build fails, where Java's `getRegion` throws out of `generate`.
+    /// As in Java, a failure after the region is read (a failing sample, or a panic, the consumer's included) is not
+    /// passed on: it is logged as "Eroded noise failed for chunk x, z -- that chunk will be left unfilled" and the call
+    /// returns `Ok`, the consumer not called where the failure came before it.
+    pub fn generate(
+        &self,
+        seed: i32,
+        chunk_x: i32,
+        chunk_z: i32,
+        consumer: impl FnOnce(&NoiseData),
+    ) -> Result<(), &'static str> {
+        let region = self.region(seed, chunk_x, chunk_z)?;
+        let offset_x = ErosionRegionLayout::chunk_offset(chunk_x);
+        let offset_z = ErosionRegionLayout::chunk_offset(chunk_z);
+        let filled = catch_unwind(AssertUnwindSafe(|| -> Result<(), &'static str> {
+            let terrains = &self.generator.continent().context().terrain;
+            let mut chunk = NoiseData::new(terrains);
+            let mut sample = NoiseSample::new(terrains);
+            let mut blender = self.generator.blender_resource();
+            let start_x = chunk_x.wrapping_shl(4);
+            let start_z = chunk_z.wrapping_shl(4);
+            for dz in NoiseData::MIN..NoiseData::MAX {
+                let noise_z = self.noise_coord(start_z.wrapping_add(dz));
+                let row = offset_z
+                    .wrapping_add(dz)
+                    .wrapping_mul(ErosionRegionLayout::MAP_SIZE)
+                    .wrapping_add(offset_x);
+                for dx in NoiseData::MIN..NoiseData::MAX {
+                    let noise_x = self.noise_coord(start_x.wrapping_add(dx));
+                    sample.reset(terrains);
+                    self.generator.sample_terrain(
+                        seed,
+                        noise_x,
+                        noise_z,
+                        &mut sample,
+                        &mut blender,
+                    )?;
+                    sample.height_noise = region[row.wrapping_add(dx) as usize];
+                    self.generator
+                        .sample_river(seed, noise_x, noise_z, &mut sample);
+                    chunk.set_noise(dx, dz, &sample);
+                }
+            }
+            consumer(&chunk);
+            Ok(())
+        }));
+        let cause = match filled {
+            Ok(Ok(())) => return Ok(()),
+            Ok(Err(error)) => error,
+            Err(_) => "panicked",
+        };
+        eprintln!(
+            "Eroded noise failed for chunk {chunk_x}, {chunk_z} -- that chunk will be left unfilled: {cause}"
+        );
+        Ok(())
+    }
+
+    /// `find(seed, x, z, minRadius, maxRadius, terrain)`: the un-eroded generator's [`NoiseGenerator::find`].
+    pub fn find(
+        &self,
+        seed: i32,
+        x: i32,
+        z: i32,
+        min_radius: i32,
+        max_radius: i32,
+        terrain: &Terrain,
+    ) -> Result<i64, &'static str> {
+        self.generator
+            .find(seed, x, z, min_radius, max_radius, terrain)
+    }
+
     /// `getNoiseCoord(coord)`: `coord * frequency` (int to float, then a float multiply).
     fn noise_coord(&self, coord: i32) -> f32 {
         coord as f32 * self.generator.levels().noise_levels.frequency
@@ -155,11 +248,40 @@ impl ErodedNoiseGenerator {
     }
 }
 
+/// Reimagined's `INoiseGenerator` methods that `TerrainGenerator` calls. `getLevels`/`getTerrainLevels` and
+/// `getHeightNoise` are the un-eroded generator's (Reimagined keeps the per-biome-sample height off the region cache on
+/// purpose); `generate` is [`ErodedNoiseGenerator::generate`], which panics where it returns `Err` (a failed region
+/// build, where Java throws; TerraForged's graphs have no custom module, so this never happens for them).
+impl NoiseGeneratorContract for ErodedNoiseGenerator {
+    fn levels(&self) -> NoiseLevels {
+        NoiseGeneratorContract::levels(&self.generator)
+    }
+
+    fn terrain_levels(&self) -> TerrainLevels {
+        self.generator.levels()
+    }
+
+    fn height_noise(&self, seed: i32, x: i32, z: i32) -> f32 {
+        NoiseGeneratorContract::height_noise(&self.generator, seed, x, z)
+    }
+
+    fn generate(
+        &self,
+        seed: i32,
+        chunk_x: i32,
+        chunk_z: i32,
+        consumer: &mut dyn FnMut(&NoiseData),
+    ) {
+        ErodedNoiseGenerator::generate(self, seed, chunk_x, chunk_z, consumer)
+            .unwrap_or_else(|error| panic!("ErodedNoiseGenerator.generate: {error}"));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::{
         terraforged::Module,
-        terraforged_noise_generator::tests::{generator, generator_with},
+        terraforged_noise_generator::tests::{Fold, generator, generator_with},
         terraforged_terrain_blender::TerrainNoise,
     };
     use super::*;
@@ -353,6 +475,259 @@ h 5 192 131 3e301f6e
             assert!(eroded.build_region(0, 0, 0).is_err());
             assert!(eroded.eroded_height_noise(0, 0, 0).is_err());
             assert!(eroded.region(0, 0, 0).is_err());
+            let mut called = false;
+            assert!(eroded.generate(0, 3, 5, |_| called = true).is_err());
+            assert!(!called);
         }
+        let trait_generate = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            NoiseGeneratorContract::generate(&eroded, 0, 0, 0, &mut |_| {});
+        }));
+        assert!(trait_generate.is_err());
+    }
+
+    /// `oracles/erosion_region/e2e/chunks.txt` (`run-chunks.sh`): Reimagined's own `generate`, a new `NoiseResource`
+    /// per chunk, interpreted and JIT-compiled alike. Groups: levels, terrain set, seed, droplets, lifetime, smoothing
+    /// iterations (as in `ErodedChunkOracle.GROUPS`), each with its chunks (`CHUNKS`).
+    const CHUNK_GROUPS: [(usize, usize, i32, i32, i32, i32, &[(i32, i32)]); 3] = [
+        (
+            0,
+            1,
+            0,
+            350,
+            25,
+            0,
+            &[
+                (0, 0),
+                (7, 7),
+                (7, 0),
+                (8, 0),
+                (-1, -1),
+                (-8, -8),
+                (-1, -8),
+                (24, 16),
+                (25, 16),
+            ],
+        ),
+        (
+            2,
+            0,
+            i32::MIN,
+            100,
+            12,
+            1,
+            &[(134_217_727, -134_217_728), (-134_217_728, 134_217_727)],
+        ),
+        (0, 1, i32::MAX, 350, 25, 2, &[(-3, 5)]),
+    ];
+    const JAVA_CHUNKS: &str = "\
+chunk 0 0 0 0 90c473a1155605e7
+chunk 0 0 7 7 89d4e2cb8cee19e0
+chunk 0 0 7 0 a59de6936e42eb8c
+chunk 0 0 8 0 9e51a3f27edec7ce
+chunk 0 0 -1 -1 fe440c688d4b931a
+chunk 0 0 -8 -8 af629f997f3f5c0d
+chunk 0 0 -1 -8 41b3fe90dea5c723
+chunk 0 0 24 16 7b26327201704579
+chunk 0 0 25 16 c04ac786e1d23b10
+chunk 1 -2147483648 134217727 -134217728 4610fb9c442d1a99
+chunk 1 -2147483648 -134217728 134217727 96425e42cc85b6a5
+chunk 2 2147483647 -3 5 3fba3fdd57ea00f8";
+
+    /// FNV-1a over every element of the chunk's maps in index order (height, base, river, terrain id or -1), then the
+    /// data's own sample: `ErodedChunkOracle.fold` (= noise_generator.rs's chunk fold).
+    fn fold_chunk(data: &NoiseData) -> u64 {
+        let mut fold = Fold::new();
+        for index in 0..data.index().length() {
+            fold.float(data.height().get_index(index));
+            fold.float(data.base().get_index(index));
+            fold.float(data.river().get_index(index));
+            fold.add(
+                data.terrain()
+                    .get_index(index)
+                    .map_or(-1, |terrain| i64::from(terrain.id())) as u64,
+            );
+        }
+        fold.sample(data.sample());
+        fold.0
+    }
+
+    fn chunk_digest(eroded: &ErodedNoiseGenerator, seed: i32, chunk_x: i32, chunk_z: i32) -> u64 {
+        let mut out = None;
+        eroded
+            .generate(seed, chunk_x, chunk_z, |data| {
+                assert!(out.replace(fold_chunk(data)).is_none());
+            })
+            .unwrap();
+        out.unwrap()
+    }
+
+    /// Every element of twelve chunks' `NoiseData` (negative chunks, both sides of region boundaries, region corners,
+    /// river chunks, block coordinates wrapping at the `int` limits; seeds 0, MIN and MAX) against Reimagined's Java.
+    #[test]
+    fn eroded_chunks_match_reimagined_java() {
+        let mut lines = Vec::new();
+        for (group, &(variant, set, seed, droplets, lifetime, smoothing, chunks)) in
+            CHUNK_GROUPS.iter().enumerate()
+        {
+            let eroded = eroded(variant, set, droplets, lifetime, smoothing);
+            for &(chunk_x, chunk_z) in chunks {
+                let hash = chunk_digest(&eroded, seed, chunk_x, chunk_z);
+                lines.push(format!(
+                    "chunk {group} {seed} {chunk_x} {chunk_z} {hash:016x}"
+                ));
+            }
+        }
+        assert_eq!(lines, JAVA_CHUNKS.lines().collect::<Vec<_>>());
+    }
+
+    /// A chunk is, position by position, a new sample's raw terrain with the uncached region build's height at the
+    /// chunk's offset (the border reading the region's margin), then the rivers; the consumer runs once. Its 16x16
+    /// interior equals `eroded_height_noise`, the height structures are placed at.
+    #[test]
+    fn chunks_are_raw_samples_with_eroded_heights() {
+        let eroded = eroded(0, 1, 50, 25, 1);
+        let seed = 91;
+        let terrains = Arc::clone(&eroded.generator().continent().context().terrain);
+        // (-1, 0) and (-8, 7) sit on the edges of region (-1, 0): their borders read its margin.
+        for (chunk_x, chunk_z) in [(-1, 0), (-8, 7), (-3, 5)] {
+            let (region_x, region_z) = ErosionRegionLayout::region(chunk_x, chunk_z);
+            let region = eroded.build_region(seed, region_x, region_z).unwrap();
+            let (offset_x, offset_z) = (
+                ErosionRegionLayout::chunk_offset(chunk_x),
+                ErosionRegionLayout::chunk_offset(chunk_z),
+            );
+            let mut blender = eroded.generator().blender_resource();
+            let mut calls = 0;
+            eroded
+                .generate(seed, chunk_x, chunk_z, |data| {
+                    calls += 1;
+                    for dz in NoiseData::MIN..NoiseData::MAX {
+                        for dx in NoiseData::MIN..NoiseData::MAX {
+                            let (x, z) = (chunk_x * 16 + dx, chunk_z * 16 + dz);
+                            let (noise_x, noise_z) = (eroded.noise_coord(x), eroded.noise_coord(z));
+                            let mut sample = NoiseSample::new(&terrains);
+                            eroded
+                                .generator()
+                                .sample_terrain(seed, noise_x, noise_z, &mut sample, &mut blender)
+                                .unwrap();
+                            sample.height_noise =
+                                region[((offset_z + dz) * 256 + offset_x + dx) as usize];
+                            eroded
+                                .generator()
+                                .sample_river(seed, noise_x, noise_z, &mut sample);
+                            assert_eq!(
+                                data.height().get(dx, dz).to_bits(),
+                                sample.height_noise.to_bits()
+                            );
+                            assert_eq!(
+                                data.base().get(dx, dz).to_bits(),
+                                sample.base_noise.to_bits()
+                            );
+                            assert_eq!(
+                                data.river().get(dx, dz).to_bits(),
+                                sample.river_noise.to_bits()
+                            );
+                            assert!(
+                                data.terrain()
+                                    .get(dx, dz)
+                                    .unwrap()
+                                    .is_same(&sample.terrain_type)
+                            );
+                            // Inside the chunk the height is the one structures are placed at.
+                            if (0..16).contains(&dx) && (0..16).contains(&dz) {
+                                assert_eq!(
+                                    data.height().get(dx, dz).to_bits(),
+                                    eroded.eroded_height_noise(seed, x, z).unwrap().to_bits()
+                                );
+                            }
+                        }
+                    }
+                    assert_eq!(
+                        fold_sample(data.sample()),
+                        fold_sample(&NoiseSample::new(&terrains))
+                    );
+                })
+                .unwrap();
+            assert_eq!(calls, 1);
+        }
+    }
+
+    fn fold_sample(sample: &NoiseSample) -> u64 {
+        let mut fold = Fold::new();
+        fold.sample(sample);
+        fold.0
+    }
+
+    /// Eight threads generating chunks of two regions in different orders through one generator get what a fresh
+    /// generator gives each chunk alone (cached = uncached; no state carried from chunk to chunk or thread to thread).
+    #[test]
+    fn chunks_do_not_depend_on_the_thread_or_order() {
+        let seed = -17;
+        let chunks = [(0, 0), (7, 3), (-1, 0), (-8, 7)];
+        let fresh: Vec<u64> = chunks
+            .iter()
+            .map(|&(x, z)| chunk_digest(&eroded(0, 1, 50, 25, 1), seed, x, z))
+            .collect();
+        let shared = eroded(0, 1, 50, 25, 1);
+        thread::scope(|scope| {
+            for worker in 0..8 {
+                let (shared, fresh) = (&shared, &fresh);
+                scope.spawn(move || {
+                    let mut order: Vec<usize> = (0..chunks.len()).collect();
+                    order.rotate_left(worker % chunks.len());
+                    if worker % 2 == 1 {
+                        order.reverse();
+                    }
+                    for i in order {
+                        let (x, z) = chunks[i];
+                        assert_eq!(chunk_digest(shared, seed, x, z), fresh[i]);
+                    }
+                });
+            }
+        });
+    }
+
+    /// Java's `catch (Throwable)`: a consumer that panics is logged, not passed on, and the generator keeps working.
+    #[test]
+    fn consumer_panics_are_logged_not_raised() {
+        let generator = eroded(0, 0, 0, 25, 0);
+        assert_eq!(
+            generator.generate(7, 0, 0, |_| panic!("consumer failed")),
+            Ok(())
+        );
+        let expected = chunk_digest(&eroded(0, 0, 0, 25, 0), 7, 0, 0);
+        assert_eq!(chunk_digest(&generator, 7, 0, 0), expected);
+    }
+
+    /// The trait's height noise and levels, and `find`, are the un-eroded generator's (as Reimagined delegates them).
+    #[test]
+    fn height_levels_and_find_stay_on_the_raw_generator() {
+        let eroded = eroded(0, 1, 350, 25, 0);
+        let raw = eroded.generator();
+        let seed = 31;
+        for (x, z) in [(80, -32), (-1, 0), (1000, 77)] {
+            assert_eq!(
+                NoiseGeneratorContract::height_noise(&eroded, seed, x, z).to_bits(),
+                NoiseGeneratorContract::height_noise(raw, seed, x, z).to_bits()
+            );
+        }
+        assert_eq!(
+            NoiseGeneratorContract::levels(&eroded),
+            NoiseGeneratorContract::levels(raw)
+        );
+        assert_eq!(
+            NoiseGeneratorContract::terrain_levels(&eroded),
+            raw.levels()
+        );
+        let terrain = raw
+            .continent()
+            .context()
+            .terrain
+            .get_by_name("hills")
+            .unwrap();
+        assert_eq!(
+            eroded.find(seed, 0, 0, 1, 4, &terrain),
+            raw.find(seed, 0, 0, 1, 4, &terrain)
+        );
     }
 }

@@ -593,18 +593,18 @@ grid 2 1 -21491124 3ed3d59af446ef82";
         generator_with(variant, |context| terrain_set(context, set))
     }
 
-    struct Fold(u64);
+    pub(crate) struct Fold(pub(crate) u64);
 
     impl Fold {
-        fn new() -> Self {
+        pub(crate) fn new() -> Self {
             Self(0xcbf2_9ce4_8422_2325)
         }
 
-        fn add(&mut self, value: u64) {
+        pub(crate) fn add(&mut self, value: u64) {
             self.0 = (self.0 ^ value).wrapping_mul(0x100_0000_01b3);
         }
 
-        fn float(&mut self, value: f32) {
+        pub(crate) fn float(&mut self, value: f32) {
             let bits = if value.is_nan() {
                 0x7fc0_0000
             } else {
@@ -613,7 +613,7 @@ grid 2 1 -21491124 3ed3d59af446ef82";
             self.add(u64::from(bits));
         }
 
-        fn sample(&mut self, sample: &NoiseSample) {
+        pub(crate) fn sample(&mut self, sample: &NoiseSample) {
             self.add(sample.continent_center as u64);
             self.float(sample.continent_noise);
             self.float(sample.base_noise);
