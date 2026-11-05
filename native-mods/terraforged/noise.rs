@@ -8193,6 +8193,8 @@ mod tests {
         }
     }
 
+    /// `TerraForgedSeededAdvancedTerraceOracle` (`.local/terraforged/oracles/seed_first/run-graphs.sh`): the PR's
+    /// advanced terrace over seeded Perlin/Simplex/Ridge/Perlin sources, four seeds, four points, one fold per seed.
     #[test]
     fn runtime_seeded_advanced_terrace_matches_current_noise2d() {
         let source = |kind, seed, frequency, octaves, gain| {
