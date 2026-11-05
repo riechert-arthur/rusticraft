@@ -113,7 +113,7 @@ mod tests {
     };
 
     #[test]
-    fn cave_band_boundaries_match_current_terraforged_source() {
+    fn cave_band_boundaries_match_reimagined() {
         assert!(is_cave_biome_section(-1));
         assert!(!is_cave_biome_section(0));
         assert!(is_cave_biome_quart(-1));
