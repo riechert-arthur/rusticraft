@@ -4809,6 +4809,8 @@ mod tests {
         );
     }
 
+    /// Raw seed-first values at config seed `i32::MAX`, runtime seed 17 (the `v` lines of
+    /// `.local/terraforged/oracles/seed_first/`).
     #[test]
     fn seed_offset_sources_match_current_noise2d() {
         let expected = [
