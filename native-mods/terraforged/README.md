@@ -1284,8 +1284,8 @@ registry's deep ocean below 0.25, shallow ocean below 0.5, coast below 0.55 and 
 `falloff_curve` turns Engine's `ControlPoints` (the same validated points the beach filter and climate use; the
 defaults when the settings fail `validate`) into five falloff points, and `falloff` maps continent noise through
 them with `MathUtil.map` (noise.rs's `map` then `lerp`); below every point it maps `0..last` onto `0..0.1`. A
-zero-width band, such as inland at exactly 1, gives NaN, as in the jar. Nothing uses them yet: the continent cells,
-configuration and shape come next. `ContinentPointsOracle.java` (`.local/terraforged/oracles/continent_points/`,
+zero-width band, such as inland at exactly 1, gives NaN, as in the jar. The continent shape reads the falloff
+curve. `ContinentPointsOracle.java` (`.local/terraforged/oracles/continent_points/`,
 which reuses the biome override's stubs) runs the jar's own bytecode over the constants, 31 continent values (each
 threshold and its neighbouring floats, signed zeros, subnormals, infinities, NaN) and eleven curves (six Engine
 settings, including invalid, NaN, subnormal and `-0` ones, and five hand-built curves: empty, one point, a NaN or
@@ -1296,8 +1296,8 @@ package: `CellPoint` (a cell's position and noise; `noise()` returns the `noise0
 and `CellSource`. A square cell sits at `cell + MathUtil.rand(hash, prime) * jitter` on each axis (noise.rs's `hash`
 and `terrain_blend_util.rs`'s `random`, in Java `int` math); `HEXAGON` shifts odd rows by half a cell with half the x
 jitter, and its `adjustY` scales y by 1.2 (x is never adjusted). The sources are Perlin (24 gradients, `CURVE3`),
-simplex and cubic noise, mapped to 0..1 by `(1 + sample) * 0.5`. Nothing uses them yet: the continent configuration,
-shape and cell generator come next. `ContinentCellOracle.java` (`.local/terraforged/oracles/continent_cell/`, which
+simplex and cubic noise, mapped to 0..1 by `(1 + sample) * 0.5`. The continent shape blends the cells; the cell
+generator that places them comes next. `ContinentCellOracle.java` (`.local/terraforged/oracles/continent_cell/`, which
 reuses the biome override's stubs) runs the jar's own bytecode over 12 hashes, 15 cell coordinates (`int` extremes and
 past 2^24), 14 jitters (signed zeros, a subnormal, huge, infinite and NaN) and 27 sample coordinates (the same kinds)
 for 6 seeds; the test matches its 177,604 results bit for bit, in debug and release.
@@ -1308,16 +1308,32 @@ and `FloatRange`. They are plain structs with the jar's defaults (cell size 400,
 falloff 0.01..0.25, `SQUARE` cells from `PERLIN` noise, falloffs 1.5 and 1, lake density 0.75), the river and lake
 presets, `copy`, and `scale`, which multiplies the three widths but not erosion or the depths; `FloatRange::at` is
 `NoiseUtil.lerp`, unclamped. The jar has no codec for them, so none is ported. The seeds stay 0 until the cell
-generator and the river pipeline read them (the jar only ever sets `seed0` and `seed1`). Nothing uses the
-configuration yet: the continent shape and cell generator come next. `ContinentConfigOracle.java`
+generator and the river pipeline read them (the jar only ever sets `seed0` and `seed1`). The continent shape reads
+it; the cell generator comes next. `ContinentConfigOracle.java`
 (`.local/terraforged/oracles/continent_config/`, which reuses the biome override's stubs) runs the jar's own bytecode
 over every default and 26 edge values (signed zeros, subnormals, `int`-precision limits, infinities, NaN) for `at`,
 `scale`, `copy` and the presets' `copy`/`scale` chains; the test matches its 89,024 results and every default bit for
 bit, in debug and release.
 
+The continent shape (`continent_shape.rs`) ports TerraForged 1.18.2-0.3.1's `ShapeGenerator`. It derives the
+threshold and the base falloffs (`threshold + baseFalloffMin`, `threshold + baseFalloffMax`) from the continent
+configuration; `sample` blends the 5x5 cells around the nearest one, weighting each by how far past the nearest
+distance it lies (blend range: the mean of the two nearest distances times the configured falloff), into the base
+noise (the cells' `noise()` mapped onto the base falloffs) and the continent noise (their 0/1 threshold values through
+the control points' falloff curve); `value` does the same for the continent noise over 3x3 cells, clamped first (the
+jar never calls it). The cells come through a `ContinentCells` trait (the jar's `ContinentGenerator`, ported next,
+with the seed-first runtime seed it passes through). Where the cell window would wrap past `i32` (about 2^31 cells
+out) the jar overruns its buffer, reads a stale one or loops forever; the port panics there. `ContinentShapeOracle.java`
+(`.local/terraforged/oracles/continent_shape/`, a stub `ContinentGenerator` plus the biome override's stubs) runs the
+jar's own bytecode over 9 configurations (signed zeros, subnormals, huge, infinite and NaN thresholds, falloffs and
+ranges; custom and invalid control points), each derived threshold and its neighbouring floats, the weights over a
+grid of edge values, and 6,240 blended outputs per configuration (both cell shapes, four cell tables from plain to
+NaN and infinite jitters and noises, nearest cells up to the `int` extremes, NaN, infinite, signed-zero and huge
+points); the test matches them, and the cells visited, bit for bit, in debug and release.
+
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives, the biome climate types, the climate settings, the climate module, the climate stage, the continent factory, the generator context, the heightmap, the world generator factory, TerraForged's terrain levels, its terrain data, its terrain generator, its terrain-blend utilities, its terrain blender with its nearest-terrain search, noise-graph reseeding, the cave noise primitives, the biome viability rules, the biome overrides, the continent control points, the continent cell primitives, and the continent configuration. They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives, the biome climate types, the climate settings, the climate module, the climate stage, the continent factory, the generator context, the heightmap, the world generator factory, TerraForged's terrain levels, its terrain data, its terrain generator, its terrain-blend utilities, its terrain blender with its nearest-terrain search, noise-graph reseeding, the cave noise primitives, the biome viability rules, the biome overrides, the continent control points, the continent cell primitives, the continent configuration, and the continent shape blending. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
