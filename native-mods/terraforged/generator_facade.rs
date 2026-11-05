@@ -1033,7 +1033,9 @@ f 3 -1875000 1874999 128 64 3bed1c90e336aeb8 same
     /// 26.3's chunk sections, interpreted and with `-Xcomp`. Per levels variant, terrain set and configuration `k`
     /// (`current_surface_biomes`' pools and settings; cave registry [`CAVES`]`[k % 3]`): the chunk count and a fold of
     /// every cell's biome name of every chunk in each of [`RANGES`], over the six runtime seeds (level seeds
-    /// `0x5eed << 32 | seed`); then every name's cell count.
+    /// `0x5eed << 32 | seed`); then every name's cell count. The chunks go through [`fill_biomes`] at the captured
+    /// seed: `create_biomes` without its hint, which would start a region build per chunk
+    /// ([`create_biomes_hints_and_fills_both_layers`] checks that the two fill alike).
     const JAVA_CHUNK_BIOMES: &str = "\
 chunks 0 0 0 612 d4c7cad5da07f811\n\
 chunks 0 0 1 612 51716f377b22a051\n\
