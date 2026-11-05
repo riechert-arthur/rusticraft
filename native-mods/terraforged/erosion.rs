@@ -22,6 +22,8 @@
  * SOFTWARE.
  */
 
+use super::terraforged::round;
+
 /// TerraForged's `worldgen.noise.erosion.NoiseTileSize` (newer source 6dd607eb; the 1.18.2-0.3.1 jar's class has the
 /// same bytecode): the square of chunks around a centre chunk that `ErodedNoiseGenerator` erodes together, `chunk_radius`
 /// chunks on every side. Chunk offsets run from `chunk_min` (inclusive) to `chunk_max` (exclusive), block offsets from
@@ -119,10 +121,16 @@ impl std::fmt::Display for NoiseTileSize {
     }
 }
 
+/// TerraForged Reimagined 26.3's `TerraSettings.Smoothing` (the Filters page's smoothing settings): Reimagined's own
+/// settings, not Engine's `FilterSettings.Smoothing` (1 iteration, radius 1.8, rate 0.9) that `terraforged_filters`'
+/// `SmoothingSettings` mirrors. Off by default (0 iterations), as TerraForged 0.3.x never smoothed.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HeightmapSmoothingSettings {
+    /// `iterations`: passes over the map; 0 or less turns smoothing off.
     pub iterations: i32,
+    /// `smoothingRadius`: the neighbourhood radius in cells (rounded up for the scan, squared for the weights).
     pub smoothing_radius: f32,
+    /// `smoothingRate`: how far each pass moves a cell towards its neighbourhood mean (0 or less turns it off).
     pub smoothing_rate: f32,
 }
 
@@ -136,24 +144,37 @@ impl Default for HeightmapSmoothingSettings {
     }
 }
 
+/// TerraForged Reimagined 26.3's `worldgen.noise.erosion.HeightmapSmoothing` (Romoslayer/TerraForged-Reimagined
+/// a24d450): neither the 1.18.2-0.3.1 jar nor the newer source (6dd607eb) has it. Reimagined's
+/// `ErodedNoiseGenerator.buildRegion` runs it on the eroded region heightmap, after erosion. It is Engine's `Smoothing`
+/// filter (`terraforged_filters::Smoothing`) on a bare height array: the same radius rounding, `1 - d² / r²` weights
+/// and in-place z-then-x scan, but without the per-cell erosion mask, the altitude modifier (the heightmap carries no
+/// terrain data, so every cell smooths evenly), or absent cells (every neighbour is in the array).
 pub struct HeightmapSmoothing;
 
 impl HeightmapSmoothing {
+    /// `HeightmapSmoothing.apply(map, length, settings)`: `settings.iterations` passes over the `length × length` map
+    /// (row-major, z rows), each moving every cell at least `radius` cells from the edge, in place, towards the
+    /// weighted mean of its neighbours within `smoothing_radius` (already-smoothed cells included). Java `int` and
+    /// `float` math throughout, so NaN and infinite heights or settings give Java's bits. Panics where Java throws
+    /// `ArrayIndexOutOfBoundsException`: when `map` is shorter than `length²` and a read leaves it.
     pub fn apply(map: &mut [f32], length: i32, settings: HeightmapSmoothingSettings) {
         let mut iterations = settings.iterations;
         if iterations <= 0 {
             return;
         }
         let radius_value = settings.smoothing_radius;
-        let radius = java_round(radius_value + 0.5);
+        let radius = round(radius_value + 0.5);
         let radius_squared = radius_value * radius_value;
         let strength = settings.smoothing_rate;
+        // Java's `<=` tests: a NaN radius rounds to 0 and returns, a NaN rate does not (it smooths to NaN).
         if radius <= 0 || radius_squared <= 0.0 || strength <= 0.0 {
             return;
         }
+        let end = length.wrapping_sub(radius);
         while iterations > 0 {
-            for z in radius..length.wrapping_sub(radius) {
-                for x in radius..length.wrapping_sub(radius) {
+            for z in radius..end {
+                for x in radius..end {
                     let mut total = 0.0_f32;
                     let mut weights = 0.0_f32;
                     for delta_z in -radius..=radius {
@@ -185,16 +206,9 @@ impl HeightmapSmoothing {
     }
 }
 
-fn java_round(value: f32) -> i32 {
-    if value >= 0.0 {
-        (value + 0.5) as i32
-    } else {
-        (value - 0.5) as i32
-    }
-}
-
+/// `pub(crate)`: noise_generator.rs's tests smooth real `NoiseData` heights with these helpers.
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::fmt::Write;
 
@@ -366,53 +380,191 @@ mod tests {
         assert_eq!(NoiseTileSize::DEFAULT, NoiseTileSize::new(1));
     }
 
-    fn fixture_map(length: i32) -> Vec<f32> {
-        (0..length.wrapping_mul(length))
-            .map(|index| {
-                (index.wrapping_mul(37) % 101) as f32 / 100.0 + (index / length) as f32 * 0.125
+    /// `HeightmapSmoothingOracle.SETTINGS` (iterations, radius, rate); row 0 is the defaults.
+    pub(crate) const SMOOTHING_SETTINGS: [(i32, f32, f32); 24] = [
+        (0, 0.0, 0.0),
+        (1, 1.75, 0.85),
+        (2, 1.75, 0.85),
+        (3, 1.75, 0.85),
+        (1, 1.8, 0.9),
+        (1, 2.5, 0.35),
+        (2, 5.0, 1.0),
+        (1, 0.4, 0.85),
+        (1, 0.5, 0.85),
+        (1, 1.0, 0.5),
+        (1, 1.75, 2.0),
+        (-1, 1.75, 0.85),
+        (3, 0.0, 1.0),
+        (1, -1.0, 0.85),
+        (1, -0.6, 0.85),
+        (1, 1.75, 0.0),
+        (1, 1.75, -0.5),
+        (1, f32::NAN, 0.85),
+        (1, 1.75, f32::NAN),
+        (1, f32::INFINITY, 0.85),
+        (1, f32::NEG_INFINITY, 0.85),
+        (1, f32::from_bits(1), 0.85),
+        (1, 1e-20, 0.85),
+        (1, 3e19, 0.85),
+    ];
+
+    pub(crate) fn smoothing_settings(row: usize) -> HeightmapSmoothingSettings {
+        if row == 0 {
+            return HeightmapSmoothingSettings::default();
+        }
+        let (iterations, smoothing_radius, smoothing_rate) = SMOOTHING_SETTINGS[row];
+        HeightmapSmoothingSettings {
+            iterations,
+            smoothing_radius,
+            smoothing_rate,
+        }
+    }
+
+    /// FNV-1a over `floatToIntBits` (NaN canonical), as the oracle.
+    pub(crate) fn smoothing_hash(map: &[f32]) -> u64 {
+        map.iter().fold(0xcbf2_9ce4_8422_2325, |hash, value| {
+            let bits = if value.is_nan() {
+                0x7fc0_0000
+            } else {
+                value.to_bits()
+            };
+            (hash ^ u64::from(bits)).wrapping_mul(0x100_0000_01b3)
+        })
+    }
+
+    /// Smooths `map` and folds its input and output hashes into `digest` (the oracle's `row`/`realrow` digests).
+    pub(crate) fn smooth_and_digest(digest: &mut u64, map: &mut [f32], length: i32, row: usize) {
+        let input = smoothing_hash(map);
+        HeightmapSmoothing::apply(map, length, smoothing_settings(row));
+        for hash in [input, smoothing_hash(map)] {
+            *digest = (*digest ^ hash).wrapping_mul(0x100_0000_01b3);
+        }
+    }
+
+    /// `HeightmapSmoothingOracle.map`: 0 smooth ramps, 1 xorshift values in [-2, 2), 2 those with NaN, ±infinity,
+    /// -0 and the smallest subnormal mixed in.
+    fn smoothing_map(pattern: i32, length: i32) -> Vec<f32> {
+        let mut random = (0x9e37_79b9_u32 as i32)
+            .wrapping_add(pattern * 31)
+            .wrapping_add(length);
+        (0..length * length)
+            .map(|i| {
+                random ^= random << 13;
+                random ^= ((random as u32) >> 17) as i32;
+                random ^= random << 5;
+                let value = ((random as u32) >> 8) as f32 * (1.0 / 4_194_304.0) - 2.0;
+                match pattern {
+                    0 => (i * 37 % 101) as f32 / 100.0 + (i / length) as f32 * 0.125,
+                    1 => value,
+                    _ if i % 7 == 3 => f32::NAN,
+                    _ if i % 11 == 5 => f32::INFINITY,
+                    _ if i % 13 == 6 => -0.0,
+                    _ if i % 17 == 2 => f32::from_bits(1),
+                    _ if i % 19 == 9 => f32::NEG_INFINITY,
+                    _ => value,
+                }
             })
             .collect()
     }
 
-    fn hash(map: &[f32]) -> u64 {
-        map.iter().fold(0xcbf29ce484222325, |hash, value| {
-            (hash ^ u64::from(value.to_bits())).wrapping_mul(1099511628211)
-        })
-    }
+    /// `HeightmapSmoothingOracle.java` (`.local/terraforged/oracles/noise_generator/run-smoothing.sh`): Reimagined
+    /// 26.3's own `HeightmapSmoothing` and `TerraSettings.Smoothing` compiled from its source. One digest per settings
+    /// row over 3 map patterns × 8 lengths (0 to 256, Reimagined's `MAP_SIZE`); the oracle's `case` lines hold each map.
+    const EXPECTED_SMOOTHING: [&str; 25] = [
+        "defaults 0 3fe00000 3f59999a",
+        "row 0 bed4f63f964064e7",
+        "row 1 276d2ceeeccf2049",
+        "row 2 fb486916b62f6dbb",
+        "row 3 cf1acfa80e3aa4e1",
+        "row 4 f6a84102166c941d",
+        "row 5 ecfad454952ece95",
+        "row 6 6330770aca045c49",
+        "row 7 1a36bd105a8064e7",
+        "row 8 1a36bd105a8064e7",
+        "row 9 bd254a8aaafb71d",
+        "row 10 c7795eb6e0bb30c2",
+        "row 11 bed4f63f964064e7",
+        "row 12 bed4f63f964064e7",
+        "row 13 bed4f63f964064e7",
+        "row 14 bed4f63f964064e7",
+        "row 15 bed4f63f964064e7",
+        "row 16 bed4f63f964064e7",
+        "row 17 bed4f63f964064e7",
+        "row 18 561c5a76bc4ed6e3",
+        "row 19 bed4f63f964064e7",
+        "row 20 bed4f63f964064e7",
+        "row 21 bed4f63f964064e7",
+        "row 22 1a36bd105a8064e7",
+        "row 23 bed4f63f964064e7",
+    ];
 
     #[test]
-    fn heightmap_smoothing_matches_current_java_source() {
-        let cases = [
-            (HeightmapSmoothingSettings::default(), 0x265dc7ee0ba807f3),
-            (
-                HeightmapSmoothingSettings {
-                    iterations: 2,
-                    smoothing_radius: 1.75,
-                    smoothing_rate: 0.85,
-                },
-                0x9008debe23dcc046,
-            ),
-            (
-                HeightmapSmoothingSettings {
-                    iterations: 1,
-                    smoothing_radius: 2.5,
-                    smoothing_rate: 0.35,
-                },
-                0x7eea390865bcc9ab,
-            ),
-            (
-                HeightmapSmoothingSettings {
-                    iterations: 3,
-                    smoothing_radius: 0.0,
-                    smoothing_rate: 1.0,
-                },
-                0x265dc7ee0ba807f3,
-            ),
-        ];
-        for (settings, expected) in cases {
-            let mut map = fixture_map(9);
-            HeightmapSmoothing::apply(&mut map, 9, settings);
-            assert_eq!(hash(&map), expected);
+    fn heightmap_smoothing_matches_reimagined_java() {
+        let defaults = HeightmapSmoothingSettings::default();
+        let mut lines = vec![format!(
+            "defaults {} {:x} {:x}",
+            defaults.iterations,
+            defaults.smoothing_radius.to_bits(),
+            defaults.smoothing_rate.to_bits()
+        )];
+        for row in 0..SMOOTHING_SETTINGS.len() {
+            let mut digest = 0xcbf2_9ce4_8422_2325;
+            for pattern in 0..3 {
+                for length in [0, 1, 3, 5, 9, 18, 33, 256] {
+                    let mut map = smoothing_map(pattern, length);
+                    smooth_and_digest(&mut digest, &mut map, length, row);
+                }
+            }
+            lines.push(format!("row {row} {digest:x}"));
         }
+        assert_eq!(lines, EXPECTED_SMOOTHING);
+    }
+
+    /// In place: a pass reads the cells it already moved (the z-then-x scan order matters), and only cells `radius`
+    /// from the edge move.
+    #[test]
+    fn heightmap_smoothing_is_in_place_and_keeps_the_border() {
+        let settings = smoothing_settings(1);
+        let mut map = smoothing_map(1, 9);
+        let original = map.clone();
+        HeightmapSmoothing::apply(&mut map, 9, settings);
+        // Radius 1.75 scans 2 cells (round(2.25)): rows and columns 0, 1, 7, 8 stay.
+        for z in 0..9 {
+            for x in 0..9 {
+                let index = z * 9 + x;
+                let inner = (2..7).contains(&x) && (2..7).contains(&z);
+                assert_eq!(map[index] != original[index], inner, "{x} {z}");
+            }
+        }
+        // The same pass over an untouched copy of every neighbourhood (a two-buffer filter) differs.
+        let mut copied = original.clone();
+        for z in 2..7_i32 {
+            for x in 2..7_i32 {
+                let (mut total, mut weights) = (0.0_f32, 0.0_f32);
+                for dz in -2..=2_i32 {
+                    for dx in -2..=2_i32 {
+                        let d = (dx * dx + dz * dz) as f32;
+                        if d > 1.75 * 1.75 {
+                            continue;
+                        }
+                        let weight = 1.0 - d / (1.75 * 1.75);
+                        total += original[((z + dz) * 9 + x + dx) as usize] * weight;
+                        weights += weight;
+                    }
+                }
+                let index = (z * 9 + x) as usize;
+                copied[index] -= (copied[index] - total / weights) * 0.85;
+            }
+        }
+        assert_ne!(smoothing_hash(&copied), smoothing_hash(&map));
+    }
+
+    /// Java throws `ArrayIndexOutOfBoundsException` once a read leaves a map shorter than `length²`.
+    #[test]
+    fn heightmap_smoothing_panics_on_a_short_map() {
+        let result = std::panic::catch_unwind(|| {
+            HeightmapSmoothing::apply(&mut [0.0; 10], 5, smoothing_settings(1));
+        });
+        assert!(result.is_err());
     }
 }
