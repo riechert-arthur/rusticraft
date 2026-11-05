@@ -55,7 +55,7 @@ const SUPPORTED: &str = "climate noise graphs have only seed-first nodes";
 /// their selection noise (`biomeNoise`), edge distance (`biomeEdgeNoise`), moisture, temperature and climate type.
 /// Sampling is seed-first: the runtime seed reaches every cell hash and noise. This is NOT Engine's
 /// [`super::terraforged_climate::ClimateModule`] (the jar's climate stage): no continent mask, no macro cell noise,
-/// a 4x4 cell search with second-nearest edge distance, and other warps.
+/// a 4x4 cell search (Engine's is 3x3), and other warps.
 pub struct CurrentClimateNoise {
     frequency: f32,
     warp: Domain,
@@ -140,8 +140,8 @@ fn next(seed: &mut Seed) -> i32 {
 }
 
 impl CurrentClimateNoise {
-    /// `new ClimateNoise(seed, settings)`: draws the module seed from `seed`, two from the moisture offset seed's
-    /// stream (noise, then the two warps), two from the temperature one (its warps), then the two biome-warp seeds
+    /// `new ClimateNoise(seed, settings)`: draws the module seed from `seed`, three from the moisture offset seed
+    /// (noise, then the two warps), two from the temperature offset seed (its warps), then the two biome-warp seeds
     /// from `seed`, in Java's order. The edge warp is seeded from fixed offsets of the module seed (7919, 104729,
     /// wrapping) and exists only for a strength above 0.
     pub fn new(seed: &mut Seed, settings: ClimateSettings) -> Self {
