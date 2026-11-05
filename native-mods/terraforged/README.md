@@ -1718,8 +1718,8 @@ the same `run-graphs.sh`; the tests match both bit for bit in debug and release.
 
 Engine's erosion `Ridge` (`Valley`, `ErosionRidge::wrap`) is seed-first too, and with it every node but custom modules
 (a custom module's closure has no seed parameter, so it still returns an error). There is no Java reference for this
-one: Engine 0.3.0's `Ridge.Noise` implements only the jar's `getValue(x, y)` (on the 2cb4843 classes it would not
-even link), and no seed-first Engine is public. The port follows Noise2D 2cb4843's convention for seeded nodes: the
+one: Engine 0.3.0's `Ridge.Noise` implements only the jar's `getValue(x, y)` (on the 2cb4843 classes it fails at run time),
+and no seed-first Engine is public. The port follows Noise2D 2cb4843's convention for seeded nodes: the
 cell lattice (`NoiseUtil.cell`) uses the ridge's own seed plus the call's seed (`int` wrap), and the source is read
 with the call's seed (the centre sample first, then each octave's 5x5 neighbourhood through the `-1`-filled cache, as
 Engine does). The octave loop, gain, lacunarity, fall-off, segment distance (`(float) Math.sqrt` in f64) and blend
