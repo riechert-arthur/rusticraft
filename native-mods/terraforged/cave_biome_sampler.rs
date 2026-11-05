@@ -23,7 +23,8 @@
  */
 
 use super::{
-    terraforged::simplex, terraforged_cave_noise::CaveType,
+    terraforged::{clamp, simplex},
+    terraforged_cave_noise::CaveType,
     terraforged_terrain_blend_util::WeightMap,
 };
 use std::sync::Arc;
@@ -88,7 +89,7 @@ impl<T> CaveBiomeSampler<T> {
 pub fn sample(seed: i32, x: i32, z: i32, frequency: f32) -> f32 {
     let nx = x as f32 * frequency;
     let nz = z as f32 * frequency;
-    ((1.0 + simplex(nx, nz, seed)) * 0.5).clamp(0.0, 1.0)
+    clamp((1.0 + simplex(nx, nz, seed)) * 0.5, 0.0, 1.0)
 }
 
 fn equal_weights<T>(values: Vec<Arc<T>>) -> WeightMap<T> {
@@ -148,5 +149,175 @@ mod tests {
                 .unwrap(),
             &global
         ));
+    }
+
+    /// `out.txt` of `.local/terraforged/oracles/cave_biome_sampler/run.sh`: Reimagined a24d450's own
+    /// `CaveBiomeSampler` (with its `WeightMap`, `MathUtil`, `Noise` and `NoiseUtil`) compiled from source over stub
+    /// registries, interpreted and with `-Xcomp`. One line per scale and pool: frequency bits, sample count, layer
+    /// hits and an FNV-1a digest of (choice bits, mask bits, layer, GLOBAL, UNIQUE) per seed and position.
+    const REIMAGINED: &str = "\
+P 800 0 983815946 4960 1851 10677fdaefc54da0
+P 800 1 983815946 4960 1851 4e47c1b973a30df5
+P 800 2 983815946 4960 0 578793cc615a5e10
+P 800 3 983815946 4960 1851 fb9a5d8840db740e
+P 800 4 983815946 4960 1851 50023107ba43d1fd
+P 800 5 983815946 4960 1851 c52bfdb2a6d7a8d0
+P 1 0 1065353216 4960 1851 7f480583f71f63d3
+P 1 1 1065353216 4960 1851 073f73a6e525218b
+P 1 2 1065353216 4960 0 0fe101730fed8e8a
+P 1 3 1065353216 4960 1851 4b75380105251b11
+P 1 4 1065353216 4960 1851 9f3891a1cb2df1ff
+P 1 5 1065353216 4960 1851 2c49f90f7f453e9a
+P 3 0 1051372203 4960 1851 2affbdaedd6e286c
+P 3 1 1051372203 4960 1851 ae9a5619b658542f
+P 3 2 1051372203 4960 0 1da287319153b592
+P 3 3 1051372203 4960 1851 992dc6d759e4f2e7
+P 3 4 1051372203 4960 1851 f4fbf6d1deab4d44
+P 3 5 1051372203 4960 1851 162aa6173d43544a
+P 1600 0 975427338 4960 1851 2acf775fd652fd5e
+P 1600 1 975427338 4960 1851 3db40edd7075e968
+P 1600 2 975427338 4960 0 38bba00c61562f4d
+P 1600 3 975427338 4960 1851 756da5b1479ef88b
+P 1600 4 975427338 4960 1851 71276118531c0b4f
+P 1600 5 975427338 4960 1851 fd315d58a740dc51
+P 0 0 2139095040 4960 1851 b70e6e320b58c252
+P 0 1 2139095040 4960 1851 a09f1bb3333a0cfe
+P 0 2 2139095040 4960 0 3b79b5eb978475af
+P 0 3 2139095040 4960 1851 648e18dd09b082c8
+P 0 4 2139095040 4960 1851 f1bff1ee0fbc2da1
+P 0 5 2139095040 4960 1851 5ea4913e00014dc7
+P -800 0 -1163667702 4960 1851 8312b02b3ea40539
+P -800 1 -1163667702 4960 1851 976303a12e8c8d69
+P -800 2 -1163667702 4960 0 a2483470fe33e288
+P -800 3 -1163667702 4960 1851 6481ea3a02462d95
+P -800 4 -1163667702 4960 1851 e2efec8787289acb
+P -800 5 -1163667702 4960 1851 ff50fb658542e714
+P -2147483648 0 -1342177280 4960 1851 13df8f75084c861b
+P -2147483648 1 -1342177280 4960 1851 04c7e372653f9fcc
+P -2147483648 2 -1342177280 4960 0 3b52977c726202fd
+P -2147483648 3 -1342177280 4960 1851 57b83ee938b8defe
+P -2147483648 4 -1342177280 4960 1851 7496a069e3ced8ef
+P -2147483648 5 -1342177280 4960 1851 8ba4a00cdd30cd09
+P 2147483647 0 805306368 4960 1851 a6c68adc240f8107
+P 2147483647 1 805306368 4960 1851 9486e2597aa028bc
+P 2147483647 2 805306368 4960 0 2127c36897c990bd
+P 2147483647 3 805306368 4960 1851 2084e27dc96139c6
+P 2147483647 4 805306368 4960 1851 d99847194993f2a1
+P 2147483647 5 805306368 4960 1851 3f09416ee0b67cd9
+T 238080";
+
+    struct Lcg(i64);
+
+    impl Lcg {
+        fn next(&mut self) -> i32 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((self.0 as u64) >> 32) as i32
+        }
+    }
+
+    fn fold(hash: &mut u64, value: i32) {
+        for byte in value.to_le_bytes() {
+            *hash ^= u64::from(byte);
+            *hash = hash.wrapping_mul(0x100_0000_01b3);
+        }
+    }
+
+    #[test]
+    fn sampler_matches_reimagined_java() {
+        // The oracle's registries: special (cave) biome i has id i, `terraforged:cave` (GLOBAL) 1000; plain biomes
+        // never reach the sampler. {has terraforged:cave, special count}.
+        let pools = [
+            (true, 3),
+            (true, 0),
+            (false, 0),
+            (true, 7),
+            (false, 5),
+            (true, 1),
+        ];
+        let scales = [800, 1, 3, 1600, 0, -800, i32::MIN, i32::MAX];
+        let mut random = Lcg(160);
+        let mut seeds = vec![
+            0,
+            1,
+            -1,
+            123_456_789,
+            -987_654_321,
+            i32::MAX,
+            i32::MIN,
+            -OFFSET,
+            i32::MAX - OFFSET + 1,
+            -MASK_OFFSET,
+        ];
+        seeds.extend((0..6).map(|_| random.next()));
+        let mut positions = vec![
+            (0, 0),
+            (1, -1),
+            (1024, -768),
+            (-2048, 4096),
+            (777, -333),
+            (i32::MAX, i32::MIN),
+            (i32::MIN, i32::MAX),
+            (i32::MAX, i32::MAX),
+            (i32::MIN, i32::MIN),
+            (-1, -1),
+        ];
+        for k in 0..300 {
+            let (a, b) = (random.next(), random.next());
+            positions.push(if k % 2 == 0 {
+                ((a % 16384) << 2, (b % 16384) << 2)
+            } else {
+                (a, b)
+            });
+        }
+        let id = |value: Option<&Arc<i32>>| value.map_or(-1, |value| **value);
+        let mut lines = REIMAGINED.lines();
+        let mut total = 0;
+        for scale in scales {
+            for (pool, &(has_cave, specials)) in pools.iter().enumerate() {
+                let global = if has_cave {
+                    vec![Arc::new(1000)]
+                } else {
+                    Vec::new()
+                };
+                let sampler =
+                    CaveBiomeSampler::new(scale, global, (0..specials).map(Arc::new).collect());
+                let (mut hash, mut hits, mut count) = (0xcbf2_9ce4_8422_2325_u64, 0, 0);
+                for &seed in &seeds {
+                    for &(x, z) in &positions {
+                        let choice = sample(seed.wrapping_add(OFFSET), x, z, sampler.frequency());
+                        fold(&mut hash, choice.to_bits() as i32);
+                        let mask = sample(seed.wrapping_add(MASK_OFFSET), x, z, MASK_FREQUENCY);
+                        fold(&mut hash, mask.to_bits() as i32);
+                        let layer = id(sampler.get_layer_biome(seed, x, z));
+                        hits += i32::from(layer != -1);
+                        fold(&mut hash, layer);
+                        fold(
+                            &mut hash,
+                            id(sampler.get_underground_biome(seed, x, z, CaveType::Global)),
+                        );
+                        fold(
+                            &mut hash,
+                            id(sampler.get_underground_biome(seed, x, z, CaveType::Unique)),
+                        );
+                        count += 1;
+                    }
+                }
+                total += count;
+                let line = format!(
+                    "P {scale} {pool} {} {count} {hits} {hash:016x}",
+                    sampler.frequency().to_bits() as i32
+                );
+                assert_eq!(
+                    Some(line.as_str()),
+                    lines.next(),
+                    "scale {scale}, pool {pool}"
+                );
+            }
+        }
+        assert_eq!(Some(format!("T {total}").as_str()), lines.next());
+        assert_eq!(None, lines.next());
     }
 }
