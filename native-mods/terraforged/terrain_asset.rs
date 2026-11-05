@@ -740,6 +740,8 @@ pub(crate) mod tests {
             );
             return;
         };
+        // `mountains_1`, `_2` and `_3`; an empty sync would otherwise pass.
+        assert_eq!(SOURCE_ASSET_ORACLE.lines().count(), 3);
         let rust: Vec<String> = SOURCE_ASSET_ORACLE
             .lines()
             .map(|java| {
