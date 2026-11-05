@@ -2194,13 +2194,30 @@ distances, and all 177,147 combinations of the 11 types' pools being absent, pre
 (weights 1, 0, NaN or none). The tests match every range and distance bit and every resulting pool, in debug and
 release builds.
 
-Surface-biome decisions now preserve per-cell wetland and mountain rolls, centered four-sample
-slope gating, and vanilla-compatible altitude snow checks before accepting a highland substitute.
+The surface-biome decisions (`biome_sampler.rs`) are Reimagined's `BiomeSampler` (a24d450, MIT, as above); 6dd607eb
+and the 1.18.2-0.3.1 jar pick every surface biome from one climate pool and have none of them. Reimagined's
+`getInitialBiome` takes the normal biome from the wet pool (wetlands included) or the dry one: `lowland_pool` picks
+wet where `riverNoise < riverSize` (0.75) or `continentNoise < coastSize` (0.7), thinned by `chance` (1) through a
+per-cell roll (`cell_roll`, `MathUtil.rand(floatToIntBits(biomeNoise), 4153)`). It then may swap in the highland
+pool's biome: only if `uses_mountain_pool` (`mountainBiomeUsage`, default 1, rolled with salt 7309; a NaN usage
+always passes, as in Java), the ground `is_steep_at` (un-eroded height noise 12 blocks west, east, north and south
+of the block column: the larger height difference times `maxY`, over 24 blocks, above 0.42) and `keeps_snow_cover` (both biomes `freezes` alike at
+the column's height: 0.05 colder per 40 blocks above sea level + 17, snow below 0.15). `getBiomeOverride` (above)
+runs after this. These are the building blocks; picking from the pools, and the plains fallback, come with the
+initial biome selection (#165). Reimagined's `getBiomeOverride` also widens the beach band to `COAST - BEACH`
+(0.05); `biome_sampler.rs` keeps the jar's 0.005 here.
+
+`BiomeSamplerDecisionOracle.java` (`.local/terraforged/oracles/biome_sampler_decisions/`, `run.sh`) compiles
+Reimagined's own `BiomeSampler`, `ClimateSample`, `WeightMap`, `MathUtil`, `NoiseUtil` and `BiomeType` from
+source with stub generator, settings and registries, and calls its private decisions by reflection, interpreted and
+with `-Xcomp`: 32,104 rolls, 811,200 wetland choices (NaN and one-ulp edges), 17,640 slope gates (the `int` wrap
+edges, odd world heights, steps one float either side of the threshold), 7,920 snow checks (wrapping sea levels)
+and 6,591 mountain-usage gates through `getInitialBiome`. The test matches every digest in debug and release builds.
 
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives, the biome climate types, the climate settings, the climate module, the climate stage, the continent factory, the generator context, the heightmap, the world generator factory, TerraForged's terrain levels, its terrain data, its terrain generator, its terrain-blend utilities, its terrain blender with its nearest-terrain search (and the newer source's seed-first blender), noise-graph reseeding, the cave noise primitives, the biome viability rules, the biome overrides, the continent control points, the continent cell primitives, the continent configuration, the continent shape blending, the continent cell generator with its spawn-offset search, the continent river nodes, the continent river carver's arithmetic, the continent river networks with their nearest-node sampling and their warped, carved river sampling, the newer source's seed-first noise sources, scalar noise graphs, domain warps, selectors, graph caches, terraces, legacy terraces, advanced terraces, curves, transforms (steps, frequency, gradient and modulation), special sources (boost, cell, cell edge and sine) and lines, and its bounded concurrent lossy cache with the continent's cell and
-river-piece caches on it, the continent noise module that joins the continent layers, the newer source's terrain height sampler with its bordered chunk generation and its nearest-terrain search, the erosion tile geometry, and TerraForged Reimagined's heightmap smoothing, erosion brushes, hydraulic erosion filter, eroded-region cache, eroded region build, eroded chunk generation, terrain cache, generator queries, chunk fill, the terrain stage hand-off to it, the biome chunk fill, the cave biome sampler and the biome pool fallback. They change nothing in the game, so there is
+river-piece caches on it, the continent noise module that joins the continent layers, the newer source's terrain height sampler with its bordered chunk generation and its nearest-terrain search, the erosion tile geometry, and TerraForged Reimagined's heightmap smoothing, erosion brushes, hydraulic erosion filter, eroded-region cache, eroded region build, eroded chunk generation, terrain cache, generator queries, chunk fill, the terrain stage hand-off to it, the biome chunk fill, the cave biome sampler, the biome pool fallback and the surface-biome decisions. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development

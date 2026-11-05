@@ -245,8 +245,8 @@ pub fn is_steep_at<E>(
     Ok(is_steep(max_y, west, east, north, south))
 }
 
-/// `isSteep`'s arithmetic over the four height-noise samples: `max(|east - west|, |south - north|) * max_y`
-/// (in Java's float order) over the `2 * half` blocks between them, steep when above [`MAX_FLAT_GRADIENT`].
+/// `isSteep`'s arithmetic over the four height-noise samples: `max(|(east - west) * max_y|,
+/// |(south - north) * max_y|) / (2 * half)` in Java's float order, steep when above [`MAX_FLAT_GRADIENT`].
 /// `Math.max` keeps a NaN, so a NaN sample is never steep.
 pub fn is_steep(max_y: i32, west: f32, east: f32, north: f32, south: f32) -> bool {
     let half = 1.max(SLOPE_STEP / 2);
