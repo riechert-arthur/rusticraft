@@ -1494,7 +1494,7 @@ range`), so a zero range (0 octaves) or an infinite one (a huge gain) gives 1 in
 path uses that `map` (`map_current`), and `Source::value`/`value_seeded` keep the jar's. Reseeding (`Module::with_seed`,
 above) stays the jar's mechanism: a reseeded source gives the seed-first bits for the same seed where the two maps
 agree, except for Perlin and Perlin2 (reseeding changes their seed; seed-first sampling does not). The eight octave sources
-and the scalar graph nodes (below) are seed-first so far; the other nodes are not. `SeedFirstOracle.java` and `JarSeedOracle.java`
+the scalar graph nodes and the domain warps (below) are seed-first so far; the other nodes are not. `SeedFirstOracle.java` and `JarSeedOracle.java`
 (`.local/terraforged/oracles/seed_first/`, outside Git; `run.sh` compiles Noise2D 2cb4843 from source) fold every
 kind over seven configs (0 octaves, negative gain and lacunarity, an infinite range), five config seeds, eight runtime
 seeds (both `int` extremes) and ten points (NaN, infinity, -0); the tests match both tables bit for bit in debug and
@@ -1506,7 +1506,7 @@ the octave sources, `Abs`, `Alpha`, `Bias`, `Clamp`, `Invert`, `Map`, `Power`, `
 add their own seed), and their arithmetic is the jar's: in 2cb4843 these classes behave as the jar's apart from the seed
 parameter. None of them calls `NoiseUtil.map` (`Map` divides by the source range fixed in its constructor), so the newer
 map only shows through the sources (a 0-octave source inside a graph gives 1, not NaN). Any other node (custom modules,
-domain warps, selectors, blends, caches, terraces, curves and the remaining transforms and sources) returns an error
+selectors, blends, caches, terraces, curves and the remaining transforms and sources) returns an error
 instead of falling back to the seedless `value`, which would ignore the seed; later layers add them. The jar path
 (`value`) and reseeding (`with_seed`) are unchanged. Reseeding gives the same bits only where it seeds the same sources:
 not through Perlin/Perlin2, a `Bias`'s bias (reseeding drops it) a combiner's sources (reseeding leaves them
@@ -1515,6 +1515,24 @@ graphs over zero and infinite source ranges, Invert's out-of-bound branches, a z
 `Math.pow` special cases, empty and single-source combiners and deep nesting; seven seeds including both `int` extremes;
 nine points with NaN, infinity and -0) run on the 2cb4843 classes (`.local/terraforged/oracles/seed_first/run-graphs.sh`,
 outside Git, after `run.sh`); the tests match both bit for bit in debug and release.
+
+Seed-first domain warps (`Domain::try_offset_x_seed_first`/`try_offset_y_seed_first`/`try_x_seed_first`/
+`try_y_seed_first`, and the `Warp` module in `Module::try_value_seed_first`) port Noise2D 2cb4843's
+`getOffsetX(int seed, float x, float y)` and friends for all six domains (`Domain.DIRECT`, `DomainWarp`,
+`DirectionWarp`, `AddWarp`, `CompoundWarp`, `CumulativeWarp`). Each passes the call's seed unchanged to its modules and
+nested domains; both axes read the unwarped point; `Warp` samples its source at `(getX, getY)`; `DirectionWarp` uses the
+same 4096-entry sine table and `cos(r) = sin(r + 1.5708f)`; `CumulativeWarp` keeps Engine's quirk of returning the second
+warp's coordinate as the offset. In 2cb4843 these classes equal the jar's apart from the seed parameter, and none calls
+`NoiseUtil.map` (`DomainWarp` maps its axes with a `Map` built at construction), so the newer map shows only through the
+sources. An unsupported module anywhere inside returns its error. The seedless `offset_x`/`x` and reseeding are
+unchanged (reseeding still panics for `Domain.DIRECT`, `AddWarp` and `CompoundWarp`, whose specs Noise2D registers under
+`CumulativeWarp`'s name). `TerraForgedSeededDomainOracle.java` (seven domains, four seeds, four points, five outputs) and
+`SeededDomainEdgeOracle.java` (16 domains: Perlin axes, zero- and infinite-range axes, an axis already at -0.5..0.5, a
+constant axis, NaN and huge angles, `Direct` inside combinations, a six-deep chain and warps of warps; seven seeds
+including both `int` extremes; nine points with NaN, infinity and -0; seven outputs each) run in the same
+`run-graphs.sh`; the tests match both bit for bit in debug and release. The river network's and `ContinentNoise`'s
+inlined warps equal this generic path bit for bit. The seed/scale shorthands (`Domain.warp(seed, scale, octaves,
+strength)`...) are still not ported.
 
 The bounded concurrent lossy cache (`lossy_cache.rs`, `ConcurrentLossyCache`) ports the newer source tree's
 `LossyCache.Concurrent` and its `LossyCache.Stamped` buckets (`com.terraforged.mod.util.storage`, 6dd607eb). The
@@ -1612,7 +1630,7 @@ lines, and past 64 seeds the offset store starts over without mixing seeds up.
 
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives, the biome climate types, the climate settings, the climate module, the climate stage, the continent factory, the generator context, the heightmap, the world generator factory, TerraForged's terrain levels, its terrain data, its terrain generator, its terrain-blend utilities, its terrain blender with its nearest-terrain search, noise-graph reseeding, the cave noise primitives, the biome viability rules, the biome overrides, the continent control points, the continent cell primitives, the continent configuration, the continent shape blending, the continent cell generator with its spawn-offset search, the continent river nodes, the continent river carver's arithmetic, the continent river networks with their nearest-node sampling and their warped, carved river sampling, the newer source's seed-first noise sources and scalar noise graphs, and its bounded concurrent lossy cache with the continent's cell and
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives, the biome climate types, the climate settings, the climate module, the climate stage, the continent factory, the generator context, the heightmap, the world generator factory, TerraForged's terrain levels, its terrain data, its terrain generator, its terrain-blend utilities, its terrain blender with its nearest-terrain search, noise-graph reseeding, the cave noise primitives, the biome viability rules, the biome overrides, the continent control points, the continent cell primitives, the continent configuration, the continent shape blending, the continent cell generator with its spawn-offset search, the continent river nodes, the continent river carver's arithmetic, the continent river networks with their nearest-node sampling and their warped, carved river sampling, the newer source's seed-first noise sources, scalar noise graphs and domain warps, and its bounded concurrent lossy cache with the continent's cell and
 river-piece caches on it, and the continent noise module that joins the continent layers. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 

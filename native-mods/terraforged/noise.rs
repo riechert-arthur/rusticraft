@@ -2269,15 +2269,21 @@ impl Module {
         }
     }
 
-    /// Noise2D 2cb4843's `getValue(int seed, float x, float y)` for the scalar nodes: every node passes the call's
-    /// seed unchanged to its children (only octave sources add their own seed, see [`Source::value_seed_first`]);
-    /// their arithmetic and evaluation order are the jar's. Nodes not yet ported to seed-first sampling return an
+    /// Noise2D 2cb4843's `getValue(int seed, float x, float y)` for the scalar nodes and `Warp`: every node passes
+    /// the call's seed unchanged to its children (only octave sources add their own seed, see
+    /// [`Source::value_seed_first`]); their arithmetic and evaluation order are the jar's. `Warp` samples its source
+    /// at the domain's seed-first coordinates ([`Domain::try_x_seed_first`]). Nodes not yet ported to seed-first sampling return an
     /// error instead of falling back to [`Module::value`], which would ignore the seed.
     pub fn try_value_seed_first(&self, seed: i32, x: f32, y: f32) -> Result<f32, &'static str> {
         let sample = |module: &Module| module.try_value_seed_first(seed, x, y);
         Ok(match &self.0.kind {
             ModuleKind::Constant(value) => *value,
             ModuleKind::Source(source) => source.value_seed_first(seed, x, y),
+            ModuleKind::Warp(source, domain) => source.try_value_seed_first(
+                seed,
+                domain.try_x_seed_first(seed, x, y)?,
+                domain.try_y_seed_first(seed, x, y)?,
+            )?,
             ModuleKind::Abs(source) => sample(source)?.abs(),
             ModuleKind::Alpha(source, alpha) => {
                 let value = sample(source)?;
@@ -3183,6 +3189,86 @@ impl Domain {
     /// `x()` adds the input coordinate once more.
     pub fn then(self, next: Self) -> Self {
         Self::node(DomainKind::Cumulative(self, next))
+    }
+
+    /// Noise2D 2cb4843's `Domain.getOffsetX(int seed, float x, float y)`: [`Domain::offset_x`] with the call's seed
+    /// passed unchanged to every module and nested domain (`DirectionWarp` uses the same sine table). An error from
+    /// any module (a node not ported to seed-first sampling) is returned as is.
+    pub fn try_offset_x_seed_first(&self, seed: i32, x: f32, y: f32) -> Result<f32, &'static str> {
+        Ok(match self.0.as_ref() {
+            DomainKind::Direct => 0.0,
+            DomainKind::DomainWarp {
+                x: axis, distance, ..
+            } => {
+                axis.try_value_seed_first(seed, x, y)?
+                    * distance.try_value_seed_first(seed, x, y)?
+            }
+            DomainKind::Direction {
+                direction,
+                strength,
+            } => {
+                let angle = direction.try_value_seed_first(seed, x, y)? * PI2;
+                sin(angle) * strength.try_value_seed_first(seed, x, y)?
+            }
+            DomainKind::Add(first, second) => {
+                first.try_offset_x_seed_first(seed, x, y)?
+                    + second.try_offset_x_seed_first(seed, x, y)?
+            }
+            DomainKind::Compound(first, second) => second.try_offset_x_seed_first(
+                seed,
+                first.try_x_seed_first(seed, x, y)?,
+                first.try_y_seed_first(seed, x, y)?,
+            )?,
+            DomainKind::Cumulative(first, second) => second.try_x_seed_first(
+                seed,
+                first.try_x_seed_first(seed, x, y)?,
+                first.try_y_seed_first(seed, x, y)?,
+            )?,
+        })
+    }
+
+    /// Noise2D 2cb4843's `Domain.getOffsetY(int seed, float x, float y)`; see [`Domain::try_offset_x_seed_first`].
+    pub fn try_offset_y_seed_first(&self, seed: i32, x: f32, y: f32) -> Result<f32, &'static str> {
+        Ok(match self.0.as_ref() {
+            DomainKind::Direct => 0.0,
+            DomainKind::DomainWarp {
+                y: axis, distance, ..
+            } => {
+                axis.try_value_seed_first(seed, x, y)?
+                    * distance.try_value_seed_first(seed, x, y)?
+            }
+            DomainKind::Direction {
+                direction,
+                strength,
+            } => {
+                let angle = direction.try_value_seed_first(seed, x, y)? * PI2;
+                cos(angle) * strength.try_value_seed_first(seed, x, y)?
+            }
+            DomainKind::Add(first, second) => {
+                first.try_offset_y_seed_first(seed, x, y)?
+                    + second.try_offset_y_seed_first(seed, x, y)?
+            }
+            DomainKind::Compound(first, second) => second.try_offset_y_seed_first(
+                seed,
+                first.try_x_seed_first(seed, x, y)?,
+                first.try_y_seed_first(seed, x, y)?,
+            )?,
+            DomainKind::Cumulative(first, second) => second.try_y_seed_first(
+                seed,
+                first.try_x_seed_first(seed, x, y)?,
+                first.try_y_seed_first(seed, x, y)?,
+            )?,
+        })
+    }
+
+    /// Noise2D 2cb4843's `Domain.getX(int seed, float x, float y)`: `x + getOffsetX(seed, x, y)`.
+    pub fn try_x_seed_first(&self, seed: i32, x: f32, y: f32) -> Result<f32, &'static str> {
+        Ok(x + self.try_offset_x_seed_first(seed, x, y)?)
+    }
+
+    /// Noise2D 2cb4843's `Domain.getY(int seed, float x, float y)`: `y + getOffsetY(seed, x, y)`.
+    pub fn try_y_seed_first(&self, seed: i32, x: f32, y: f32) -> Result<f32, &'static str> {
+        Ok(y + self.try_offset_y_seed_first(seed, x, y)?)
     }
 
     /// `Domain.getOffsetX`.
@@ -5612,7 +5698,7 @@ mod tests {
 
     #[test]
     fn seeded_scalar_graph_rejects_unsupported_children() {
-        let unsupported = Module::constant(0.5).warp(Domain::direct());
+        let unsupported = Module::constant(0.5).cache();
         assert!(unsupported.try_value_seed_first(1, 0.0, 0.0).is_err());
         assert!(
             Module::constant(0.25)
@@ -5794,6 +5880,329 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn runtime_seeded_domains_match_current_noise2d() {
+        let source = Module::source(Source::new(
+            SourceKind::Simplex,
+            SourceConfig {
+                seed: i32::MAX,
+                frequency: 0.125,
+                octaves: 2,
+                gain: 0.65,
+                ..SourceConfig::default()
+            },
+        ));
+        let control = Module::source(Source::new(
+            SourceKind::Cubic,
+            SourceConfig {
+                seed: -91,
+                frequency: 0.25,
+                octaves: 2,
+                ..SourceConfig::default()
+            },
+        ));
+        let strength = source
+            .clone()
+            .scale(Module::constant(3.0))
+            .bias(Module::constant(0.25));
+        let axes = Domain::domain_warp(source.clone(), control, strength.clone());
+        let direction = Domain::direction(source.clone(), strength);
+        let domains = [
+            Domain::direct(),
+            axes.clone(),
+            direction.clone(),
+            axes.clone().add(direction.clone()),
+            axes.clone().compound(direction.clone()),
+            axes.clone().then(direction.clone()),
+            axes.clone()
+                .then(direction.clone())
+                .compound(axes.add(direction)),
+        ];
+        let expected: [[u64; 4]; 7] = [
+            [
+                0x3f5d83450043d7aa,
+                0x44dad7a858cffb76,
+                0xa8a35e02a9c30670,
+                0x75ca35c0637684a9,
+            ],
+            [
+                0x71b13ef3a4d059b7,
+                0xc3966dec6f9a6ac3,
+                0x71a518cb6a4ddaae,
+                0x8afa5878c019f5b4,
+            ],
+            [
+                0x5bde5c5c3ed91f59,
+                0x253a26e150042d96,
+                0x95260d0fe0f62f9b,
+                0x261be60bed0c9c85,
+            ],
+            [
+                0x9f922f76221cb3d8,
+                0x530f5bcd818c7c73,
+                0x79175f5e01a546fa,
+                0x8010fff83d7a99b4,
+            ],
+            [
+                0x108203f02897bad6,
+                0x368f068e13e5b1ac,
+                0x4f6d78468e2a6101,
+                0xcaa4f70304ae1b28,
+            ],
+            [
+                0x8c60c24a7a8fb0f5,
+                0x5a3183af79028f6f,
+                0x4063e0a2bef5d53b,
+                0x25d2a5b3da5e1334,
+            ],
+            [
+                0xab5bca91abeb98b8,
+                0xa1820ccb2733b19a,
+                0xdb674a00985b6fb1,
+                0x540db0a18ded0fde,
+            ],
+        ];
+        for (index, (domain, hashes)) in domains.iter().zip(expected).enumerate() {
+            let warped = source.clone().warp(domain.clone());
+            for (seed, expected) in [0, 17, -91, i32::MAX].into_iter().zip(hashes) {
+                let mut hash = 0xcbf29ce484222325u64;
+                for (x, y) in [
+                    (0.0, 0.0),
+                    (0.125, -0.75),
+                    (12.34, 56.78),
+                    (-1234.5, 987.25),
+                ] {
+                    for value in [
+                        domain.try_offset_x_seed_first(seed, x, y).unwrap(),
+                        domain.try_offset_y_seed_first(seed, x, y).unwrap(),
+                        domain.try_x_seed_first(seed, x, y).unwrap(),
+                        domain.try_y_seed_first(seed, x, y).unwrap(),
+                        warped.try_value_seed_first(seed, x, y).unwrap(),
+                    ] {
+                        hash ^= u64::from(value.to_bits());
+                        hash = hash.wrapping_mul(0x100000001b3);
+                    }
+                }
+                assert_eq!(hash, expected, "domain {index}, seed {seed}");
+            }
+        }
+    }
+
+    /// Seed-first domain warps at the edges: Perlin axes and angles (which ignore the runtime seed), zero- and
+    /// infinite-range axes (`DomainWarp`'s map), an axis already at -0.5..0.5 (its shortcut) and a constant one, NaN
+    /// and huge angles (the sine table's `int` cast), NaN/infinite strengths, `Direct` inside combinations, a six-deep
+    /// Add/Compound/Cumulative chain and a warp of a warp, at both `int` extreme seeds and NaN/infinite/-0 points.
+    /// Hashes from `SeededDomainEdgeOracle.java` (`.local/terraforged/oracles/seed_first/run-graphs.sh`), one per
+    /// domain over the seeds, the points, then seven outputs, with canonical NaN bits.
+    #[test]
+    fn runtime_seeded_domain_edges_match_current_noise2d() {
+        let src = |kind, seed, octaves, gain, frequency| {
+            Module::source(Source::new(
+                kind,
+                SourceConfig {
+                    seed,
+                    octaves,
+                    gain,
+                    frequency,
+                    ..SourceConfig::default()
+                },
+            ))
+        };
+        let source = src(SourceKind::Simplex, i32::MAX, 2, 0.65, 0.125);
+        let control = src(SourceKind::Cubic, -91, 2, 0.5, 0.25);
+        let perlin = src(SourceKind::Perlin, 53, 2, 0.5, 0.5);
+        let perlin2 = src(SourceKind::Perlin2, -7, 3, 0.5, 0.3);
+        let zero = src(SourceKind::Simplex, 1337, 0, 0.5, 3.0);
+        let huge = src(SourceKind::Billow, -5, 3, 1e20, 1.0);
+        let c = Module::constant;
+        let strength = source.clone().scale(c(3.0)).bias(c(0.25));
+        let dw0 = Domain::domain_warp(source.clone(), control.clone(), c(4.0));
+        let dw1 = Domain::domain_warp(perlin, perlin2.clone(), strength);
+        let dw2 = Domain::domain_warp(zero.clone(), huge.clone(), c(1.0));
+        let dw3 = Domain::domain_warp(source.clone().map(c(-0.5), c(0.5)), c(0.5), control.clone());
+        let dir4 = Domain::direction(source.clone(), c(2.0));
+        let dir5 = Domain::direction(perlin2.clone(), huge);
+        let dir6 = Domain::direction(c(f32::NAN), c(1.0));
+        let dir7 = Domain::direction(source.clone().scale(c(1e9)), c(1.0));
+        let dir8 = Domain::direction(zero, control.clone());
+        let mut chain = dw0.clone();
+        for i in 0..6 {
+            chain = match i % 3 {
+                0 => chain.add(dir4.clone()),
+                1 => dir5.clone().compound(chain),
+                _ => chain.then(dw1.clone()),
+            };
+        }
+        let domains = [
+            dw0.clone(),
+            dw1.clone(),
+            dw2.clone(),
+            dw3.clone(),
+            dir4.clone(),
+            dir5.clone(),
+            dir6.clone(),
+            dir7.clone(),
+            dir8.clone(),
+            dw0.clone().add(dir4.clone()),
+            dw1.clone().compound(dir5),
+            dir4.clone().then(dw0.clone()),
+            dw0.clone()
+                .then(dir4)
+                .then(dw1.add(dir8).compound(Domain::direct())),
+            Domain::direct().compound(Domain::direct().then(Domain::direct())),
+            dw0.then(dw3).compound(dir7).add(dir6.then(dw2)),
+            chain,
+        ];
+        let expected: [u64; 16] = [
+            0xb1f591fab036a4f9,
+            0xe973aa67aa70dadd,
+            0x8490a9ce079370c4,
+            0x0fc359b953666019,
+            0x5adcf430011e4d9e,
+            0x5fd1f0562f99a42e,
+            0xed8db6e8b8335a24,
+            0x3ae6e06051aa2af3,
+            0xde0cdecc339ae81d,
+            0x42c552fb3baa3f6c,
+            0x5afd9dc6c54d164a,
+            0x98e741c422d3beb3,
+            0x54080d2afd11bd66,
+            0x9add91001765fda5,
+            0x5e153fb2d03d4478,
+            0x95ba6c715e065992,
+        ];
+        let seeds = [0, 1, -1, 17, i32::MAX, i32::MIN, -987654321];
+        let points = [
+            (0.0, 0.0),
+            (0.125, -0.75),
+            (12.34, 56.78),
+            (-1234.5, 987.25),
+            (-0.0, 3.5),
+            (f32::NAN, 1.0),
+            (f32::INFINITY, 2.0),
+            (1e30, -1e30),
+            (65536.5, -32768.25),
+        ];
+        for (index, (domain, expected)) in domains.iter().zip(expected).enumerate() {
+            let warped = [
+                source.clone().warp(domain.clone()),
+                perlin2.clone().warp(domain.clone()),
+                control.clone().warp(domain.clone()).warp(domain.clone()),
+            ];
+            let mut values = Vec::new();
+            for seed in seeds {
+                for (x, y) in points {
+                    values.extend([
+                        domain.try_offset_x_seed_first(seed, x, y).unwrap(),
+                        domain.try_offset_y_seed_first(seed, x, y).unwrap(),
+                        domain.try_x_seed_first(seed, x, y).unwrap(),
+                        domain.try_y_seed_first(seed, x, y).unwrap(),
+                    ]);
+                    values.extend(
+                        warped
+                            .iter()
+                            .map(|m| m.try_value_seed_first(seed, x, y).unwrap()),
+                    );
+                }
+            }
+            let hash = canonical_bits(values)
+                .into_iter()
+                .fold(0xcbf29ce484222325u64, |hash, bits| {
+                    (hash ^ u64::from(bits)).wrapping_mul(0x100000001b3)
+                });
+            assert_eq!(hash, expected, "domain {index}");
+        }
+    }
+
+    /// The river network (#125) and `ContinentNoise` (#128) inline their `Domain.warp(x, y, constant)` as
+    /// `x + (-0.5 + axis) * strength`; that is the generic seed-first `DomainWarp` bit for bit (its `Map` of a 0..1
+    /// axis is `-0.5 + value`), so either can move onto [`Domain`] without changing output.
+    #[test]
+    fn seeded_domain_warp_matches_inlined_river_and_continent_warps() {
+        let simplex = |seed| {
+            Source::new(
+                SourceKind::Simplex,
+                SourceConfig {
+                    seed,
+                    frequency: 30.0,
+                    ..SourceConfig::default()
+                },
+            )
+        };
+        let perlin2 = |seed| {
+            Source::new(
+                SourceKind::Perlin2,
+                SourceConfig {
+                    seed,
+                    octaves: 3,
+                    lacunarity: 2.2,
+                    frequency: 3.0,
+                    gain: 0.3,
+                    ..SourceConfig::default()
+                },
+            )
+        };
+        let cases = [
+            (simplex(8_657_124), simplex(5_123_678), 0.004),
+            (perlin2(-1_234_567), perlin2(i32::MAX), 0.2),
+        ];
+        for (warp_x, warp_y, strength) in cases {
+            let domain = Domain::domain_warp(
+                Module::source(warp_x.clone()),
+                Module::source(warp_y.clone()),
+                Module::constant(strength),
+            );
+            for seed in [0, 17, -91, i32::MIN, i32::MAX] {
+                for i in -20..20 {
+                    let (x, y) = (i as f32 * 0.173 - 0.031, i as f32 * -2.71 + 1e4);
+                    let inlined_x = x + (-0.5 + warp_x.value_seed_first(seed, x, y)) * strength;
+                    let inlined_y = y + (-0.5 + warp_y.value_seed_first(seed, x, y)) * strength;
+                    assert_eq!(
+                        domain.try_x_seed_first(seed, x, y).unwrap().to_bits(),
+                        inlined_x.to_bits()
+                    );
+                    assert_eq!(
+                        domain.try_y_seed_first(seed, x, y).unwrap().to_bits(),
+                        inlined_y.to_bits()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn seeded_domains_propagate_unsupported_children() {
+        let unsupported = Module::constant(0.5).cache();
+        let axes = Domain::domain_warp(
+            unsupported.clone(),
+            unsupported.clone(),
+            Module::constant(1.0),
+        );
+        let strength = Domain::direction(Module::constant(0.25), unsupported.clone());
+        for domain in [
+            axes.clone(),
+            strength,
+            Domain::direct().add(axes.clone()),
+            axes.clone().compound(Domain::direct()),
+            Domain::direct().then(axes),
+        ] {
+            assert!(domain.try_x_seed_first(17, 1.0, 2.0).is_err());
+            assert!(domain.try_y_seed_first(17, 1.0, 2.0).is_err());
+            assert!(
+                Module::constant(1.0)
+                    .warp(domain)
+                    .try_value_seed_first(17, 1.0, 2.0)
+                    .is_err()
+            );
+        }
+        assert!(
+            unsupported
+                .warp(Domain::direct())
+                .try_value_seed_first(17, 1.0, 2.0)
+                .is_err()
+        );
     }
 
     #[test]
