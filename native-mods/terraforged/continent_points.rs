@@ -31,8 +31,9 @@ use super::{
 pub use super::terraforged_biome_sampler::{BEACH, COAST, DEEP_OCEAN, INLAND, SHALLOW_OCEAN};
 
 /// The jar's `FalloffPoint` record: from `control_point` up to the previous point's control point, the falloff
-/// maps continent noise onto `min..max`.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// maps continent noise onto `min..max`. No `PartialEq`: the record's `equals` compares floats with
+/// `Float.compare` (NaN equals NaN, `-0` differs from `0`), which Rust's `==` would not match.
+#[derive(Clone, Copy, Debug)]
 pub struct FalloffPoint {
     pub control_point: f32,
     pub min: f32,
