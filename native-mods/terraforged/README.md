@@ -2399,6 +2399,26 @@ structs hold any value and the biome sampler compares it as Java does. `CurrentS
 (`.local/terraforged/oracles/current_settings/`, `run.sh`) compiles Reimagined's `TerraSettings` from source and
 prints each field's default (floats as bits) and range; the test matches every line.
 
+The terrain overrides (`apply_terrain_overrides`, `terrain_overrides.rs`) are TerraForged Reimagined a24d450's
+`GeneratorPreset.applyTerrainOverrides`, the Terrain page's pass over the registry's terrain noises before the noise
+generator is built (MIT, as above); TerraForged 6dd607eb and the 1.18.2-0.3.1 jar have no such pass. Its settings are
+Reimagined's `TerraSettings.Terrain` in `current_settings.rs`: `TerrainGeneralSettings` (`General`: region size 800,
+jitter 0.8, blending 0.4, seed offset 0, global vertical scale 1, fancy mountains on, mountain width 3.5) and
+`CurrentTerrainSettings` with a per-terrain map, empty by default, whose entries (`TerrainEntry`) reuse Engine's
+`TerrainFormSettings` (same four fields, all 1). Entries are keyed by registry id as `RegistryKey.entryIds` lists them
+(the path for `terraforged:` terrains, the full id otherwise), matched exactly. With the defaults only the mountain
+terrains change: ids containing `mountain`, `dolomites`, `torridonian` or `dales` (case-sensitive) are widened by
+`freq(1 / 3.5)`. Turning fancy mountains off drops every id containing `ridge` (all of them dropped keeps the input).
+A terrain with no entry, no global scale and no stretch keeps the same `Arc`; a rebuilt one goes through
+`TerrainNoise`'s constructor again, so a noise that reports a minimum below 5/255 (such as one ending in the earlier raise's
+`clamp(0, 1)`, which reports 0) is raised again, as in Java. Nothing calls the pass yet: decoding and loading the terrain registry (#185, #186) come first, and the
+`@Range` clamps are only applied by Reimagined's unported `SettingsSerializer`. `TerrainOverridesOracle.java`
+(`.local/terraforged/oracles/terrain_overrides/`, `run.sh`) copies `applyTerrainOverrides` and `isMountain` verbatim
+from Reimagined's `GeneratorPreset`, compiles them with Reimagined's `TerraSettings` onto the real `TerrainNoise` and
+Noise2D 2cb4843 (identical to Reimagined's noise package), and runs 22 settings cases (widths, NaN and infinite
+scales, dropped ridges, missing and namespaced ids) interpreted and JIT-compiled; it prints the defaults and, per
+case, each returned terrain's identity, weight, noise bounds and seed-first samples. The tests match every line.
+
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives, the biome climate types, the climate settings, the climate module, the climate stage, the continent factory, the generator context, the heightmap, the world generator factory, TerraForged's terrain levels, its terrain data, its terrain generator, its terrain-blend utilities, its terrain blender with its nearest-terrain search (and the newer source's seed-first blender), noise-graph reseeding, the cave noise primitives, the biome viability rules, the biome overrides (and TerraForged Reimagined's wider beach band), the continent control points, the continent cell primitives, the continent configuration, the continent shape blending, the continent cell generator with its spawn-offset search, the continent river nodes, the continent river carver's arithmetic, the continent river networks with their nearest-node sampling and their warped, carved river sampling, the newer source's seed-first noise sources, scalar noise graphs, domain warps, selectors, graph caches, terraces, legacy terraces, advanced terraces, curves, transforms (steps, frequency, gradient and modulation), special sources (boost, cell, cell edge and sine) and lines, and its bounded concurrent lossy cache with the continent's cell and
