@@ -93,6 +93,12 @@ impl CellGenerator {
     }
 }
 
+// World generation shares the generator across threads.
+const _: fn() = || {
+    fn shared<T: Send + Sync>() {}
+    shared::<CellGenerator>();
+};
+
 /// `getNearestCell`'s loop bounds: `min..=min + 2` in Java `int` math, empty when the upper bound wraps below.
 /// `None` where the jar's loop never ends (upper bound `Integer.MAX_VALUE`: the counter wraps forever); `floor` of an
 /// `f32` never returns `Integer.MAX_VALUE - 1`, so this cannot happen from `nearest_cell`.
@@ -117,10 +123,16 @@ impl ContinentCells for CellGenerator {
     fn nearest_cell(&self, seed: i32, x: f32, y: f32) -> (i32, i32) {
         let x = self.shape.adjust_x(x);
         let y = self.shape.adjust_y(y);
-        let rows = window(floor(y).wrapping_sub(1));
-        let columns = window(floor(x).wrapping_sub(1));
-        let (Some(rows), Some(columns)) = (rows, columns) else {
+        // The rows loop runs forever past `None`; the columns loop only if a row runs.
+        let Some(rows) = window(floor(y).wrapping_sub(1)) else {
             panic!("TerraForged's getNearestCell loops forever at ({x}, {y})");
+        };
+        let Some(columns) = window(floor(x).wrapping_sub(1)) else {
+            assert!(
+                rows.is_empty(),
+                "TerraForged's getNearestCell loops forever at ({x}, {y})"
+            );
+            return (0, 0);
         };
         let mut nearest = (0, 0);
         let mut distance = f32::MAX;
