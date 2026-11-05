@@ -341,3 +341,10 @@ file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_chunk_fill"
 source = "chunk_fill.rs"
 visibility = "pub"
+
+[[module]]
+id = "current_climate"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_current_climate"
+source = "current_climate.rs"
+visibility = "pub"
