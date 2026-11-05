@@ -919,7 +919,11 @@ parent failed or `f` panicked. Engine 0.3.0's `CacheEntry` has no `map` or `supp
 the value. Its test replays the async lines of `CacheEntryOracle.java` (`.local/terraforged/oracles/cache_entry/`:
 `isDone` while the task runs, `get` blocking, the task's thread, two tasks at once on `ThreadPools.create(4)`,
 timestamps, failures, `then` chains and failing parents, `ThreadPools.NONE`, pool sizes) with an injected clock in place
-of the oracle's sleeps.
+of the oracle's sleeps. As with `FutureTask.set`, a task thread marks the entry done before it hands over the value or
+the failure, so a `get` or `call` that has returned (or panicked) always finds `is_done` true, and in a `then` chain each
+function sees its parent done. A second test replays `CacheEntryOrderOracle.java` (same folder, `run-order.sh`): a gated
+three-entry chain on pools of 4 and 2, 3,000 concurrent reads of succeeding and failing tasks, and a chain on
+`ThreadPools.NONE`.
 
 The tile-cache layer adds Engine's `TileCache` and `TileProvider`'s lookups (`tile_generator.rs`). `cached()` on a
 shared (`Arc`) generator makes the cache on the generator's pool: the builder's `pool(size)` (`ThreadPool::create`), else
