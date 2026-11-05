@@ -23,10 +23,10 @@
  */
 
 // Adapted from TerraForged Reimagined (https://github.com/Romoslayer/TerraForged-Reimagined, a24d450):
-// `buildRegion`, `erodedHeightNoise`, `erodedHeight`, `getRegion`, `generate`, `find`, `getHeightNoise`, `getLevels` and
-// `getTerrainLevels` of
-// `src/main/java/com/terraforged/mod/worldgen/noise/erosion/ErodedNoiseGenerator.java`. MIT License, Copyright (c) 2020
-// TerraForged, Copyright (c) 2026 Romoslayer; see `LICENSE-TERRAFORGED-REIMAGINED`.
+// `buildRegion`, `erodedHeightNoise`, `erodedHeight`, `getRegion`, `generate`, `find`, `getHeightNoise`,
+// `getLevels` and `getTerrainLevels` of
+// `src/main/java/com/terraforged/mod/worldgen/noise/erosion/ErodedNoiseGenerator.java`. MIT License, Copyright (c)
+// 2020 TerraForged, Copyright (c) 2026 Romoslayer; see `LICENSE-TERRAFORGED-REIMAGINED`.
 
 use super::{
     terraforged_engine::Terrain,
@@ -44,12 +44,13 @@ use std::{
     sync::Arc,
 };
 
-/// TerraForged Reimagined 26.3's `ErodedNoiseGenerator` (Romoslayer/TerraForged-Reimagined a24d450): erosion runs once per [`ErosionRegionLayout`] region (8x8 chunks plus 4
-/// chunks of margin, a 256x256 map) over the raw terrain heights of the wrapped [`NoiseGenerator`], then the optional
-/// [`HeightmapSmoothing`], and the result is cached per region and seed ([`ErosionRegionCache`], Java's `getRegion`).
-/// Neither the 1.18.2-0.3.1 jar nor the newer source (6dd607eb) has regions: they erode a `NoiseTileSize` tile per
-/// chunk. Reimagined's `NoiseGenerator.sampleTerrain`/`sampleRiver` are 6dd607eb's, which [`NoiseGenerator`] ports.
-/// Chunks are filled from the regions ([`Self::generate`]); the plain height and `find` stay on the un-eroded generator.
+/// TerraForged Reimagined 26.3's `ErodedNoiseGenerator` (Romoslayer/TerraForged-Reimagined a24d450): erosion runs
+/// once per [`ErosionRegionLayout`] region (8x8 chunks plus 4 chunks of margin, a 256x256 map) over the raw terrain
+/// heights of the wrapped [`NoiseGenerator`], then the optional [`HeightmapSmoothing`], and the result is cached per
+/// region and seed ([`ErosionRegionCache`], Java's `getRegion`). Neither the 1.18.2-0.3.1 jar nor the newer source
+/// (6dd607eb) has regions: they erode a `NoiseTileSize` tile per chunk. Reimagined's
+/// `NoiseGenerator.sampleTerrain`/`sampleRiver` are 6dd607eb's, which [`NoiseGenerator`] ports. Chunks are filled
+/// from the regions ([`Self::generate`]); the plain height and `find` stay on the un-eroded generator.
 pub struct ErodedNoiseGenerator {
     erosion: ErosionFilter,
     generator: NoiseGenerator,

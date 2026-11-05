@@ -2026,7 +2026,8 @@ border position reads the region's own margin, not the neighbouring region, as J
 neighbouring chunk's edge), then the rivers carved. Java samples each position into its own `NoiseSample` of a pooled
 `NoiseResource`: a new resource starts every position from the defaults, while a reused one carries the river noise
 over from the same position of the chunk that used it before, so Java's output depends on which chunks shared a
-resource. The port starts every position from the defaults (Java's new resource) and fills a new `NoiseData` per call,
+resource (the oracle's `pool` lines show it: chunk (25, 16) right after (24, 16) on one resource differs from a fresh
+fill). The port starts every position from the defaults (Java's new resource) and fills a new `NoiseData` per call,
 so a chunk never depends on the chunks or threads before it. A failed region build is an `Err` (the trait panics) where
 Java throws out of `generate`; a later failure (a failing sample, or a panic, the consumer's included) is logged and the
 chunk left unfilled, as Java's `catch (Throwable)` does. The trait's `height_noise` and `levels`, and `find`, stay on the
