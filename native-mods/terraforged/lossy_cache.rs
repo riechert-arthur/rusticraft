@@ -111,12 +111,12 @@ impl<T> Bucket<T> {
 ///   whenever the seed doesn't change.
 /// - Values are shared `Arc`s: an evicted value stays valid for everyone still holding it. The
 ///   listener receives the evicted `Arc`, so it cannot recycle a value that is still in use (only
-///   `Arc::into_inner` could take it back, and only once no one holds it). TerraForged returns
-///   evicted values to an `ObjectPool`, and its `Stamped` calls the listener with the value it read
-///   before locking even when it then returns another thread's value or the function throws, so a
-///   pooled value can be released twice or while still cached; whether that happens depends on the
-///   thread count (`Environment.CORES`). The port never calls the listener for a value it didn't
-///   evict.
+///   `Arc::into_inner` could take it back, and only once no one holds it). TerraForged's listeners
+///   return evicted values to an `ObjectPool`, and its `Stamped` calls the listener with the value it
+///   read before locking even when it then returns another thread's value or the function throws, so
+///   a value can be released twice or while still cached (harmless only because the source's
+///   `ObjectPool.take` always builds a new value). The port never calls the listener for a value it
+///   didn't evict.
 /// - Sizes Java can't use panic at construction: no buckets or empty buckets (where Java's first
 ///   lookup throws), and bucket or slot counts past 2^30 (where Java's constructor throws).
 pub struct ConcurrentLossyCache<T> {
