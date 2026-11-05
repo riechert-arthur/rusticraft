@@ -1261,7 +1261,19 @@ to each threshold, for seven `maxY` values) and on real `TerrainData` chunks thr
 the test matches its 91,275 fitness values bit for bit, in debug and release.
 
 The biome overrides (`biome_sampler.rs`) port TerraForged 1.18.2-0.3.1's `ClimateSample` and
-`BiomeSampler.getBiomeOverride`, with `ContinentPoints`' thresholds. PLACEHOLDER
+`BiomeSampler.getBiomeOverride`, with `ContinentPoints`' thresholds. Continent noise at or below 0.25 gives a deep
+ocean, at or below 0.5 a shallow ocean, at or below 0.505 (`BEACH + beachSize`, folded to one float) a beach; past
+those bands a river or lake terrain whose river noise is exactly 0 (either signed zero) gives a river, and anything
+else keeps the input biome. The climate type picks the variant (cold, frozen, lukewarm or warm oceans, snowy beach,
+stony shore, frozen river). NaN fails every band and the river test, as Java's float compares do; terrains count as
+rivers or lakes through their category, composites included. `ClimateSample.reset` resets only the `NoiseSample`
+part. Minecraft's biome holders don't exist here, so an override is a `BiomeOverride` that names its biome key; the
+initial biome pick (`getInitialBiome`), `sampleBiome` and the climate noise are not ported yet.
+`BiomeOverrideOracle.java` (`.local/terraforged/oracles/biome_override/`) runs the jar's own bytecode, with
+Minecraft's biome classes and the mod's `BiomeMapManager` stubbed, over 26 continent values (each threshold and its
+neighbouring floats, signed zeros, infinities, NaN), every climate type, the 16 built-in terrains and three
+composites and 10 river values (signed zeros, subnormals, infinities, NaN); the test matches its 54,340 overrides
+and the reset fields exactly, in debug and release.
 
 ## Status: development only
 
