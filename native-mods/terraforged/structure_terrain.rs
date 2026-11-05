@@ -110,12 +110,17 @@ impl<B: TerrainBlockStates> Columns for ChunkColumns<'_, '_, B> {
     }
 }
 
-/// TerraForged 6dd607eb's `worldgen.terrain.StructureTerrain` without its constructor's piece collection.
+/// TerraForged 6dd607eb's `worldgen.terrain.StructureTerrain`.
 pub struct StructureTerrain {
     pieces: Vec<Piece>,
 }
 
 impl StructureTerrain {
+    /// The constructor `StructureTerrain(chunk, structureManager)`: from `startsForStructure(chunkPos, TERRAIN_MODIFIED)`
+    /// (pass the starts referencing `chunk` in 26.3's order, e.g. the generator's `references`), each BEARD_BOX or
+    /// BEARD_THIN start's pieces that are `isCloseToChunk(chunkPos, 20)` (box within 20 blocks of the chunk, Java `int`
+    /// wrap), except pool pieces whose element is not RIGID; then [`from_rigid_pieces`](Self::from_rigid_pieces)'s
+    /// stable `minY` sort. Starts of other structures, and starts without pieces (`isValid`), add nothing.
     pub fn from_starts(
         registry: &StructureRegistry,
         starts: &[Arc<StructureStart>],
@@ -165,8 +170,8 @@ impl StructureTerrain {
         Self::from_rigid_pieces(pieces)
     }
 
-    /// The constructor's `rigids.sort(PIECE_SORTER)`: pieces by box `minY`, stable (fastutil's sort), from the
-    /// pieces the caller collected (BEARD_BOX/BEARD_THIN starts, close to the chunk, rigid pool elements).
+    /// The constructor's `rigids.sort(PIECE_SORTER)`: pieces by box `minY`, stable (fastutil's sort), from already
+    /// collected pieces ([`from_starts`](Self::from_starts) collects them from structure starts).
     pub fn from_rigid_pieces(mut pieces: Vec<Piece>) -> Self {
         pieces.sort_by_key(|piece| piece.bounds.min_y);
         Self { pieces }
@@ -311,8 +316,159 @@ mod tests {
     use super::*;
     use std::{collections::BTreeSet, convert::Infallible};
 
+    /// `SelectionOracle.java`'s output (`.local/terraforged/oracles/structure_terrain/selection/`, `run.sh`): scenario,
+    /// the starts 26.3's `startsForStructure` visited (`structure.start`, `-` for none), the number of pieces the
+    /// constructor collected, and a fold of their boxes and ground deltas in `rigids` order.
+    const JAVA_SELECTION: &str = "\
+0 2.0,3.0,1.0,1.1 2 0x5b40718030a9fe83
+1 2.0,2.1,2.2 4 0xe036ea2a969e238b
+2 1.0,0.1,0.0,0.2,2.1,2.0 8 0x7c8eb83252d09119
+3 1.2,1.1,3.2,3.0,3.1 6 0x8678655245a4a71c
+4 2.1,2.2,2.0,0.0 5 0x5efaf8bb1d46ec1d
+5 0.0 0 0xcbf29ce484222325
+6 0.0,0.2,0.1 2 0xb73386496b754fcb
+7 0.2,0.1 2 0x13b7bd0c2e6a5ace
+8 - 0 0xcbf29ce484222325
+9 - 0 0xcbf29ce484222325
+10 - 0 0xcbf29ce484222325
+11 0.2,0.0 3 0x8786955738dd127d
+12 0.0,0.1,0.2 0 0xcbf29ce484222325
+13 0.1 2 0x3dad39e3caaad952
+14 0.0,0.1,1.2,1.0,1.1 0 0xcbf29ce484222325
+15 0.1,0.0,0.2 0 0xcbf29ce484222325
+16 - 0 0xcbf29ce484222325
+17 - 0 0xcbf29ce484222325
+18 0.1,0.0 2 0x72d8301efd6506c3
+19 - 0 0xcbf29ce484222325
+20 0.0,1.0 1 0xfa33b6cc8429e456
+21 2.1,2.0,2.2,0.1,0.0 5 0x966c6a3000652b40
+22 2.0,0.0,0.1 4 0xeafc27f51c69777f
+23 2.2,2.1,0.0,1.2,1.0,1.1 6 0x4d771ac8e057c453
+24 0.0 0 0xcbf29ce484222325
+25 1.0,2.0 2 0x4e5e0a471df7d716
+26 2.1,2.0,1.0 4 0xa4c08f63aea28e41
+27 0.0 1 0x6d84319d59207248
+28 - 0 0xcbf29ce484222325
+29 0.0,0.2,1.0,1.2,1.1 4 0x337b489f9f97a0e1
+30 1.1,0.0 0 0xcbf29ce484222325
+31 3.0,0.1,2.0,2.1 0 0xcbf29ce484222325
+32 3.1,3.0,1.1,1.0,2.1,2.0,0.0 7 0x7a0679b3223ac823
+33 2.0,2.1,3.0,3.1 5 0x788de08fb368a3c6
+34 1.1,1.0,1.2,3.0 10 0x44be1f95cae8d420
+35 2.0 1 0x49567a9884e832b6
+36 0.0,0.1,2.2,2.0,2.1,3.0 6 0xc5439034a1203eed
+37 - 0 0xcbf29ce484222325
+38 0.0 0 0xcbf29ce484222325
+39 0.1,0.0 3 0xa94b77c612e3795a
+40 0.1,0.0 2 0xe0c15fa57fc96bc7
+41 - 0 0xcbf29ce484222325
+42 - 0 0xcbf29ce484222325
+43 0.0 0 0xcbf29ce484222325
+44 - 0 0xcbf29ce484222325
+45 0.0,0.1 3 0xf4eaef5d6f5eb19c
+46 0.0 0 0xcbf29ce484222325
+47 0.0 0 0xcbf29ce484222325
+48 0.2,0.0,0.1 2 0xe540eb187a3377f3
+49 - 0 0xcbf29ce484222325
+50 - 0 0xcbf29ce484222325
+51 1.0,1.2,1.1 8 0x40a735b437344c39
+52 0.1,0.0,0.2,1.1,1.0 1 0x26aad90dde8b8c2b
+53 - 0 0xcbf29ce484222325
+54 0.0,2.1,2.0,1.0,1.1 4 0x1ea5ab4394853c81
+55 2.2,2.0,0.0 0 0xcbf29ce484222325
+56 2.0,2.1,1.0 5 0x51787d8e00a2c87d
+57 2.1,2.2,2.0,0.0,0.2,0.1,1.0 11 0x434010a9b31fa751
+58 1.0,2.0,2.2,2.1 5 0xe1aba4acb41bae03
+59 2.0 0 0xcbf29ce484222325
+60 1.0,1.1 3 0xae22e9ca748ace71
+61 0.0 0 0xcbf29ce484222325
+62 1.0,1.1,0.2,0.1,3.0,3.2,3.1 0 0xcbf29ce484222325
+63 0.0,3.1,3.0 0 0xcbf29ce484222325
+64 3.2,3.0,3.1,1.0,0.0 8 0x83cc2b6d6286313f
+65 1.1,1.0,3.0,0.0 1 0x420de108a6c15c12
+66 1.0,1.1,3.0,3.1 6 0xaf1060dd3d7f8cac
+67 1.0,3.0 2 0xd932db799117062d
+68 1.0,2.1,2.2 2 0x090473d3c8844b42
+69 1.2,1.1,1.0,2.2,2.1,2.0,3.1,3.0 5 0x03367a0d3c355774
+70 0.0,0.2,0.1 3 0xc6a443ab05f1f284
+71 0.1,0.2,0.0 4 0xe1f7398e99068e34
+72 0.2,0.0,0.1 3 0x91e6abbac7c183f8
+73 0.1,0.0 0 0xcbf29ce484222325
+74 - 0 0xcbf29ce484222325
+75 - 0 0xcbf29ce484222325
+76 - 0 0xcbf29ce484222325
+77 0.0,0.1 2 0xf53fd64a5453eeae
+78 1.1,0.1,0.0 0 0xcbf29ce484222325
+79 1.1,1.0,0.0 0 0xcbf29ce484222325
+80 1.1,1.0 3 0xd33fd1d290928bd0
+81 0.0 0 0xcbf29ce484222325
+82 0.0,0.1 5 0xcaefe762ed4dc563
+83 - 0 0xcbf29ce484222325
+84 1.0 1 0x93c6f4ee596c4b44
+85 1.0 0 0xcbf29ce484222325
+86 2.0,0.2,0.1,1.0 6 0xe714a64452b28b44
+87 0.0,2.0 6 0xafa22aa5356cc594
+88 0.0,2.2,2.0,2.1 4 0x89fa3c69c4ac14cd
+89 0.2,0.1,0.0,2.2,2.1,2.0 5 0xd4f67ea70890229d
+90 1.0,1.1,0.0,0.1,0.2 8 0xe796825d98dbdd7f
+91 2.1,2.2,1.1,1.0 7 0xc2877313db0a5008
+92 2.0,1.0,1.1 3 0x159364965cd5bc0e
+93 0.0,0.1,0.2,1.0,2.1,2.0 5 0x62b961725c58c299
+94 1.0,1.2,1.1,2.0,2.1,2.2,3.1 0 0xcbf29ce484222325
+95 3.0,0.0,0.1,2.0,2.2,2.1 0 0xcbf29ce484222325
+96 0.1,0.0,1.1,1.0,3.0 2 0xe46a1571f0815987
+97 1.0,0.0,2.0,2.1,2.2,3.1 6 0xe2766470ca5df613
+98 0.0,3.1,3.2,3.0,2.1,2.2,2.0,1.0 4 0xe3068bf7657845b4
+99 3.0 3 0x4b51c8f168371331
+100 3.1,3.2,3.0,1.1,1.2,1.0 7 0xcd1937c0ece5ed79
+101 1.0,3.1,2.0,2.1 4 0x1d4ccef5beae03fa
+102 2.2,2.0,1.0,0.0 5 0xc868f814a96fdbd0
+103 0.0 0 0xcbf29ce484222325
+104 0.0,0.2,0.1 5 0x02d191951cabd43f
+105 - 0 0xcbf29ce484222325
+106 0.0 0 0xcbf29ce484222325
+107 - 0 0xcbf29ce484222325
+108 - 0 0xcbf29ce484222325
+109 0.0,0.1,0.2 3 0xf2243ea791aaeba2
+110 - 0 0xcbf29ce484222325
+111 1.1,1.2,1.0 0 0xcbf29ce484222325
+112 0.0,0.2,0.1,1.0 8 0x7701080d8a40ab3a
+113 0.0,1.0 5 0x8abdec5882414f9c
+114 0.1,0.0 2 0xae71eb22f2fc0396
+115 0.0,0.1 3 0x309535d68e228af1
+116 - 0 0xcbf29ce484222325
+117 1.0,1.1 2 0x98b6c0da7fbe55c0
+118 0.0,0.1 2 0x1528577fb4a356f8
+119 2.0,2.1 2 0x03af53962cb9e9ad
+120 0.0,1.1,1.0,1.2 1 0x339882a076cd216d
+121 2.0,0.0 2 0x7ec5dd0586874cb3
+122 1.1,1.0,0.1,0.0 4 0x4e6c42acfd40f3d4
+123 0.1 0 0xcbf29ce484222325
+124 1.0 0 0xcbf29ce484222325
+125 - 0 0xcbf29ce484222325
+126 2.0 0 0xcbf29ce484222325
+127 3.2,3.1,3.0,0.0,0.1 0 0xcbf29ce484222325";
+
+    /// One box axis as `SelectionOracle.axis` draws it.
+    fn selection_axis(random: &mut Lcg, origin: i32) -> (i32, i32) {
+        let (mode, span) = (random.next(5), random.next(24));
+        let lo = match mode {
+            0 => origin.wrapping_add(35).wrapping_add(random.next(2)),
+            1 => origin.wrapping_add(-21 + random.next(2) - span),
+            _ => origin.wrapping_add(random.next(70) - 40),
+        };
+        let hi = lo.wrapping_add(span);
+        (lo, if hi < lo { i32::MAX } else { hi })
+    }
+
+    /// The scenarios of `SelectionOracle.java`, which runs 6dd607eb's constructor through a real 26.3
+    /// `StructureManager`: chunk positions where `x << 4` and the 20-block margin wrap, 1-4 structures of every
+    /// `TerrainAdjustment`, 1-3 starts each (some without pieces, which `isValid` drops), legacy pieces and pool pieces
+    /// (the empty element, rigid and terrain-matching elements), boxes on both edges of the margin, tied `minY`s.
+    /// 26.3 visits the structures in a `HashMap`'s identity-hash order, so Java's visit order is an input here; the
+    /// starts Java never visits (other adjustments, empty starts) are interleaved to show they add nothing.
     #[test]
-    fn selection_matches_original_constructor() {
+    fn from_starts_matches_6dd607eb_on_26_3_structure_starts() {
         use super::super::super::structure::{
             BoundingBox, Rotation,
             jigsaw::{PoolElement, PoolPiece},
@@ -334,94 +490,168 @@ mod tests {
                 Ok(())
             }
         }
-
-        let mut registry =
-            StructureRegistry::new(&BTreeMap::new(), &BTreeMap::new(), BTreeMap::new(), &|_| {
-                Ok(BTreeSet::new())
-            })
-            .unwrap();
-        let mut starts = Vec::new();
-        for adjustment in [
+        // TerrainAdjustment.values() order.
+        const ADJUSTMENTS: [TerrainAdjustment; 5] = [
             TerrainAdjustment::None,
             TerrainAdjustment::Bury,
-            TerrainAdjustment::BeardBox,
             TerrainAdjustment::BeardThin,
+            TerrainAdjustment::BeardBox,
             TerrainAdjustment::Encapsulate,
-        ] {
-            let structure = registry.structures.len();
-            registry.structures.push(StructureDef {
-                name: "test".into(),
-                kind: StructureKind::Unsupported("test".into()),
-                biomes: BTreeSet::new(),
-                step: 0,
-                terrain: adjustment,
-                enhanced_terrain: None,
-            });
-            let mut pieces = Vec::new();
-            for (x, z, y, projection, delta) in [
-                (-36, -16, 80, Projection::Rigid, 2),
-                (19, -16, 60, Projection::Rigid, 3),
-                (-37, -16, 40, Projection::Rigid, 4),
-                (20, -16, 40, Projection::Rigid, 5),
-                (-16, -36, 60, Projection::Rigid, 6),
-                (-16, 19, 90, Projection::Rigid, 7),
-                (-16, -37, 40, Projection::Rigid, 8),
-                (-16, 20, 40, Projection::Rigid, 9),
-                (-16, -16, 40, Projection::TerrainMatching, 10),
-            ] {
-                pieces.push(WorldPiece::Pool(PoolPiece {
-                    element: Arc::new(PoolElement::Feature {
-                        feature: "test".into(),
-                        projection,
-                    }),
-                    position: [x, y, z],
-                    ground_level_delta: delta,
-                    rotation: Rotation::None,
-                    bounding_box: BoundingBox::new([x, y, z], [x, y + 5, z]),
-                    junctions: Vec::new(),
-                    waterlogging: false,
-                }));
+        ];
+
+        let mut scenarios = 0;
+        for line in JAVA_SELECTION.lines() {
+            let fields: Vec<&str> = line.split(' ').collect();
+            let s: u32 = fields[0].parse().unwrap();
+            let count: usize = fields[2].parse().unwrap();
+            let hash = u64::from_str_radix(fields[3].trim_start_matches("0x"), 16).unwrap();
+            let mut random = Lcg(u64::from(s)
+                .wrapping_mul(0x9E3779B97F4A7C15)
+                .wrapping_add(170));
+            let cx = match s % 16 {
+                13 => i32::MAX - random.next(2),
+                14 => 0x0800_0000 + random.next(2),
+                15 => 0x07ff_ffff - random.next(2),
+                _ => random.next(9) - 5,
+            };
+            let cz = random.next(9) - 5;
+            let (ox, oz) = (cx.wrapping_shl(4), cz.wrapping_shl(4));
+            let mut registry = StructureRegistry::new(
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                BTreeMap::new(),
+                &|_| Ok(BTreeSet::new()),
+            )
+            .unwrap();
+            let mut starts = BTreeMap::new();
+            let mut valid_beards = BTreeSet::new();
+            for t in 0..1 + random.next(4) {
+                let a = random.next(8);
+                let terrain = match a {
+                    0..5 => ADJUSTMENTS[a as usize],
+                    5 => TerrainAdjustment::BeardThin,
+                    _ => TerrainAdjustment::BeardBox,
+                };
+                let structure = registry.structures.len();
+                registry.structures.push(StructureDef {
+                    name: format!("test_{t}"),
+                    kind: StructureKind::Unsupported("test".into()),
+                    biomes: BTreeSet::new(),
+                    step: 0,
+                    terrain,
+                    enhanced_terrain: None,
+                });
+                for k in 0..1 + random.next(3) {
+                    let (rx, rz) = (cx.wrapping_add(k - 1), cz + random.next(3) - 1);
+                    let mut pieces = Vec::new();
+                    for _ in 0..random.next(8) {
+                        let kind = random.next(4);
+                        let (x, z) = (
+                            selection_axis(&mut random, ox),
+                            selection_axis(&mut random, oz),
+                        );
+                        let y0 = 40 + random.next(6) * 4;
+                        let y1 = y0 + random.next(10);
+                        let bounding_box = BoundingBox::new([x.0, y0, z.0], [x.1, y1, z.1]);
+                        let ground_level_delta = random.next(9) - 4;
+                        let element = match kind {
+                            0 => {
+                                pieces.push(WorldPiece::Legacy(Box::new(Legacy(bounding_box))));
+                                continue;
+                            }
+                            1 => PoolElement::Empty,
+                            _ => PoolElement::Feature {
+                                feature: "minecraft:test".into(),
+                                projection: if random.next(2) == 0 {
+                                    Projection::Rigid
+                                } else {
+                                    Projection::TerrainMatching
+                                },
+                            },
+                        };
+                        pieces.push(WorldPiece::Pool(PoolPiece {
+                            element: Arc::new(element),
+                            position: [0; 3],
+                            ground_level_delta,
+                            rotation: Rotation::None,
+                            bounding_box,
+                            junctions: Vec::new(),
+                            waterlogging: true,
+                        }));
+                    }
+                    let name = format!("{t}.{k}");
+                    if matches!(
+                        terrain,
+                        TerrainAdjustment::BeardBox | TerrainAdjustment::BeardThin
+                    ) && !pieces.is_empty()
+                    {
+                        valid_beards.insert(name.clone());
+                    }
+                    let bounding_box = pieces
+                        .first()
+                        .map_or(BoundingBox::new([0; 3], [0; 3]), |piece| {
+                            piece.bounding_box()
+                        });
+                    starts.insert(
+                        name.clone(),
+                        Arc::new(StructureStart {
+                            structure,
+                            name,
+                            chunk: ChunkPos::new(rx, rz),
+                            pieces,
+                            bounding_box,
+                        }),
+                    );
+                }
             }
-            pieces.push(WorldPiece::Legacy(Box::new(Legacy(BoundingBox::new(
-                [-16, 60, -16],
-                [-16, 65, -16],
-            )))));
-            starts.push(Arc::new(StructureStart {
-                structure,
-                name: "test".into(),
-                chunk: ChunkPos::new(-1, -1),
-                pieces,
-                bounding_box: BoundingBox::new([-37, 40, -37], [20, 95, 20]),
-            }));
+            let visited: Vec<&str> = match fields[1] {
+                "-" => Vec::new(),
+                list => list.split(',').collect(),
+            };
+            assert_eq!(
+                visited
+                    .iter()
+                    .map(|name| name.to_string())
+                    .collect::<BTreeSet<_>>(),
+                valid_beards,
+                "scenario {s}: the mirrored scenario differs from Java's"
+            );
+            let mut others = starts
+                .iter()
+                .filter(|(name, _)| !visited.contains(&name.as_str()))
+                .map(|(_, start)| start.clone());
+            let mut input = Vec::new();
+            for name in &visited {
+                input.extend(others.next());
+                input.push(starts[*name].clone());
+            }
+            input.extend(others);
+            let selected = StructureTerrain::from_starts(&registry, &input, ChunkPos::new(cx, cz));
+            let folded = selected
+                .pieces
+                .iter()
+                .fold(0xcbf29ce484222325, |hash, piece| {
+                    let b = piece.bounds;
+                    [
+                        b.min_x,
+                        b.min_y,
+                        b.min_z,
+                        b.max_x,
+                        b.max_y,
+                        b.max_z,
+                        piece.ground_delta,
+                    ]
+                    .into_iter()
+                    .fold(hash, fold)
+                });
+            assert_eq!(
+                (selected.pieces.len(), folded),
+                (count, hash),
+                "scenario {s}"
+            );
+            scenarios += 1;
         }
-        let selected = StructureTerrain::from_starts(&registry, &starts, ChunkPos::new(-1, -1));
-        let values: Vec<_> = selected
-            .pieces
-            .iter()
-            .map(|piece| {
-                (
-                    piece.bounds.min_x,
-                    piece.bounds.min_y,
-                    piece.bounds.min_z,
-                    piece.ground_delta,
-                )
-            })
-            .collect();
-        assert_eq!(
-            values,
-            vec![
-                (19, 60, -16, 3),
-                (-16, 60, -36, 6),
-                (-16, 60, -16, 0),
-                (19, 60, -16, 3),
-                (-16, 60, -36, 6),
-                (-16, 60, -16, 0),
-                (-36, 80, -16, 2),
-                (-36, 80, -16, 2),
-                (-16, 90, 19, 7),
-                (-16, 90, 19, 7),
-            ]
-        );
+        assert_eq!(scenarios, 128);
     }
 
     struct Column {
