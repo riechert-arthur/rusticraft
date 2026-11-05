@@ -54,11 +54,12 @@ impl<'a, Cells: ContinentCells> RiverNetwork<'a, Cells> {
         }
     }
 
-    /// `computeNodes(seed, PosUtil.pack(cell_x, cell_y))`. An ocean cell has no pieces. A land cell gets the
-    /// rivers of every higher neighbour whose lowest neighbour it is (the inflows, in [`DIRECTIONS`] order), then
-    /// its own river to its lowest neighbour (the last one at or below its value; none if no neighbour is), and a
-    /// lake when it is a source (no inflow) and [`Self::has_lake`]. A source whose lowest neighbour is ocean has
-    /// no pieces at all. Neighbour coordinates wrap like Java `int`s.
+    /// `computeNodes(seed, PosUtil.pack(cell_x, cell_y))`. An ocean cell has no pieces. A land cell scans its
+    /// neighbours in [`DIRECTIONS`] order, keeping the lowest one at or below its own value (the last on ties) and
+    /// taking the rivers of every other land neighbour whose strictly lowest neighbour it is (the inflows). Then it
+    /// adds its own river to the lowest neighbour, if any, and a lake when it is a source (no inflow) and
+    /// [`Self::has_lake`]. A source whose lowest neighbour's value is at most 0 has no pieces at all. Neighbour
+    /// coordinates wrap like Java `int`s.
     pub fn compute_nodes(&self, seed: i32, cell_x: i32, cell_y: i32) -> RiverPieces {
         let origin = self.continent.cell(seed, cell_x, cell_y);
         if self.shape.threshold_value(origin) <= 0.0 {

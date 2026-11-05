@@ -1408,9 +1408,10 @@ height, river noise, terrain) bit for bit, in debug and release.
 
 The continent river network (`river_network.rs`) ports `computeNodes` of the newer source tree's
 `worldgen.noise.continent.river.RiverGenerator`: the river and lake pieces of one cell. An ocean cell (threshold value
-0) has none. A land cell first takes the rivers of every higher neighbour whose strictly lowest neighbour it is (the
-inflows, neighbours in `DIRS` order), then its own river to its lowest neighbour (the last one at or below its own
-value); a source cell (no inflow) whose lowest neighbour is ocean gets nothing ("chode-rivers" are culled). Each
+0) has none. A land cell scans its neighbours in `DIRS` order, keeping the lowest one at or below its own value (the
+last on ties) and taking the rivers of every other land neighbour whose strictly lowest neighbour it is (the inflows);
+then it adds its own river to the lowest neighbour, if any. A source cell (no inflow) whose lowest neighbour's value is
+at most 0 gets nothing ("chode-rivers" are culled). Each
 connection is two segments to the shared border, bent sideways by `MathUtil.rand` draws at `seed + 20107`, `9803` and
 `28387` with `MathUtil.hash(seed + 827614, x, y)`, plus a third on to the neighbour when its `noise` field is below the
 threshold. A source cell also gets a lake when its hash's draw (`hash + 37171`) is at most `lakeDensity` or its base
