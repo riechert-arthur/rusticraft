@@ -117,7 +117,8 @@ pub struct StructureTerrain {
 
 impl StructureTerrain {
     /// The constructor `StructureTerrain(chunk, structureManager)`: from `startsForStructure(chunkPos, TERRAIN_MODIFIED)`
-    /// (pass the starts referencing `chunk` in 26.3's order, e.g. the generator's `references`), each BEARD_BOX or
+    /// (pass the starts referencing `chunk` in the order 26.3 returns them, e.g. the generator's `references`; across
+    /// structures that is a `HashMap`'s identity-hash order, not fixed in Java), each BEARD_BOX or
     /// BEARD_THIN start's pieces that are `isCloseToChunk(chunkPos, 20)` (box within 20 blocks of the chunk, Java `int`
     /// wrap), except pool pieces whose element is not RIGID; then [`from_rigid_pieces`](Self::from_rigid_pieces)'s
     /// stable `minY` sort. Starts of other structures, and starts without pieces (`isValid`), add nothing.

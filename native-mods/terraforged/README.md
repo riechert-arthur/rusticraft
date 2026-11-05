@@ -2126,12 +2126,13 @@ of the chunk's persisted status, so before TERRAIN, where `fillFromNoise` runs, 
 26.3 updates the final heightmaps instead and OCEAN_FLOOR_WG keeps its old heights, as in Java), and stores each
 returned height in `TerrainData`'s height map as Java does (`Index.CHUNK`, the `int` widened to float; the
 min/max/max-base extrema are left as they were). `StructureTerrain::from_starts` is the constructor's piece
-collection: given the starts referencing the chunk (26.3's `startsForStructure`; the caller passes them in 26.3's order,
-as Horizon's generator collects them for the beardifier), it keeps the BEARD_BOX and BEARD_THIN structures' pieces whose
-box is within 20 blocks of the chunk (`isCloseToChunk(pos, 20)`, Java `int` wrap), drops pool pieces whose element is
-not RIGID (the empty element is terrain-matching), takes a pool piece's ground-level delta (0 for other pieces) and
-sorts by `minY`, stable. Across structures 26.3 visits the starts in a `HashMap`'s identity-hash order, so the order
-of pieces with tied `minY`s from different structures is not fixed in Java either. Not ported here: calling
+collection: given the starts referencing the chunk, in the order 26.3's `startsForStructure` returns them (the
+generator's `references`, which the beardifier reads too), it keeps the BEARD_BOX and BEARD_THIN structures' pieces
+whose box is within 20 blocks of the chunk (`isCloseToChunk(pos, 20)`, Java `int` wrap), drops pool pieces whose
+element is not RIGID (the empty element is terrain-matching), takes a pool piece's ground-level delta (0 for other
+pieces) and sorts by `minY`, stable. Within a structure 26.3 visits the starts in its references' `LongOpenHashSet`
+order (which `references` reproduces); across structures in a `HashMap`'s identity-hash order, so Java does not fix
+the order of tied-`minY` pieces from different structures either. Not ported here: calling
 `from_starts` and `modify_chunk` from the terrain stage. Reimagined a24d450 changes the blend radius (`clamp(length *
 0.75, 8, 24)`, collection radius 32) and skips buried structures; the port keeps 6dd607eb's. `StructureTerrainOracle.java`
 (`.local/terraforged/oracles/structure_terrain/`, `run.sh`) compiles 6dd607eb's `StructureTerrain.java` unchanged, with
@@ -2142,8 +2143,9 @@ alike. `ChunkAdapterOracle.java` (`.local/terraforged/oracles/structure_terrain/
 `StructureTerrain.java` (its constructor given the collected pieces, and `setBlockState`'s 1.19 `false` changed to
 26.3's int flags as Reimagined does; `patch.py` prints the diff) over real 26.3 `ProtoChunk`s and `Heightmap`s with the
 jar's block tags, on 96 chunks at the BIOMES, EMPTY, TERRAIN and FEATURES statuses, with and without primed WG
-heightmaps, with water over the stone; `modify_chunk` matches its blocks, all six heightmaps and the height map. `SelectionOracle.java` (`.local/terraforged/oracles/structure_terrain/selection/`, `run.sh`) runs 6dd607eb's
-unchanged constructor (only 26.3's `startsForStructure(x, z, ..)` call form and `setBlockState` flags patched;
+heightmaps, with water over the stone; `modify_chunk` matches its blocks, all six heightmaps and the height map.
+`SelectionOracle.java` (`.local/terraforged/oracles/structure_terrain/selection/`, `run.sh`) runs 6dd607eb's unchanged
+constructor (only 26.3's `startsForStructure(x, z, ..)` call form and `setBlockState` flags patched;
 `patch.py` prints the diff) through a real 26.3 `StructureManager` over `ProtoChunk` references and starts, with
 `PoolElementStructurePiece`s of single and empty pool elements and plain pieces, on 128 chunks (margin edges at -20/-21
 and +35/+36, chunk positions where `x << 4` and the margin wrap, empty starts, tied `minY`s); `from_starts` matches the
