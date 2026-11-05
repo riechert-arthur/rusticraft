@@ -46,8 +46,8 @@ impl CellPoint {
     }
 }
 
-/// `CellShape`: how continent cells sit on the grid. `SQUARE` jitters each cell inside its own square; `HEXAGON`
-/// stretches y by 1.2 and shifts odd rows by half a cell with half the x jitter.
+/// `CellShape`: how continent cells sit on the grid. `SQUARE` jitters each cell from its own corner; `HEXAGON`
+/// shifts odd rows by half a cell with half the x jitter, and its `adjust_y` scales y by 1.2.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CellShape {
     Square,

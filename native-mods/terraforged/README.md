@@ -1291,14 +1291,14 @@ settings, including invalid, NaN, subnormal and `-0` ones, and five hand-built c
 
 The continent cell primitives (`continent_cell.rs`) port TerraForged 1.18.2-0.3.1's `worldgen.noise.continent.cell`
 package: `CellPoint` (a cell's position and noise; `noise()` returns the `noise0` field, as in the jar), `CellShape`
-and `CellSource`. A square cell sits at `cell + MathUtil.rand(hash, prime) * jitter` on each axis (noise.rs's
-`hash` and `terrain_blend_util.rs`'s `random`, in Java `int` math); a hexagon cell stretches y by 1.2 and shifts
-odd rows by half a cell with half the x jitter. The sources are Perlin (24 gradients, `CURVE3`), simplex and cubic
-noise, mapped to 0..1 by `(1 + sample) * 0.5`. Nothing uses them yet: the continent configuration, shape and cell
-generator come next. `ContinentCellOracle.java` (`.local/terraforged/oracles/continent_cell/`, which reuses the
-biome override's stubs) runs the jar's own bytecode over 12 hashes, 15 cell coordinates (`int` extremes and past
-2^24), 14 jitters (signed zeros, a subnormal, huge, infinite and NaN) and 27 sample coordinates (the same kinds) for
-6 seeds; the test matches its 177,604 results bit for bit, in debug and release.
+and `CellSource`. A square cell sits at `cell + MathUtil.rand(hash, prime) * jitter` on each axis (noise.rs's `hash`
+and `terrain_blend_util.rs`'s `random`, in Java `int` math); `HEXAGON` shifts odd rows by half a cell with half the x
+jitter, and its `adjustY` scales y by 1.2 (x is never adjusted). The sources are Perlin (24 gradients, `CURVE3`),
+simplex and cubic noise, mapped to 0..1 by `(1 + sample) * 0.5`. Nothing uses them yet: the continent configuration,
+shape and cell generator come next. `ContinentCellOracle.java` (`.local/terraforged/oracles/continent_cell/`, which
+reuses the biome override's stubs) runs the jar's own bytecode over 12 hashes, 15 cell coordinates (`int` extremes and
+past 2^24), 14 jitters (signed zeros, a subnormal, huge, infinite and NaN) and 27 sample coordinates (the same kinds)
+for 6 seeds; the test matches its 177,604 results bit for bit, in debug and release.
 
 ## Status: development only
 
