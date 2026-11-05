@@ -34,7 +34,7 @@ use std::ops::RangeInclusive;
 
 /// What TerraForged 1.18.2-0.3.1's `ShapeGenerator` reads from its `ContinentGenerator`: `getNearestCell` (unpacked
 /// as `PosUtil.unpackLeft`/`unpackRight`), `getCell` and the `cellShape` field. The jar binds its seeds inside the
-/// generator; `seed` is the world's runtime seed that #118's cell generator adds to them (the newer source's
+/// generator; `seed` is the world's runtime seed that `CellGenerator` (`continent_cells.rs`) adds to them (the newer source's
 /// seed-first style). `ShapeGenerator` only passes it through.
 pub trait ContinentCells {
     fn nearest_cell(&self, seed: i32, x: f32, y: f32) -> (i32, i32);

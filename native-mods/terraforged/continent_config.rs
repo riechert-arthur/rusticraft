@@ -125,8 +125,8 @@ impl Default for RiverConfig {
 
 /// `ContinentConfig.Shape`. The jar's `ContinentNoise.createContinent` sets `scale` from Engine's `WorldSettings`
 /// continent scale and draws `seed0`, then `seed1`, from the context `Seed`; `ContinentGenerator` takes `seed0` as
-/// its cell seed and `seed1 + 6569` as its sample seed. The seeds default to 0 as in Java and are unused until the
-/// cell generator (#118) reads them.
+/// its cell seed and `seed1 + 6569` as its sample seed. The seeds default to 0 as in Java; `CellGenerator`
+/// (`continent_cells.rs`) reads them.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ShapeConfig {
     pub seed0: i32,

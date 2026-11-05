@@ -1297,7 +1297,7 @@ and `CellSource`. A square cell sits at `cell + MathUtil.rand(hash, prime) * jit
 and `terrain_blend_util.rs`'s `random`, in Java `int` math); `HEXAGON` shifts odd rows by half a cell with half the x
 jitter, and its `adjustY` scales y by 1.2 (x is never adjusted). The sources are Perlin (24 gradients, `CURVE3`),
 simplex and cubic noise, mapped to 0..1 by `(1 + sample) * 0.5`. The continent shape blends the cells; the cell
-generator that places them comes next. `ContinentCellOracle.java` (`.local/terraforged/oracles/continent_cell/`, which
+generator places them. `ContinentCellOracle.java` (`.local/terraforged/oracles/continent_cell/`, which
 reuses the biome override's stubs) runs the jar's own bytecode over 12 hashes, 15 cell coordinates (`int` extremes and
 past 2^24), 14 jitters (signed zeros, a subnormal, huge, infinite and NaN) and 27 sample coordinates (the same kinds)
 for 6 seeds; the test matches its 177,604 results bit for bit, in debug and release.
@@ -1308,8 +1308,8 @@ and `FloatRange`. They are plain structs with the jar's defaults (cell size 400,
 falloff 0.01..0.25, `SQUARE` cells from `PERLIN` noise, falloffs 1.5 and 1, lake density 0.75), the river and lake
 presets, `copy`, and `scale`, which multiplies the three widths but not erosion or the depths; `FloatRange::at` is
 `NoiseUtil.lerp`, unclamped. The jar has no codec for them, so none is ported. The seeds stay 0 until the cell
-generator and the river pipeline read them (the jar only ever sets `seed0` and `seed1`). The continent shape reads
-it; the cell generator comes next. `ContinentConfigOracle.java`
+generator and the river pipeline read them (the jar only ever sets `seed0` and `seed1`). The continent shape and the cell
+generator read it. `ContinentConfigOracle.java`
 (`.local/terraforged/oracles/continent_config/`, which reuses the biome override's stubs) runs the jar's own bytecode
 over every default and 26 edge values (signed zeros, subnormals, `int`-precision limits, infinities, NaN) for `at`,
 `scale`, `copy` and the presets' `copy`/`scale` chains; the test matches its 89,024 results and every default bit for
@@ -1321,8 +1321,8 @@ configuration; `sample` blends the 5x5 cells around the nearest one, weighting e
 distance it lies (blend range: the mean of the two nearest distances times the configured falloff), into the base
 noise (the cells' `noise()` mapped onto the base falloffs) and the continent noise (their 0/1 threshold values through
 the control points' falloff curve); `value` does the same for the continent noise over 3x3 cells, clamped first (the
-jar never calls it). The cells come through a `ContinentCells` trait (the jar's `ContinentGenerator`, ported next,
-with the seed-first runtime seed it passes through). Where the cell window would wrap past `i32` (about 2^31 cells
+jar never calls it). The cells come through a `ContinentCells` trait (the jar's `ContinentGenerator`, ported as the cell
+generator below, with the seed-first runtime seed it passes through). Where the cell window would wrap past `i32` (about 2^31 cells
 out) the jar overruns its buffer, reads a stale one or loops forever; the port panics there. `ContinentShapeOracle.java`
 (`.local/terraforged/oracles/continent_shape/`, a stub `ContinentGenerator` plus the biome override's stubs) runs the
 jar's own bytecode over 9 configurations (signed zeros, subnormals, huge, infinite and NaN thresholds, falloffs and
@@ -1332,7 +1332,24 @@ NaN and infinite jitters and noises, nearest cells up to the `int` extremes, NaN
 points); the test matches them, and the cells visited, bit for bit, in debug and release.
 
 The continent cell generator (`continent_cells.rs`) ports the cell half of TerraForged 1.18.2-0.3.1's
-`worldgen.noise.continent.ContinentGenerator` (the jar has no separate `CellGenerator`). PLACEHOLDER.
+`worldgen.noise.continent.ContinentGenerator` (the jar has no separate `CellGenerator`). Each cell sits at its jittered
+position (the cell shape over `NoiseUtil.hash2D(seed0, x, y)`); its noise is two octaves of the cell source at 0.1 times
+that position (lacunarity 2.75, gain 0.3, seed `seed1 + 6569`), and `noise0` is the first octave. `nearest_cell` is
+`getNearestCell`: the strictly nearest of the 3x3 cells around the adjusted point's `NoiseUtil.floor`; where that floor
+is `Integer.MAX_VALUE` (points at or past 2^31, at -2^31, infinite) the jar's loop wraps and is empty, so the answer is
+cell (0, 0), and the continent shape on top of real cells never reaches its `i32` panics. The jar caches cells in a
+lossy cache whose pool always hands out fresh points, so the cache never changes a result; the port computes cells
+directly (the cache is a later layer). The jar has no runtime seed: `ContinentNoise.createContinent` binds the world
+seed by drawing `seed0` and `seed1` from the generator context's `Seed`. The port's `seed` parameters are the newer
+source's runtime seed, added (Java `int` wrap) to both seeds; 0 gives the jar's cells, and seed `s` over `(a, b)`
+equals seed 0 over `(a + s, b + s)`. The spawn-offset search and the river generator come later.
+`ContinentCellsOracle.java` (`.local/terraforged/oracles/continent_cells/`, with a `Mth` stub plus the biome override's
+and terrain levels' stubs) runs the jar's own `ContinentGenerator` (its constructor, cache and pool) and
+`ShapeGenerator` over 8 seed pairs (`int` extremes and wrapping sample seeds), 10 jitters (signed zeros, a subnormal,
+huge, infinite and NaN), 144 cells per table up to the `int` extremes (each read twice, through the cache), 676
+nearest-cell searches per generator over NaN, infinite, signed-zero, subnormal, huge, ±2^31 and 2^24 points, and the
+shape's blended outputs over the same points, for both cell shapes and all three sources; the test matches its 942,336
+results bit for bit, in debug and release.
 
 ## Status: development only
 
