@@ -200,6 +200,7 @@ mod tests {
         }
     }
 
+    /// The oracle's `fixture` and `degenerate` lines (a zero-length node projects to NaN).
     #[test]
     fn river_node_geometry_matches_java_raw_bits() {
         let expected = [
