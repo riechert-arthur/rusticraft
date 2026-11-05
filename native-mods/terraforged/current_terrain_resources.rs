@@ -148,7 +148,7 @@ pub fn decode_current_terrain_types(
 /// `data/worldgen/terrain_noise/`:
 ///
 /// - TerraForged Reimagined a24d450's flatlands `plains` and `steppe`, hills `dales`, `hills_1` and `hills_2`, and
-///   mountains `mountains_ridge_1`, `mountains_ridge_2` and `torridonian`
+///   mountains `mountains_ridge_1`, `mountains_ridge_2`, `torridonian` and `dolomites`
 ///   (<https://github.com/Romoslayer/TerraForged-Reimagined/tree/a24d4503064780790e975cd17495866ae13eef11>,
 ///   `src/main/resources/default/data/terraforged/worldgen/terrain_noise/`, MIT, (c) 2020 TerraForged, (c) 2026
 ///   Romoslayer; TerraForged 6dd607eb generates the same bytes);
