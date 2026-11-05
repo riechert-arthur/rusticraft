@@ -32,7 +32,7 @@ use super::terraforged_terrain_asset_registry::{
 /// The number of bundled terrain types.
 pub const TERRAIN_TYPE_COUNT: usize = 18;
 /// The number of bundled terrain noises.
-pub const TERRAIN_NOISE_COUNT: usize = 11;
+pub const TERRAIN_NOISE_COUNT: usize = 12;
 
 /// TerraForged Reimagined a24d450's `terrain_type` registry files
 /// (<https://github.com/Romoslayer/TerraForged-Reimagined/tree/a24d4503064780790e975cd17495866ae13eef11>,
@@ -147,8 +147,8 @@ pub fn decode_current_terrain_types(
 /// The bundled `terrain_noise` registry files, as (registry key, JSON) pairs, all unchanged in
 /// `data/worldgen/terrain_noise/`:
 ///
-/// - TerraForged Reimagined a24d450's flatlands `plains` and `steppe`, hills `dales`, `hills_1` and `hills_2`, and
-///   mountains `mountains_ridge_1`, `mountains_ridge_2` and `torridonian`
+/// - TerraForged Reimagined a24d450's flatlands `plains` and `steppe`, hills `dales`, `hills_1`, `hills_2` and
+///   `torridonian`, and mountains `mountains_ridge_1`, `mountains_ridge_2` and `dolomites`
 ///   (<https://github.com/Romoslayer/TerraForged-Reimagined/tree/a24d4503064780790e975cd17495866ae13eef11>,
 ///   `src/main/resources/default/data/terraforged/worldgen/terrain_noise/`, MIT, (c) 2020 TerraForged, (c) 2026
 ///   Romoslayer; TerraForged 6dd607eb generates the same bytes);
@@ -223,6 +223,12 @@ pub fn current_terrain_noise_documents() -> [(&'static str, &'static str); TERRA
             "terraforged:torridonian",
             text(crate::terraforged_data!(
                 "worldgen/terrain_noise/torridonian.json"
+            )),
+        ),
+        (
+            "terraforged:dolomites",
+            text(crate::terraforged_data!(
+                "worldgen/terrain_noise/dolomites.json"
             )),
         ),
     ]
@@ -331,6 +337,15 @@ terraforged:wetland|wetland|wetland/category:WETLAND|wetland/category:WETLAND|WE
                 .unwrap()
                 .is_same(&torridonian)
         );
+        let mountains = registry.get_by_name("mountains").unwrap();
+        let dolomites = assets.resolve("terraforged:dolomites").unwrap();
+        assert!(dolomites.parent().unwrap().is_same(&mountains));
+        assert!(
+            registry
+                .get_by_name("dolomites")
+                .unwrap()
+                .is_same(&dolomites)
+        );
     }
 
     #[test]
@@ -365,6 +380,7 @@ terraforged:wetland|wetland|wetland/category:WETLAND|wetland/category:WETLAND|WE
     /// own terrain of that name, weight bits, the raised noise's bounds and the #185 oracle's hash of seed-first
     /// samples.
     const NOISE_ORACLE: &str = r##"terraforged:dales|hills/category:LOWLAND|true|weight=3fc00000|min=00000000|max=3f800000|hash=2a75f650c0578dc8
+terraforged:dolomites|dolomites/terrain:mountains|true|weight=3fa00000|min=3f100000|max=3f400000|hash=ad60d1f97d47d31b
 terraforged:hills_1|hills/category:LOWLAND|true|weight=40000000|min=00000000|max=3f800000|hash=16d5050ff2aba2c1
 terraforged:hills_2|hills/category:LOWLAND|true|weight=40000000|min=00000000|max=3f800000|hash=e013cf848d1b6c6e
 terraforged:mountains_1|mountains/category:HIGHLAND|true|weight=3fa00000|min=00000000|max=3f800000|hash=572329a5df58853d
@@ -414,6 +430,7 @@ terraforged:torridonian|torridonian/terrain:hills|true|weight=40200000|min=00000
             ids,
             [
                 "dales",
+                "dolomites",
                 "hills_1",
                 "hills_2",
                 "mountains_1",
@@ -438,17 +455,17 @@ terraforged:torridonian|torridonian/terrain:hills|true|weight=40200000|min=00000
         let values: Vec<_> = noises.into_values().collect();
         let applied = apply_terrain_overrides(&values, &ids, &settings);
         assert_eq!(applied.len(), TERRAIN_NOISE_COUNT);
-        assert!(Arc::ptr_eq(&applied[8], &plains)); // a full-id key matches no terraforged: entry
-        assert_eq!(applied[9].weight().to_bits(), 4.0_f32.to_bits());
-        assert_eq!(applied[9].terrain().name(), "flats");
+        assert!(Arc::ptr_eq(&applied[9], &plains)); // a full-id key matches no terraforged: entry
+        assert_eq!(applied[10].weight().to_bits(), 4.0_f32.to_bits());
+        assert_eq!(applied[10].terrain().name(), "flats");
     }
 
     #[test]
     fn default_overrides_stretch_dales_and_the_mountains_but_not_the_hills() {
         // `isMountain` matches ids containing "mountain", "dolomites", "torridonian" or "dales" (of the bundled
-        // noises: dales, the mountains and torridonian), so the default `mountainWidth` (3.5) stretches dales, the
-        // five mountains (fancy mountains are on, so both ridges stay) and torridonian; the two hills and the
-        // flatlands have no override and pass through as the same entries.
+        // noises: dales, dolomites, the mountains and torridonian), so the default `mountainWidth` (3.5) stretches
+        // dales, dolomites, the five mountains (fancy mountains are on, so both ridges stay) and torridonian; the two
+        // hills and the flatlands have no override and pass through as the same entries.
         let mut registry = TerrainRegistry::new();
         let types = decode_current_terrain_types(&mut registry).unwrap();
         let noises = decode_current_terrain_noises(&types).unwrap();
@@ -461,6 +478,7 @@ terraforged:torridonian|torridonian/terrain:hills|true|weight=40200000|min=00000
         assert_eq!(applied.len(), TERRAIN_NOISE_COUNT);
         let stretched = [
             "dales",
+            "dolomites",
             "mountains_1",
             "mountains_2",
             "mountains_3",
