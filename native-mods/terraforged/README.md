@@ -2500,7 +2500,7 @@ checks the bundled copies are byte-identical; the test matches its 12 agreeing l
 
 It also bundles twelve `terrain_noise` files, byte for byte in `data/worldgen/terrain_noise/`. Nine are Reimagined's
 (same folder in Reimagined, `terrain_noise` instead of `terrain_type`, MIT): the flatlands `plains` and `steppe`, the
-hills `dales`, `hills_1` and `hills_2`, the mountain ridges `mountains_ridge_1` and `mountains_ridge_2`, `torridonian`
+hills `dales`, `hills_1`, `hills_2` and `torridonian`, the mountain ridges `mountains_ridge_1` and `mountains_ridge_2`,
 and `dolomites` (6dd607eb generates the same bytes in `generated/.../worldgen/terrain/noise/`). The mountains
 `mountains_1`, `mountains_2` and `mountains_3` are TerraForged 6dd607eb's generated files (MIT): Reimagined's copies
 differ (they replace the `Valley` erosion node, which Reimagined's codec cannot read, with other nodes), and the port

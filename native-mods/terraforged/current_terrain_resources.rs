@@ -147,8 +147,8 @@ pub fn decode_current_terrain_types(
 /// The bundled `terrain_noise` registry files, as (registry key, JSON) pairs, all unchanged in
 /// `data/worldgen/terrain_noise/`:
 ///
-/// - TerraForged Reimagined a24d450's flatlands `plains` and `steppe`, hills `dales`, `hills_1` and `hills_2`, and
-///   mountains `mountains_ridge_1`, `mountains_ridge_2`, `torridonian` and `dolomites`
+/// - TerraForged Reimagined a24d450's flatlands `plains` and `steppe`, hills `dales`, `hills_1`, `hills_2` and
+///   `torridonian`, and mountains `mountains_ridge_1`, `mountains_ridge_2` and `dolomites`
 ///   (<https://github.com/Romoslayer/TerraForged-Reimagined/tree/a24d4503064780790e975cd17495866ae13eef11>,
 ///   `src/main/resources/default/data/terraforged/worldgen/terrain_noise/`, MIT, (c) 2020 TerraForged, (c) 2026
 ///   Romoslayer; TerraForged 6dd607eb generates the same bytes);
@@ -336,6 +336,15 @@ terraforged:wetland|wetland|wetland/category:WETLAND|wetland/category:WETLAND|WE
                 .get_by_name("torridonian")
                 .unwrap()
                 .is_same(&torridonian)
+        );
+        let mountains = registry.get_by_name("mountains").unwrap();
+        let dolomites = assets.resolve("terraforged:dolomites").unwrap();
+        assert!(dolomites.parent().unwrap().is_same(&mountains));
+        assert!(
+            registry
+                .get_by_name("dolomites")
+                .unwrap()
+                .is_same(&dolomites)
         );
     }
 
