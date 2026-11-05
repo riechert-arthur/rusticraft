@@ -1575,8 +1575,8 @@ by the runtime seed and the coordinates' bits, like the seedless path (above): a
 graph gives, a `-0.0` point does not hit `+0.0`'s entry, and a NaN point can hit its own (where Java always misses and
 samples again). Seed-first and seedless samples never read each other's entry (their `NoiseUtil.map`s differ), a
 failing child stores nothing, and the entry is still one shared value behind a lock that is only tried (bounded,
-threads never wait). `TerraForgedSeededCacheOracle.java` (same folder and `run-graphs.sh`: six cached graphs, shared
-and nested caches included, five seeds, eight points each sampled twice in a row, on one thread with fresh caches,
+threads never wait). `TerraForgedSeededCacheOracle.java` (`.local/terraforged/oracles/seed_first/`, outside Git, run by
+`run-graphs.sh`: six cached graphs, shared and nested caches included, five seeds, eight points each sampled twice in a row, on one thread with fresh caches,
 plus the coordinate-only hits that return another seed's sample) gives what Java shows deterministically; the tests
 match it bit for bit in debug and release, return the uncached sample where 2cb4843 returns another seed's, and check
 cached = uncached on 8 threads interleaving five seeds over one cache, and that the seedless `value` and `with_seed`
