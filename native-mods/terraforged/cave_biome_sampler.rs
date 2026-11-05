@@ -22,11 +22,13 @@
  * SOFTWARE.
  */
 
-// Adapted from TerraForged Reimagined (https://github.com/Romoslayer/TerraForged-Reimagined, a24d450):
-// `src/main/java/com/terraforged/mod/worldgen/biome/CaveBiomeSampler.java` with `util/storage/WeightMap.java`.
-// TerraForged 6dd607eb's CaveBiomeSampler has the choice noise and the two pools but no coverage mask, no
-// `getLayerBiome` and no empty-pool fallback; those are Reimagined's. MIT License, Copyright (c) 2020 TerraForged,
-// Copyright (c) 2026 Romoslayer; see `LICENSE-TERRAFORGED-REIMAGINED`.
+// Adapted from TerraForged 6dd607eb (https://github.com/TerraForged/TerraForged/tree/6dd607ebfd41a3b7274e090b1f2cf565d53d1d44,
+// MIT License, Copyright (c) 2021 TerraForged): `src/main/java/com/terraforged/mod/worldgen/biome/CaveBiomeSampler.java`
+// with `util/storage/WeightMap.java`: the choice noise and two independent pools, an empty pool staying empty.
+// The coverage mask (`get_layer_biome`) and the empty-pool fallback (`CaveBiomeSampler::reimagined`) are adapted from
+// TerraForged Reimagined (https://github.com/Romoslayer/TerraForged-Reimagined, a24d450), MIT License, Copyright (c)
+// 2020 TerraForged, Copyright (c) 2026 Romoslayer; see `LICENSE-TERRAFORGED-REIMAGINED`. They serve only the
+// Reimagined chunk biome layer (`Generator.createBiomes`, generator_facade.rs/live_biomes.rs).
 
 use super::{
     terraforged::{clamp, simplex},
@@ -44,8 +46,8 @@ pub const MASK_FREQUENCY: f32 = 1.0 / 1600.0;
 /// Reimagined's `maskThreshold`: a column with a mask below it has no cave biome.
 pub const MASK_THRESHOLD: f32 = 0.62;
 
-/// TerraForged Reimagined's `CaveBiomeSampler`: equal-weight `WeightMap`s for `CaveType.GLOBAL` and
-/// `CaveType.UNIQUE`, chosen by one simplex noise at `1 / scale`. Coordinates are BLOCK coordinates: Reimagined's
+/// TerraForged's `CaveBiomeSampler`: equal-weight `WeightMap`s for `CaveType.GLOBAL` and `CaveType.UNIQUE`, chosen by
+/// one simplex noise at `1 / scale`. Coordinates are BLOCK coordinates: Reimagined's
 /// `Source.getLayerBiome(x, z)` takes quart coordinates and passes `x << 2`, `z << 2` (Java `int` wrap) with
 /// the captured `(int)` world seed, so the layer that wires #159's quart cave closure must shift the same way.
 pub struct CaveBiomeSampler<T> {
@@ -56,22 +58,31 @@ pub struct CaveBiomeSampler<T> {
 }
 
 impl<T> CaveBiomeSampler<T> {
-    /// `new CaveBiomeSampler(scale, biomeMapManager)` (Reimagined's `Source` uses 800) over pools the caller
-    /// builds: `global` is `terraforged:cave` when the registry has it (else empty), `special` the registry's
-    /// biomes in registry order that pass `BiomeUtil.isNonSurface` (`ModTags.NON_SURFACE`, or a path starting with
-    /// `cave/` or ending with `_caves`). An empty `special` falls back to `global` (the same values), as
-    /// Reimagined does; both empty means every lookup is `None` (Java's null). Reimagined's startup warning about
-    /// incomplete cave biomes is not ported.
-    pub fn new(scale: i32, global: Vec<Arc<T>>, mut special: Vec<Arc<T>>) -> Self {
-        if special.is_empty() {
-            special = global.clone();
-        }
+    /// TerraForged 6dd607eb's `new CaveBiomeSampler(scale, biomeMapManager)` (its `Source` uses 800) over pools the
+    /// caller builds: `global` is `terraforged:cave` when the registry has it (else empty), `special` the UNIQUE pool
+    /// (6dd607eb: every registry biome in registry order, its UNDERGROUND filter being commented out). The pools are
+    /// independent: an empty one stays empty and every lookup in it is `None` (Java's `WeightMap.getValue` null).
+    pub fn new(scale: i32, global: Vec<Arc<T>>, special: Vec<Arc<T>>) -> Self {
         Self {
             scale,
             frequency: 1.0 / scale as f32,
             global: equal_weights(global),
             unique: equal_weights(special),
         }
+    }
+
+    /// TerraForged Reimagined's constructor, as its `Source` builds it for the cave layer (`get_layer_biome`):
+    /// `special` is the registry's biomes in registry order that pass `BiomeUtil.isNonSurface` (`ModTags.NON_SURFACE`,
+    /// or a path starting with `cave/` or ending with `_caves`), and an empty `special` falls back to `global` (the
+    /// same values). Both empty means every lookup is `None`. Reimagined's startup warning about incomplete cave
+    /// biomes is not ported.
+    pub fn reimagined(scale: i32, global: Vec<Arc<T>>, special: Vec<Arc<T>>) -> Self {
+        let special = if special.is_empty() {
+            global.clone()
+        } else {
+            special
+        };
+        Self::new(scale, global, special)
     }
 
     pub const fn scale(&self) -> i32 {
@@ -82,7 +93,8 @@ impl<T> CaveBiomeSampler<T> {
         self.frequency
     }
 
-    /// The equal-weight pool `typeMap.get(cave_type)` holds (UNIQUE already fallen back to GLOBAL if it was empty).
+    /// The equal-weight pool `typeMap.get(cave_type)` holds (for [`Self::reimagined`], UNIQUE already fallen back to
+    /// GLOBAL if it was empty).
     pub const fn pool(&self, cave_type: CaveType) -> &WeightMap<T> {
         match cave_type {
             CaveType::Global => &self.global,
@@ -106,7 +118,8 @@ impl<T> CaveBiomeSampler<T> {
     }
 
     /// Reimagined's `getLayerBiome(seed, x, z)`: the UNIQUE cave biome where the coarse mask reaches
-    /// [`MASK_THRESHOLD`], else `None` (the column keeps its surface biome).
+    /// [`MASK_THRESHOLD`], else `None` (the column keeps its surface biome). TerraForged 6dd607eb has no such lookup:
+    /// its biome source never returns a cave biome. Only the Reimagined chunk biome layer (`create_biomes`) calls it.
     pub fn get_layer_biome(&self, seed: i32, x: i32, z: i32) -> Option<&Arc<T>> {
         let mask = sample(seed.wrapping_add(MASK_OFFSET), x, z, MASK_FREQUENCY);
         if mask < MASK_THRESHOLD {
@@ -172,15 +185,57 @@ mod tests {
     }
 
     #[test]
-    fn empty_special_set_falls_back_to_global_set() {
+    fn reimagined_empty_special_set_falls_back_to_global_set() {
         let global = Arc::new(7);
-        let sampler = CaveBiomeSampler::new(800, vec![Arc::clone(&global)], Vec::new());
+        let sampler = CaveBiomeSampler::reimagined(800, vec![Arc::clone(&global)], Vec::new());
         assert!(Arc::ptr_eq(
             sampler
                 .get_underground_biome(0, 0, 0, CaveType::Unique)
                 .unwrap(),
             &global
         ));
+    }
+
+    /// TerraForged 6dd607eb's choices for the fixtures above: UNIQUE picks by the choice noise, GLOBAL always the one
+    /// `terraforged:cave`.
+    #[test]
+    fn choices_match_terraforged_6dd607eb() {
+        let sampler = CaveBiomeSampler::new(
+            800,
+            vec![Arc::new(9)],
+            vec![Arc::new(0), Arc::new(1), Arc::new(2)],
+        );
+        for (seed, x, z, choice) in [
+            (0, 0, 0, 1),
+            (0, 1024, -768, 2),
+            (123_456_789, -2048, 4096, 1),
+            (-987_654_321, 777, -333, 0),
+        ] {
+            let pick = |cave_type| {
+                sampler
+                    .get_underground_biome(seed, x, z, cave_type)
+                    .map(|value| **value)
+            };
+            assert_eq!(pick(CaveType::Unique), Some(choice));
+            assert_eq!(pick(CaveType::Global), Some(9));
+        }
+    }
+
+    /// 6dd607eb has no fallback: an empty pool stays empty (Java's null) whatever the other pool holds.
+    #[test]
+    fn empty_pools_remain_independent() {
+        let sampler = CaveBiomeSampler::new(800, vec![Arc::new(9)], Vec::new());
+        let pick = |sampler: &CaveBiomeSampler<i32>, cave_type| {
+            sampler
+                .get_underground_biome(0, 0, 0, cave_type)
+                .map(|value| **value)
+        };
+        assert_eq!(pick(&sampler, CaveType::Unique), None);
+        assert_eq!(pick(&sampler, CaveType::Global), Some(9));
+        assert_eq!(sampler.get_layer_biome(0, 0, 0), None);
+        let sampler = CaveBiomeSampler::new(800, Vec::new(), vec![Arc::new(2)]);
+        assert_eq!(pick(&sampler, CaveType::Global), None);
+        assert_eq!(pick(&sampler, CaveType::Unique), Some(2));
     }
 
     /// `out.txt` of `.local/terraforged/oracles/cave_biome_sampler/run.sh`: Reimagined a24d450's own
@@ -314,8 +369,11 @@ T 238080";
                 } else {
                     Vec::new()
                 };
-                let sampler =
-                    CaveBiomeSampler::new(scale, global, (0..specials).map(Arc::new).collect());
+                let sampler = CaveBiomeSampler::reimagined(
+                    scale,
+                    global,
+                    (0..specials).map(Arc::new).collect(),
+                );
                 let (mut hash, mut hits, mut count) = (0xcbf2_9ce4_8422_2325_u64, 0, 0);
                 for &seed in &seeds {
                     for &(x, z) in &positions {
@@ -346,6 +404,151 @@ T 238080";
                     Some(line.as_str()),
                     lines.next(),
                     "scale {scale}, pool {pool}"
+                );
+            }
+        }
+        assert_eq!(Some(format!("T {total}").as_str()), lines.next());
+        assert_eq!(None, lines.next());
+    }
+
+    /// `out.txt` of `.local/terraforged/oracles/cave_biome_sampler/6dd607eb/run.sh`: TerraForged 6dd607eb's own
+    /// `CaveBiomeSampler` (with its `WeightMap` and `MathUtil`, and Noise2D's `Noise` and `NoiseUtil`) compiled from
+    /// source over stub registries, interpreted and with `-Xcomp`. One line per scale and registry: frequency bits,
+    /// sample count and an FNV-1a digest of (choice bits, GLOBAL, UNIQUE) per seed and position.
+    const TERRAFORGED: &str = "\
+S 800 0 983815946 4650 9f2932704b0b4223
+S 800 1 983815946 4650 8919c31dddc41cb3
+S 800 2 983815946 4650 3a135e419cc868ab
+S 800 3 983815946 4650 d3a4788ecba4c4cd
+S 800 4 983815946 4650 1b52012d7f7c15a0
+S 800 5 983815946 4650 73f8f5aacb79135f
+S 1 0 1065353216 4650 1a35e3acda74ce69
+S 1 1 1065353216 4650 6b8913c673fec059
+S 1 2 1065353216 4650 442aa5e870866079
+S 1 3 1065353216 4650 4b559cd1dfcee240
+S 1 4 1065353216 4650 c82eb784271370d6
+S 1 5 1065353216 4650 d85dc95fb70997e9
+S 3 0 1051372203 4650 20cf2a7053734355
+S 3 1 1051372203 4650 4b359bf3d9086a25
+S 3 2 1051372203 4650 8e4b02eb074affad
+S 3 3 1051372203 4650 44c09036838b912f
+S 3 4 1051372203 4650 d4ba64b586378a61
+S 3 5 1051372203 4650 a14826a5d6508f25
+S 1600 0 975427338 4650 ccde786bf8ffc3e8
+S 1600 1 975427338 4650 c7210ad9dfef7818
+S 1600 2 975427338 4650 d848046cb3b345f0
+S 1600 3 975427338 4650 6d644b3e73c4f90e
+S 1600 4 975427338 4650 5e262433e8be7387
+S 1600 5 975427338 4650 eebf0c20e09d1e22
+S 0 0 2139095040 4650 9ef154eec40bc9d5
+S 0 1 2139095040 4650 b2a17151fbc8b1cd
+S 0 2 2139095040 4650 137464e61c059ff1
+S 0 3 2139095040 4650 d2e56e337865a39d
+S 0 4 2139095040 4650 58f76e7db7ad4220
+S 0 5 2139095040 4650 1a18219bebf8c8a8
+S -800 0 -1163667702 4650 411a0a3f2bfbd191
+S -800 1 -1163667702 4650 cb38ed62d6e97b91
+S -800 2 -1163667702 4650 f631e1e131ed4ef1
+S -800 3 -1163667702 4650 8ce91eac28e58315
+S -800 4 -1163667702 4650 623740411a1fd786
+S -800 5 -1163667702 4650 36d83594808af22a
+S -2147483648 0 -1342177280 4650 509fb7594b3d9853
+S -2147483648 1 -1342177280 4650 5158b7e7831997d3
+S -2147483648 2 -1342177280 4650 86a80388f189a7a3
+S -2147483648 3 -1342177280 4650 b319e7889deb20bb
+S -2147483648 4 -1342177280 4650 93cb9e70fe83cb4f
+S -2147483648 5 -1342177280 4650 ea0ebc5e95cf5416
+S 2147483647 0 805306368 4650 9330416e20c07491
+S 2147483647 1 805306368 4650 5d263e885f10f731
+S 2147483647 2 805306368 4650 40b2663065746611
+S 2147483647 3 805306368 4650 fe9b407dd5530b89
+S 2147483647 4 805306368 4650 9866995335fe8857
+S 2147483647 5 805306368 4650 33190548ec7ea1c5
+T 223200";
+
+    #[test]
+    fn sampler_matches_terraforged_6dd607eb_java() {
+        // The oracle's registries: biome i has id i; {size, has terraforged:cave}. `terraforged:cave` sits at index 1
+        // (index 0 in a one-biome registry) and is the GLOBAL pool; UNIQUE is the whole registry, in order.
+        let registries = [
+            (0, false),
+            (1, true),
+            (1, false),
+            (3, true),
+            (4, false),
+            (9, true),
+        ];
+        let scales = [800, 1, 3, 1600, 0, -800, i32::MIN, i32::MAX];
+        let mut random = Lcg(162);
+        let mut seeds = vec![
+            0,
+            1,
+            -1,
+            123_456_789,
+            -987_654_321,
+            i32::MAX,
+            i32::MIN,
+            -OFFSET,
+            i32::MAX - OFFSET + 1,
+        ];
+        seeds.extend((0..6).map(|_| random.next()));
+        let mut positions = vec![
+            (0, 0),
+            (1, -1),
+            (1024, -768),
+            (-2048, 4096),
+            (777, -333),
+            (i32::MAX, i32::MIN),
+            (i32::MIN, i32::MAX),
+            (i32::MAX, i32::MAX),
+            (i32::MIN, i32::MIN),
+            (-1, -1),
+        ];
+        for k in 0..300 {
+            let (a, b) = (random.next(), random.next());
+            positions.push(if k % 2 == 0 {
+                ((a % 16384) << 2, (b % 16384) << 2)
+            } else {
+                (a, b)
+            });
+        }
+        let id = |value: Option<&Arc<i32>>| value.map_or(-1, |value| **value);
+        let mut lines = TERRAFORGED.lines();
+        let mut total = 0;
+        for scale in scales {
+            for (registry, &(size, has_cave)) in registries.iter().enumerate() {
+                let biomes: Vec<_> = (0..size).map(Arc::new).collect();
+                let global = if has_cave {
+                    vec![Arc::clone(&biomes[1.min(size as usize - 1)])]
+                } else {
+                    Vec::new()
+                };
+                let sampler = CaveBiomeSampler::new(scale, global, biomes);
+                let (mut hash, mut count) = (0xcbf2_9ce4_8422_2325_u64, 0);
+                for &seed in &seeds {
+                    for &(x, z) in &positions {
+                        let choice = sample(seed.wrapping_add(OFFSET), x, z, sampler.frequency());
+                        fold(&mut hash, choice.to_bits() as i32);
+                        fold(
+                            &mut hash,
+                            id(sampler.get_underground_biome(seed, x, z, CaveType::Global)),
+                        );
+                        fold(
+                            &mut hash,
+                            id(sampler.get_underground_biome(seed, x, z, CaveType::Unique)),
+                        );
+                        count += 1;
+                    }
+                }
+                total += count;
+                let line = format!(
+                    "S {scale} {registry} {} {count} {hash:016x}",
+                    sampler.frequency().to_bits() as i32
+                );
+                assert_eq!(
+                    Some(line.as_str()),
+                    lines.next(),
+                    "scale {scale}, registry {registry}"
                 );
             }
         }
