@@ -1506,14 +1506,15 @@ impl Line {
         self.value_with_width(x, y, self.width_modifier(x, y))
     }
 
+    /// Noise2D 2cb4843's `Line.getValue(int seed, float x, float y)`: the seedless arithmetic, with the call's seed
+    /// passed unchanged to the fade and radius modules (the line has no seed of its own and calls no
+    /// `NoiseUtil.map`). The fades are read only off the endpoints (an endpoint's width modifier is 0 without them),
+    /// fade-in before fade-out, then the radius at every point. Unlike reseeding (`Module::with_seed`, whose `Line`
+    /// spec reads its children back without the seed, so they keep their own), seed-first sampling reaches them.
     pub fn try_value_seed_first(&self, seed: i32, x: f32, y: f32) -> Result<f32, &'static str> {
-        self.try_value_with_min_width_seed_first(
-            seed,
-            x,
-            y,
-            0.0,
-            self.try_width_modifier_seed_first(seed, x, y)?,
-        )
+        let mut sample = |module: &Module| module.try_value_seed_first(seed, x, y);
+        let width_modifier = self.width_modifier_with(x, y, &mut sample)?;
+        self.value_with_min_width_with(x, y, 0.0, width_modifier, &mut sample)
     }
 
     pub fn value_with_width(&self, x: f32, y: f32, width_modifier: f32) -> f32 {
@@ -1527,29 +1528,24 @@ impl Line {
         min_width2: f32,
         width_modifier: f32,
     ) -> f32 {
-        let distance2 = self.distance2(x, y);
-        let radius2 = min_width2 + self.radius.value(x, y) * width_modifier;
-        if distance2 > radius2 {
-            return 0.0;
-        }
-        let value = distance2 / radius2;
-        if self.feather_scale == 0.0 {
-            return 1.0 - value;
-        }
-        let feather = self.feather_bias + width_modifier * self.feather_scale;
-        (1.0 - value) * feather
+        let Ok(value) =
+            self.value_with_min_width_with(x, y, min_width2, width_modifier, &mut |module| {
+                Ok::<_, std::convert::Infallible>(module.value(x, y))
+            });
+        value
     }
 
-    fn try_value_with_min_width_seed_first(
+    /// `Line.getValue(x, y, minWidth2, widthModifier)` for both paths; `sample` reads the radius at (x, y).
+    fn value_with_min_width_with<E>(
         &self,
-        seed: i32,
         x: f32,
         y: f32,
         min_width2: f32,
         width_modifier: f32,
-    ) -> Result<f32, &'static str> {
+        sample: &mut impl FnMut(&Module) -> Result<f32, E>,
+    ) -> Result<f32, E> {
         let distance2 = self.distance2(x, y);
-        let radius2 = min_width2 + self.radius.try_value_seed_first(seed, x, y)? * width_modifier;
+        let radius2 = min_width2 + sample(&self.radius)? * width_modifier;
         if distance2 > radius2 {
             return Ok(0.0);
         }
@@ -1570,38 +1566,19 @@ impl Line {
     }
 
     pub fn width_modifier(&self, x: f32, y: f32) -> f32 {
-        let distance1 = Self::dist2(x, y, self.x1, self.y1);
-        if distance1 == 0.0 {
-            return 0.0;
-        }
-        let distance2 = Self::dist2(x, y, self.x2, self.y2);
-        if distance2 == 0.0 {
-            return 0.0;
-        }
-        let mut fade = 1.0;
-        let fade_in = self.fade_in.value(x, y);
-        let fade_out = self.fade_out.value(x, y);
-        if fade_in > 0.0 {
-            let distance = fade_in * self.length2;
-            if distance1 < distance {
-                fade *= distance1 / distance;
-            }
-        }
-        if fade_out > 0.0 {
-            let distance = fade_out * self.length2;
-            if distance2 < distance {
-                fade *= distance2 / distance;
-            }
-        }
-        fade
+        let Ok(value) = self.width_modifier_with(x, y, &mut |module| {
+            Ok::<_, std::convert::Infallible>(module.value(x, y))
+        });
+        value
     }
 
-    fn try_width_modifier_seed_first(
+    /// `Line.getWidthModifier` for both paths; `sample` reads a fade at (x, y), never at an endpoint.
+    fn width_modifier_with<E>(
         &self,
-        seed: i32,
         x: f32,
         y: f32,
-    ) -> Result<f32, &'static str> {
+        sample: &mut impl FnMut(&Module) -> Result<f32, E>,
+    ) -> Result<f32, E> {
         let distance1 = Self::dist2(x, y, self.x1, self.y1);
         if distance1 == 0.0 {
             return Ok(0.0);
@@ -1611,8 +1588,8 @@ impl Line {
             return Ok(0.0);
         }
         let mut fade = 1.0;
-        let fade_in = self.fade_in.try_value_seed_first(seed, x, y)?;
-        let fade_out = self.fade_out.try_value_seed_first(seed, x, y)?;
+        let fade_in = sample(&self.fade_in)?;
+        let fade_out = sample(&self.fade_out)?;
         if fade_in > 0.0 {
             let distance = fade_in * self.length2;
             if distance1 < distance {
@@ -2175,17 +2152,18 @@ impl Module {
         }
     }
 
-    /// Noise2D 2cb4843's `getValue(int seed, float x, float y)` for every node but custom modules, `Line` and Engine's
-    /// erosion `Ridge` (the scalar nodes, `Warp`, the selectors, `Cache`, the terraces, curves and transforms, `Boost`
-    /// and the cell, cell-edge and sine sources): every node passes the call's seed unchanged to its children, except
+    /// Noise2D 2cb4843's `getValue(int seed, float x, float y)` for every node but custom modules and Engine's erosion
+    /// `Ridge` (the scalar nodes, `Warp`, the selectors, `Cache`, the terraces, curves and transforms, `Boost`, the
+    /// cell, cell-edge and sine sources and `Line`): every node passes the call's seed unchanged to its children, except
     /// that the octave, cell and cell-edge sources add their own seed (see [`Source::value_seed_first`]) and a cell's
     /// lookup and a sine's alpha get that sum (a sine's own seed is the builder default, 1337); their arithmetic and
     /// evaluation order are the jar's, and where 2cb4843 calls `NoiseUtil.map` this maps with [`map_current`]
     /// (`Cache` also keys its entry by the seed). `Warp` samples its source at the domain's seed-first coordinates
     /// ([`Domain::try_x_seed_first`]). Nodes not yet ported to seed-first sampling return an error instead of falling
-    /// back to [`Module::value`], which would ignore the seed. Selectors and terraces evaluate only the children Java
-    /// evaluates for that sample (a terrace reads its ramp and cliff only inside a step's window, its ramp height only
-    /// above the ramp; a legacy terrace reads one curve, and only outside a step's window), so an unsupported node in a
+    /// back to [`Module::value`], which would ignore the seed. Selectors, terraces and lines evaluate only the children
+    /// Java evaluates for that sample (a terrace reads its ramp and cliff only inside a step's window, its ramp height
+    /// only above the ramp; a legacy terrace reads one curve, and only outside a step's window; a line reads its fades
+    /// only off its endpoints), so an unsupported node in a
     /// branch the sample skips errors only at the points that reach it: one `Ok` sample does not prove the whole graph
     /// is supported. Where Java throws (a `MultiBlend` slot outside its sources, a NaN terrace sample, a terrace or
     /// legacy terrace without steps, a cell lookup with no cell nearer than `Float.MAX_VALUE`), this panics, as
@@ -9766,6 +9744,9 @@ mod tests {
 
     #[test]
     fn runtime_seeded_line_matches_current_noise2d() {
+        // `TerraForgedSeededLineOracle.java` (`.local/terraforged/oracles/seed_first/`): the PR's line, one fold per
+        // seed. Three seeds sample 0 at all four points (`SeededLineEdgeOracle`'s "r" lines); the edge test below
+        // covers the rest.
         let source = |kind, seed, frequency, octaves, gain| {
             Module::source(Source::new(
                 kind,
@@ -9799,6 +9780,213 @@ mod tests {
             }
             assert_eq!(hash, expected, "seed {seed}");
         }
+    }
+
+    #[test]
+    fn runtime_seeded_line_edges_match_current_noise2d() {
+        // `SeededLineEdgeOracle.java` (`.local/terraforged/oracles/seed_first/`): 21 lines x 7 seeds x 38 points (each
+        // line's endpoints, projections at, one ulp beside and past 0 and 1 on and off the segment, NaN, +-inf, +-0,
+        // MAX and subnormal points), canonical NaN bits; (line, nonzero non-NaN samples, fold).
+        let (nan, inf) = (f32::NAN, f32::INFINITY);
+        let src = |kind, seed, frequency, octaves| {
+            Module::source(Source::new(
+                kind,
+                SourceConfig {
+                    seed,
+                    frequency,
+                    octaves,
+                    ..SourceConfig::default()
+                },
+            ))
+        };
+        let c = Module::constant;
+        let rad = src(SourceKind::Simplex, 1401, 1.0 / 64.0, 3).scale(c(100.0));
+        let fin = src(SourceKind::Simplex2, 1402, 1.0 / 80.0, 2);
+        let fout = src(SourceKind::Ridge, 1403, 1.0 / 96.0, 2);
+        let prad = src(SourceKind::Perlin, 1405, 1.0 / 16.0, 2).scale(c(50.0));
+        let pfade = src(SourceKind::Perlin2, 1407, 1.0 / 32.0, 2);
+        let zero = src(SourceKind::Simplex, 1406, 1.0, 0);
+        let wide = src(SourceKind::Simplex, 1408, 1.0 / 64.0, 3).scale(c(40000.0));
+        let inner = Module::line(Line::new(
+            -20.0,
+            -20.0,
+            20.0,
+            20.0,
+            c(400.0),
+            fin.clone(),
+            fout.clone(),
+            0.0,
+        ));
+        let main = (-10.0, 5.0, 30.0, 25.0);
+        let (s3, f3) = (
+            || (rad.clone(), fin.clone(), fout.clone()),
+            |r: Module| (r, fin.clone(), fout.clone()),
+        );
+        #[rustfmt::skip]
+        let lines: [((f32, f32, f32, f32), (Module, Module, Module), f32); 21] = [
+            (main, s3(), 0.4),
+            (main, s3(), 0.0),
+            (main, s3(), 1.0),
+            ((5.0, 5.0, 5.0, 5.0), s3(), 0.4),
+            ((5.0, 5.0, 5.0, 5.0), (c(4.0), c(0.2), c(0.2)), 0.0),
+            (main, (c(4.0), c(0.25), c(0.25)), 0.5),
+            (main, f3(c(nan)), 0.4),
+            (main, f3(c(inf)), 0.4),
+            (main, f3(c(0.0)), 0.4),
+            (main, f3(c(-1.0)), 0.4),
+            (main, (rad.clone(), c(nan), c(inf)), 0.4),
+            (main, (rad.clone(), c(-0.5), c(2.0)), 0.4),
+            (main, (prad, pfade.clone(), pfade), 0.4),
+            (main, (zero.clone().scale(c(25.0)), zero.clone(), zero), 0.4),
+            ((-1e30, 0.0, 1e30, 0.0), f3(c(1e30)), 0.4),
+            ((0.0, 0.0, f32::from_bits(1), 0.0), (c(4.0), c(0.5), c(0.5)), 0.3),
+            ((0.0, -20.0, 0.0, 20.0), s3(), 0.4),
+            (main, (inner.clone().scale(c(64.0)), inner, fout.clone()), 0.4),
+            (main, s3(), nan),
+            ((-0.0, 0.0, 0.0, -0.0), (rad.clone(), c(0.5), c(0.5)), 0.4),
+            (main, f3(wide), 0.6),
+        ];
+        let expected: [(usize, u64); 21] = [
+            (21, 0x4a869d327c60d054),
+            (21, 0xcd605c20e85a238d),
+            (21, 0x54d38951dca92e27),
+            (0, 0x8d1f292bd69a238d),
+            (0, 0x8d1f292bd69a238d),
+            (21, 0x81c500eda95a238d),
+            (0, 0x8d1f292bd69a238d),
+            (203, 0x943c6c0670ed88bf),
+            (0, 0x79651b6ec89a238d),
+            (0, 0x3220c8787eda238d),
+            (0, 0x79651b6ec89a238d),
+            (28, 0xd3981e90baa94b5d),
+            (21, 0xe6fd72b3f624d765),
+            (21, 0xce6abfbce8fc08a5),
+            (0, 0x72fe51c0f99a238d),
+            (0, 0x6cf801e20d9a238d),
+            (42, 0x343854799cedb771),
+            (9, 0xafadc404fd584171),
+            (0, 0x79651b6ec89a238d),
+            (0, 0x8d1f292bd69a238d),
+            (168, 0x92def7dc9d5c27d5),
+        ];
+        let ts = [
+            0.0,
+            1.0,
+            1f32.next_down(),
+            1f32.next_up(),
+            -1e-6,
+            1e-6,
+            0.5,
+            -0.5,
+            1.5,
+        ];
+        let fixed = [
+            (0.0, 0.0),
+            (-0.0, -0.0),
+            (nan, 1.0),
+            (1.0, nan),
+            (inf, 2.0),
+            (-inf, -2.0),
+            (f32::MAX, -f32::MAX),
+            (12.34, 56.78),
+            (f32::from_bits(1), 0.0),
+        ];
+        let seeds = [0, 1, -1, 17, i32::MAX, i32::MIN, -987654321];
+        for (index, (((x1, y1, x2, y2), (radius, fade_in, fade_out), feather), expected)) in
+            lines.into_iter().zip(expected).enumerate()
+        {
+            let line = Module::line(Line::new(
+                x1, y1, x2, y2, radius, fade_in, fade_out, feather,
+            ));
+            let (dx, dy) = (x2 - x1, y2 - y1);
+            let mut points = vec![(x1, y1), (x2, y2)];
+            for t in ts {
+                for k in [0.0, 0.5, 3.0] {
+                    points.push((x1 + t * dx - k * dy, y1 + t * dy + k * dx));
+                }
+            }
+            points.extend(fixed);
+            let (mut live, mut hash) = (0, 0xcbf29ce484222325u64);
+            for seed in seeds {
+                for &(x, y) in &points {
+                    let value = line.try_value_seed_first(seed, x, y).unwrap();
+                    live += usize::from(value != 0.0 && !value.is_nan());
+                    let bits = if value.is_nan() {
+                        0x7fc0_0000
+                    } else {
+                        value.to_bits()
+                    };
+                    hash = (hash ^ u64::from(bits)).wrapping_mul(0x100000001b3);
+                }
+            }
+            assert_eq!((live, hash), expected, "line {index}");
+        }
+    }
+
+    #[test]
+    fn seeded_line_reads_fades_lazily_and_differs_from_reseeding() {
+        let src = |kind, seed| {
+            Module::source(Source::new(
+                kind,
+                SourceConfig {
+                    seed,
+                    frequency: 1.0 / 64.0,
+                    octaves: 3,
+                    ..SourceConfig::default()
+                },
+            ))
+        };
+        let line = |radius, fade_in, fade_out| {
+            Module::line(Line::new(
+                -10.0, 5.0, 30.0, 25.0, radius, fade_in, fade_out, 0.4,
+            ))
+        };
+        let c = Module::constant;
+        // Java reads the fades only off the endpoints (fade-in first), and the radius everywhere.
+        let fades = line(c(4.0), unsupported_seeded_node(0.5), c(0.5));
+        for (x, y) in [(-10.0, 5.0), (30.0, 25.0)] {
+            assert!(fades.try_value_seed_first(3, x, y).unwrap().is_nan());
+        }
+        assert!(fades.try_value_seed_first(3, 10.0, 15.0).is_err());
+        let fade_out = line(c(4.0), c(0.5), unsupported_seeded_node(0.5));
+        assert!(fade_out.try_value_seed_first(3, 10.0, 15.0).is_err());
+        let radius = line(unsupported_seeded_node(4.0), c(0.5), c(0.5));
+        assert!(radius.try_value_seed_first(3, -10.0, 5.0).is_err());
+        // The seedless path is the seed-first one at seed 0 over seed-free children, bit for bit.
+        let plain = line(c(4.0), c(0.25), c(0.25));
+        for (x, y) in [
+            (0.0, 10.0),
+            (10.0, 15.0),
+            (-10.0, 5.0),
+            (29.0, 24.5),
+            (f32::NAN, 1.0),
+        ] {
+            assert_eq!(
+                plain.value(x, y).to_bits(),
+                plain.try_value_seed_first(0, x, y).unwrap().to_bits()
+            );
+        }
+        // Seed-first sampling passes the call's seed to the children (2cb4843); reseeding does not (the jar's `Line`
+        // spec reads its children back without the seed, #109), so the two differ for any nonzero seed.
+        let seeded = line(
+            src(SourceKind::Simplex, 1401).scale(c(40000.0)),
+            src(SourceKind::Simplex2, 1402),
+            src(SourceKind::Ridge, 1403),
+        );
+        let (x, y) = (10.0, 15.0);
+        let unseeded = seeded.value(x, y);
+        assert_eq!(
+            seeded.with_seed(17).value(x, y).to_bits(),
+            unseeded.to_bits()
+        );
+        assert_eq!(
+            seeded.try_value_seed_first(0, x, y).unwrap().to_bits(),
+            unseeded.to_bits()
+        );
+        assert_ne!(
+            seeded.try_value_seed_first(17, x, y).unwrap().to_bits(),
+            unseeded.to_bits()
+        );
     }
 
     #[test]
