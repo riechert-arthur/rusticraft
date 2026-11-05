@@ -61,7 +61,8 @@ const _: fn() = || {
 impl<'a, T> CurrentSurfaceBiomeSampler<'a, T> {
     /// `new BiomeSampler(noiseGenerator, biomeMapManager)`: the climate sampler (its seeds drawn as
     /// [`CurrentBiomeSampler::new`] does), the manager's wet (`getBiomeMap`), dry and highland pools and its plains
-    /// biome, and the generator's settings and levels.
+    /// biome, and the generator's settings and levels. Building the climate noise is not cheap: build one sampler
+    /// per world and share it across threads (TerraForged builds one, in `Source`), not one per chunk.
     pub fn new(
         noise: &'a NoiseGenerator,
         wet: &'a BiomePools<T>,
