@@ -390,7 +390,7 @@ fn create_ocean_terrain() -> Module {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::super::{
         terraforged_context::{GeneratorContext, GeneratorSettings},
         terraforged_erosion::tests::smooth_and_digest,
@@ -551,7 +551,7 @@ grid 2 1 -21491124 3ed3d59af446ef82";
     }
 
     /// `new NoiseGenerator(levels, terrainNoises)`: the oracle's terrain noise sets, from the context's registry.
-    fn generator_with(
+    pub(crate) fn generator_with(
         variant: usize,
         set: impl FnOnce(&GeneratorContext) -> Vec<Arc<TerrainNoise>>,
     ) -> NoiseGenerator {
@@ -589,7 +589,7 @@ grid 2 1 -21491124 3ed3d59af446ef82";
         ]
     }
 
-    fn generator(variant: usize, set: usize) -> NoiseGenerator {
+    pub(crate) fn generator(variant: usize, set: usize) -> NoiseGenerator {
         generator_with(variant, |context| terrain_set(context, set))
     }
 
