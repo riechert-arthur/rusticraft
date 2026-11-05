@@ -58,10 +58,11 @@ const _: fn() = || {
 /// (`NoiseLevels.toHeightNoise`).
 ///
 /// The constructor takes the continent and the blender as built (`createContinentNoise`/`createLandTerrain` build them
-/// from `CONTINENT_OFFSET`/[`TERRAIN_OFFSET`] and the terrain noises); the deep-ocean terrain is the continent
+/// from [`CONTINENT_OFFSET`]/[`TERRAIN_OFFSET`] and the terrain noises); the deep-ocean terrain is the continent
 /// context's registry's, so it compares `is_same` with the world's built-ins, and the blender's terrain noises must
-/// hold that registry's terrains too. The 1.18.2-0.3.1 jar's `NoiseGenerator` is a different class (a world seed in
-/// its constructor, no runtime seed, no deep-ocean branch of its own); this is the newer source's.
+/// hold that registry's terrains too. The 1.18.2-0.3.1 jar's `NoiseGenerator` samples the same branches but takes the
+/// world seed in its constructor (the ocean noise seeded with `(int) seed` itself, no offset; the blender and the
+/// continent settings with the world seed) and has no runtime seed; this is the newer source's.
 pub struct NoiseGenerator {
     levels: TerrainLevels,
     ocean: Module,
