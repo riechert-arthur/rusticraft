@@ -1234,8 +1234,18 @@ throws or drops a node) with six seeds (high bits, `Long.MIN_VALUE + 5`, `Intege
 jar's own `ContextSeedable` and hashes the bounds and 261 samples of each; `TerrainBlenderOracle.java` reseeds its
 nine blenders and prints their noises and values; the tests match both bit for bit.
 
-Cave-noise assets now preserve global and unique cave modes, recursively reseeded elevation, shape,
-and floor modules, integer cave scaling, and TerraForged's jittered cellular cave distribution.
+The cave noise primitives (`cave_noise.rs`) port TerraForged 1.18.2-0.3.1's `CaveType`, `NoiseCave` and
+`UniqueCaveDistributor` as the jar has them (no seed arguments on the samplers; the newer source tree adds them).
+`CaveType::for_name` upper-cases like `toUpperCase(Locale.ROOT)` and returns `None` where `valueOf` throws.
+`NoiseCave` scales its elevation, shape and floor noise to whole blocks with `NoiseUtil.floor` and Java `int`
+wrapping (`rangeY = maxY - minY`; a range of 0 or less gives 0), and `with_seed` reseeds the three modules through
+`Module::with_seed` while keeping the cave's own seed. `UniqueCaveDistributor` places jittered cells on staggered
+rows and zeroes cells above its density; `module()` makes it a `Module` with `Noise`'s default 0..1 bounds, as
+`NoiseCaveGenerator` uses it. The cave generator, carver and decorator are not ported yet. `CaveNoiseOracle.java`
+(`.local/terraforged/oracles/cave_noise/`) runs the jar's own classes on 12 names, 8 distributors (and
+`NoiseCaveGenerator`'s clamp, map and warp graph over each) at 217 points (signed zeros, negative, huge, infinite
+and NaN), and 6 caves (TerraForged's `mega` cave and `int` wrap, NaN and overflow cases) over 72 block positions
+and 8 size modifiers, each reseeded with 6 seeds; the test matches its output bit for bit, in debug and release.
 
 ## Status: development only
 
