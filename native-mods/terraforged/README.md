@@ -1492,9 +1492,49 @@ kind over seven configs (0 octaves, negative gain and lacunarity, an infinite ra
 seeds (both `int` extremes) and ten points (NaN, infinity, -0); the tests match both tables bit for bit in debug and
 release, through `value_seed_first` and through the seedless API.
 
+The bounded concurrent lossy cache (`lossy_cache.rs`, `ConcurrentLossyCache`) ports the newer source tree's
+`LossyCache.Concurrent` and its `LossyCache.Stamped` buckets (`com.terraforged.mod.util.storage`, 6dd607eb). The
+1.18.2-0.3.1 jar has the same class in `util.map` without the seed (`computeIfAbsent(long, Long2ObjectFunction)`) and
+without the source's re-check under the write lock (two threads missing one key both compute it); its slot math and
+single-threaded behaviour are the source's. The structure is the source's: `smallestEncompassingPowerOfTwo(concurrency)`
+buckets (`Environment.CORES`, Java's `availableProcessors()`, for `concurrent(capacity)`), each with
+`smallestEncompassingPowerOfTwo(NoiseUtil.floor((float) capacity / buckets))` slots; a key picks its bucket with
+`(int) (key ^ key >>> 16) & 0x7fffffff` and its slot with fastutil's `HashCommon.mix`, and a miss computes
+`function(seed, key)` under the bucket's write lock (as Java does), overwrites the slot and passes the replaced value to
+the removal listener after the lock is released. It differs from Java in three ways, so that a value read through the
+cache always equals the one computed directly, whatever the seeds, threads or core count:
+
+- **Hits need the seed too.** Java's `LongCache` matches the `long` key alone, so a slot computed for one seed answers
+  every other seed (the source's river-piece cache, keyed by cell, would hand one world's pieces to another). The port
+  stores the seed in the slot and treats a different seed as a miss in the same slot. With one seed, which is how the
+  source uses it, the hits, misses, eviction order and listener calls are Java's.
+- **No recycling of values in use.** Values are shared (`Arc`); an evicted value stays valid for everyone holding it,
+  and the listener gets the evicted `Arc`, so it can take a value back only once no one else holds it. TerraForged's
+  cell and river caches hand evicted values to an `ObjectPool`, and `Stamped` calls the listener with the value it read
+  before locking even when it then returns another thread's newer value or the function throws, so a value can go back
+  to the pool twice or while it is still cached, depending on how threads interleave. In 6dd607eb that is harmless only
+  because `ObjectPool.take` always builds a new value; a pool that reused them would alias values still in use. The port
+  calls the listener only for values it evicted and ports no pool for these caches. Hits take a read lock rather than
+  Java's optimistic read; a miss checks the slot again under the write lock, as Java does when its lock conversion
+  fails.
+- **Unusable sizes panic at construction**: no buckets or buckets of no slots (Java builds them, then throws
+  `ArrayIndexOutOfBoundsException` on the first lookup) and counts past 2^30 (Java's constructor throws). The plain
+  single-threaded `LossyCache.of`, which nothing in the source uses, is not ported.
+
+`LossyCacheOracle.java` (`.local/terraforged/oracles/lossy_cache/`, outside Git; `run.sh` compiles the source's
+`LossyCache`, `LongCache` and `LockUtil` with an `Environment` stub fixing `CORES` at 6 and runs them interpreted and
+JIT, then the jar's seedless class, whose output is the same) checks nine capacity/concurrency pairs (one slot to 256
+slots per bucket, 1 to 64 buckets, non-power-of-two sizes): the bucket and slot counts, the bucket and slot of 10 to 10,245 keys each (the `long` extremes, keys `i << 16`
+and `i << 32`, negatives), and per pair three single-threaded traces of 4 lookups per key (seeds 0, 12345,
+`Integer.MIN_VALUE`) recording every factory call, listener call and result; the `CORES` factory gives the same traces
+as concurrency 6. The test replays them bit for bit. Rust tests cover what Java can't show deterministically: 16 threads
+on 48 colliding keys and three seeds always get the directly computed value, values held across evictions stay intact,
+one key under contention is computed once, a panicking function leaves the slot and the listener alone, and the
+listener runs outside the lock.
+
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives, the biome climate types, the climate settings, the climate module, the climate stage, the continent factory, the generator context, the heightmap, the world generator factory, TerraForged's terrain levels, its terrain data, its terrain generator, its terrain-blend utilities, its terrain blender with its nearest-terrain search, noise-graph reseeding, the cave noise primitives, the biome viability rules, the biome overrides, the continent control points, the continent cell primitives, the continent configuration, the continent shape blending, the continent cell generator with its spawn-offset search, the continent river nodes, the continent river carver's arithmetic, the continent river networks with their nearest-node sampling and their warped, carved river sampling, and the newer source's seed-first noise sources. They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives, the biome climate types, the climate settings, the climate module, the climate stage, the continent factory, the generator context, the heightmap, the world generator factory, TerraForged's terrain levels, its terrain data, its terrain generator, its terrain-blend utilities, its terrain blender with its nearest-terrain search, noise-graph reseeding, the cave noise primitives, the biome viability rules, the biome overrides, the continent control points, the continent cell primitives, the continent configuration, the continent shape blending, the continent cell generator with its spawn-offset search, the continent river nodes, the continent river carver's arithmetic, the continent river networks with their nearest-node sampling and their warped, carved river sampling, the newer source's seed-first noise sources, and its bounded concurrent lossy cache. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
