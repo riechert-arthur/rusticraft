@@ -175,8 +175,9 @@ impl NoiseGenerator {
     ///
     /// `Err` where the blender's warp has no seed-first form (a custom module), and where the blender has no terrain
     /// noise named like `terrain`: there `findNearest` returns `null` and Java's `find` throws a
-    /// `NullPointerException` on it. Like Java, a search that misses everywhere walks the whole spiral, and a
-    /// `min_radius` above `max_radius` never returns on a miss (see [`TerrainBlender::find_nearest`]).
+    /// `NullPointerException` on it. Like Java, a search that misses everywhere walks the whole spiral, a
+    /// `min_radius` above `max_radius` never returns on a miss, and a negative `min_radius` panics where Java divides by
+    /// zero (see [`TerrainBlender::find_nearest`]).
     pub fn find(
         &self,
         seed: i32,
@@ -1289,6 +1290,13 @@ find 2 1 -2147483648 ae60db6daec69adb 42 84 42 28";
             ))]
         });
         let reference = generator(0, 0);
+        // A negative minimum radius: Java throws an ArithmeticException (/ by zero) in the spiral.
+        for min_radius in [-1, -5] {
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                mixed.find(0, 0, 0, min_radius, 2, &hills)
+            }));
+            assert!(result.is_err());
+        }
         for (x, z) in FIND_POSITIONS {
             assert_eq!(
                 custom.find(-17, x, z, 1, 8, &hills),

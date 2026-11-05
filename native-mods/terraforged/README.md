@@ -1909,7 +1909,8 @@ multiplies the river noise and reads the carried height, so a candidate rejected
 the ones after it. Where the blender has no terrain noise with the terrain's name, Java's `findNearest` returns `null`
 and `find` throws a `NullPointerException`; the port returns an error there (and where the blender's warp has no
 seed-first form). The jar's `find(x, z, minRadius, maxRadius, terrain)` is the same method with the seed from its
-constructor (`javap`: the same instructions, `0.5F` and `0.75F` included, without the seed argument).
+constructor (`version/compare.sh` now compares `find` too: only the seed argument of `findNearest`, `sampleContinent`
+and `sampleRiver` differs). A negative minimum radius panics where Java divides by zero in the spiral.
 `NoiseFindOracle.java` (same folder, `run-find.sh`) runs the source's `find` for two `TerrainLevels`, both terrain sets
 and four runtime seeds (the `int` extremes included) over eight terrains (two not overground, two with no terrain
 noise), seven block positions (negative ones and the `int` extremes, where the floored result saturates) and three radius
