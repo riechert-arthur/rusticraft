@@ -23,6 +23,11 @@
  */
 
 use super::terraforged::{clamp, java_max, java_pow, lerp, round};
+use super::{
+    super::terrain::{TerrainBlockStates, TerrainChunk, TerrainError},
+    terraforged_terrain_data::TerrainData,
+};
+use crate::{heightmap::HeightmapType, registry::BlockStateId};
 
 /// A structure piece's `BoundingBox` (inclusive block bounds).
 #[derive(Clone, Copy, Debug)]
@@ -64,6 +69,39 @@ pub trait Columns {
     type Error;
     fn ocean_floor(&self, x: i32, z: i32) -> i32;
     fn set(&mut self, x: i32, y: i32, z: i32, fill: Fill) -> Result<(), Self::Error>;
+}
+
+/// [`Columns`] over a Horizon proto-chunk, as `modify` sees a 26.3 `ProtoChunk`: `ocean_floor` is
+/// `ChunkAccess.getHeight(OCEAN_FLOOR_WG, x, z)` (first available minus one, `x & 15`, `z & 15`), `set` is
+/// `ProtoChunk.setBlockState` ([`TerrainChunk::set_block_worldgen`]): writes outside the build range are dropped and
+/// the write updates the heightmaps of the chunk's persisted status, priming any it lacks. Before TERRAIN (where
+/// `fillFromNoise` runs) those are the two WG maps, so `ocean_floor` reflects earlier writes; from TERRAIN on they
+/// are the four final maps and OCEAN_FLOOR_WG stays as it was, as in Java.
+struct ChunkColumns<'a, 'r, B: TerrainBlockStates> {
+    chunk: &'a mut TerrainChunk<'r, B>,
+    stone: BlockStateId,
+    air: BlockStateId,
+}
+
+impl<B: TerrainBlockStates> Columns for ChunkColumns<'_, '_, B> {
+    type Error = TerrainError;
+
+    fn ocean_floor(&self, x: i32, z: i32) -> i32 {
+        self.chunk
+            .heightmap(HeightmapType::OceanFloorWg)
+            .expect("modify_chunk primes OCEAN_FLOOR_WG")
+            .highest_taken(x & 15, z & 15)
+            .expect("masked chunk coordinates")
+    }
+
+    fn set(&mut self, x: i32, y: i32, z: i32, fill: Fill) -> Result<(), Self::Error> {
+        let state = match fill {
+            Fill::Stone => self.stone,
+            Fill::Air => self.air,
+        };
+        self.chunk.set_block_worldgen(x & 15, y, z & 15, state)?;
+        Ok(())
+    }
 }
 
 /// TerraForged 6dd607eb's `worldgen.terrain.StructureTerrain` without its constructor's piece collection.
@@ -134,6 +172,36 @@ impl StructureTerrain {
             }
         }
         Ok((raised || highest.is_some()).then(|| chunk.ocean_floor(x, z)))
+    }
+
+    /// `ChunkUtil.buildStructureTerrain(chunk, terrainData, ..)` after the constructor's piece collection: `modify`
+    /// on every column (dz, then dx, from the chunk's minimum block, Java `int` math), each returned height written
+    /// into `terrain`'s height map ([`TerrainData::set_height_at`]: `Index.CHUNK`, the `int` widened to float; the
+    /// extrema stay as `accept` left them, as in Java). `stone` and `air` are `Blocks.STONE`/`Blocks.AIR`'s default
+    /// states. A missing OCEAN_FLOOR_WG is primed first, as the first `getHeight` primes it; nothing else is primed
+    /// here (a write primes its status's maps). Fails only where a write does (an unknown state id).
+    pub fn modify_chunk<B: TerrainBlockStates>(
+        &self,
+        chunk: &mut TerrainChunk<'_, B>,
+        terrain: &mut TerrainData,
+        stone: BlockStateId,
+        air: BlockStateId,
+    ) -> Result<(), TerrainError> {
+        if chunk.heightmap(HeightmapType::OceanFloorWg).is_none() {
+            chunk.prime_heightmaps(&[HeightmapType::OceanFloorWg])?;
+        }
+        let origin = chunk.position();
+        let (min_x, min_z) = (origin.x.wrapping_shl(4), origin.z.wrapping_shl(4));
+        let mut columns = ChunkColumns { chunk, stone, air };
+        for dz in 0..16 {
+            for dx in 0..16 {
+                let (x, z) = (min_x.wrapping_add(dx), min_z.wrapping_add(dz));
+                if let Some(height) = self.modify(x, z, &mut columns)? {
+                    terrain.set_height_at(x, z, height);
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -518,5 +586,244 @@ mod tests {
         };
         operation.modify(3, 3, &mut column).unwrap();
         assert!(column.stone.contains(&70));
+    }
+
+    /// `oracles/structure_terrain/chunk/` (`run.sh`): 6dd607eb's `StructureTerrain.java` (constructor given the rigid
+    /// pieces, 26.3's int `setBlockState` flags; `patch.py` prints the diff) over REAL 26.3 `ProtoChunk`s and
+    /// `Heightmap`s, then `buildStructureTerrain`'s loop. Per scenario: FNV-1a folds of every block (z, x, y), of the
+    /// six heightmaps (absent = -1, else 256 first-available heights) and of the 256 height-map floats, plus how
+    /// many of those floats are not +0.0 (their zero start). Interpreted and JIT runs agree.
+    #[rustfmt::skip]
+    const JAVA_CHUNKS: [(u32, u64, u64, u32, u64); 96] = [
+        (0, 0xc205c385c60f587f, 0xab1fd3fb787cdd39, 256, 0x2573aaa7c331b725),
+        (1, 0x1a821c3e96f81225, 0x0d4ea4864aa734f1, 242, 0x5c71591e4c6db725),
+        (2, 0x9d7d0dcf14245dc5, 0x1ae1e32a6f6c69fd, 256, 0x6abd7d790fd5b725),
+        (3, 0xe4c802944344ff4f, 0xe839ea2a6b0dd615, 226, 0x569bf07e88f5b725),
+        (4, 0xb56c6fb0dcd0939f, 0x0b643a6bf2226189, 0, 0xd80ac658736bb725),
+        (5, 0x64bf2fb991a9b5b5, 0x282714474e605391, 247, 0x0fbe78a478e5b725),
+        (6, 0x44dd19b3ac6c7a3d, 0x916dae83caa5a09e, 0, 0xd80ac658736bb725),
+        (7, 0x0422d71ba5b79e67, 0x14d9b8cb6500054d, 202, 0x6e1d3809f445b725),
+        (8, 0x9e32dbf34c955925, 0x936cf02f1af10129, 148, 0xc580638fe0e9b725),
+        (9, 0x1f5840586646d725, 0x01a0f9260fcfdb9d, 204, 0x9e094d388fb9b725),
+        (10, 0x3539b45b7eee3a35, 0xe1e7b8a072950169, 30, 0xfb9b1d7cb3e7b725),
+        (11, 0x70b591f3a8ef64cd, 0x248291d1c2d54fa1, 134, 0x395fac3cd303b725),
+        (12, 0x01b442c6e67da235, 0x61906eff1eab8f09, 96, 0x3c63f12f81ebb725),
+        (13, 0x5da1f0edae092235, 0x651a765bdcb79eaa, 57, 0xe58eec540d57b725),
+        (14, 0xc97940d64b79b217, 0x5a1a8a64f5d0cc69, 112, 0xc11d02705fac3725),
+        (15, 0xbf8c78ec5194bcd5, 0x873456af0f19a621, 245, 0x33b3290dde37b725),
+        (16, 0xeae68e7a4f75c1c7, 0x7332c9bb384634a5, 0, 0xd80ac658736bb725),
+        (17, 0x574593c777fa0de5, 0xc10b7092e8b6bfe4, 20, 0xe149b06d2ae5b725),
+        (18, 0x6a8f66ae6ed385e4, 0x89a4afb9e0d67045, 0, 0xd80ac658736bb725),
+        (19, 0x765dc064e1317071, 0x78ab1ebe1ba45b72, 0, 0xd80ac658736bb725),
+        (20, 0xc2d68cd45a04b4e8, 0x0369aaf1af890fc7, 115, 0xe29e0ed6c3b9b725),
+        (21, 0x5c67e085af7ffe71, 0xca4b9fdcab4b18a6, 251, 0x5dafb5151747b725),
+        (22, 0x3d4b5ca52883fa02, 0x35fb46edbfa23b04, 29, 0xab99fe7ffb043725),
+        (23, 0x6053ac5b2a9eec78, 0x30e1cd5d857c5865, 206, 0x05c9a4d732d3b725),
+        (24, 0xa729d7647c991b03, 0x584a78ae1b4997f5, 246, 0x8e0eb6df7693b725),
+        (25, 0xade848d0695c2c6f, 0xf70c3f9e89be48a6, 77, 0xacf2fc5b4a1fb725),
+        (26, 0x268bb02e36b3fcd4, 0x86dc180f2258bcb2, 215, 0x0bd791241861b725),
+        (27, 0x59c5a246fb6362e5, 0x48708a579d47f888, 256, 0xbcdd03888d93b725),
+        (28, 0xe2c323e48d67b7c7, 0xdeccdc49273390b9, 240, 0xf1b3dea798b1b725),
+        (29, 0x3e348ee6e66e2325, 0xda1810a11f69cd51, 256, 0x4ff4932c38ebb725),
+        (30, 0xd8a579734d4c486f, 0x56876c7acffc5b51, 5, 0xce5e5e5327f33725),
+        (31, 0x735cd1b602e9cf25, 0xa3c8df2da396d9a0, 0, 0xd80ac658736bb725),
+        (32, 0xc88ad9a53dd25dda, 0xc9b92aa372e2de01, 239, 0x759b010e7ec5b725),
+        (33, 0x7b84d25d0910455b, 0xcc87d87a73e9881f, 210, 0xc441a2bcf6d9b725),
+        (34, 0x4793d9df21ab28e3, 0xec55d9fc7c742232, 0, 0xd80ac658736bb725),
+        (35, 0x3c8c839f8115b663, 0xbc15f9d69608b6b5, 240, 0x26ef0267f65bb725),
+        (36, 0x764c90507de726d9, 0x7568177d7f56b83b, 152, 0x05ce73b6c029b725),
+        (37, 0x5759fc5155e61c0b, 0xa6b445e4141c3591, 0, 0xd80ac658736bb725),
+        (38, 0xd4c6e41c8baaf06d, 0xcbc9f2d2792a82dd, 136, 0x3036f1071e263725),
+        (39, 0x48c4914104c25127, 0x313a1e087debdc65, 26, 0x25f7a6c0275fb725),
+        (40, 0x7bc43cb2f97ab565, 0xc2f6840b888bd01d, 200, 0x013385377c11b725),
+        (41, 0x77a12fafd8ca5e5d, 0x472dfc958dc60551, 74, 0xa783f338ef15b725),
+        (42, 0x710452e095fbf7d5, 0x2347784525b5dbd5, 121, 0xdb06752c1839b725),
+        (43, 0xcbdeb7de035b631d, 0xe981978d8f73a431, 208, 0xf6d3c75d225bb725),
+        (44, 0xf5028a51c5f15f8d, 0x57424f5dce599899, 160, 0x6da7a6cab45db725),
+        (45, 0xc79f098878f58d2f, 0x06dc1dbe265f1049, 193, 0xba93b3017c4bb725),
+        (46, 0x063def343f5df255, 0x355e232e5f47daee, 212, 0x9a2afd868b0db725),
+        (47, 0xc7e9ceb199a71007, 0xb3b92eb60674efbd, 64, 0xf9e5447acd8bb725),
+        (48, 0xce5f282ae05bbfe7, 0x819518bc20a1cf57, 232, 0x02a783cc99e3b725),
+        (49, 0xbf65fba2fa044da7, 0xbcd7b27fac024401, 256, 0xa5942101f4f7b725),
+        (50, 0xca4777668dd6458f, 0x7197c5bf85ed8351, 0, 0xd80ac658736bb725),
+        (51, 0x5f92675550e0fd55, 0x4c20302214de65e5, 144, 0x65dc650bae5db725),
+        (52, 0x1ad0255229e99d4d, 0xd282743a89b47b4e, 0, 0xd80ac658736bb725),
+        (53, 0xed21349e406240d7, 0xd544fae9436947c1, 0, 0xd80ac658736bb725),
+        (54, 0xcfbed9379223965d, 0x15617ef5bb4ae069, 0, 0xd80ac658736bb725),
+        (55, 0x7251de468e0e6c37, 0x9983602625db5e31, 144, 0x510b02232f1db725),
+        (56, 0x4a8413d08f1ab3bd, 0xefe169a49f69c2ba, 33, 0x35b9a2d9fa7fb725),
+        (57, 0x867fe49e3c8a70ef, 0x81b55704d013017d, 132, 0xcabf2bc4403db725),
+        (58, 0x5c1108a4034d15de, 0x4c70c15c56afa2b9, 172, 0x2ac3cc8f3d1bb725),
+        (59, 0x74af49154e8ec6e0, 0x3b9d2a6c4e970719, 0, 0xd80ac658736bb725),
+        (60, 0x79a4d9b30e036a94, 0x58c939c2ed06cc09, 0, 0xd80ac658736bb725),
+        (61, 0xb3ece7e7940a897f, 0x95d6e72b5ad346a5, 64, 0xea287ca3fc63b725),
+        (62, 0x2b231a7ff8105d75, 0x61681cedf79eb229, 0, 0xd80ac658736bb725),
+        (63, 0x9de59421a9c29f4c, 0x6967665c83482529, 0, 0xd80ac658736bb725),
+        (64, 0x6de10783c18d80c5, 0xc2de2f169693a867, 0, 0xd80ac658736bb725),
+        (65, 0x7a63ab203957a3e4, 0xca6029432970e7c4, 0, 0xd80ac658736bb725),
+        (66, 0x7014201c5f91b768, 0xfd914aadeea72a12, 256, 0x26e5584cdd79b725),
+        (67, 0xc1c816623f592bae, 0xd3ba782a2c35c25a, 213, 0x97ee8f06ea45b725),
+        (68, 0xcda1356f48d9b150, 0x6d74c236f7a71704, 236, 0xfa770f020c63b725),
+        (69, 0xec42375daefba508, 0x81c5b8758d12330c, 215, 0x9143ff032723b725),
+        (70, 0x4a4a1310a384d86c, 0x33c9dce3ff3e399c, 232, 0x1ebb8eb5f651b725),
+        (71, 0xc8808cf50278a047, 0xe3f89c14b7a3612d, 255, 0x682ff4b1468db725),
+        (72, 0x59e5a9e173607537, 0x4114e5a32ab8aa07, 66, 0x4ad7d5ff8ae9b725),
+        (73, 0x82cb134b96f8d7e9, 0x8b432937a335e6bb, 144, 0x2769409abd75b725),
+        (74, 0xcbc940b5850066ca, 0xced0e486f8a89062, 230, 0x23785267b74fb725),
+        (75, 0x59bf071fc20861b6, 0x87534330040dc97c, 17, 0x009439f078c7b725),
+        (76, 0x14921732cd198b66, 0x69309fe3878f07fe, 145, 0x090b4a24d359b725),
+        (77, 0xfdd6e41d8105ebff, 0xb8991c39cec1633d, 0, 0xd80ac658736bb725),
+        (78, 0xa9f256bc7eb7540f, 0x47b5e507cda86a4d, 7, 0x77916b6a7999b725),
+        (79, 0x59ff43bb987118cf, 0x71f00382f7659de5, 41, 0x372ca43c0ab5b725),
+        (80, 0x15cac46199025eb7, 0x6db209aaf28792b9, 44, 0x190cb1adeb95b725),
+        (81, 0x9bbfbac51f630e9f, 0xab95d79528a0a4ac, 110, 0xf6a62c16ae1db725),
+        (82, 0x25a4233609a0675f, 0x0e9f07c655363861, 35, 0x58b222d9d0a1b725),
+        (83, 0x81c4dbe3f47d86f5, 0x447e7f5ed972e221, 0, 0xd80ac658736bb725),
+        (84, 0x0c9c95ab95e70345, 0x4495b447b121a2d1, 256, 0x51ab0bd3b937b725),
+        (85, 0x251db85ace453cd5, 0x3948568cbb26b3d8, 0, 0xd80ac658736bb725),
+        (86, 0xd508f844e6b7250f, 0x56876c7acffc5b51, 127, 0x7ef0a26fef363725),
+        (87, 0xc602a630075e575f, 0xe948f4ab89b79b01, 0, 0xd80ac658736bb725),
+        (88, 0xa02cd281b68056d7, 0xb28598c2ff44f70d, 25, 0xe25bf4e6c7adb725),
+        (89, 0xcae9852d65882485, 0xa64e13288d54b720, 251, 0xca6c5cdaa41bb725),
+        (90, 0x9de734d18f4f3f8f, 0x906cc04bd0ebfb49, 245, 0x3ae46d92f019b725),
+        (91, 0xfa5c7f6ae6090a07, 0xc77b0a1c52dfc70d, 115, 0xf74d1bdeb649b725),
+        (92, 0xc8e16a54833a90a5, 0x1f93933c5cd087e5, 256, 0x101ea3e350f7b725),
+        (93, 0x760b4916a8bb0e7f, 0x0ceb01e7f226d335, 0, 0xd80ac658736bb725),
+        (94, 0x4c8b5fe20e3d7ddd, 0x22af460bf8d74c79, 181, 0x6c588a04c3203725),
+        (95, 0x0b2d29ce31a3880d, 0xc554ae439387d571, 205, 0x8cad5bb6993fb725),
+    ];
+
+    /// The scenarios of `ChunkAdapterOracle.java`: persisted status (mostly BIOMES, where `fillFromNoise` runs; also
+    /// EMPTY, TERRAIN and FEATURES), WG maps primed first or not, stone columns and water written straight into the
+    /// sections (surfaces near both build limits), up to 7 rigid pieces (pool pieces with ground deltas).
+    #[test]
+    fn modify_chunk_matches_6dd607eb_on_26_3_proto_chunks() {
+        use super::super::{
+            super::terrain::PreLightChunkStage,
+            terraforged_chunk_fill::tests::{AIR, Properties, STONE, WATER, registry},
+            terraforged_terrain_levels::TerrainLevels,
+        };
+        use horizon_core::position::ChunkPos;
+        const STAGES: [PreLightChunkStage; 4] = [
+            PreLightChunkStage::Biomes,
+            PreLightChunkStage::Empty,
+            PreLightChunkStage::Terrain,
+            PreLightChunkStage::Features,
+        ];
+        const MAPS: [HeightmapType; 6] = [
+            HeightmapType::WorldSurfaceWg,
+            HeightmapType::OceanFloorWg,
+            HeightmapType::WorldSurface,
+            HeightmapType::OceanFloor,
+            HeightmapType::MotionBlocking,
+            HeightmapType::MotionBlockingNoLeaves,
+        ];
+        let registry = registry();
+        for (s, blocks, maps, sets, heights) in JAVA_CHUNKS {
+            let mut random = Lcg(u64::from(s)
+                .wrapping_mul(0x9E3779B97F4A7C15)
+                .wrapping_add(168));
+            let (cx, cz) = (random.next(9) - 5, random.next(9) - 5);
+            let k = random.next(8);
+            let stage = STAGES[if k < 5 { 0 } else { k as usize - 4 }];
+            let prime = random.next(2) == 0;
+            let (min_y, height) = (-64, 384);
+            let base = match s % 8 {
+                6 => 300 + random.next(30),
+                7 => -70 + random.next(10),
+                _ => 40 + random.next(60),
+            };
+            let sea = if random.next(2) == 0 {
+                base + random.next(12)
+            } else {
+                i32::MIN
+            };
+            let mut chunk =
+                TerrainChunk::new(ChunkPos::new(cx, cz), min_y, height, &registry, Properties)
+                    .unwrap();
+            chunk.set_generation_stage(stage);
+            for z in 0..16 {
+                for x in 0..16 {
+                    let top = base + random.next(13) - 6;
+                    for y in min_y..min_y + height {
+                        if y <= top {
+                            chunk.set_block_raw(x, y, z, STONE).unwrap();
+                        } else if y <= sea {
+                            chunk.set_block_raw(x, y, z, WATER).unwrap();
+                        }
+                    }
+                }
+            }
+            if prime {
+                chunk
+                    .prime_heightmaps(&[HeightmapType::WorldSurfaceWg, HeightmapType::OceanFloorWg])
+                    .unwrap();
+            }
+            let count = random.next(8);
+            let shared_y = 40 + random.next(90);
+            let mut pieces = Vec::new();
+            for _ in 0..count {
+                let x0 = cx * 16 + random.next(44) - 14;
+                let z0 = cz * 16 + random.next(44) - 14;
+                let y0 = if random.next(3) == 0 {
+                    shared_y
+                } else if s % 8 == 6 {
+                    280 + random.next(40)
+                } else {
+                    30 + random.next(110)
+                };
+                let bounds = Bounds {
+                    min_x: x0,
+                    min_y: y0,
+                    min_z: z0,
+                    max_x: x0 + random.next(30),
+                    max_y: y0 + random.next(14),
+                    max_z: z0 + random.next(30),
+                };
+                let ground_delta = if random.next(2) == 0 {
+                    0
+                } else {
+                    random.next(7) - 3
+                };
+                pieces.push(Piece {
+                    bounds,
+                    ground_delta,
+                });
+            }
+            let mut terrain = TerrainData::new(TerrainLevels::default());
+            let extrema = (terrain.min(), terrain.max(), terrain.max_base());
+            StructureTerrain::from_rigid_pieces(pieces)
+                .modify_chunk(&mut chunk, &mut terrain, STONE, AIR)
+                .unwrap();
+            let mut block_hash = 0xcbf29ce484222325;
+            for z in 0..16 {
+                for x in 0..16 {
+                    for y in min_y..min_y + height {
+                        block_hash = fold(block_hash, chunk.block(x, y, z).0 as i32);
+                    }
+                }
+            }
+            let mut map_hash = 0xcbf29ce484222325;
+            for kind in MAPS {
+                let Some(map) = chunk.heightmap(kind) else {
+                    map_hash = fold(map_hash, -1);
+                    continue;
+                };
+                for z in 0..16 {
+                    for x in 0..16 {
+                        map_hash = fold(map_hash, map.first_available(x, z).unwrap());
+                    }
+                }
+            }
+            let cells = (0..256).map(|i| terrain.height().get_index(i).to_bits());
+            let written = cells.clone().filter(|&bits| bits != 0).count() as u32;
+            let height_hash = cells.fold(0xcbf29ce484222325, |hash, bits| fold(hash, bits as i32));
+            assert_eq!(
+                (block_hash, map_hash, written, height_hash),
+                (blocks, maps, sets, heights),
+                "scenario {s}"
+            );
+            assert_eq!((terrain.min(), terrain.max(), terrain.max_base()), extrema);
+        }
     }
 }

@@ -342,6 +342,13 @@ impl TerrainData {
         self.levels.height(self.height.get(x, z))
     }
 
+    /// `getHeight().set(x, z, height)`, as `StructureTerrain.modify` writes it: `Index.CHUNK` masks `x`/`z`, the
+    /// `int` widens to float (the map then holds a block height, which `height_at` floors back to it); `min`, `max`
+    /// and `max_base` are not updated.
+    pub fn set_height_at(&mut self, x: i32, z: i32, height: i32) {
+        self.height.set(x, z, height as f32);
+    }
+
     pub fn base_height_at(&self, x: i32, z: i32) -> i32 {
         self.levels.height(self.base_height.get(x, z))
     }
