@@ -1379,14 +1379,36 @@ in the 1.18.2-0.3.1 jar and in the newer source tree. `RiverNodesOracle.java` (`
 runs the jar's classes over four nodes (one of zero length) at every pair of 20 edge inputs (signed zeros, a subnormal,
 huge, infinite and NaN), at every projection and squared distance among them, and with each node field set to each
 edge input in turn; the test matches its 44,400 hashed results, the samples' sentinels and the pieces' order bit for
-bit, in debug and release. The nearest-node search and the carver come later.
+bit, in debug and release. The nearest-node search comes later.
 
-The continent river carver (`continent_carver.rs`) applies valley/bank/bed shaping, erosion modifiers, coastline
-clipping, and river-then-lake precedence.
+The continent river carver (`continent_carver.rs`) ports the carving arithmetic of the newer source tree's
+`worldgen.noise.continent.river.RiverCarver`. The constructor scales the river and lake configurations by the noise
+levels' frequency over the continent scale (`1f / scale` with the `int` scale, so 0 gives infinity) and derives the
+blend radius (`min(1, max(both valley maxima) + 0.2)`, which Java never reads). `carve_with_erosion` is `carve` after
+its erosion lookup. It multiplies the base noise by the coast modifier (`NoiseUtil.map(continent, COAST, 1, 1 -
+COAST)`), then carves the river node and then the lake node, each from the previous base noise. A node inside the
+valley lerps the base noise from its level to the sample's base. The carver lowers the height towards the bank level
+across the valley, with an eroded U-to-linear falloff that fades out over the valley's last 2.5%, and towards the bed
+level inside the banks, where the node's terrain is taken. The river noise falls across the valley and the banks.
+Below `BEACH` the river noise is reset to 1. `getBaseNoise`'s -1 ("outside the valley") also skips a node whose
+carved base really is -1, as in Java. Version check: compiled from the newer source, `RiverCarver`, `NoiseLevels`,
+`NoiseSample`, `ContinentPoints`, the three config classes, `NodeSample` and `CarverSample` give the same bytecode as
+the 1.18.2-0.3.1 jar except in one place. The source's `carve(int seed, float x, float y, …)` reads the erosion
+seed-first (`erosionNoise.getValue(seed, x, y)`, Noise2D); the jar's `carve(float x, float y, …)` calls
+`getValue(x, y)`. The erosion module itself (a two-octave ridge at frequency 128, seed `rivers.seed + 21221`) is not
+ported yet: #124 ports the seed-first sources and #125 wires it, so `carve_with_erosion` takes the erosion value.
+`ContinentCarverOracle.java` (`.local/terraforged/oracles/continent_carver/`, river nodes' class path and stubs; the
+bytecode comparison is in `version/`) runs the jar's own `carve` with the erosion module swapped for a constant by
+reflection. It covers 16 configurations (`int` scales 0, negative and `MAX`; NaN, infinite and signed-zero widths,
+depths and erosion; equal and crossed radii) over five noise levels, and a river grid of 766,080 carves. The grid
+takes each scaled radius with its float neighbours, points across the valley through the erosion fade, the 0.4/0.6
+shape and `COAST`/`BEACH` thresholds with their neighbours, the -1 sentinel, NaN, infinities and signed zeros. It also
+covers incoming river noise and river-then-lake precedence. The test matches the outputs (base, height, river noise,
+terrain) bit for bit, in debug and release.
 
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives, the biome climate types, the climate settings, the climate module, the climate stage, the continent factory, the generator context, the heightmap, the world generator factory, TerraForged's terrain levels, its terrain data, its terrain generator, its terrain-blend utilities, its terrain blender with its nearest-terrain search, noise-graph reseeding, the cave noise primitives, the biome viability rules, the biome overrides, the continent control points, the continent cell primitives, the continent configuration, the continent shape blending, the continent cell generator with its spawn-offset search, and the continent river nodes. They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives, the biome climate types, the climate settings, the climate module, the climate stage, the continent factory, the generator context, the heightmap, the world generator factory, TerraForged's terrain levels, its terrain data, its terrain generator, its terrain-blend utilities, its terrain blender with its nearest-terrain search, noise-graph reseeding, the cave noise primitives, the biome viability rules, the biome overrides, the continent control points, the continent cell primitives, the continent configuration, the continent shape blending, the continent cell generator with its spawn-offset search, the continent river nodes, and the continent river carver's arithmetic. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
