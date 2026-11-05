@@ -2438,16 +2438,26 @@ negative terrace steps), decoding fails; where Java builds a graph that throws o
 octaves, a terrace with no steps), decoding fails too. Supported are the nodes the 14 Reimagined assets use (the eight
 octave sources, `CellEdge`, `Const`, `Alpha`, `Bias`, `Boost`, `Clamp`, `Invert`, `Map`, `Pow`, `PowCurve`, `Scale`,
 `Warp` with `DomainWarp`/`DirectionWarp`, `Blend`, `Terrace`, `AdvTerrace`, `Steps` with an `Interpolation` curve)
-plus `Min` and `Sub`; the other specs Reimagined registers (`Cell`, `Sin`, `Line`, `Rand`, `Abs`, `Cache`, `Curve`,
+plus `Min` and `Sub`, and Engine 0.3.0's erosion `Valley` (`Ridge.create`: seed 1337, one octave, strength 1, grid
+size 100, amplitude 0.5, lacunarity 2.25, fall-off 0.75 and blend `CONSTANT` by default, read with `asInt`/`asFloat`,
+then `new Ridge(...)` and `wrap(source)`; zero or negative octaves sample NaN and the octave count is not capped,
+as in Java). TerraForged 6dd607eb's
+`NoiseCodec` registers `Valley` and its generated mountain assets use it; Reimagined a24d450's `NoiseCodec` dropped
+that registration (its comment calls it `Ridge`), so Reimagined itself rejects a `Valley` node: the port follows
+6dd607eb here. The other specs Reimagined registers (`Cell`, `Sin`, `Line`, `Rand`, `Abs`, `Cache`, `Curve`,
 `Freq`, `Grad`, `LegacyTerrace`, `Modulate`, `Threshold`, `VariCurve`, `Base`, `MultiBlend`, `Select`, `VariBlend`,
 `CumulativeWarp`, and the `MidPointCurve`/`SCurve` curves) decode in Java but return an "unsupported" error here.
 `TerrainAssetOracle.java` (`.local/terraforged/oracles/terrain_asset/`, `run.sh`) compiles Reimagined's Cereal, noise
 package, `DataUtil`, `SuperCodec`, `NoiseCodec` and `TerrainNoise` from source against Minecraft 26.3's server jar
-(`StrictJsonParser`, `Identifier`, DFU, Gson), runs 154 cases (defaults, number forms and limits, enum and identifier
-errors, constructor edge cases) and the 14 assets interpreted and JIT-compiled, and prints each decoded id, weight,
+(`StrictJsonParser`, `Identifier`, DFU, Gson), runs 181 cases (defaults, number forms and limits, enum and identifier
+errors, constructor edge cases, 28 with `Valley`) and the 14 assets interpreted and JIT-compiled, and prints each decoded id, weight,
 bounds and a hash of 294 seed-first samples over seven seeds (`sync.py` copies its cases and output into the tests).
 The tests match every line, reading "err" where Java decodes a graph that only throws; the asset lines are checked
-when Reimagined's sources are unpacked locally (the assets are not copied into this repository).
+when Reimagined's sources are unpacked locally (the assets are not copied into this repository). For `Valley` it also
+compiles Engine 0.3.0's `Ridge` (spec and factory unchanged; Engine's sampling has only the jar's seedless
+`getValue(x, y)`, so it samples seed-first with the convention of the seed-first erosion `Ridge` above: lattice seed = own +
+call seed) and registers it as 6dd607eb does, and checks 6dd607eb's three generated `mountains_*.json` assets, which
+use it (when TerraForged's sources are unpacked locally).
 
 `terrain_asset_registry.rs` loads the `terrain_type` and `terrain_noise` registries from (registry key, JSON) pairs,
 after TerraForged Reimagined a24d450's asset `TerrainType` (`DIRECT`, `forName`, its engine `TerrainType.get` and
