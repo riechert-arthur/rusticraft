@@ -253,6 +253,12 @@ mod tests {
         thread,
     };
 
+    // Minecraft calls the generator from every chunk worker: the facade must be shareable.
+    const _: () = {
+        const fn send_sync<T: Send + Sync>() {}
+        send_sync::<TerraForgedGenerator>();
+    };
+
     /// `GeneratorQueryOracle.levels` (= the noise generator tests' level variants).
     fn levels(variant: usize) -> TerrainLevels {
         match variant {
