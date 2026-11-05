@@ -226,9 +226,11 @@ pub fn uses_mountain_pool(biome_noise: f32, mountain_usage: f32) -> bool {
 }
 
 /// `BiomeSampler.isSteep(seed, x, z)`: reads the height noise `half = max(1, SLOPE_STEP / 2)` blocks west, east,
-/// north and south of the block column (Java's order and `int` wrap), then applies [`is_steep`]. `height_noise`
-/// is `getHeightNoise(seed, x, z)` for the world's seed; its first error is returned. `max_y` is the
-/// `TerrainLevels.maxY` of the generator.
+/// north and south of the block column (Java's order and `int` wrap), then applies [`is_steep`]. `x`/`z` are
+/// block coordinates (Reimagined's `Source.compute` passes quart `x << 2`, `z << 2`). `height_noise` is
+/// `getHeightNoise(seed, x, z)` for the world's seed, the UN-eroded height (Reimagined's `ErodedNoiseGenerator`
+/// delegates it to the raw generator on purpose, as `ErodedNoiseGenerator`'s `NoiseGenerator` impl does here);
+/// its first error is returned. `max_y` is the generator's `TerrainLevels.maxY`.
 pub fn is_steep_at<E>(
     max_y: i32,
     x: i32,
@@ -267,7 +269,9 @@ pub fn freezes(base_temperature: f32, height: i32, sea_level: i32) -> bool {
 }
 
 /// `BiomeSampler.keepsSnowCover`: a highland substitute is accepted only when it [`freezes`] exactly where the
-/// normal biome does at this height.
+/// normal biome does at this height. `getInitialBiome` passes the column's centre height,
+/// `levels.getHeight(levels.getScaledHeight(getHeightNoise(seed, x, z)))` (terrain_levels.rs `height`/
+/// `scaled_height`), and each biome's base temperature.
 pub fn keeps_snow_cover(
     normal_temperature: f32,
     highland_temperature: f32,
