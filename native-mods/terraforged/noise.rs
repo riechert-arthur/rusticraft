@@ -1785,64 +1785,15 @@ impl Module {
             ModuleKind::Custom(value) => value(x, y),
             ModuleKind::Source(source) => source.value(x, y),
             ModuleKind::ErosionRidge { ridge, source } => ridge.value(x, y, source),
-            ModuleKind::CellSource {
-                config,
-                displacement,
-                function,
-                distance,
-                lookup,
-            } => {
-                let nearest = || {
-                    let (x, y) = (x * config.frequency, y * config.frequency);
-                    nearest_cell(x, y, config.seed, *displacement, *distance)
-                };
-                match function {
-                    CellFunction::CellValue => {
-                        let cell = nearest();
-                        map(value_coord_2d(config.seed, cell.x, cell.y), -1.0, 1.0, 2.0)
-                    }
-                    CellFunction::NoiseLookup => {
-                        let cell = nearest();
-                        let Some(vector) = cell.vector else {
-                            panic!(
-                                "Engine throws a NullPointerException: no cell is nearer than Float.MAX_VALUE"
-                            );
-                        };
-                        lookup.value(cell.x as f32 + vector[0], cell.y as f32 + vector[1])
-                    }
-                    // `CellFunc.DISTANCE.mapValue` always returns 0; its (side-effect free) search is skipped.
-                    CellFunction::Distance => 0.0,
-                }
-            }
-            ModuleKind::CellEdgeSource {
-                config,
-                displacement,
-                edge,
-                distance,
-            } => {
-                let value = cell_edge(
-                    x * config.frequency,
-                    y * config.frequency,
-                    config.seed,
-                    *displacement,
-                    *edge,
-                    *distance,
-                );
-                let (min, max, range) = edge.bounds();
-                map(value, min, max, range)
-            }
-            ModuleKind::SineSource { frequency, alpha } => {
-                let alpha = alpha.value(x, y);
-                let x = x * *frequency;
-                let y = y * *frequency;
-                let noise = if alpha == 0.0 {
-                    sin(x)
-                } else if alpha == 1.0 {
-                    sin(y)
-                } else {
-                    lerp(sin(x), sin(y), alpha)
-                };
-                map(noise, -1.0, 1.0, 2.0)
+            ModuleKind::CellSource { .. }
+            | ModuleKind::CellEdgeSource { .. }
+            | ModuleKind::SineSource { .. }
+            | ModuleKind::Boost(..) => {
+                let Ok(value) =
+                    special_source_value(&self.0.kind, 0, x, y, map, |module, _, x, y| {
+                        Ok::<_, std::convert::Infallible>(module.value(x, y))
+                    });
+                value
             }
             ModuleKind::Line(line) => line.value(x, y),
             ModuleKind::Abs(source) => source.value(x, y).abs(),
@@ -1852,13 +1803,6 @@ impl Module {
                 value * alpha + (1.0 - alpha)
             }
             ModuleKind::Bias(source, bias) => source.value(x, y) + bias.value(x, y),
-            ModuleKind::Boost(source, iterations) => {
-                let mut value = source.value(x, y);
-                for _ in 0..*iterations {
-                    value = java_pow(value, 1.0 - value);
-                }
-                value
-            }
             ModuleKind::Clamp(source, min, max) => {
                 let value = source.value(x, y);
                 clamp(value, min.value(x, y), max.value(x, y))
@@ -2168,23 +2112,39 @@ impl Module {
         }
     }
 
-    /// Noise2D 2cb4843's `getValue(int seed, float x, float y)` for the scalar nodes, `Warp`, the `Base`,
-    /// `Blend`, `VariableBlend`, `Select` and `MultiBlend` selectors, `Cache`, `Terrace` and `LegacyTerrace`: every node passes the
-    /// call's seed unchanged to its children (only octave sources add their own seed, see
-    /// [`Source::value_seed_first`]); their arithmetic and evaluation order are the jar's (`Cache` also keys its
-    /// entry by the seed). `Warp` samples its source at the domain's seed-first coordinates ([`Domain::try_x_seed_first`]).
-    /// Nodes not yet ported to seed-first sampling return an error instead of falling back to [`Module::value`],
-    /// which would ignore the seed. Selectors and terraces evaluate only the children Java evaluates for that
-    /// sample (a terrace reads its ramp and cliff only inside a step's window, its ramp height only above the ramp;
-    /// a legacy terrace reads one curve, and only outside a step's window),
-    /// so an unsupported node in a branch the sample skips errors only at the points that reach it: one `Ok` sample
-    /// does not prove the whole graph is supported. Where Java throws (a `MultiBlend` slot outside its sources, a
-    /// NaN terrace sample, a terrace or legacy terrace without steps), this panics, as [`Module::value`] does.
+    /// Noise2D 2cb4843's `getValue(int seed, float x, float y)` for every node but custom modules, `Line` and Engine's
+    /// erosion `Ridge` (the scalar nodes, `Warp`, the selectors, `Cache`, the terraces, curves and transforms, `Boost`
+    /// and the cell, cell-edge and sine sources): every node passes the call's seed unchanged to its children, except
+    /// that the octave, cell and cell-edge sources add their own seed (see [`Source::value_seed_first`]) and a cell's
+    /// lookup and a sine's alpha get that sum (a sine's own seed is the builder default, 1337); their arithmetic and
+    /// evaluation order are the jar's, and where 2cb4843 calls `NoiseUtil.map` this maps with [`map_current`]
+    /// (`Cache` also keys its entry by the seed). `Warp` samples its source at the domain's seed-first coordinates
+    /// ([`Domain::try_x_seed_first`]). Nodes not yet ported to seed-first sampling return an error instead of falling
+    /// back to [`Module::value`], which would ignore the seed. Selectors and terraces evaluate only the children Java
+    /// evaluates for that sample (a terrace reads its ramp and cliff only inside a step's window, its ramp height only
+    /// above the ramp; a legacy terrace reads one curve, and only outside a step's window), so an unsupported node in a
+    /// branch the sample skips errors only at the points that reach it: one `Ok` sample does not prove the whole graph
+    /// is supported. Where Java throws (a `MultiBlend` slot outside its sources, a NaN terrace sample, a terrace or
+    /// legacy terrace without steps, a cell lookup with no cell nearer than `Float.MAX_VALUE`), this panics, as
+    /// [`Module::value`] does.
     pub fn try_value_seed_first(&self, seed: i32, x: f32, y: f32) -> Result<f32, &'static str> {
         let sample = |module: &Module| module.try_value_seed_first(seed, x, y);
         Ok(match &self.0.kind {
             ModuleKind::Constant(value) => *value,
             ModuleKind::Source(source) => source.value_seed_first(seed, x, y),
+            // Noise2D 2cb4843's `CellFunc.CELL_VALUE`, `CellEdgeNoise` and `Sin` map with its own `NoiseUtil.map`
+            // (their ranges are fixed and finite, so it gives the jar's bits here too).
+            ModuleKind::CellSource { .. }
+            | ModuleKind::CellEdgeSource { .. }
+            | ModuleKind::SineSource { .. }
+            | ModuleKind::Boost(..) => special_source_value(
+                &self.0.kind,
+                seed,
+                x,
+                y,
+                map_current,
+                |module, seed, x, y| module.try_value_seed_first(seed, x, y),
+            )?,
             ModuleKind::Warp(source, domain) => source.try_value_seed_first(
                 seed,
                 domain.try_x_seed_first(seed, x, y)?,
@@ -3662,6 +3622,106 @@ fn power_curve_value(value: f32, midpoint: f32, power: f32) -> f32 {
     } else {
         midpoint - java_pow(midpoint - value, power)
     }
+}
+
+/// The cell, cell-edge and sine sources and `Boost`, shared by the seedless and seed-first paths (Engine 0.3.0 and
+/// Noise2D 2cb4843 agree here apart from the seed and `NoiseUtil.map`, the jar's [`map`] or 2cb4843's
+/// [`map_current`]). `call_seed` is added to each source's own seed with Java `int` wrap (0 on the seedless path,
+/// where a source samples with its own seed); `sample(module, seed, x, y)` reads a child with the seed Java gives
+/// it (the seedless path ignores it): a cell's lookup gets the cell's seed (own + call, Noise2D's `Noise.cell`), a
+/// sine's alpha the sine's (the builder default 1337 + call: the port's `Sin` keeps no seed of its own, as Engine's
+/// `Sin` spec has none), `Boost`'s source the call seed. A cell lookup reads its child at the nearest cell's feature
+/// point (unscaled by the displacement) and panics where Java dereferences a null `vec2f` (no distance below
+/// `Float.MAX_VALUE`: NaN or infinite coordinates or displacements, overflowing distances); `CellFunc.DISTANCE`
+/// always gives 0, so its search is skipped.
+fn special_source_value<E>(
+    kind: &ModuleKind,
+    call_seed: i32,
+    x: f32,
+    y: f32,
+    map: fn(f32, f32, f32, f32) -> f32,
+    mut sample: impl FnMut(&Module, i32, f32, f32) -> Result<f32, E>,
+) -> Result<f32, E> {
+    Ok(match kind {
+        ModuleKind::CellSource {
+            config,
+            displacement,
+            function,
+            distance,
+            lookup,
+        } => {
+            let seed = config.seed.wrapping_add(call_seed);
+            let nearest = || {
+                let (x, y) = (x * config.frequency, y * config.frequency);
+                nearest_cell(x, y, seed, *displacement, *distance)
+            };
+            match function {
+                CellFunction::CellValue => {
+                    let cell = nearest();
+                    map(value_coord_2d(seed, cell.x, cell.y), -1.0, 1.0, 2.0)
+                }
+                CellFunction::NoiseLookup => {
+                    let cell = nearest();
+                    let Some(vector) = cell.vector else {
+                        panic!(
+                            "Engine throws a NullPointerException (Noise2D too): no cell is nearer than Float.MAX_VALUE"
+                        );
+                    };
+                    sample(
+                        lookup,
+                        seed,
+                        cell.x as f32 + vector[0],
+                        cell.y as f32 + vector[1],
+                    )?
+                }
+                // `CellFunc.DISTANCE.mapValue` always returns 0; its (side-effect free) search is skipped.
+                CellFunction::Distance => 0.0,
+            }
+        }
+        ModuleKind::CellEdgeSource {
+            config,
+            displacement,
+            edge,
+            distance,
+        } => {
+            let value = cell_edge(
+                x * config.frequency,
+                y * config.frequency,
+                config.seed.wrapping_add(call_seed),
+                *displacement,
+                *edge,
+                *distance,
+            );
+            let (min, max, range) = edge.bounds();
+            map(value, min, max, range)
+        }
+        ModuleKind::SineSource { frequency, alpha } => {
+            let alpha = sample(
+                alpha,
+                SourceConfig::default().seed.wrapping_add(call_seed),
+                x,
+                y,
+            )?;
+            let x = x * *frequency;
+            let y = y * *frequency;
+            let noise = if alpha == 0.0 {
+                sin(x)
+            } else if alpha == 1.0 {
+                sin(y)
+            } else {
+                lerp(sin(x), sin(y), alpha)
+            };
+            map(noise, -1.0, 1.0, 2.0)
+        }
+        ModuleKind::Boost(source, iterations) => {
+            let mut value = sample(source, call_seed, x, y)?;
+            for _ in 0..*iterations {
+                value = java_pow(value, 1.0 - value);
+            }
+            value
+        }
+        _ => unreachable!("special_source_value only takes Cell, CellEdge, Sin and Boost"),
+    })
 }
 
 /// `Steps`, `Freq`, `Grad` and `Modulate`, shared by the seedless and seed-first paths (Engine 0.3.0 and Noise2D
@@ -7912,23 +7972,27 @@ mod tests {
             let graph = build(Module::node(ModuleKind::Constant(v), bounds.0, bounds.1));
             for seed in seeds {
                 for (x, y) in points {
-                    let bits =
-                        match std::panic::catch_unwind(|| graph.try_value_seed_first(seed, x, y)) {
-                            Ok(value) => {
-                                let value = value.unwrap();
-                                if value.is_nan() {
-                                    0x7fc0_0000
-                                } else {
-                                    value.to_bits()
-                                }
-                            }
-                            Err(_) => 0xffff_ffff,
-                        };
+                    let bits = seeded_sample_bits(&graph, seed, x, y);
                     hash = (hash ^ u64::from(bits)).wrapping_mul(0x100000001b3);
                 }
             }
         }
         (values.len(), hash)
+    }
+
+    /// One seed-first sample as the edge oracles fold it: canonical NaN bits, 0xffffffff where Java throws (a panic).
+    fn seeded_sample_bits(graph: &Module, seed: i32, x: f32, y: f32) -> u32 {
+        match std::panic::catch_unwind(|| graph.try_value_seed_first(seed, x, y)) {
+            Ok(value) => {
+                let value = value.unwrap();
+                if value.is_nan() {
+                    0x7fc0_0000
+                } else {
+                    value.to_bits()
+                }
+            }
+            Err(_) => 0xffff_ffff,
+        }
     }
 
     #[test]
@@ -9292,6 +9356,348 @@ mod tests {
                 .unwrap()
                 .to_bits()
         );
+    }
+
+    #[test]
+    fn runtime_seeded_special_sources_match_current_noise2d() {
+        let source = |kind, seed, frequency, octaves, gain| {
+            Module::source(Source::new(
+                kind,
+                SourceConfig {
+                    seed,
+                    octaves,
+                    gain,
+                    frequency,
+                    lacunarity: 2.0,
+                    interpolation: Interpolation::Curve3,
+                },
+            ))
+        };
+        let lookup = source(SourceKind::Simplex, 1303, 1.0 / 64.0, 3, 0.5);
+        let alpha = source(SourceKind::Simplex2, 1304, 1.0 / 72.0, 2, 0.5);
+        let cell_config = SourceConfig {
+            seed: 1301,
+            octaves: 1,
+            gain: 0.5,
+            frequency: 1.0 / 96.0,
+            lacunarity: 2.0,
+            interpolation: Interpolation::Curve3,
+        };
+        let edge_config = SourceConfig {
+            seed: 1302,
+            frequency: 1.0 / 80.0,
+            ..cell_config
+        };
+        let graphs = [
+            lookup.clone().boost(2),
+            Module::cell_source(
+                cell_config,
+                0.85,
+                CellFunction::CellValue,
+                DistanceFunction::Manhattan,
+                Module::constant(0.0),
+            ),
+            Module::cell_source(
+                cell_config,
+                0.85,
+                CellFunction::NoiseLookup,
+                DistanceFunction::Natural,
+                lookup,
+            ),
+            Module::cell_edge_source(
+                edge_config,
+                0.7,
+                EdgeFunction::Distance2Add,
+                DistanceFunction::Natural,
+            ),
+            Module::sine_source(1.0 / 64.0, alpha),
+        ];
+        let expected = [
+            [
+                0x0cd5c1c44d7adbaf,
+                0x62e89b22ef3eda45,
+                0x2a37ca81ba3fdddb,
+                0x4451930bbf5d320a,
+            ],
+            [
+                0x77712f421d8d9149,
+                0x3b3142ebd823dca3,
+                0x6e59a545cbddf7f5,
+                0x45961bcc004e5ab9,
+            ],
+            [
+                0xb7cf1fbb2e0bc225,
+                0x80808cc2104975a6,
+                0xb5c7f407337972f8,
+                0x16ed23ba914fa72e,
+            ],
+            [
+                0xeab022e606ae48ec,
+                0xee086d6dbf4243b4,
+                0x53e969de04b31350,
+                0x49710aa763fa8c76,
+            ],
+            [
+                0xcd49ed4705b66fcf,
+                0xbdb543614d9c0939,
+                0xb942b54bec18da08,
+                0x244e92ee113ed92a,
+            ],
+        ];
+        for (graph, hashes) in graphs.iter().zip(expected) {
+            for (seed, expected) in [0, 17, -91, i32::MAX].into_iter().zip(hashes) {
+                let mut hash = 0xcbf29ce484222325u64;
+                for (x, y) in [
+                    (0.0, 0.0),
+                    (0.125, -0.75),
+                    (12.34, 56.78),
+                    (-1234.5, 987.25),
+                ] {
+                    hash ^= u64::from(graph.try_value_seed_first(seed, x, y).unwrap().to_bits());
+                    hash = hash.wrapping_mul(0x100000001b3);
+                }
+                assert_eq!(hash, expected, "seed {seed}");
+            }
+        }
+    }
+
+    #[test]
+    fn runtime_seeded_special_source_edges_match_current_noise2d() {
+        // `SeededSpecialSourceEdgeOracle.java` (`.local/terraforged/oracles/seed_first/`): "f" families vary a fixed
+        // value as Boost's source, Sin's alpha or a cell lookup; "p" graphs fold 7 seeds x 20 points at and beside
+        // cell edges, huge, NaN, infinite and signed-zero coordinates.
+        let (inf, nan) = (f32::INFINITY, f32::NAN);
+        fn config(seed: i32, frequency: f32) -> SourceConfig {
+            SourceConfig {
+                seed,
+                frequency,
+                ..SourceConfig::default()
+            }
+        }
+        let src = |kind, seed, frequency, octaves| {
+            Module::source(Source::new(
+                kind,
+                SourceConfig {
+                    octaves,
+                    ..config(seed, frequency)
+                },
+            ))
+        };
+        let (eu, ma, na) = (
+            DistanceFunction::Euclidean,
+            DistanceFunction::Manhattan,
+            DistanceFunction::Natural,
+        );
+        let (cv, nl, di) = (
+            CellFunction::CellValue,
+            CellFunction::NoiseLookup,
+            CellFunction::Distance,
+        );
+        let cell = |seed, frequency, displacement, function, distance, lookup| {
+            Module::cell_source(
+                config(seed, frequency),
+                displacement,
+                function,
+                distance,
+                lookup,
+            )
+        };
+        let edge = |seed, frequency, displacement, edge, distance| {
+            Module::cell_edge_source(config(seed, frequency), displacement, edge, distance)
+        };
+        let z = || Module::constant(0.0);
+        let simplex = src(SourceKind::Simplex, 1303, 1.0 / 8.0, 3);
+        let perlin = src(SourceKind::Perlin, 1305, 1.0 / 16.0, 2);
+        let zero = src(SourceKind::Simplex, 1306, 1.0, 0);
+        let simplex2 = src(SourceKind::Simplex2, 1304, 1.0 / 72.0, 2);
+        let inner = cell(i32::MAX, 0.25, 1.0, cv, eu, z());
+
+        type Family = (&'static [f32], Box<dyn Fn(Module) -> Module>);
+        let families: [Family; 7] = [
+            (
+                &[0.0, 1.0, 0.5, 0.25, 0.75],
+                Box::new(|k: Module| k.boost(1)),
+            ),
+            (
+                &[0.0, 1.0, 0.5, 0.25, 0.75],
+                Box::new(|k: Module| k.boost(3)),
+            ),
+            (
+                &[0.0, 1.0, 0.5, 0.25],
+                Box::new(|k| Module::sine_source(1.0 / 64.0, k)),
+            ),
+            (&[0.0, 1.0, 0.5], Box::new(|k| Module::sine_source(1.0, k))),
+            (
+                &[0.0, 1.0, 0.5],
+                Box::new(|k| Module::sine_source(f32::INFINITY, k)),
+            ),
+            (
+                &[0.0, 1.0, 0.5],
+                Box::new(move |k| cell(1301, 1.0 / 96.0, 0.85, nl, na, k)),
+            ),
+            (
+                &[0.0, 1.0, 0.5],
+                Box::new(move |k| cell(0, 1.0, 1.0, di, eu, k)),
+            ),
+        ];
+        let expected_families = [
+            (29, 0xa8adceff8b7db197),
+            (29, 0x152f9ba8ba81a633),
+            (26, 0x1acd41c9187045e1),
+            (23, 0x923443cd908e4bac),
+            (23, 0x6319103b7e8e979f),
+            (23, 0xb5b42bc9c5188e87),
+            (23, 0x12860f345ef7443d),
+        ];
+        let specials = [
+            nan,
+            inf,
+            -inf,
+            0.0,
+            -0.0,
+            0.5,
+            1.0,
+            -1.0,
+            2.0,
+            f32::from_bits(1),
+            -f32::from_bits(1),
+            1.0f32.next_down(),
+            1e30,
+            -1e30,
+        ];
+        for (index, ((table, build), expected)) in
+            families.iter().zip(expected_families).enumerate()
+        {
+            assert_eq!(
+                seeded_edge_fold(table, &specials, (0.0, 1.0), build),
+                expected,
+                "family {index}"
+            );
+        }
+
+        let graphs = [
+            cell(0, 1.0, 1.0, cv, eu, z()),
+            cell(1301, 1.0 / 96.0, 0.85, cv, ma, z()),
+            cell(i32::MAX, 1.0, 0.0, cv, na, z()),
+            cell(i32::MIN, 1.0, nan, cv, eu, z()),
+            cell(-7, 1.0, inf, cv, eu, z()),
+            cell(5, 0.0, 1.0, cv, eu, z()),
+            cell(1301, 1.0, 1.0, nl, eu, simplex.clone()),
+            cell(1301, 1.0 / 3.0, 0.5, nl, ma, perlin.clone()),
+            cell(i32::MAX, 1.0, 1.0, nl, na, inner),
+            cell(9, 1.0, 1.0, nl, eu, zero.clone()),
+            cell(9, 1.0, nan, nl, eu, simplex.clone()),
+            cell(0, 1.0, 1.0, di, eu, z()),
+            edge(0, 1.0, 1.0, EdgeFunction::Distance2, eu),
+            edge(0, 1.0, 1.0, EdgeFunction::Distance2Add, eu),
+            edge(0, 1.0, 1.0, EdgeFunction::Distance2Sub, eu),
+            edge(0, 1.0, 1.0, EdgeFunction::Distance2Mul, eu),
+            edge(0, 1.0, 1.0, EdgeFunction::Distance2Div, eu),
+            edge(i32::MAX, 1.0 / 80.0, 0.7, EdgeFunction::Distance2Add, ma),
+            edge(i32::MIN, 1.0, 0.7, EdgeFunction::Distance2Div, na),
+            edge(3, 1.0, nan, EdgeFunction::Distance2, eu),
+            edge(3, 1.0, 0.0, EdgeFunction::Distance2Sub, eu),
+            edge(3, 1.0, inf, EdgeFunction::Distance2Mul, eu),
+            Module::sine_source(1.0 / 64.0, simplex2),
+            Module::sine_source(1.0, cell(4, 1.0, 1.0, cv, eu, z())),
+            Module::sine_source(1.0 / 16.0, perlin.clone()),
+            simplex.boost(2),
+            perlin.boost(1),
+            zero.boost(2),
+            edge(11, 1.0, 1.0, EdgeFunction::Distance2Add, eu).boost(2),
+            cell(
+                12,
+                0.5,
+                1.0,
+                nl,
+                eu,
+                edge(13, 1.0, 1.0, EdgeFunction::Distance2, eu).boost(1),
+            ),
+        ];
+        let expected_graphs: [u64; 30] = [
+            0x6613e24c31434c49,
+            0xaf13d086e750b998,
+            0xe2ead82bd523d669,
+            0x7f0d2f4cf3ba9b51,
+            0x7e235a9eea2af744,
+            0xb78c30665beccb32,
+            0x501053a80808837c,
+            0x8d60df06a097ec6c,
+            0x7489e488df41f30b,
+            0x777057b13cbc5dd6,
+            0x0ffd4a2d7832fb69,
+            0x7b71c07e2c060e95,
+            0x739ae3150a781f63,
+            0x14132754cafd4a4c,
+            0x861290217d8d8ae7,
+            0xf640997ecc967f59,
+            0xc103c08ff11c1954,
+            0xe89be9286cc27e60,
+            0x3d792f0a2767e491,
+            0x342cb92ed3060e95,
+            0x272465f7d7d1767d,
+            0x342cb92ed3060e95,
+            0x8b84fd030b2c14af,
+            0xbcee2107d01b9768,
+            0x636f6d56e6add742,
+            0x7f2404ee961f6811,
+            0x3b9c67d59850c761,
+            0x342cb92ed3060e95,
+            0x021f5d3de3c17c72,
+            0x2db10fd1374c24e2,
+        ];
+        let points = [
+            (0.0, 0.0),
+            (-0.0, -0.0),
+            (1.0, 1.0),
+            (1.0f32.next_down(), 1.0f32.next_up()),
+            (-1.0, -1.0f32.next_down()),
+            (0.5, -0.5),
+            (12.34, 56.78),
+            (-1234.5, 987.25),
+            (96.0, -96.0),
+            (96.0f32.next_down(), 191.99),
+            (1e9, -1e9),
+            (3e9, -3e9),
+            (f32::MAX, -f32::MAX),
+            (16777216.0, -16777217.0),
+            (nan, 1.0),
+            (1.0, nan),
+            (inf, 2.0),
+            (-inf, -2.0),
+            (f32::from_bits(1), -f32::from_bits(1)),
+            (2147483520.0, -2147483648.0),
+        ];
+        for (index, (graph, expected)) in graphs.iter().zip(expected_graphs).enumerate() {
+            let mut hash = 0xcbf29ce484222325u64;
+            for seed in [0, 1, -1, 17, i32::MAX, i32::MIN, -987654321] {
+                for (x, y) in points {
+                    let bits = seeded_sample_bits(graph, seed, x, y);
+                    hash = (hash ^ u64::from(bits)).wrapping_mul(0x100000001b3);
+                }
+            }
+            assert_eq!(hash, expected, "graph {index}");
+        }
+        // Reseeding keeps cells and edges (displacement 1, which reseeding restores) and boosts of non-Perlin
+        // sources on the seed-first bits: both add the seed to the source's own.
+        for index in [0, 12, 13, 14, 15, 16, 25, 28] {
+            for seed in [0, 1, -1, 17, i32::MAX, i32::MIN, -987654321] {
+                let reseeded = graphs[index].with_seed(i64::from(seed));
+                for (x, y) in points {
+                    let value = reseeded.value(x, y);
+                    let bits = if value.is_nan() {
+                        0x7fc0_0000
+                    } else {
+                        value.to_bits()
+                    };
+                    assert_eq!(
+                        bits,
+                        seeded_sample_bits(&graphs[index], seed, x, y),
+                        "graph {index}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
