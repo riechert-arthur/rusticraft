@@ -2173,10 +2173,31 @@ them interpreted and with `-Xcomp`: 8 scales (`0` and the `int` limits included)
 seven biomes), 16 seeds (the offsets' wrap edges included) and 310 positions, 238,080 samples of the choice and
 mask bits and the layer, GLOBAL and UNIQUE choices. The test matches every digest in debug and release builds.
 
+The biome pool fallback (`biome_map.rs`, `BiomePools::fill_empty_climates`) is Reimagined's
+`BiomeMapManager.fillEmptyClimates` (a24d450, MIT, as above): every climate type whose pool is missing or empty takes
+the pool of the nearest climate type that had biomes of its own before any filling, so a borrowed pool is never lent
+on. Distance is between the midpoints of the types' temperature and moisture ranges (#93's `BiomeType`), temperature
+counted twice (`(2 dt)^2 + dm^2`, f32 in Java's order); ties go to the first type in enum order, and when every pool
+is empty nothing is filled (Reimagined's `BiomeSampler` then falls back to plains). The borrowing climate shares the
+donor's pool. Reimagined's debug log line is returned instead as a list of `BorrowedPool`s. Reimagined's
+`BiomeType` only fills its ranges when its lazy `Lookup` loads (the first `BiomeType.get`); before that every range,
+so every distance, is 0 and the first non-empty type in enum order wins. In a normal start `getWeightsMap` has
+already classified biomes through `BiomeType.get` (`BiomeUtil.getByClimate`), so the ranges are loaded; the port
+always uses them (#93's table, which equals Reimagined's baked `biome_types.bin`). TerraForged 6dd607eb and
+the 1.18.2-0.3.1 jar have no fallback (an empty climate gets plains). Building the pools (the registry's climate
+weights, the dry and highland filters) comes with a later layer.
+
+`BiomePoolOracle.java` (`.local/terraforged/oracles/biome_pool/`, `run.sh`) copies `fillEmptyClimates`,
+`distance` and `midpoint` verbatim from Reimagined's `BiomeMapManager` and runs them with Reimagined's own
+`WeightMap` and `BiomeType` (its baked lookup loaded), interpreted and with `-Xcomp`: every type's ranges, all 121
+distances, and all 177,147 combinations of the 11 types' pools being absent, present but empty, or holding biomes
+(weights 1, 0, NaN or none). The tests match every range and distance bit and every resulting pool, in debug and
+release builds.
+
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives, the biome climate types, the climate settings, the climate module, the climate stage, the continent factory, the generator context, the heightmap, the world generator factory, TerraForged's terrain levels, its terrain data, its terrain generator, its terrain-blend utilities, its terrain blender with its nearest-terrain search (and the newer source's seed-first blender), noise-graph reseeding, the cave noise primitives, the biome viability rules, the biome overrides, the continent control points, the continent cell primitives, the continent configuration, the continent shape blending, the continent cell generator with its spawn-offset search, the continent river nodes, the continent river carver's arithmetic, the continent river networks with their nearest-node sampling and their warped, carved river sampling, the newer source's seed-first noise sources, scalar noise graphs, domain warps, selectors, graph caches, terraces, legacy terraces, advanced terraces, curves, transforms (steps, frequency, gradient and modulation), special sources (boost, cell, cell edge and sine) and lines, and its bounded concurrent lossy cache with the continent's cell and
-river-piece caches on it, the continent noise module that joins the continent layers, the newer source's terrain height sampler with its bordered chunk generation and its nearest-terrain search, the erosion tile geometry, and TerraForged Reimagined's heightmap smoothing, erosion brushes, hydraulic erosion filter, eroded-region cache, eroded region build, eroded chunk generation, terrain cache, generator queries, chunk fill, the terrain stage hand-off to it, the biome chunk fill and the cave biome sampler. They change nothing in the game, so there is
+river-piece caches on it, the continent noise module that joins the continent layers, the newer source's terrain height sampler with its bordered chunk generation and its nearest-terrain search, the erosion tile geometry, and TerraForged Reimagined's heightmap smoothing, erosion brushes, hydraulic erosion filter, eroded-region cache, eroded region build, eroded chunk generation, terrain cache, generator queries, chunk fill, the terrain stage hand-off to it, the biome chunk fill, the cave biome sampler and the biome pool fallback. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
