@@ -1137,6 +1137,18 @@ pub(crate) mod tests {
     fn erosion_brushes_are_shareable_across_threads() {
         fn shareable<T: Send + Sync>() {}
         shareable::<ErosionBrushes>();
+        // Reimagined's ErodedNoiseGenerator shares one filter between its region builders.
+        shareable::<ErosionFilter>();
+    }
+
+    /// A map too small for a droplet's 2x2 cell (or shorter than `map_size²`) panics where Java
+    /// throws `ArrayIndexOutOfBoundsException`.
+    #[test]
+    #[should_panic(expected = "index out of bounds")]
+    fn erosion_filter_panics_where_java_throws() {
+        let filter = ErosionFilter::new(2, ErosionFilterSettings::default());
+        let mut map = vec![0.5, 0.4, 0.3, 0.2];
+        filter.apply_region(0, 0, 0, 1, 2, &mut ErosionResource::default(), &mut map);
     }
 
     #[test]
