@@ -5640,7 +5640,7 @@ mod tests {
     /// `map_current`), an infinite range, Invert's out-of-bound branches, a zero-range Map, crossed Clamp bounds,
     /// Power's special cases, a NaN threshold, empty and single-source combiners, deep nesting, both `int` extreme
     /// seeds and NaN/infinite/-0 points. Hashes from `SeededGraphEdgeOracle.java` (`.local/terraforged/oracles/
-    /// seed_first/`), canonical NaN bits.
+    /// seed_first/`), one per graph over the seeds, then the points, with canonical NaN bits.
     #[test]
     fn scalar_graph_runtime_seed_edges_match_current_noise2d() {
         let src = |kind, seed, octaves, gain, frequency| {
@@ -5700,214 +5700,30 @@ mod tests {
                 .clamp(control, perlin2.abs())
                 .scale(zero.invert()),
         ];
-        let expected: [[u64; 7]; 23] = [
-            [
-                0x8f886568e74a6515,
-                0xf6ee6e40ef853efd,
-                0x6c0653120ca448b5,
-                0x3a4abc8ec56cc98e,
-                0xb405d18dfb75beaf,
-                0x96c97fd3d3b75300,
-                0x57c84436d6b04052,
-            ],
-            [
-                0x55388c100d418a2b,
-                0x55388c100d418a2b,
-                0x55388c100d418a2b,
-                0x55388c100d418a2b,
-                0x55388c100d418a2b,
-                0x55388c100d418a2b,
-                0x55388c100d418a2b,
-            ],
-            [
-                0x1fc0172983b5455b,
-                0xfc7070502732ab5d,
-                0x878c320fa1aeb0d9,
-                0x13a042099fc6cefd,
-                0xcd9e965c32bf70da,
-                0xd1534276dd30fd85,
-                0xa8a56b65fd31c6c6,
-            ],
-            [
-                0xb014a403b09029bf,
-                0xb014a403b09029bf,
-                0xb014a403b09029bf,
-                0xb014a403b09029bf,
-                0xb014a403b09029bf,
-                0xb014a403b09029bf,
-                0xb014a403b09029bf,
-            ],
-            [
-                0x17dd53b8ac1029bf,
-                0x17dd53b8ac1029bf,
-                0x17dd53b8ac1029bf,
-                0x17dd53b8ac1029bf,
-                0x17dd53b8ac1029bf,
-                0x17dd53b8ac1029bf,
-                0x17dd53b8ac1029bf,
-            ],
-            [
-                0x2d6d2ed5c47148ae,
-                0x77a688f290b2aceb,
-                0xfaeb41c2d398d267,
-                0x93c1d6cb5caefbc9,
-                0x328e419c2093e6ec,
-                0xd635d87c8785ecc1,
-                0xc95aa48f208f36a6,
-            ],
-            [
-                0x46628fb384d029bf,
-                0x46628fb384d029bf,
-                0x46628fb384d029bf,
-                0x46628fb384d029bf,
-                0x46628fb384d029bf,
-                0x46628fb384d029bf,
-                0x46628fb384d029bf,
-            ],
-            [
-                0x9d41270d58e0d4f6,
-                0xc97e54e92ac98afc,
-                0x189982912b3c1de1,
-                0x19767a18246661cc,
-                0x1245eccc44e2acba,
-                0x504aecbb43fea624,
-                0x50c01728b6182efb,
-            ],
-            [
-                0x4126cb16dd6ee853,
-                0xeca01095a170fd7f,
-                0xa0be9a6852ee8a3f,
-                0x036835efb72bb52d,
-                0xa0be9a6852ee8a3f,
-                0x4126cb16dd6ee853,
-                0x30a711602feb0a0e,
-            ],
-            [
-                0xd85163c9865029bf,
-                0x2dd4c7c8065029bf,
-                0xd85163c9865029bf,
-                0x7f733a23865029bf,
-                0xd85163c9865029bf,
-                0x78343053865029bf,
-                0x45b09ec1065029bf,
-            ],
-            [
-                0x6375dce0ddd2ef1d,
-                0xc89eeaf0b57dbbbc,
-                0xd83ff05b8dd8bdd3,
-                0x12b089565138b78a,
-                0xa26b7f21ea37c3cc,
-                0x5256e4ac6c291bf4,
-                0xa0f301e58b06549c,
-            ],
-            [
-                0x0402464b33e10d7e,
-                0x5fad552df72a9196,
-                0x2b7cb655d09a5507,
-                0xd5e11b4e20f2b455,
-                0x4f6901d2941f8627,
-                0xb2b291990b7ac7de,
-                0xcdc05d2204bde521,
-            ],
-            [
-                0x096049cce75029bf,
-                0x096049cce75029bf,
-                0x8994bd10401029bf,
-                0x8994bd10401029bf,
-                0x8994bd10401029bf,
-                0x096049cce75029bf,
-                0x096049cce75029bf,
-            ],
-            [
-                0x6f1f378f7d1029bf,
-                0x6f1f378f7d1029bf,
-                0x6f1f378f7d1029bf,
-                0x6f1f378f7d1029bf,
-                0x6f1f378f7d1029bf,
-                0x6f1f378f7d1029bf,
-                0x6f1f378f7d1029bf,
-            ],
-            [
-                0xe604823a249029bf,
-                0xe604823a249029bf,
-                0xe604823a249029bf,
-                0xe604823a249029bf,
-                0xe604823a249029bf,
-                0xe604823a249029bf,
-                0xe604823a249029bf,
-            ],
-            [
-                0xe604823a249029bf,
-                0xe604823a249029bf,
-                0xe604823a249029bf,
-                0xe604823a249029bf,
-                0xe604823a249029bf,
-                0xe604823a249029bf,
-                0xe604823a249029bf,
-            ],
-            [
-                0xe604823a249029bf,
-                0xe604823a249029bf,
-                0xe604823a249029bf,
-                0xe604823a249029bf,
-                0xe604823a249029bf,
-                0xe604823a249029bf,
-                0xe604823a249029bf,
-            ],
-            [
-                0xe604823a249029bf,
-                0xe604823a249029bf,
-                0xe604823a249029bf,
-                0xe604823a249029bf,
-                0xe604823a249029bf,
-                0xe604823a249029bf,
-                0xe604823a249029bf,
-            ],
-            [
-                0xe604823a249029bf,
-                0xe604823a249029bf,
-                0xe604823a249029bf,
-                0xe604823a249029bf,
-                0xe604823a249029bf,
-                0xe604823a249029bf,
-                0xe604823a249029bf,
-            ],
-            [
-                0x38ccaf7d583faed9,
-                0x0ab5840bc6498afc,
-                0x59d3033e773c1de1,
-                0x5aada81c6e6661cc,
-                0x537d18ddd662acba,
-                0x1183f9cef7fea624,
-                0xa13fdc7d4a720e38,
-            ],
-            [
-                0xc6a113af984614f4,
-                0xc6a113af984614f4,
-                0xc6a113af984614f4,
-                0xc6a113af984614f4,
-                0xc6a113af984614f4,
-                0xc6a113af984614f4,
-                0xc6a113af984614f4,
-            ],
-            [
-                0x18b766c352d029bf,
-                0x18b766c352d029bf,
-                0x18b766c352d029bf,
-                0x18b766c352d029bf,
-                0x18b766c352d029bf,
-                0x18b766c352d029bf,
-                0x18b766c352d029bf,
-            ],
-            [
-                0xe3b47ed672d029bf,
-                0xe3b47ed672d029bf,
-                0xe3b47ed672d029bf,
-                0xe3b47ed672d029bf,
-                0xe3b47ed672d029bf,
-                0xe3b47ed672d029bf,
-                0xe3b47ed672d029bf,
-            ],
+        let expected: [u64; 23] = [
+            0x4fb359ebc491fb4e,
+            0x57515118049449ab,
+            0x932b91965afb271f,
+            0x9452c0977ede72c7,
+            0x6981bfd7e75e72c7,
+            0x2f1dd1f8753a883c,
+            0xf12b5210ed1e72c7,
+            0x2d31f1a1d5d0294c,
+            0x571ebe50c7bf9b08,
+            0x5edb6107d11e72c7,
+            0x5e92c4df24a1e42e,
+            0x9c4324424c566c0e,
+            0x7d16428f3a5e72c7,
+            0xd421388f395e72c7,
+            0x4e2fd09b7fde72c7,
+            0x4e2fd09b7fde72c7,
+            0x4e2fd09b7fde72c7,
+            0x4e2fd09b7fde72c7,
+            0x4e2fd09b7fde72c7,
+            0xd616aa7e1b6abd88,
+            0x3cfb29857940568a,
+            0x0d5f106d169e72c7,
+            0x3f65b81f249e72c7,
         ];
         let seeds = [0, 1, -1, 17, i32::MAX, i32::MIN, -987654321];
         let points = [
@@ -5921,16 +5737,16 @@ mod tests {
             (1e30, -1e30),
             (65536.5, -32768.25),
         ];
-        for (graph_index, (graph, hashes)) in graphs.iter().zip(expected).enumerate() {
-            for (seed, expected) in seeds.into_iter().zip(hashes) {
-                let values = points.map(|(x, y)| graph.try_value_seed_first(seed, x, y).unwrap());
-                let hash = canonical_bits(values)
-                    .into_iter()
-                    .fold(0xcbf29ce484222325u64, |hash, bits| {
-                        (hash ^ u64::from(bits)).wrapping_mul(0x100000001b3)
-                    });
-                assert_eq!(hash, expected, "graph {graph_index}, seed {seed}");
-            }
+        for (graph_index, (graph, expected)) in graphs.iter().zip(expected).enumerate() {
+            let values = seeds.into_iter().flat_map(|seed| {
+                points.map(|(x, y)| graph.try_value_seed_first(seed, x, y).unwrap())
+            });
+            let hash = canonical_bits(values)
+                .into_iter()
+                .fold(0xcbf29ce484222325u64, |hash, bits| {
+                    (hash ^ u64::from(bits)).wrapping_mul(0x100000001b3)
+                });
+            assert_eq!(hash, expected, "graph {graph_index}");
         }
     }
 
