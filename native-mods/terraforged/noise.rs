@@ -2091,15 +2091,12 @@ impl Module {
                 midpoint,
                 range,
                 power,
-            } => {
-                let value = source.value(x, y);
-                let value = if value >= *midpoint {
-                    *midpoint + java_pow(value - *midpoint, *power)
-                } else {
-                    *midpoint - java_pow(*midpoint - value, *power)
-                };
-                map(value, *min, *max, *range)
-            }
+            } => map(
+                power_curve_value(source.value(x, y), *midpoint, *power),
+                *min,
+                *max,
+                *range,
+            ),
             ModuleKind::Steps {
                 source,
                 steps,
@@ -2485,6 +2482,29 @@ impl Module {
                 || sample(slope),
                 || sample(modulation),
             )?,
+            ModuleKind::Curve { source, function } => function.apply(sample(source)?),
+            ModuleKind::VariableCurve {
+                source,
+                midpoint,
+                gradient,
+            } => noise_curve(sample(source)?, sample(midpoint)?, sample(gradient)?),
+            ModuleKind::PowerCurve {
+                source,
+                min,
+                max,
+                midpoint,
+                range,
+                power,
+            } => {
+                // Noise2D 2cb4843's `PowerCurve.modify` ends in its own `NoiseUtil.map`: 1, not NaN, where the
+                // curve's range is zero (a constant source) or infinite.
+                map_current(
+                    power_curve_value(sample(source)?, *midpoint, *power),
+                    *min,
+                    *max,
+                    *range,
+                )
+            }
             // Noise2D 2cb4843's `Cache` keeps one entry per thread keyed by `x == this.x && y == this.y` alone, so a
             // repeated point at another runtime seed returns the first seed's sample. The port keys the shared entry
             // by the seed too (and by the coordinates' bits, as the seedless path does): a hit is always the sample
@@ -3672,6 +3692,17 @@ pub fn java_pow(value: f32, power: f32) -> f32 {
         return f32::NAN;
     }
     (f64::from(value).powf(f64::from(power))) as f32
+}
+
+/// `PowerCurve.modify` up to its `NoiseUtil.map` (both paths; the seedless one maps with the jar's [`map`], the
+/// seed-first one with [`map_current`]): the sample's distance from the curve's midpoint raised to `power`
+/// (`Math.pow`), on the sample's side of the midpoint. A NaN sample takes the lower branch and stays NaN.
+fn power_curve_value(value: f32, midpoint: f32, power: f32) -> f32 {
+    if value >= midpoint {
+        midpoint + java_pow(value - midpoint, power)
+    } else {
+        midpoint - java_pow(midpoint - value, power)
+    }
 }
 
 /// `NoiseUtil.pow(float, int)`: repeated float products (`value * value * value` for 3), not `Math.pow`; a negative
@@ -8500,6 +8531,345 @@ mod tests {
         {
             let table = args.map_or_else(Vec::new, edges);
             let fold = seeded_edge_fold(&table, &specials, *bounds, build);
+            assert_eq!(fold, expected, "family {index}");
+        }
+    }
+
+    #[test]
+    fn seeded_curves_match_reseeding_and_read_every_child() {
+        // Over non-Perlin sources with finite, nonzero ranges, reseeding and seed-first sampling seed the same
+        // sources and fix the same power-curve bounds, so they give the same bits. A MidPointCurve or SCurve cannot
+        // be reseeded (the jar and Noise2D 2cb4843's Cereal both throw), but samples seed-first.
+        let src = |kind, seed, octaves| {
+            Module::source(Source::new(
+                kind,
+                SourceConfig {
+                    seed,
+                    octaves,
+                    frequency: 0.2,
+                    ..SourceConfig::default()
+                },
+            ))
+        };
+        let source = src(SourceKind::Simplex, i32::MAX, 2);
+        let midpoint = src(SourceKind::Cubic, -91, 3);
+        let gradient = src(SourceKind::Simplex2, i32::MIN, 2);
+        let graphs = [
+            source
+                .clone()
+                .curve(CurveFunction::Interpolation(Interpolation::Curve4)),
+            source.clone().variable_curve(midpoint, gradient),
+            source.clone().power_curve(0.8),
+            source.clone().power_curve(2.5).power_curve(0.5),
+        ];
+        for (index, graph) in graphs.iter().enumerate() {
+            for seed in [0, 1, -1, 17, i32::MAX, i32::MIN] {
+                let reseeded = graph.with_seed(i64::from(seed));
+                for (x, y) in [(0.0, 0.0), (12.34, -56.78), (-0.0, 3.5), (1e30, 3.0)] {
+                    assert_eq!(
+                        canonical_bits([graph.try_value_seed_first(seed, x, y).unwrap()]),
+                        canonical_bits([reseeded.value(x, y)]),
+                        "graph {index}, seed {seed}, ({x}, {y})"
+                    );
+                }
+            }
+        }
+        for function in [
+            CurveFunction::Midpoint {
+                midpoint: 0.4,
+                steepness: 6.0,
+            },
+            CurveFunction::s_curve(0.5, -0.2),
+        ] {
+            let graph = source.clone().curve(function);
+            assert!(graph.try_value_seed_first(i32::MIN, 1.0, 2.0).is_ok());
+            assert!(std::panic::catch_unwind(|| graph.with_seed(5)).is_err());
+        }
+        // Curve and PowerCurve read only their source; VariableCurve reads all three children (Java has no early exit).
+        let unsupported = unsupported_seeded_node(0.5);
+        let c = Module::constant;
+        let midpoint_curve = CurveFunction::Midpoint {
+            midpoint: 0.5,
+            steepness: 4.0,
+        };
+        assert!(
+            unsupported
+                .clone()
+                .curve(midpoint_curve)
+                .try_value_seed_first(1, 0.0, 0.0)
+                .is_err()
+        );
+        assert!(
+            unsupported
+                .clone()
+                .power_curve(0.8)
+                .try_value_seed_first(1, 0.0, 0.0)
+                .is_err()
+        );
+        for (s, m, g) in [
+            (&unsupported, &c(0.5), &c(4.0)),
+            (&c(0.5), &unsupported, &c(4.0)),
+            (&c(0.5), &c(0.5), &unsupported),
+        ] {
+            let graph = s.clone().variable_curve(m.clone(), g.clone());
+            assert!(graph.try_value_seed_first(1, 0.0, 0.0).is_err());
+        }
+        let graph = c(f32::NAN).variable_curve(c(f32::NAN), c(4.0));
+        assert!(graph.try_value_seed_first(1, 0.0, 0.0).unwrap().is_nan());
+    }
+
+    #[test]
+    fn runtime_seeded_curves_match_current_noise2d() {
+        let source = |kind, seed, frequency, octaves, gain| {
+            Module::source(Source::new(
+                kind,
+                SourceConfig {
+                    seed,
+                    octaves,
+                    gain,
+                    frequency,
+                    lacunarity: 2.0,
+                    interpolation: Interpolation::Curve3,
+                },
+            ))
+        };
+        let base = source(SourceKind::Perlin, 901, 1.0 / 96.0, 4, 0.5);
+        let graphs = [
+            base.clone().curve(CurveFunction::Midpoint {
+                midpoint: 0.4,
+                steepness: 6.0,
+            }),
+            base.clone().curve(CurveFunction::s_curve(0.5, -0.2)),
+            base.clone().variable_curve(
+                source(SourceKind::Simplex, 902, 1.0 / 80.0, 3, 0.5),
+                source(SourceKind::Ridge, 903, 1.0 / 128.0, 2, 0.975),
+            ),
+            base.power_curve(0.8),
+        ];
+        let expected = [
+            [0x01599d465de40a43; 4],
+            [0xa6a665d0d63d0c48; 4],
+            [
+                0x5d4f1efc413f1011,
+                0x46db897093016fff,
+                0x2f4d070948218174,
+                0x71b0b05f4e543d5c,
+            ],
+            [0xf87ba5b74029c866; 4],
+        ];
+        for (graph, hashes) in graphs.iter().zip(expected) {
+            for (seed, expected) in [0, 17, -91, i32::MAX].into_iter().zip(hashes) {
+                let mut hash = 0xcbf29ce484222325u64;
+                for (x, y) in [
+                    (0.0, 0.0),
+                    (0.125, -0.75),
+                    (12.34, 56.78),
+                    (-1234.5, 987.25),
+                ] {
+                    hash ^= u64::from(graph.try_value_seed_first(seed, x, y).unwrap().to_bits());
+                    hash = hash.wrapping_mul(0x100000001b3);
+                }
+                assert_eq!(hash, expected, "seed {seed}");
+            }
+        }
+    }
+
+    /// `SeededCurveEdgeOracle` (`.local/terraforged/oracles/seed_first/run-graphs.sh`): Curve (MidPointCurve, SCurve,
+    /// the three interpolations), VariableCurve and PowerCurve with a source fixed at, and one ulp beside, each
+    /// midpoint, `NoiseUtil.exp`'s zero-base point, SCurve's zero-power point and PowerCurve's source bounds and
+    /// midpoint (plus NaN, ±inf, ±0, subnormals and values outside 0..1); zero, negative, infinite and NaN curve
+    /// parameters; NaN, infinite and seeded variable-curve controls; power curves over zero (`map_current`'s 1),
+    /// infinite, inverted and NaN bounds; power curves of seeded sources; and nested curves.
+    #[test]
+    fn runtime_seeded_curve_edges_match_current_noise2d() {
+        let src = |kind, seed, octaves, gain, frequency| {
+            Module::source(Source::new(
+                kind,
+                SourceConfig {
+                    seed,
+                    octaves,
+                    gain,
+                    frequency,
+                    ..SourceConfig::default()
+                },
+            ))
+        };
+        let simplex2 = src(SourceKind::Simplex2, 802, 3, 0.5, 0.0125);
+        let cubic = src(SourceKind::Cubic, 803, 2, 0.975, 0.0078125);
+        let perlin2 = src(SourceKind::Perlin2, 804, 2, 0.5, 0.015625);
+        let zero = src(SourceKind::Simplex, 1337, 0, 0.5, 3.0);
+        let huge = src(SourceKind::Billow, -5, 3, 1e20, 1.0);
+        let simplex = src(SourceKind::Simplex, i32::MAX, 3, 0.65, 0.125);
+        let perlin = src(SourceKind::Perlin, 801, 4, 0.5, 1.0 / 96.0);
+        let c = Module::constant;
+        let (inf, nan) = (f32::INFINITY, f32::NAN);
+        type Family = (Vec<f32>, (f32, f32), Box<dyn Fn(Module) -> Module>);
+        let unit = |table: &[f32], build: Box<dyn Fn(Module) -> Module>| -> Family {
+            (table.to_vec(), (0.0, 1.0), build)
+        };
+        let mp = |midpoint: f32, steepness: f32, table: &[f32]| {
+            unit(
+                table,
+                Box::new(move |k: Module| {
+                    k.curve(CurveFunction::Midpoint {
+                        midpoint,
+                        steepness,
+                    })
+                }),
+            )
+        };
+        let sc = |lower: f32, upper: f32, table: &[f32]| {
+            unit(
+                table,
+                Box::new(move |k: Module| k.curve(CurveFunction::s_curve(lower, upper))),
+            )
+        };
+        let it = |interpolation, table: &[f32]| {
+            unit(
+                table,
+                Box::new(move |k: Module| k.curve(CurveFunction::Interpolation(interpolation))),
+            )
+        };
+        let vc = |midpoint: &Module, gradient: &Module, table: &[f32]| {
+            let (midpoint, gradient) = (midpoint.clone(), gradient.clone());
+            unit(
+                table,
+                Box::new(move |k: Module| k.variable_curve(midpoint.clone(), gradient.clone())),
+            )
+        };
+        let pc = |power: f32, min: f32, max: f32| -> Family {
+            let table = vec![min, max, min + (max - min) / 2.0];
+            (
+                table,
+                (min, max),
+                Box::new(move |k: Module| k.power_curve(power)),
+            )
+        };
+        let fixed = |module: Module| unit(&[], Box::new(move |_| module.clone()));
+        let families: Vec<Family> = vec![
+            mp(0.4, 6.0, &[0.4, 0.4 + 256.0 / 6.0]),
+            mp(0.5, 0.0, &[0.5]),
+            mp(0.5, -4.0, &[0.5, 0.5 - 64.0]),
+            mp(nan, 4.0, &[]),
+            mp(inf, 4.0, &[]),
+            mp(0.5, inf, &[0.5]),
+            mp(0.5, nan, &[0.5]),
+            mp(-0.0, 1e30, &[0.0]),
+            sc(0.5, -0.2, &[0.0, 1.0, 2.5]),
+            sc(0.5, -0.8, &[0.0, 1.0]),
+            sc(0.0, 1.0, &[0.0, 1.0]),
+            sc(1.0, 0.0, &[0.0, 1.0]),
+            sc(nan, 1.0, &[0.0, 1.0]),
+            sc(2.0, nan, &[0.0, 1.0]),
+            sc(-1.0, 0.5, &[0.0, 1.0, 2.0]),
+            sc(inf, -1.0, &[0.0, 1.0]),
+            sc(-0.0, -0.0, &[0.0, 1.0]),
+            it(Interpolation::Linear, &[0.0, 1.0]),
+            it(Interpolation::Curve3, &[0.0, 0.5, 1.0]),
+            it(Interpolation::Curve4, &[0.0, 0.5, 1.0]),
+            vc(&c(0.5), &c(4.0), &[0.5]),
+            vc(&c(nan), &c(4.0), &[]),
+            vc(&c(0.5), &c(inf), &[0.5]),
+            vc(&c(-inf), &c(-0.0), &[]),
+            vc(&simplex2, &cubic, &[0.5]),
+            vc(&zero, &perlin2, &[]),
+            pc(0.8, 0.0, 1.0),
+            pc(2.0, -1.0, 1.0),
+            pc(0.0, 0.0, 1.0),
+            pc(-1.0, 0.0, 1.0),
+            pc(nan, 0.0, 1.0),
+            pc(inf, 0.0, 1.0),
+            pc(0.5, 0.5, 0.5),
+            pc(1.0, 0.0, inf),
+            pc(1.0, -inf, inf),
+            pc(3.0, 0.0, 1e30),
+            pc(1.0, 1.0, 0.0),
+            pc(0.8, 0.0, nan),
+            fixed(perlin.power_curve(0.8)),
+            fixed(zero.clone().power_curve(1.5)),
+            fixed(huge.power_curve(0.8)),
+            unit(
+                &[0.0, 1.0, 0.5],
+                Box::new(move |k: Module| {
+                    k.power_curve(0.8)
+                        .variable_curve(simplex2.clone(), c(4.0))
+                        .curve(CurveFunction::s_curve(0.5, -0.2))
+                }),
+            ),
+            unit(
+                &[0.0, 1.0, 0.5],
+                Box::new(|k: Module| k.power_curve(2.0).power_curve(0.5)),
+            ),
+            unit(
+                &[0.5],
+                Box::new(move |k: Module| simplex.clone().variable_curve(k, c(6.0))),
+            ),
+        ];
+        let expected: [(usize, u64); 44] = [
+            (20, 0xf6ae4e04c7d1cda9),
+            (17, 0x60949791576c3e8d),
+            (20, 0x67376dd144c70d01),
+            (14, 0x2d2fae0b58f76195),
+            (14, 0x87ea76ab2f776195),
+            (17, 0x126239de28ec3e8d),
+            (17, 0xfc713680a16c3e8d),
+            (17, 0x729c84d8a8ec3e8d),
+            (23, 0x23f342e836dd378d),
+            (20, 0x0164fe84e4b107e9),
+            (20, 0xfad57b4e0b004061),
+            (20, 0x06cea9bc78314d3b),
+            (20, 0x0b82b503e27bfac5),
+            (20, 0x0b82b503e27bfac5),
+            (23, 0x34af43cece66f40d),
+            (20, 0x843382745dfbfac5),
+            (20, 0x8889817d307bfac5),
+            (20, 0xe9c4266b68b14d3b),
+            (23, 0x7e20e5dcc47294bf),
+            (23, 0xf1a5daa2ec02e26b),
+            (17, 0x44cdcb3bf7d79aa1),
+            (14, 0x2d2fae0b58f76195),
+            (17, 0x126239de28ec3e8d),
+            (14, 0x2d2fae0b58f76195),
+            (17, 0x492fcb363f40cb9f),
+            (14, 0x2e3c1049a39fadff),
+            (23, 0xa0c475c94e4c1ca5),
+            (23, 0x1264650d40e77d19),
+            (23, 0x516d6ad16ff7443d),
+            (23, 0xdc5f71aa214665b3),
+            (23, 0xcba82590e577443d),
+            (23, 0xb9a7ce2a42f7443d),
+            (23, 0xb9a7ce2a42f7443d),
+            (23, 0xcba82590e577443d),
+            (23, 0xcba82590e577443d),
+            (23, 0xcba82590e577443d),
+            (23, 0xb9a7ce2a42f7443d),
+            (23, 0xcba82590e577443d),
+            (14, 0xc2063e51c2a007a1),
+            (14, 0x2ee0893bd7f76195),
+            (14, 0xcc8eb8ea84b2e58d),
+            (23, 0x2f53f7d494a57b32),
+            (23, 0xa7baeda75988a301),
+            (17, 0xc1790e7b8af061c8),
+        ];
+        let specials = [
+            nan,
+            inf,
+            -inf,
+            0.0,
+            -0.0,
+            0.5,
+            1.0,
+            -1.0,
+            2.0,
+            f32::from_bits(1),
+            -f32::from_bits(1),
+            1.0f32.next_down(),
+            1e30,
+            -1e30,
+        ];
+        for (index, ((table, bounds, build), expected)) in families.iter().zip(expected).enumerate()
+        {
+            let fold = seeded_edge_fold(table, &specials, *bounds, build);
             assert_eq!(fold, expected, "family {index}");
         }
     }
