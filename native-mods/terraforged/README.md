@@ -1351,20 +1351,21 @@ nearest-cell searches per generator over NaN, infinite, signed-zero, subnormal, 
 shape's blended outputs over the same points, for both cell shapes and all three sources; the test matches its 942,336
 results bit for bit, in debug and release.
 
-`world_offset` ports the jar's spawn-offset search, `ContinentGenerator.getWorldOffset`: it walks
-`SpiralIterator(0, 0, 0, 100000)` (rings 1 to 100,000 around cell (0, 0), each from its `(-r, -r)` corner along +x,
-+y, -x, then -y; the origin cell itself is never visited) and returns the jittered position of the first cell that is
-land (`getThresholdValue` is not 0: noise at or above the threshold, NaN included) whose spawn neighbourhood
-(`isValidSpawn` with radius 3: the ten cells at `dy` 1 or 2 and `dx` -2 to 2) is all land, or `(0, 0)` if there is
-none. The jar recomputes it on every call (`ContinentNoise` keeps the answer in a field), so the port caches nothing;
-the runtime seed shifts both cell seeds as for every cell. `ContinentSpawnOracle.java` (same folder, `spawn.txt`) runs
-the jar's `getWorldOffset` for both cell shapes and all three sources over seed pairs drawn through Engine's `Seed`
-from `long` world seeds (`Long.MIN_VALUE`/`MAX_VALUE`, values that wrap `seed1` past `Integer.MAX_VALUE`) and the
-`int`-extreme seed pairs, NaN and zero jitters, thresholds 0.525, 0, 0.25, -inf and NaN, and thresholds equal to and
-one float either side of the first cell's noise and of its neighbourhood's least noise; it also runs the same loop at
-radii 0 to 3 over the jar's `SpiralIterator`, private `computeCell` and `isValidSpawn` (checked against
-`getWorldOffset`) at every cell noise near the origin and one float above it, so each answer depends on the search
-order. The tests match its seed pairs and 45,552 hashed floats bit for bit, in debug and release.
+`world_offset` ports the jar's spawn-offset search, `ContinentGenerator.getWorldOffset`: it walks `SpiralIterator(0, 0,
+0, 100000)` (rings 1 to 100,000 around cell (0, 0), each from its `(-r, -r)` corner along +x, +y, -x, then -y; the
+origin cell itself is never visited) and returns the jittered position of the first cell that is land
+(`getThresholdValue` is not 0: noise at or above the threshold, NaN included) whose spawn neighbourhood (`isValidSpawn`
+with radius 3: the ten cells at `dy` 1 or 2 and `dx` -2 to 2) is all land, or `(0, 0)` if there is none (like the jar,
+only after walking all ~4·10^10 cells when no land is near the origin). The jar recomputes it on every call
+(`ContinentNoise` keeps the answer in a field), so the port caches nothing; the runtime seed shifts both cell seeds as
+for every cell. `ContinentSpawnOracle.java` (same folder, `spawn.txt`) runs the jar's `getWorldOffset` for both cell
+shapes and all three sources over seed pairs drawn through Engine's `Seed` from `long` world seeds
+(`Long.MIN_VALUE`/`MAX_VALUE`, values that wrap `seed1` past `Integer.MAX_VALUE`) and the `int`-extreme seed pairs, NaN
+and zero jitters, thresholds 0.525, 0, 0.25, -inf and NaN, and thresholds equal to and one float either side of the
+first cell's noise and of its neighbourhood's least noise; it also runs the same loop at radii 0 to 3 over the jar's
+`SpiralIterator`, private `computeCell` and `isValidSpawn` (checked against `getWorldOffset`) at every cell noise near
+the origin and one float above it, so each answer depends on the search order. The tests match its seed pairs and 45,552
+hashed floats bit for bit, in debug and release.
 
 ## Status: development only
 

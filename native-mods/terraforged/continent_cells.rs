@@ -105,7 +105,8 @@ impl CellGenerator {
     /// 1 to 100000 around the origin, each from its `(-r, -r)` corner along +x, +y, -x, then -y; the origin cell is
     /// never visited), that is land and whose spawn neighbourhood is land; `(0, 0)` (`Vec2f.ZERO`) if none is. The
     /// jar recomputes it on every call (`ContinentNoise` keeps the result in its `offset` field), so nothing is cached
-    /// here. `seed` is the runtime seed added to the cell seeds, as for every cell.
+    /// here. `seed` is the runtime seed added to the cell seeds, as for every cell. Like the jar, a world without land
+    /// near the origin (a threshold above every noise) walks all ~4 * 10^10 cells of the spiral before giving up.
     pub fn world_offset(&self, seed: i32) -> (f32, f32) {
         self.search_offset(seed, SPAWN_SEARCH_RADIUS)
     }
