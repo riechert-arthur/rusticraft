@@ -6478,6 +6478,200 @@ mod tests {
         );
     }
 
+    /// `SeededBlendEdgeOracle` (`.local/terraforged/oracles/seed_first/run-graphs.sh`): Base/Blend/VariableBlend with a
+    /// control fixed at, and one ulp beside, each window edge (plus NaN, ±inf, ±0), zero/negative/NaN/infinite
+    /// windows and falloffs, NaN/±inf/zero/seeded variators, windows clamped to 0..1 and nested selectors.
+    #[test]
+    fn runtime_seeded_blend_edges_match_current_noise2d() {
+        let src = |kind, seed, octaves, gain, frequency| {
+            Module::source(Source::new(
+                kind,
+                SourceConfig {
+                    seed,
+                    octaves,
+                    gain,
+                    frequency,
+                    ..SourceConfig::default()
+                },
+            ))
+        };
+        let source = src(SourceKind::Simplex, i32::MAX, 2, 0.65, 0.125);
+        let control = src(SourceKind::Cubic, -91, 2, 0.5, 0.25);
+        let perlin = src(SourceKind::Perlin, 53, 2, 0.5, 0.5);
+        let zero = src(SourceKind::Simplex, 1337, 0, 0.5, 3.0);
+        let variator = src(SourceKind::Simplex2, -7, 2, 0.5, 0.3);
+        let c = Module::constant;
+        let lo = control.clone().scale(c(0.35));
+        let up = source.clone().bias(c(0.2));
+        let base = source.clone().scale(c(0.35));
+        let (l, c3, c4) = (
+            Interpolation::Linear,
+            Interpolation::Curve3,
+            Interpolation::Curve4,
+        );
+        let (bm, vr) = (base.max_value(), 0.05 + 0.5 * 0.3);
+        let vw = vec![java_max(0.0, 0.5 - vr), java_min(1.0, 0.5 + vr)];
+        // Blend's constructor window for a 0..1 control.
+        let win = |mid: f32, range: f32| {
+            vec![
+                java_max(0.0, mid - range / 2.0),
+                java_min(1.0, mid + range / 2.0),
+            ]
+        };
+        let blend = |mp, br, i| {
+            let (lo, up) = (lo.clone(), up.clone());
+            Box::new(move |k: Module| k.blend(lo.clone(), up.clone(), mp, br, i))
+                as Box<dyn Fn(Module) -> Module>
+        };
+        let based = |falloff, i| {
+            let base = base.clone();
+            Box::new(move |k: Module| base.clone().base(k, falloff, i))
+                as Box<dyn Fn(Module) -> Module>
+        };
+        let vary = |v: Module, mp, min, max, i| {
+            let (lo, up) = (lo.clone(), up.clone());
+            Box::new(move |k: Module| {
+                k.variable_blend(v.clone(), lo.clone(), up.clone(), mp, min, max, i)
+            }) as Box<dyn Fn(Module) -> Module>
+        };
+        let (nested_lo, nested_up) = (
+            lo.clone().base(up.clone(), 0.3, c3),
+            control.clone().variable_blend(
+                perlin.clone(),
+                up.clone(),
+                lo.clone(),
+                0.5,
+                0.1,
+                0.2,
+                l,
+            ),
+        );
+        let (p, z, u, cl, low) = (
+            perlin.clone(),
+            zero,
+            up.clone(),
+            control.clone(),
+            lo.clone(),
+        );
+        let families: Vec<(Box<dyn Fn(Module) -> Module>, Vec<f32>)> = vec![
+            (blend(0.5, 0.4, l), win(0.5, 0.4)),
+            (blend(0.5, 0.4, c3), win(0.5, 0.4)),
+            (blend(0.5, 0.4, c4), win(0.5, 0.4)),
+            (blend(0.5, 0.0, l), win(0.5, 0.0)),
+            (blend(0.5, -0.4, c3), win(0.5, -0.4)),
+            (blend(f32::NAN, 0.4, l), vec![]),
+            (blend(0.25, f32::INFINITY, c4), win(0.25, f32::INFINITY)),
+            (blend(1.2, 0.4, l), win(1.2, 0.4)),
+            (based(0.3, l), vec![bm, bm + 0.3]),
+            (based(0.3, c3), vec![bm, bm + 0.3]),
+            (based(0.3, c4), vec![bm, bm + 0.3]),
+            (based(0.0, l), vec![bm]),
+            (based(-0.2, l), vec![bm, bm - 0.2]),
+            (based(f32::NAN, c3), vec![bm]),
+            (based(f32::INFINITY, l), vec![bm]),
+            (vary(c(0.5), 0.5, 0.05, 0.3, l), vw.clone()),
+            (vary(c(0.5), 0.5, 0.05, 0.3, c3), vw.clone()),
+            (vary(c(0.5), 0.5, 0.05, 0.3, c4), vw),
+            (vary(c(f32::NAN), 0.5, 0.05, 0.3, l), vec![0.5]),
+            (vary(c(f32::INFINITY), 0.5, 0.05, 0.3, c3), vec![0.0, 1.0]),
+            (vary(c(f32::NEG_INFINITY), 0.5, 0.05, 0.3, l), vec![]),
+            (vary(c(0.0), 0.5, 0.0, 0.3, l), vec![0.5]),
+            (vary(variator, 0.4, 0.1, 0.5, c4), vec![0.4]),
+            (vary(c(1.0), 0.5, 0.3, 0.4, l), vec![0.0, 1.0]),
+            (
+                Box::new(move |k: Module| {
+                    k.blend(nested_lo.clone(), nested_up.clone(), 0.5, 0.4, c4)
+                }),
+                win(0.5, 0.4),
+            ),
+            (
+                Box::new(move |k: Module| {
+                    let inner = k.clone().blend(p.clone(), z.clone(), 0.5, 0.2, l);
+                    cl.clone()
+                        .blend(inner, u.clone(), 0.3, 0.2, c3)
+                        .scale(k.base(low.clone(), 0.25, l))
+                }),
+                win(0.5, 0.2),
+            ),
+            (
+                Box::new(move |k: Module| control.clone().blend(k, up.clone(), 0.25, 0.1, c3)),
+                vec![],
+            ),
+        ];
+        let expected: [u64; 27] = [
+            0x6f18d3dd954af663,
+            0xc3e0c297bd14859f,
+            0x6aaaf4e5a7744318,
+            0x69b3670b0e05a6d7,
+            0x784308d585ff0905,
+            0xc7890e94de74f24d,
+            0xa1ba46c5c7aa69d4,
+            0x2418cadf2fb982c7,
+            0x3a3300612e5d67c4,
+            0xe2dacb683d47bd83,
+            0xd179158eb6aee6a2,
+            0x56ad70171f1af2dd,
+            0xf2f694f0a3b4334b,
+            0xba6ae5f751e2df31,
+            0x55393397180ac885,
+            0x6f18d3dd954af663,
+            0xc3e0c297bd14859f,
+            0x6aaaf4e5a7744318,
+            0x463f236bcb8ac885,
+            0xa37b4b140fe6a74b,
+            0xe3e76edba7593bed,
+            0x22a0b05c56ceff1f,
+            0x7f75e55ba1a579b1,
+            0x0a2c791c02420a18,
+            0x0eb4ca970fbd4ab0,
+            0xf81b6449eef60226,
+            0x16f8303fa64ab20e,
+        ];
+        let specials = [
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            0.0,
+            -0.0,
+            0.5,
+            1.0,
+            0.3,
+            0.7,
+        ];
+        let seeds = [0, 1, -1, 17, i32::MAX, i32::MIN, -987654321];
+        let points = [
+            (0.0, 0.0),
+            (12.34, 56.78),
+            (-1234.5, 987.25),
+            (-0.0, 3.5),
+            (f32::NAN, 1.0),
+            (f32::INFINITY, 2.0),
+        ];
+        for (index, ((family, edges), expected)) in families.iter().zip(expected).enumerate() {
+            let controls = edges
+                .iter()
+                .flat_map(|&e| [e, e.next_down(), e.next_up()])
+                .chain(specials);
+            let mut hash = 0xcbf29ce484222325u64;
+            for v in controls {
+                // A Java module overriding only `getValue`: the value `v` with `Noise`'s default 0..1 bounds.
+                let graph = family(Module::node(ModuleKind::Constant(v), 0.0, 1.0));
+                for seed in seeds {
+                    for (x, y) in points {
+                        let value = graph.try_value_seed_first(seed, x, y).unwrap();
+                        let bits = if value.is_nan() {
+                            0x7fc0_0000
+                        } else {
+                            value.to_bits()
+                        };
+                        hash = (hash ^ u64::from(bits)).wrapping_mul(0x100000001b3);
+                    }
+                }
+            }
+            assert_eq!(hash, expected, "family {index}");
+        }
+    }
+
     #[test]
     fn module_graph_matches_engine_0_3_0() {
         let base = Module::source(Source::new(
