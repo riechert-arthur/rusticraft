@@ -2269,9 +2269,10 @@ impl Module {
         }
     }
 
-    /// Noise2D 2cb4843's `getValue(int seed, float x, float y)` for the scalar nodes: every node passes the call's
-    /// seed unchanged to its children (only octave sources add their own seed, see [`Source::value_seed_first`]);
-    /// their arithmetic and evaluation order are the jar's. Nodes not yet ported to seed-first sampling return an
+    /// Noise2D 2cb4843's `getValue(int seed, float x, float y)` for the scalar nodes and `Warp`: every node passes
+    /// the call's seed unchanged to its children (only octave sources add their own seed, see
+    /// [`Source::value_seed_first`]); their arithmetic and evaluation order are the jar's. `Warp` samples its source
+    /// at the domain's seed-first coordinates ([`Domain::try_x_seed_first`]). Nodes not yet ported to seed-first sampling return an
     /// error instead of falling back to [`Module::value`], which would ignore the seed.
     pub fn try_value_seed_first(&self, seed: i32, x: f32, y: f32) -> Result<f32, &'static str> {
         let sample = |module: &Module| module.try_value_seed_first(seed, x, y);
@@ -3190,6 +3191,9 @@ impl Domain {
         Self::node(DomainKind::Cumulative(self, next))
     }
 
+    /// Noise2D 2cb4843's `Domain.getOffsetX(int seed, float x, float y)`: [`Domain::offset_x`] with the call's seed
+    /// passed unchanged to every module and nested domain (`DirectionWarp` uses the same sine table). An error from
+    /// any module (a node not ported to seed-first sampling) is returned as is.
     pub fn try_offset_x_seed_first(&self, seed: i32, x: f32, y: f32) -> Result<f32, &'static str> {
         Ok(match self.0.as_ref() {
             DomainKind::Direct => 0.0,
@@ -3223,6 +3227,7 @@ impl Domain {
         })
     }
 
+    /// Noise2D 2cb4843's `Domain.getOffsetY(int seed, float x, float y)`; see [`Domain::try_offset_x_seed_first`].
     pub fn try_offset_y_seed_first(&self, seed: i32, x: f32, y: f32) -> Result<f32, &'static str> {
         Ok(match self.0.as_ref() {
             DomainKind::Direct => 0.0,
@@ -3256,10 +3261,12 @@ impl Domain {
         })
     }
 
+    /// Noise2D 2cb4843's `Domain.getX(int seed, float x, float y)`: `x + getOffsetX(seed, x, y)`.
     pub fn try_x_seed_first(&self, seed: i32, x: f32, y: f32) -> Result<f32, &'static str> {
         Ok(x + self.try_offset_x_seed_first(seed, x, y)?)
     }
 
+    /// Noise2D 2cb4843's `Domain.getY(int seed, float x, float y)`: `y + getOffsetY(seed, x, y)`.
     pub fn try_y_seed_first(&self, seed: i32, x: f32, y: f32) -> Result<f32, &'static str> {
         Ok(y + self.try_offset_y_seed_first(seed, x, y)?)
     }
@@ -5980,6 +5987,132 @@ mod tests {
                 }
                 assert_eq!(hash, expected, "domain {index}, seed {seed}");
             }
+        }
+    }
+
+    /// Seed-first domain warps at the edges: Perlin axes and angles (which ignore the runtime seed), zero- and
+    /// infinite-range axes (`DomainWarp`'s map), an axis already at -0.5..0.5 (its shortcut) and a constant one, NaN
+    /// and huge angles (the sine table's `int` cast), NaN/infinite strengths, `Direct` inside combinations, a six-deep
+    /// Add/Compound/Cumulative chain and a warp of a warp, at both `int` extreme seeds and NaN/infinite/-0 points.
+    /// Hashes from `SeededDomainEdgeOracle.java` (`.local/terraforged/oracles/seed_first/run-graphs.sh`), one per
+    /// domain over the seeds, the points, then seven outputs, with canonical NaN bits.
+    #[test]
+    fn runtime_seeded_domain_edges_match_current_noise2d() {
+        let src = |kind, seed, octaves, gain, frequency| {
+            Module::source(Source::new(
+                kind,
+                SourceConfig {
+                    seed,
+                    octaves,
+                    gain,
+                    frequency,
+                    ..SourceConfig::default()
+                },
+            ))
+        };
+        let source = src(SourceKind::Simplex, i32::MAX, 2, 0.65, 0.125);
+        let control = src(SourceKind::Cubic, -91, 2, 0.5, 0.25);
+        let perlin = src(SourceKind::Perlin, 53, 2, 0.5, 0.5);
+        let perlin2 = src(SourceKind::Perlin2, -7, 3, 0.5, 0.3);
+        let zero = src(SourceKind::Simplex, 1337, 0, 0.5, 3.0);
+        let huge = src(SourceKind::Billow, -5, 3, 1e20, 1.0);
+        let c = Module::constant;
+        let strength = source.clone().scale(c(3.0)).bias(c(0.25));
+        let dw0 = Domain::domain_warp(source.clone(), control.clone(), c(4.0));
+        let dw1 = Domain::domain_warp(perlin, perlin2.clone(), strength);
+        let dw2 = Domain::domain_warp(zero.clone(), huge.clone(), c(1.0));
+        let dw3 = Domain::domain_warp(source.clone().map(c(-0.5), c(0.5)), c(0.5), control.clone());
+        let dir4 = Domain::direction(source.clone(), c(2.0));
+        let dir5 = Domain::direction(perlin2.clone(), huge);
+        let dir6 = Domain::direction(c(f32::NAN), c(1.0));
+        let dir7 = Domain::direction(source.clone().scale(c(1e9)), c(1.0));
+        let dir8 = Domain::direction(zero, control.clone());
+        let mut chain = dw0.clone();
+        for i in 0..6 {
+            chain = match i % 3 {
+                0 => chain.add(dir4.clone()),
+                1 => dir5.clone().compound(chain),
+                _ => chain.then(dw1.clone()),
+            };
+        }
+        let domains = [
+            dw0.clone(),
+            dw1.clone(),
+            dw2.clone(),
+            dw3.clone(),
+            dir4.clone(),
+            dir5.clone(),
+            dir6.clone(),
+            dir7.clone(),
+            dir8.clone(),
+            dw0.clone().add(dir4.clone()),
+            dw1.clone().compound(dir5),
+            dir4.clone().then(dw0.clone()),
+            dw0.clone()
+                .then(dir4)
+                .then(dw1.add(dir8).compound(Domain::direct())),
+            Domain::direct().compound(Domain::direct().then(Domain::direct())),
+            dw0.then(dw3).compound(dir7).add(dir6.then(dw2)),
+            chain,
+        ];
+        let expected: [u64; 16] = [
+            0xb1f591fab036a4f9,
+            0xe973aa67aa70dadd,
+            0x8490a9ce079370c4,
+            0x0fc359b953666019,
+            0x5adcf430011e4d9e,
+            0x5fd1f0562f99a42e,
+            0xed8db6e8b8335a24,
+            0x3ae6e06051aa2af3,
+            0xde0cdecc339ae81d,
+            0x42c552fb3baa3f6c,
+            0x5afd9dc6c54d164a,
+            0x98e741c422d3beb3,
+            0x54080d2afd11bd66,
+            0x9add91001765fda5,
+            0x5e153fb2d03d4478,
+            0x95ba6c715e065992,
+        ];
+        let seeds = [0, 1, -1, 17, i32::MAX, i32::MIN, -987654321];
+        let points = [
+            (0.0, 0.0),
+            (0.125, -0.75),
+            (12.34, 56.78),
+            (-1234.5, 987.25),
+            (-0.0, 3.5),
+            (f32::NAN, 1.0),
+            (f32::INFINITY, 2.0),
+            (1e30, -1e30),
+            (65536.5, -32768.25),
+        ];
+        for (index, (domain, expected)) in domains.iter().zip(expected).enumerate() {
+            let warped = [
+                source.clone().warp(domain.clone()),
+                perlin2.clone().warp(domain.clone()),
+                control.clone().warp(domain.clone()).warp(domain.clone()),
+            ];
+            let mut values = Vec::new();
+            for seed in seeds {
+                for (x, y) in points {
+                    values.extend([
+                        domain.try_offset_x_seed_first(seed, x, y).unwrap(),
+                        domain.try_offset_y_seed_first(seed, x, y).unwrap(),
+                        domain.try_x_seed_first(seed, x, y).unwrap(),
+                        domain.try_y_seed_first(seed, x, y).unwrap(),
+                    ]);
+                    values.extend(
+                        warped
+                            .iter()
+                            .map(|m| m.try_value_seed_first(seed, x, y).unwrap()),
+                    );
+                }
+            }
+            let hash = canonical_bits(values)
+                .into_iter()
+                .fold(0xcbf29ce484222325u64, |hash, bits| {
+                    (hash ^ u64::from(bits)).wrapping_mul(0x100000001b3)
+                });
+            assert_eq!(hash, expected, "domain {index}");
         }
     }
 
