@@ -28,8 +28,13 @@ use super::terraforged_terrain_asset_registry::{
     TerrainAssetRegistryError, TerrainTypeAssets, decode_terrain_type_assets,
 };
 
+/// The number of bundled terrain types.
 pub const TERRAIN_TYPE_COUNT: usize = 18;
 
+/// TerraForged Reimagined a24d450's `terrain_type` registry files
+/// (<https://github.com/Romoslayer/TerraForged-Reimagined/tree/a24d4503064780790e975cd17495866ae13eef11>,
+/// `src/main/resources/default/data/terraforged/worldgen/terrain_type/`, MIT, (c) 2020 TerraForged, (c) 2026
+/// Romoslayer), bundled unchanged in `data/worldgen/terrain_type/`, as (registry key, JSON) pairs.
 pub fn current_terrain_type_documents() -> [(&'static str, &'static str); TERRAIN_TYPE_COUNT] {
     [
         (
