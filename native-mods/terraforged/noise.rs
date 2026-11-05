@@ -2112,18 +2112,21 @@ impl Module {
         }
     }
 
-    /// Noise2D 2cb4843's `getValue(int seed, float x, float y)` for the scalar nodes, `Warp`, the `Base`,
-    /// `Blend`, `VariableBlend`, `Select` and `MultiBlend` selectors, `Cache`, `Terrace` and `LegacyTerrace`: every node passes the
-    /// call's seed unchanged to its children (only octave sources add their own seed, see
-    /// [`Source::value_seed_first`]); their arithmetic and evaluation order are the jar's (`Cache` also keys its
-    /// entry by the seed). `Warp` samples its source at the domain's seed-first coordinates ([`Domain::try_x_seed_first`]).
-    /// Nodes not yet ported to seed-first sampling return an error instead of falling back to [`Module::value`],
-    /// which would ignore the seed. Selectors and terraces evaluate only the children Java evaluates for that
-    /// sample (a terrace reads its ramp and cliff only inside a step's window, its ramp height only above the ramp;
-    /// a legacy terrace reads one curve, and only outside a step's window),
-    /// so an unsupported node in a branch the sample skips errors only at the points that reach it: one `Ok` sample
-    /// does not prove the whole graph is supported. Where Java throws (a `MultiBlend` slot outside its sources, a
-    /// NaN terrace sample, a terrace or legacy terrace without steps), this panics, as [`Module::value`] does.
+    /// Noise2D 2cb4843's `getValue(int seed, float x, float y)` for every node but custom modules, `Line` and Engine's
+    /// erosion `Ridge` (the scalar nodes, `Warp`, the selectors, `Cache`, the terraces, curves and transforms, `Boost`
+    /// and the cell, cell-edge and sine sources): every node passes the call's seed unchanged to its children, except
+    /// that the octave, cell and cell-edge sources add their own seed (see [`Source::value_seed_first`]) and a cell's
+    /// lookup and a sine's alpha get that sum (a sine's own seed is the builder default, 1337); their arithmetic and
+    /// evaluation order are the jar's, and where 2cb4843 calls `NoiseUtil.map` this maps with [`map_current`]
+    /// (`Cache` also keys its entry by the seed). `Warp` samples its source at the domain's seed-first coordinates
+    /// ([`Domain::try_x_seed_first`]). Nodes not yet ported to seed-first sampling return an error instead of falling
+    /// back to [`Module::value`], which would ignore the seed. Selectors and terraces evaluate only the children Java
+    /// evaluates for that sample (a terrace reads its ramp and cliff only inside a step's window, its ramp height only
+    /// above the ramp; a legacy terrace reads one curve, and only outside a step's window), so an unsupported node in a
+    /// branch the sample skips errors only at the points that reach it: one `Ok` sample does not prove the whole graph
+    /// is supported. Where Java throws (a `MultiBlend` slot outside its sources, a NaN terrace sample, a terrace or
+    /// legacy terrace without steps, a cell lookup with no cell nearer than `Float.MAX_VALUE`), this panics, as
+    /// [`Module::value`] does.
     pub fn try_value_seed_first(&self, seed: i32, x: f32, y: f32) -> Result<f32, &'static str> {
         let sample = |module: &Module| module.try_value_seed_first(seed, x, y);
         Ok(match &self.0.kind {

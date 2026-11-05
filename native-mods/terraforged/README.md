@@ -1494,7 +1494,7 @@ range`), so a zero range (0 octaves) or an infinite one (a huge gain) gives 1 in
 path uses that `map` (`map_current`), and `Source::value`/`value_seeded` keep the jar's. Reseeding (`Module::with_seed`,
 above) stays the jar's mechanism: a reseeded source gives the seed-first bits for the same seed where the two maps
 agree, except for Perlin and Perlin2 (reseeding changes their seed; seed-first sampling does not). The eight octave sources,
-the scalar graph nodes, the domain warps, the five selectors, `Cache`, `Terrace`, `LegacyTerrace`, `AdvancedTerrace`, the curves and `Steps`/`Freq`/`Grad`/`Modulate` (below) are seed-first so far; the other nodes are not. `SeedFirstOracle.java` and `JarSeedOracle.java`
+the scalar graph nodes, the domain warps, the five selectors, `Cache`, `Terrace`, `LegacyTerrace`, `AdvancedTerrace`, the curves, `Steps`/`Freq`/`Grad`/`Modulate`, `Boost` and the cell, cell-edge and sine sources (below) are seed-first so far; custom modules, `Line` and Engine's erosion `Ridge` are not. `SeedFirstOracle.java` and `JarSeedOracle.java`
 (`.local/terraforged/oracles/seed_first/`, outside Git; `run.sh` compiles Noise2D 2cb4843 from source) fold every
 kind over seven configs (0 octaves, negative gain and lacunarity, an infinite range), five config seeds, eight runtime
 seeds (both `int` extremes) and ten points (NaN, infinity, -0); the tests match both tables bit for bit in debug and
@@ -1505,7 +1505,7 @@ the octave sources, `Abs`, `Alpha`, `Bias`, `Clamp`, `Invert`, `Map`, `Power`, `
 (`Add`, `Multiply`, `Max`, `Min`, `Sub`). Each passes the call's seed unchanged to its children (only the octave sources
 add their own seed), and their arithmetic is the jar's: in 2cb4843 these classes behave as the jar's apart from the seed
 parameter. None of them calls `NoiseUtil.map` (`Map` divides by the source range fixed in its constructor), so the newer
-map only shows through the sources (a 0-octave source inside a graph gives 1, not NaN). Any other node (custom modules and the remaining transforms and sources) returns an error
+map only shows through the sources (a 0-octave source inside a graph gives 1, not NaN). Any other node (custom modules, `Line` and Engine's erosion `Ridge`) returns an error
 instead of falling back to the seedless `value`, which would ignore the seed; later layers add them. The jar path
 (`value`) and reseeding (`with_seed`) are unchanged. Reseeding gives the same bits only where it seeds the same sources:
 not through Perlin/Perlin2, a `Bias`'s bias (reseeding drops it) a combiner's sources (reseeding leaves them
@@ -1676,9 +1676,29 @@ run in the same `run-graphs.sh` (`.local/terraforged/oracles/seed_first/`, outsi
 bit in debug and release, check which children each sample reads, and that reseeding gives the same bits over
 non-Perlin sources.
 
-Boost, cellular value/lookup, cellular edge and sine sources now support runtime-seeded sampling.
-Cell seeds use Java wrapping addition, lookup children retain the runtime seed, and sine controls
-sample the original coordinates before axis interpolation.
+`Boost` (`Module.boost(n)`) and the cell, cell-edge and sine sources (`Builder.cell()`, `cellEdge()`, `sin()`) are
+seed-first too: Noise2D 2cb4843's classes are the jar's apart from the seed parameter (and `NoiseUtil.map`), so both
+paths share one helper. `CellNoise` and `CellEdgeNoise` are `NoiseSource`s: they search the 3×3 cells around the
+scaled point with their own seed plus the call's (`int` wrap), hashing and jittering the cells as the seedless path
+does (`NoiseUtil.floor`, `NoiseUtil.cell`, Java `int` wrap where the window passes `Integer.MAX_VALUE`). `CELL_VALUE`
+maps the nearest cell's value from -1..1, `CellEdgeNoise` its edge function from the function's bounds, and `Sin` its
+sine from -1..1, all with 2cb4843's `NoiseUtil.map` (`map_current`; these ranges are fixed and finite, so the bits
+equal the jar's map). `NOISE_LOOKUP` samples its lookup, unmapped, at the nearest cell's feature point with the cell's
+seed (so a seeded lookup adds its own seed on top), and panics where Java throws a `NullPointerException` (no cell
+nearer than `Float.MAX_VALUE`: NaN or infinite coordinates or displacements); `DISTANCE` always gives 0. `Sin` is a
+`NoiseSource` in 2cb4843: it reads its alpha at the original point with its own seed plus the call's, then scales the
+point. The port's `Sin` keeps no seed (Engine's `Sin` spec has none), so it uses the builder default 1337, as a `Sin`
+built without `seed(...)` or read back from its spec. `Boost` passes the call's seed to its source (mapped to 0..1 at
+construction) and raises it `iterations` times with `NoiseUtil.pow` (`Math.pow`, through `java_pow`). Reseeding gives
+the same bits for cells and edges of displacement 1 (reseeding resets it) and boosts of non-Perlin sources.
+`TerraForgedSeededSpecialSourceOracle.java` (the PR's five graphs, four seeds, four points) and
+`SeededSpecialSourceEdgeOracle.java` (seven families of a fixed value as `Boost`'s source, `Sin`'s alpha or a cell
+lookup, at and one ulp beside every table value plus NaN, ±inf, ±0, subnormals and ±1e30; 30 graphs of every cell
+function, edge function and distance function with zero, NaN and infinite displacements and frequencies, config seeds
+at both `int` extremes, seeded, Perlin, 0-octave and nested lookups and alphas, over seven seeds including both `int`
+extremes and 20 points at and beside cell edges, huge, NaN, infinite and signed-zero coordinates; Java's exceptions
+where the port panics) run in the same `run-graphs.sh` (`.local/terraforged/oracles/seed_first/`, outside Git); the
+tests match both bit for bit in debug and release.
 
 The bounded concurrent lossy cache (`lossy_cache.rs`, `ConcurrentLossyCache`) ports the newer source tree's
 `LossyCache.Concurrent` and its `LossyCache.Stamped` buckets (`com.terraforged.mod.util.storage`, 6dd607eb). The
