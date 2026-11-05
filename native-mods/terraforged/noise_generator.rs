@@ -33,6 +33,10 @@ use super::{
     terraforged_util::{pack, unpack_left_float, unpack_right_float},
 };
 
+/// `NoiseGenerator.find`'s `0.75F`: a non-river terrain's candidate needs at least this river noise (away from any
+/// river valley).
+const FIND_RIVER_NOISE: f32 = 0.75;
+
 /// `NoiseGenerator.OCEAN_OFFSET`: the ocean floor noise's own seed (the runtime seed is added to it, `int` wrap).
 const OCEAN_OFFSET: i32 = 8_763_214;
 /// `NoiseGenerator.TERRAIN_OFFSET`: the seed `createLandTerrain` builds the [`TerrainBlender`] with
@@ -153,6 +157,26 @@ impl NoiseGenerator {
         Ok(())
     }
 
+    /// `find(seed, x, z, minRadius, maxRadius, terrain)`: the block position (`PosUtil.pack` of the `NoiseUtil.floor`ed
+    /// coordinates) of the nearest cell of `terrain`'s region that is on land and away from rivers, or `0` when none is
+    /// found (Java's `0L`, also for a terrain that is not overground, before anything is sampled).
+    ///
+    /// It scales the block position by the noise levels' frequency (`getNoiseCoord`) and walks the blender's
+    /// seed-first nearest-terrain search ([`TerrainBlender::try_find_nearest_seed_first`]). Each candidate the search
+    /// returns is skipped when it is `0` (the search's miss, `0L / frequency`), divided back to blocks by the
+    /// frequency, and then skipped when its continent noise is below `BEACH` (coast or ocean) or, for a terrain that is
+    /// not a river, when its river noise is below 0.75 (no built-in terrain is both overground and a river, so the
+    /// river test always applies to them). As in Java the continent and the rivers are sampled at those block
+    /// coordinates as they are, not scaled by the frequency again as [`Self::sample`] does (the same point only when
+    /// the frequency is 1). As in Java one sample (reset once, at the start) is reused for
+    /// every candidate, so the continent fields are overwritten each time while the river carver's height and river
+    /// noise carry over from the candidates before (it only multiplies the river noise, and every candidate it
+    /// carves is on land, where nothing resets it).
+    ///
+    /// `Err` where the blender's warp has no seed-first form (a custom module), and where the blender has no terrain
+    /// noise named like `terrain`: there `findNearest` returns `null` and Java's `find` throws a
+    /// `NullPointerException` on it. Like Java, a search that misses everywhere walks the whole spiral, and a
+    /// `min_radius` above `max_radius` never returns on a miss (see [`TerrainBlender::find_nearest`]).
     pub fn find(
         &self,
         seed: i32,
@@ -172,7 +196,9 @@ impl NoiseGenerator {
             .land
             .try_find_nearest_seed_first(seed, noise_x, noise_z, min_radius, max_radius, terrain)?
         else {
-            return Ok(0);
+            return Err(
+                "NoiseGenerator.find: no terrain noise has the terrain's name (Java throws a NullPointerException)",
+            );
         };
         let mut sample = NoiseSample::new(&self.continent.context().terrain);
         for position in finder {
@@ -188,7 +214,7 @@ impl NoiseGenerator {
             }
             self.continent
                 .sample_river(seed, point_x, point_z, &mut sample);
-            if !terrain.is_river() && sample.river_noise < 0.75 {
+            if !terrain.is_river() && sample.river_noise < FIND_RIVER_NOISE {
                 continue;
             }
             return Ok(pack(floor(point_x), floor(point_z)));
@@ -1097,33 +1123,177 @@ chunk 2 1 -2147483648 -40 -16 c04ac2241d15e3ce 0";
         });
     }
 
-    #[test]
-    fn nearest_terrain_search_applies_coast_and_river_filters() {
-        let generator = generator(0, 0);
+    /// `NoiseFindOracle.java` (`.local/terraforged/oracles/noise_generator/`, `run-find.sh`): the newer source's `find`
+    /// for two `TerrainLevels`, both terrain sets and four runtime seeds, over eight terrains (four in the larger set,
+    /// one in the constant set; deep ocean and river are not overground; coast and volcano are overground but have no
+    /// terrain noise, where Java throws), seven block positions (negative ones and the `int` extremes) and three radius
+    /// pairs (a zero minimum included). Each line folds every result (0xffffffff where Java throws), then counts hits,
+    /// zeros and throws, and how many results change when each candidate gets a fresh sample (the carry-over).
+    const EXPECTED_FINDS: &str = "\
+find 0 0 0 8f450f1d2d4d08c9 14 49 105 7\n\
+find 0 0 -17 91a65b7873fb22d3 8 55 105 13\n\
+find 0 0 2147483647 2cbf799349e1a04f 14 49 105 7\n\
+find 0 0 -2147483648 fad0040ce32c8b55 15 48 105 6\n\
+find 0 1 0 7e1904a2e77b276d 47 79 42 28\n\
+find 0 1 -17 3ebf20b1607776c8 38 88 42 38\n\
+find 0 1 2147483647 a704b30a2ce91085 46 80 42 31\n\
+find 0 1 -2147483648 2a30542e8ddb3ebe 54 72 42 26\n\
+find 2 0 0 9ce50ffb4e3425a6 8 55 105 12\n\
+find 2 0 -17 2a5f1e72de9ac33 10 53 105 11\n\
+find 2 0 2147483647 5b31d1039b25e131 16 47 105 5\n\
+find 2 0 -2147483648 4333d52da51e069d 11 52 105 9\n\
+find 2 1 0 7651d30db96754b2 35 91 42 36\n\
+find 2 1 -17 d85fe447ed6d0e86 44 82 42 29\n\
+find 2 1 2147483647 d9842d574ff83c8c 51 75 42 28\n\
+find 2 1 -2147483648 ae60db6daec69adb 42 84 42 28";
+
+    const FIND_TERRAINS: [&str; 8] = [
+        "hills",
+        "flats",
+        "mountains",
+        "plateau",
+        "deep_ocean",
+        "river",
+        "coast",
+        "volcano",
+    ];
+    const FIND_POSITIONS: [(i32, i32); 7] = [
+        (0, 0),
+        (-211, 97),
+        (5000, -7000),
+        (-123_457, 98_765),
+        (30_000_000, -29_999_999),
+        (i32::MAX, i32::MIN),
+        (i32::MIN, i32::MAX),
+    ];
+    const FIND_RADII: [(i32, i32); 3] = [(1, 8), (0, 2), (3, 24)];
+
+    /// The oracle's `fresh`: `find` with a new sample per candidate, to show the carried sample matters.
+    fn find_fresh(
+        generator: &NoiseGenerator,
+        seed: i32,
+        (x, z): (i32, i32),
+        (min_radius, max_radius): (i32, i32),
+        terrain: &Terrain,
+    ) -> i64 {
+        if !terrain.is_overground() {
+            return 0;
+        }
+        let frequency = generator.levels.noise_levels.frequency;
+        let finder = generator
+            .land
+            .try_find_nearest_seed_first(
+                seed,
+                x as f32 * frequency,
+                z as f32 * frequency,
+                min_radius,
+                max_radius,
+                terrain,
+            )
+            .unwrap()
+            .unwrap();
+        let terrains = &generator.continent().context().terrain;
+        for position in finder.filter(|&position| position != 0) {
+            let point_x = unpack_left_float(position) / frequency;
+            let point_z = unpack_right_float(position) / frequency;
+            let mut sample = NoiseSample::new(terrains);
+            generator
+                .continent
+                .sample_continent(seed, point_x, point_z, &mut sample);
+            if sample.continent_noise < BEACH {
+                continue;
+            }
+            generator
+                .continent
+                .sample_river(seed, point_x, point_z, &mut sample);
+            if !terrain.is_river() && sample.river_noise < FIND_RIVER_NOISE {
+                continue;
+            }
+            return pack(floor(point_x), floor(point_z));
+        }
+        0
+    }
+
+    fn find_line(variant: usize, set: usize, seed: i32) -> String {
+        let generator = generator(variant, set);
         let terrains = Arc::clone(&generator.continent().context().terrain);
+        let mut fold = Fold::new();
+        let (mut hits, mut zeros, mut errors, mut carried) = (0, 0, 0, 0);
+        for name in FIND_TERRAINS {
+            let terrain = terrains.get_by_name(name).unwrap();
+            for position in FIND_POSITIONS {
+                for radii in FIND_RADII {
+                    let (x, z) = position;
+                    match generator.find(seed, x, z, radii.0, radii.1, &terrain) {
+                        Ok(found) => {
+                            fold.add(found as u64);
+                            if found == 0 {
+                                zeros += 1;
+                            } else {
+                                hits += 1;
+                            }
+                            if find_fresh(&generator, seed, position, radii, &terrain) != found {
+                                carried += 1;
+                            }
+                        }
+                        Err(_) => {
+                            fold.add(0xffff_ffff);
+                            errors += 1;
+                        }
+                    }
+                }
+            }
+        }
+        let line = fold.line(format!("find {variant} {set} {seed}"));
+        format!("{line} {hits} {zeros} {errors} {carried}")
+    }
+
+    #[test]
+    fn finds_match_current_java_generator() {
+        let mut lines = Vec::new();
+        for variant in [0, 2] {
+            for set in 0..2 {
+                for seed in [0, -17, i32::MAX, i32::MIN] {
+                    lines.push(find_line(variant, set, seed));
+                }
+            }
+        }
+        let expected: Vec<&str> = EXPECTED_FINDS.lines().collect();
+        assert_eq!(lines, expected);
+    }
+
+    /// A terrain that is not overground is `0` before anything is sampled; a terrain the blender has no noise for is
+    /// an error (Java's `NullPointerException`); a custom terrain noise doesn't change the result, as `find` never
+    /// samples the terrain noises (only the blender's band, warp and cell hashes, and the continent).
+    #[test]
+    fn find_filters_and_errors() {
+        let mixed = generator(0, 1);
+        let terrains = Arc::clone(&mixed.continent().context().terrain);
+        let hills = terrains.get_by_name("hills").unwrap();
+        assert_ne!(mixed.find(42, -211, 97, 1, 8, &hills), Ok(0));
+
+        let constant = generator_with(0, |context| terrain_set(context, 0));
+        let flats = terrains.get_by_name("flats").unwrap();
+        assert!(constant.find(0, 0, 0, 1, 8, &flats).is_err());
+        assert_eq!(constant.find(0, 0, 0, 1, 8, &terrains.get_by_id(1)), Ok(0));
         assert_eq!(
-            generator.find(42, 0, 0, 1, 8, &terrains.get_by_id(1)),
-            Ok(0)
-        );
-        assert_eq!(
-            generator.find(42, 0, 0, 1, 8, &terrains.get_by_id(8)),
+            constant.find(0, 0, 0, 1, 8, &terrains.get_by_name("river").unwrap()),
             Ok(0)
         );
 
-        let position = generator
-            .find(42, 0, 0, 1, 32, &terrains.get_by_name("hills").unwrap())
-            .unwrap();
-        assert_ne!(position, 0);
-        let point_x = super::super::terraforged_util::unpack_left(position);
-        let point_z = super::super::terraforged_util::unpack_right(position);
-        let mut sample = NoiseSample::new(&terrains);
-        generator
-            .continent()
-            .sample_continent(42, point_x as f32, point_z as f32, &mut sample);
-        assert!(sample.continent_noise >= BEACH);
-        generator
-            .continent()
-            .sample_river(42, point_x as f32, point_z as f32, &mut sample);
-        assert!(sample.river_noise >= 0.75);
+        let custom = generator_with(0, |context| {
+            vec![Arc::new(TerrainNoise::new(
+                context.terrain.get_by_name("hills").unwrap(),
+                1.0,
+                Module::custom(0.0, 1.0, |_, _| 0.25),
+            ))]
+        });
+        let reference = generator(0, 0);
+        for (x, z) in FIND_POSITIONS {
+            assert_eq!(
+                custom.find(-17, x, z, 1, 8, &hills),
+                reference.find(-17, x, z, 1, 8, &hills)
+            );
+        }
     }
 }

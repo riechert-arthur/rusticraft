@@ -1861,7 +1861,7 @@ blender's terrain. NaN goes inland, as Java's float compares do. Then the rivers
 the continent context's registry's. A terrain noise with no seed-first form (a custom module) makes `sample` return an
 error rather than sample it seedless. Building the continent and the blender (`createContinentNoise` with
 `CONTINENT_OFFSET` 18749560 and its control points, `createLandTerrain` with `TERRAIN_OFFSET` 45763218) is left to the
-caller, chunk generation is below, and `find` and erosion come later. The 1.18.2-0.3.1 jar's `NoiseGenerator` samples
+caller, chunk generation and `find` are below, and erosion comes later. The 1.18.2-0.3.1 jar's `NoiseGenerator` samples
 the same way with the seed taken from its constructor: its ocean noise is seeded with `(int) seed` itself (no 8763214 offset),
 its blender and continent settings with the world seed, and its sampling methods take no seed. Compared method by
 method (`.local/terraforged/oracles/noise_generator/version/compare.sh`), the two differ only in where that seed comes
@@ -1895,13 +1895,32 @@ matches its 128 chunk lines (the hash and the number of cells whose river noise 
 chunks have some) bit for bit, in debug and release. Run one after another on one thread, up to six of the eight
 chunks come out different in Java.
 
-Nearest-terrain search now follows the warped terrain-region spiral, skips zero sentinels and
-rejects ocean/coast or river-adjacent candidates exactly like the current generator.
+The nearest-terrain search (`NoiseGenerator::find(seed, x, z, min_radius, max_radius, terrain)`, the newer source's
+`find`, which TerraForged's `/locateterrain` command calls) returns the block position (`PosUtil.pack` of the
+`NoiseUtil.floor`ed coordinates) of the nearest cell of the terrain's region that is on land and away from rivers, or 0
+when there is none. A terrain that is not overground (oceans, rivers, lakes) is 0 at once. Otherwise the block position
+is scaled by the noise frequency and the blender's seed-first search (`try_find_nearest_seed_first`, above; nothing of
+it is duplicated here) walks its spiral of cells; each candidate is skipped when it is the search's miss value (0), then
+divided back to blocks and skipped when its continent noise is below `BEACH` (0.5, coast or ocean) or its river noise is
+below 0.75 (the source skips this second test for river terrains, but no built-in terrain is both overground and a
+river). As in Java, the continent and rivers are sampled at those block coordinates without scaling them by the
+frequency again (unlike `sample`), and one sample, reset once, is reused for every candidate: the river carver only
+multiplies the river noise and reads the carried height, so a candidate rejected near a river lowers the river noise of
+the ones after it. Where the blender has no terrain noise with the terrain's name, Java's `findNearest` returns `null`
+and `find` throws a `NullPointerException`; the port returns an error there (and where the blender's warp has no
+seed-first form). The jar's `find(x, z, minRadius, maxRadius, terrain)` is the same method with the seed from its
+constructor (`javap`: the same instructions, `0.5F` and `0.75F` included, without the seed argument).
+`NoiseFindOracle.java` (same folder, `run-find.sh`) runs the source's `find` for two `TerrainLevels`, both terrain sets
+and four runtime seeds (the `int` extremes included) over eight terrains (two not overground, two with no terrain
+noise), seven block positions (negative ones and the `int` extremes, where the floored result saturates) and three radius
+pairs (a zero minimum included): 2,688 searches, interpreted and JIT-compiled alike. The test matches its 16 folded lines
+bit for bit, in debug and release, including the per-line count of searches whose result changes when every candidate
+gets a fresh sample (5 to 38 per line), which shows the carried sample is reproduced.
 
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives, the biome climate types, the climate settings, the climate module, the climate stage, the continent factory, the generator context, the heightmap, the world generator factory, TerraForged's terrain levels, its terrain data, its terrain generator, its terrain-blend utilities, its terrain blender with its nearest-terrain search (and the newer source's seed-first blender), noise-graph reseeding, the cave noise primitives, the biome viability rules, the biome overrides, the continent control points, the continent cell primitives, the continent configuration, the continent shape blending, the continent cell generator with its spawn-offset search, the continent river nodes, the continent river carver's arithmetic, the continent river networks with their nearest-node sampling and their warped, carved river sampling, the newer source's seed-first noise sources, scalar noise graphs, domain warps, selectors, graph caches, terraces, legacy terraces, advanced terraces, curves, transforms (steps, frequency, gradient and modulation), special sources (boost, cell, cell edge and sine) and lines, and its bounded concurrent lossy cache with the continent's cell and
-river-piece caches on it, the continent noise module that joins the continent layers, and the newer source's terrain height sampler with its bordered chunk generation. They change nothing in the game, so there is
+river-piece caches on it, the continent noise module that joins the continent layers, and the newer source's terrain height sampler with its bordered chunk generation and its nearest-terrain search. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
