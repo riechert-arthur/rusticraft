@@ -8237,6 +8237,76 @@ mod tests {
         }
     }
 
+    #[test]
+    fn seeded_advanced_terrace_matches_reseeding_and_evaluates_children_lazily() {
+        // Over non-Perlin sources with finite, nonzero ranges, reseeding and seed-first sampling seed the same
+        // sources and fix the same `modRange`, so they give the same bits.
+        let src = |kind, seed, octaves| {
+            Module::source(Source::new(
+                kind,
+                SourceConfig {
+                    seed,
+                    octaves,
+                    frequency: 0.2,
+                    ..SourceConfig::default()
+                },
+            ))
+        };
+        let source = src(SourceKind::Simplex, i32::MAX, 2);
+        let modulation = src(SourceKind::Cubic, -91, 3);
+        let mask = src(SourceKind::Simplex2, i32::MIN, 2);
+        let slope = src(SourceKind::Ridge, 17, 2);
+        for (steps, octaves) in [(1, 1), (4, 2), (8, 3), (i32::MAX, 3)] {
+            let graph = source.clone().advanced_terrace(
+                modulation.clone(),
+                mask.clone(),
+                slope.clone(),
+                0.2,
+                0.8,
+                steps,
+                octaves,
+            );
+            for seed in [0, 1, -1, 17, i32::MAX, i32::MIN] {
+                let reseeded = graph.with_seed(i64::from(seed));
+                for (x, y) in [(0.0, 0.0), (12.34, -56.78), (-0.0, 3.5), (1e30, 3.0)] {
+                    assert_eq!(
+                        canonical_bits([graph.try_value_seed_first(seed, x, y).unwrap()]),
+                        canonical_bits([reseeded.value(x, y)]),
+                        "steps {steps}, octaves {octaves}, seed {seed}, ({x}, {y})"
+                    );
+                }
+            }
+        }
+        // A sample at or below blendMin reads no child; a zero (or -0) mask reads neither slope nor modulation;
+        // otherwise all three are read. A NaN sample is not at or below blendMin.
+        let unsupported = unsupported_seeded_node(0.5);
+        let c = Module::constant;
+        let terrace = |value, modulation: &Module, mask: &Module, slope: &Module| {
+            Module::node(ModuleKind::Constant(value), 0.0, 1.0)
+                .advanced_terrace(
+                    modulation.clone(),
+                    mask.clone(),
+                    slope.clone(),
+                    0.2,
+                    0.8,
+                    4,
+                    2,
+                )
+                .try_value_seed_first(1, 0.0, 0.0)
+        };
+        for value in [0.2, -1.0, f32::NEG_INFINITY] {
+            assert!(terrace(value, &unsupported, &unsupported, &unsupported).is_ok());
+        }
+        for value in [0.5, f32::NAN] {
+            assert!(terrace(value, &c(0.1), &unsupported, &c(0.25)).is_err());
+            assert!(terrace(value, &unsupported, &c(0.0), &unsupported).is_ok());
+            assert!(terrace(value, &unsupported, &c(-0.0), &unsupported).is_ok());
+            assert!(terrace(value, &c(0.1), &c(0.5), &unsupported).is_err());
+            assert!(terrace(value, &unsupported, &c(0.5), &c(0.25)).is_err());
+            assert!(terrace(value, &c(0.1), &c(0.5), &c(0.25)).is_ok());
+        }
+    }
+
     /// `SeededAdvancedTerraceEdgeOracle` (`.local/terraforged/oracles/seed_first/run-graphs.sh`): AdvancedTerrace with
     /// a source fixed at, and one ulp beside, blendMin, blendMax and (first two octaves, at most 64 steps) every step
     /// value `k / n` and rounding edge `(k + 0.5) / n` (plus NaN, ±inf, ±0, subnormals and values outside 0..1); masks
