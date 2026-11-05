@@ -1315,11 +1315,21 @@ over every default and 26 edge values (signed zeros, subnormals, `int`-precision
 `scale`, `copy` and the presets' `copy`/`scale` chains; the test matches its 89,024 results and every default bit for
 bit, in debug and release.
 
-The current-source continent shape layer now blends the nearest 25 cells, preserving threshold,
-falloff, and separate primary/base noise semantics. Mixed-cell outputs are checked against the
-Java ShapeGenerator bytecode (with a plain NoiseSample holder replacing Minecraft registry setup).
-Its cell-provider interface is ready for the current-source continent generator; this does not yet
-connect the mod to playable world generation.
+The continent shape (`continent_shape.rs`) ports TerraForged 1.18.2-0.3.1's `ShapeGenerator`. It derives the
+threshold and the base falloffs (`threshold + baseFalloffMin`, `threshold + baseFalloffMax`) from the continent
+configuration; `sample` blends the 5x5 cells around the nearest one, weighting each by how far past the nearest
+distance it lies (blend range: the mean of the two nearest distances times the configured falloff), into the base
+noise (the cells' `noise()` mapped onto the base falloffs) and the continent noise (their 0/1 threshold values through
+the control points' falloff curve); `value` does the same for the continent noise over 3x3 cells, clamped first (the
+jar never calls it). The cells come through a `ContinentCells` trait (the jar's `ContinentGenerator`, ported next,
+with the seed-first runtime seed it passes through). Where the cell window would wrap past `i32` (about 2^31 cells
+out) the jar overruns its buffer, reads a stale one or loops forever; the port panics there. `ContinentShapeOracle.java`
+(`.local/terraforged/oracles/continent_shape/`, a stub `ContinentGenerator` plus the biome override's stubs) runs the
+jar's own bytecode over 9 configurations (signed zeros, subnormals, huge, infinite and NaN thresholds, falloffs and
+ranges; custom and invalid control points), each derived threshold and its neighbouring floats, the weights over a
+grid of edge values, and 6,240 blended outputs per configuration (both cell shapes, four cell tables from plain to
+NaN and infinite jitters and noises, nearest cells up to the `int` extremes, NaN, infinite, signed-zero and huge
+points); the test matches them, and the cells visited, bit for bit, in debug and release.
 
 ## Status: development only
 
