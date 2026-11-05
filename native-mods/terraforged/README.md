@@ -2506,21 +2506,23 @@ hills `dales`, `hills_1`, `hills_2` and `torridonian`, the mountain ridges `moun
 differ (they replace the `Valley` erosion node, which Reimagined's codec cannot read, with other nodes), and the port
 follows the newer source. `decode_current_terrain_noises(&types)` decodes them with #185's decoder, their `type`
 (`terraforged:flats`, `terraforged:hills`, `terraforged:mountains`, `terraforged:torridonian`, a child of `hills`, or
-`terraforged:dolomites`, a child of `mountains`, or `terraforged:plateau`) resolved in the terrain types `decode_current_terrain_types` returned
-(so the terrains are the world registry's), into a `TerrainNoiseAssets` in registry order; its `entry_ids()` (`dales`,
-`dolomites`, `hills_1`, `hills_2`, `mountains_1`, `mountains_2`, `mountains_3`, `mountains_ridge_1`,
-`mountains_ridge_2`, `plains`, `plateau`, `steppe`, `torridonian`) and `into_values()` are what `apply_terrain_overrides` takes.
+`terraforged:dolomites`, a child of `mountains`, or `terraforged:plateau`) resolved in the terrain types
+`decode_current_terrain_types` returned (so the terrains are the world registry's), into a `TerrainNoiseAssets` in
+registry order; its `entry_ids()` (`dales`, `dolomites`, `hills_1`, `hills_2`, `mountains_1`, `mountains_2`,
+`mountains_3`, `mountains_ridge_1`, `mountains_ridge_2`, `plains`, `plateau`, `steppe`, `torridonian`) and
+`into_values()` are what `apply_terrain_overrides` takes.
 With the default settings that stretches `dales`, `dolomites`, the five mountains and `torridonian` by the mountain
-width (`isMountain` matches their ids), not the two hills or `plateau`; turning fancy mountains off drops `mountains_ridge_1` and
-`mountains_ridge_2`. The last noise (badlands) comes with a later layer; nothing calls it yet.
+width (`isMountain` matches their ids), not the two hills or `plateau`; turning fancy mountains off drops
+`mountains_ridge_1` and `mountains_ridge_2`. The last noise (badlands) comes with a later layer; nothing calls it yet.
 `CurrentTerrainNoisesOracle.java` (same oracle folder, `run.sh`) decodes each bundled file from the tree it comes from
 (6dd607eb's three mountains, Reimagined's copies of the rest) with Reimagined's real `NoiseCodec`, plus Engine 0.3.0's
 `Valley` registered as 6dd607eb does, and `TerrainNoise` into its terrain-type registry, and checks each bundled file
 is byte-identical to its source (and that the three 6dd607eb files are not Reimagined's); the test matches its lines
 (terrain, registry identity, weight, raised bounds and a hash of 294 seed-first samples over 7 seeds), except that
 `plateau`'s terrain is Engine 0.3.0's lowland built-in here and Reimagined's highland there (the registry difference
-above). Both categories only mark the terrain as overground, and its noise, weight and bounds match, so the test pins
-that one terrain column as a known difference.
+above). In both engines the two categories have the same predicates (overground only) and differ only in their order,
+which only Engine's composite terrains read; the noise, weight and bounds match, so the test pins that one terrain
+column as a known difference.
 
 ## Status: development only
 

@@ -400,8 +400,9 @@ terraforged:steppe|flats/category:FLATLAND|true|weight=3fc00000|min=00000000|max
 terraforged:torridonian|torridonian/terrain:hills|true|weight=40200000|min=00000000|max=3f800000|hash=0d9ba14ddc9c79fe"##;
 
     /// The noise lines that differ, and only in their terrain column, because the registry is Engine 0.3.0's (see
-    /// [`ENGINE_REGISTRY_LINES`]): Engine makes the built-in `plateau` a lowland, Reimagined a highland. Both
-    /// categories have the same predicates (only `isOverground`), and the noise, weight and bounds are unchanged.
+    /// [`ENGINE_REGISTRY_LINES`]): Engine makes the built-in `plateau` a lowland, Reimagined a highland. In both engines
+    /// the two categories have the same predicates (only `isOverground`) and differ only in their order, which only
+    /// Engine's composite terrains read; the noise, weight and bounds are unchanged.
     /// These are the port's lines today; the test fails once the registry follows Reimagined (#206).
     const ENGINE_NOISE_LINES: [&str; 1] = [
         "terraforged:plateau|plateau/category:LOWLAND|true|weight=40000000|min=00000000|max=3f800000|hash=5a96e6ffb27bc660",
