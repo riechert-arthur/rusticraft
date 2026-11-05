@@ -22,7 +22,9 @@
  * SOFTWARE.
  */
 
-use super::terraforged::round;
+use super::terraforged::{java_max, java_min, pack_seed, round};
+use super::terraforged_filters::FastRandom;
+use super::terraforged_terrain_levels::java_clamp;
 
 /// TerraForged's `worldgen.noise.erosion.NoiseTileSize` (newer source 6dd607eb; the 1.18.2-0.3.1 jar's class has the
 /// same bytecode): the square of chunks around a centre chunk that `ErodedNoiseGenerator` erodes together, `chunk_radius`
@@ -305,12 +307,28 @@ struct EdgeBrush {
     weights: Box<[f32]>,
 }
 
+/// `ErosionFilter.Resource`: the two gradient samples (height, x and y slope) a droplet step
+/// reuses. Scratch space only; kept so callers can reuse one per thread as Reimagined does.
 #[derive(Default)]
 pub struct ErosionResource {
     gradient1: [f32; 3],
     gradient2: [f32; 3],
 }
 
+/// TerraForged Reimagined 26.3's `worldgen.noise.erosion.ErosionFilter` (a24d450): the hydraulic
+/// droplet simulation over a flat `float[]` heightmap that `ErodedNoiseGenerator` runs. Adapted from
+/// TerraForged Reimagined (MIT, see `LICENSE-TERRAFORGED-REIMAGINED`).
+///
+/// `apply_tile` and the droplet are also 6dd607eb's and the 1.18.2-0.3.1 jar's (the jar binds the
+/// seed in the constructor instead of taking it per call); only the brush storage differs (#149),
+/// and the oracle checks all three trees give the same maps. `apply_region` exists only in
+/// Reimagined. Java's `FastRandom` argument is not taken: every chunk reseeds it fully
+/// (`seed(chunkSeed, iterationSeed)` sets both its fields), so a fresh one per chunk is the same.
+///
+/// Engine's `Erosion` (`terraforged_filters::Erosion`, #69) is a different droplet model and stays
+/// separate: it runs over `Cell`s through value modifiers, uses inertia 0.05, capacity factor 4,
+/// minimum capacity 0.01, gravity 3, evaporation to 99 %, no height falloff, clamps the start
+/// position as a float and zeroes NaN lengths and speeds where this filter stops the droplet.
 pub struct ErosionFilter {
     erode_speed: f32,
     deposit_speed: f32,
@@ -341,6 +359,8 @@ impl ErosionFilter {
         }
     }
 
+    /// Reimagined's `apply(seed, originChunkX, originChunkZ, chunksAcross, mapSize, …)`: one droplet
+    /// per chunk of the `chunks_across`² block per iteration, seeded from world chunk coordinates.
     pub fn apply_region(
         &self,
         seed: i32,
@@ -362,14 +382,13 @@ impl ErosionFilter {
                         origin_chunk_x.wrapping_add(chunk_x),
                         origin_chunk_z.wrapping_add(chunk_z),
                     );
-                    let mut random =
-                        super::terraforged_filters::FastRandom::seeded(chunk_seed, iteration_seed);
-                    let x = clamp_i32(
+                    let mut random = FastRandom::seeded(chunk_seed, iteration_seed);
+                    let x = java_clamp(
                         start_x.wrapping_add(random.next_int(NoiseTileSize::CHUNK_SIZE)),
                         1,
                         max_index,
                     );
-                    let z = clamp_i32(
+                    let z = java_clamp(
                         start_z.wrapping_add(random.next_int(NoiseTileSize::CHUNK_SIZE)),
                         1,
                         max_index,
@@ -380,6 +399,8 @@ impl ErosionFilter {
         }
     }
 
+    /// `apply(seed, chunkX, chunkZ, NoiseTileSize, …)`: the same over the tile's chunks around
+    /// (`chunk_x`, `chunk_z`), on a map `size.region_length` blocks wide.
     pub fn apply_tile(
         &self,
         seed: i32,
@@ -398,14 +419,13 @@ impl ErosionFilter {
                     let start_x = delta_x.wrapping_sub(size.chunk_min).wrapping_shl(4);
                     let chunk_seed =
                         pack_seed(chunk_x.wrapping_add(delta_x), chunk_z.wrapping_add(delta_z));
-                    let mut random =
-                        super::terraforged_filters::FastRandom::seeded(chunk_seed, iteration_seed);
-                    let x = clamp_i32(
+                    let mut random = FastRandom::seeded(chunk_seed, iteration_seed);
+                    let x = java_clamp(
                         start_x.wrapping_add(random.next_int(NoiseTileSize::CHUNK_SIZE)),
                         1,
                         max_index,
                     );
-                    let z = clamp_i32(
+                    let z = java_clamp(
                         start_z.wrapping_add(random.next_int(NoiseTileSize::CHUNK_SIZE)),
                         1,
                         max_index,
@@ -540,56 +560,6 @@ fn height_falloff(height: f32) -> f32 {
         1.0
     } else {
         height / ErosionFilter::HEIGHT_FALL_OFF
-    }
-}
-
-fn pack_seed(x: i32, z: i32) -> i64 {
-    (u64::from(x as u32) | (u64::from(z as u32) << 32)) as i64
-}
-
-fn clamp_i32(value: i32, minimum: i32, maximum: i32) -> i32 {
-    if value < minimum {
-        minimum
-    } else if value > maximum {
-        maximum
-    } else {
-        value
-    }
-}
-
-fn java_max(first: f32, second: f32) -> f32 {
-    if first.is_nan() {
-        first
-    } else if second.is_nan() {
-        second
-    } else if first == 0.0 && second == 0.0 {
-        if first.is_sign_positive() || second.is_sign_positive() {
-            0.0
-        } else {
-            -0.0
-        }
-    } else if first >= second {
-        first
-    } else {
-        second
-    }
-}
-
-fn java_min(first: f32, second: f32) -> f32 {
-    if first.is_nan() {
-        first
-    } else if second.is_nan() {
-        second
-    } else if first == 0.0 && second == 0.0 {
-        if first.is_sign_negative() || second.is_sign_negative() {
-            -0.0
-        } else {
-            0.0
-        }
-    } else if first <= second {
-        first
-    } else {
-        second
     }
 }
 
@@ -1176,47 +1146,176 @@ pub(crate) mod tests {
         ErosionBrushes::new(46341);
     }
 
-    fn erosion_map(length: i32) -> Vec<f32> {
-        (0..length.wrapping_mul(length))
+    /// `ErosionFilterOracle.SETTINGS`: the jar/6dd607eb settings (lifetime 12), Reimagined's
+    /// defaults (lifetime 25), and small, odd, zero and negative counts.
+    fn erosion_filter_settings() -> [(&'static str, ErosionFilterSettings); 6] {
+        let with = |droplets_per_chunk, droplet_lifetime| ErosionFilterSettings {
+            droplets_per_chunk,
+            droplet_lifetime,
+            ..ErosionFilterSettings::default()
+        };
+        let odd = ErosionFilterSettings {
+            droplets_per_chunk: 20,
+            droplet_lifetime: 40,
+            droplet_volume: 1.0,
+            droplet_velocity: 0.1,
+            erosion_rate: 1.0,
+            deposit_rate: 0.0,
+        };
+        [
+            ("jar", with(350, 12)),
+            ("reimagined", ErosionFilterSettings::default()),
+            ("small", with(3, 10)),
+            ("odd", odd),
+            ("none", with(0, 25)),
+            ("negative", with(-3, -1)),
+        ]
+    }
+
+    fn erosion_mix(x: i32, z: i32, seed: i32) -> i32 {
+        let h = x
+            .wrapping_mul(374761393)
+            .wrapping_add(z.wrapping_mul(668265263))
+            .wrapping_add(seed.wrapping_mul(1442695041));
+        let h = (h ^ (h as u32 >> 13) as i32).wrapping_mul(1274126177);
+        h ^ (h as u32 >> 16) as i32
+    }
+
+    /// `ErosionFilterOracle.map`: 0 smooth value noise (0.15..0.75 plus a slope, so the 0.4 height
+    /// falloff matters), 1 the original ramp, 2 flat (droplets stop at once), 3 the noise with NaN,
+    /// infinite, negative and -0 cells.
+    fn erosion_map(kind: i32, length: i32, seed: i32) -> Vec<f32> {
+        let lattice = |x, z| (erosion_mix(x, z, seed) as u32 >> 8) as f32 / 16777216.0;
+        (0..length * length)
             .map(|index| {
-                let x = index % length;
-                let z = index / length;
-                0.2 + (x.wrapping_mul(13).wrapping_add(z.wrapping_mul(7)) % 31) as f32 / 100.0
-                    + x as f32 / 1000.0
+                let (x, z) = (index % length, index / length);
+                match kind {
+                    1 => 0.2 + ((x * 13 + z * 7) % 31) as f32 / 100.0 + x as f32 / 1000.0,
+                    2 => 0.5,
+                    _ => {
+                        let (ix, iz) = (x >> 3, z >> 3);
+                        let (tx, tz) = ((x & 7) as f32 / 8.0, (z & 7) as f32 / 8.0);
+                        let (a, b) = (lattice(ix, iz), lattice(ix + 1, iz));
+                        let (c, d) = (lattice(ix, iz + 1), lattice(ix + 1, iz + 1));
+                        let top = a + (b - a) * tx;
+                        let bottom = c + (d - c) * tx;
+                        let value = 0.15 + (top + (bottom - top) * tz) * 0.6 + x as f32 * 0.0005;
+                        match (kind, erosion_mix(x, z, !seed) & 255) {
+                            (3, 0) => f32::NAN,
+                            (3, 1) => f32::INFINITY,
+                            (3, 2) => -value,
+                            (3, 3) => -0.0,
+                            _ => value,
+                        }
+                    }
+                }
             })
             .collect()
     }
 
+    /// FNV-1a over every cell's bits, NaN canonicalized (its sign is not deterministic in Java).
+    fn erosion_map_digest(map: &[f32]) -> u64 {
+        map.iter().fold(0xcbf29ce484222325, |hash, &value| {
+            let bits = if value.is_nan() {
+                0x7fc00000
+            } else {
+                value.to_bits()
+            };
+            (hash ^ u64::from(bits)).wrapping_mul(1099511628211)
+        })
+    }
+
+    const EROSION_SEEDS: [i32; 5] = [0, 42, -1, i32::MIN, 123456789];
+    const EROSION_CHUNKS: [(i32, i32); 3] = [(0, 0), (-3, 5), (i32::MAX, i32::MIN)];
+
+    /// `.local/terraforged/oracles/erosion_filter/run.sh` runs Reimagined's own `ErosionFilter` (and,
+    /// for the tile apply, 6dd607eb's and the 1.18.2-0.3.1 jar's, which give the same maps) on these
+    /// maps, interpreted and JIT-compiled; each value folds the digests of one settings set's cases
+    /// (`reimagined.txt`, in order).
     #[test]
-    fn current_erosion_filter_matches_java_maps() {
+    fn erosion_filter_tiles_match_reimagined_java() {
+        let expected = [
+            0x9718b7fc26f58d8a_u64,
+            0xcc93b28186bfc21d,
+            0xeed98a075fb9d1ed,
+            0x35da6ecb5f483798,
+            0x6cb052f777dea056,
+            0x5baf101bb6230879,
+        ];
+        let mut line = 0;
+        for ((name, settings), expected) in erosion_filter_settings().into_iter().zip(expected) {
+            let mut fold = 0xcbf29ce484222325_u64;
+            for radius in 0..=2 {
+                for kind in 0..4 {
+                    let seed = EROSION_SEEDS[line % 5];
+                    let (chunk_x, chunk_z) = EROSION_CHUNKS[line % 3];
+                    line += 1;
+                    let size = NoiseTileSize::new(radius);
+                    let filter = ErosionFilter::new(size.region_length, settings);
+                    let mut map = erosion_map(kind, size.region_length, seed);
+                    let mut resource = ErosionResource::default();
+                    filter.apply_tile(seed, chunk_x, chunk_z, size, &mut resource, &mut map);
+                    let digest = erosion_map_digest(&map);
+                    fold = (fold ^ digest).wrapping_mul(1099511628211);
+                }
+            }
+            assert_eq!(fold, expected, "{name}");
+        }
+    }
+
+    /// Reimagined's region apply (`reimagined.txt`'s `r` lines): its 256-block, 16-chunk region and
+    /// smaller ones, including chunks that start past the map (clamped) and a map wider than the chunks.
+    #[test]
+    fn erosion_filter_regions_match_reimagined_java() {
+        let expected = [
+            0x353b5c5340fa0deb_u64,
+            0x387e4ff98c5e1947,
+            0x79035e03408cd9ce,
+            0x884b93846ab07b5a,
+            0x4e3fe5ae0cc243df,
+            0x9935981b434ab69f,
+        ];
+        let regions = [(1, 16), (3, 48), (5, 80), (4, 80), (6, 64), (16, 256)];
+        let mut line = 0;
+        for ((name, settings), expected) in erosion_filter_settings().into_iter().zip(expected) {
+            let mut fold = 0xcbf29ce484222325_u64;
+            for (chunks_across, map_size) in regions {
+                let step = if map_size == 256 { 3 } else { 1 };
+                for kind in (0..4).step_by(step) {
+                    let seed = EROSION_SEEDS[line % 5];
+                    let (chunk_x, chunk_z) = EROSION_CHUNKS[line % 3];
+                    line += 1;
+                    let filter = ErosionFilter::new(map_size, settings);
+                    let mut map = erosion_map(kind, map_size, seed);
+                    let mut resource = ErosionResource::default();
+                    filter.apply_region(
+                        seed,
+                        chunk_x,
+                        chunk_z,
+                        chunks_across,
+                        map_size,
+                        &mut resource,
+                        &mut map,
+                    );
+                    fold = (fold ^ erosion_map_digest(&map)).wrapping_mul(1099511628211);
+                }
+            }
+            assert_eq!(fold, expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn erosion_filter_moves_material() {
+        let size = NoiseTileSize::new(1);
         let settings = ErosionFilterSettings {
-            droplets_per_chunk: 3,
-            droplet_lifetime: 10,
+            droplet_lifetime: 12,
             ..ErosionFilterSettings::default()
         };
-        let size = NoiseTileSize::DEFAULT;
         let filter = ErosionFilter::new(size.region_length, settings);
-        let mut tile_map = erosion_map(size.region_length);
-        filter.apply_tile(
-            42,
-            -3,
-            5,
-            size,
-            &mut ErosionResource::default(),
-            &mut tile_map,
-        );
-        assert_eq!(hash(&tile_map), 0xb36ecb2fd97ba171);
-
-        let mut region_map = erosion_map(size.region_length);
-        filter.apply_region(
-            -17,
-            8,
-            -11,
-            size.chunk_length,
-            size.region_length,
-            &mut ErosionResource::default(),
-            &mut region_map,
-        );
-        assert_eq!(hash(&region_map), 0x293bedd53953eb33);
+        let original = erosion_map(0, size.region_length, 7);
+        let mut map = original.clone();
+        filter.apply_tile(7, 0, 0, size, &mut ErosionResource::default(), &mut map);
+        let changed = map.iter().zip(&original).filter(|(a, b)| a != b).count();
+        assert!(changed > map.len() / 4, "{changed} of {} cells", map.len());
     }
 }

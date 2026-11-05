@@ -29,7 +29,7 @@ use super::{
 
 /// TerraForged's `MathUtil.clamp(int, int, int)`: `value < min ? min : value > max ? max : value`. Unlike
 /// `i32::clamp` it never panics when `min > max` (then `min` wins for values below it and `max` for the rest).
-fn java_clamp(value: i32, min: i32, max: i32) -> i32 {
+pub fn java_clamp(value: i32, min: i32, max: i32) -> i32 {
     if value < min {
         min
     } else if value > max {

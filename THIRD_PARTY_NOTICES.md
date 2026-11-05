@@ -17,8 +17,8 @@ TerraForged source, distinct from the older shaded dependency's seed-replacement
 The heightmap smoothing and the erosion brushes in `native-mods/terraforged/erosion.rs` (`HeightmapSmoothing`,
 `HeightmapSmoothingSettings`, `ErosionBrushes`, `ErosionFilterSettings`) are adapted from
 [TerraForged Reimagined a24d4503064780790e975cd17495866ae13eef11](https://github.com/Romoslayer/TerraForged-Reimagined/tree/a24d4503064780790e975cd17495866ae13eef11)
-(`HeightmapSmoothing` and `TerraSettings.Smoothing`; `ErosionFilter`'s erosion-brush layout and
-`TerraSettings.Erosion`), an unofficial port of TerraForged to Minecraft 26.3,
+(`HeightmapSmoothing` and `TerraSettings.Smoothing`; `ErosionFilter`'s erosion-brush layout, its
+droplet simulation with the region-wide `apply`, and `TerraSettings.Erosion`), an unofficial port of TerraForged to Minecraft 26.3,
 MIT, copyright (c) 2020 TerraForged and (c) 2026 Romoslayer. Its license is preserved in
 `native-mods/terraforged/LICENSE-TERRAFORGED-REIMAGINED`.
 
