@@ -254,6 +254,11 @@ impl NoiseData {
         self.height.index()
     }
 
+    /// `getSample`.
+    pub const fn sample(&self) -> &NoiseSample {
+        &self.sample
+    }
+
     pub fn sample_mut(&mut self) -> &mut NoiseSample {
         &mut self.sample
     }

@@ -1162,8 +1162,8 @@ sea level given. Heights are TerraForged's block Y, `floor(noise * max_y)` count
 `TerrainLevels`' `max_y` (480 by default), not clamped to 26.3's -64..320: fitting them into a 26.3 world is the
 generator's job. Samples and noise data take the world's `TerrainRegistry`, so the default terrain is that
 registry's `none`; unset cells have no terrain (Java's null), and `getWaterLevel` panics on one where Java throws.
-What fills `NoiseData` (TerraForged's `NoiseGenerator`) is not ported yet. Its test replays `TerrainDataOracle.java`
-(in `.local/terraforged/oracles/terrain_data/`), which runs these classes from the mod jar (stubbing
+`NoiseData` is filled by the newer source's `NoiseGenerator.generate` (`noise_generator.rs`, below). Its test replays
+`TerrainDataOracle.java` (in `.local/terraforged/oracles/terrain_data/`), which runs these classes from the mod jar (stubbing
 `DimensionType`, the logger and the mod's registry-backed `TerrainType` wrapper of Engine's `none`): indices over
 negative and huge coordinates and borders, four chunks (smooth, random, special values with NaN, infinities,
 signed zeros and subnormals, and one with unset cells) read with four `TerrainLevels`, every element, height,
@@ -1172,8 +1172,8 @@ gradient and water level, bit for bit.
 The terrain-generator layer (`terrain_generator.rs`, the mod's `TerrainGenerator` and `ObjectPool` as in the
 1.18.2-0.3.1 jar) turns a noise generator's chunk `NoiseData` into `TerrainData` and answers `getHeight` (height noise
 scaled by `TerrainLevels`). `NoiseGenerator` is the part of the mod's `INoiseGenerator` it calls; as in the jar, the
-seed is bound into the noise generator, so calls take coordinates only. The mod's noise generator itself is not ported
-yet (its continent noise is: `ContinentNoise`, below; its terrain blender too). The pool keeps the mod's quirk: `take` always builds a new value
+seed is bound into the noise generator, so calls take coordinates only. The ported noise generator
+(`noise_generator.rs`, below) is the newer source's seed-first one and does not implement this trait. The pool keeps the mod's quirk: `take` always builds a new value
 (the polled one is dropped), so every `generate` fills a fresh `TerrainData` and restored data is never reused; its
 capacity is `Environment.CORES` (the processor count) and `forCacheSize` uses `NoiseUtil.floor`. Its test replays
 `TerrainGeneratorOracle.java` (in `.local/terraforged/oracles/terrain_generator/`), which runs the jar's classes over
@@ -1861,8 +1861,8 @@ blender's terrain. NaN goes inland, as Java's float compares do. Then the rivers
 the continent context's registry's. A terrain noise with no seed-first form (a custom module) makes `sample` return an
 error rather than sample it seedless. Building the continent and the blender (`createContinentNoise` with
 `CONTINENT_OFFSET` 18749560 and its control points, `createLandTerrain` with `TERRAIN_OFFSET` 45763218) is left to the
-caller, and chunk generation, `find` and erosion come later. The 1.18.2-0.3.1 jar's `NoiseGenerator` samples the same
-way with the seed taken from its constructor: its ocean noise is seeded with `(int) seed` itself (no 8763214 offset),
+caller, chunk generation is below, and `find` and erosion come later. The 1.18.2-0.3.1 jar's `NoiseGenerator` samples
+the same way with the seed taken from its constructor: its ocean noise is seeded with `(int) seed` itself (no 8763214 offset),
 its blender and continent settings with the world seed, and its sampling methods take no seed. Compared method by
 method (`.local/terraforged/oracles/noise_generator/version/compare.sh`), the two differ only in where that seed comes
 from. `NoiseGeneratorOracle.java` (`.local/terraforged/oracles/noise_generator/`, `run.sh`) runs the newer source's own
@@ -1874,10 +1874,31 @@ included). Each case samples a 17×17 grid that reaches all four height branches
 infinity, where Java throws and the port panics). The test matches its 66 folded grid and edge lines bit for bit, in debug and
 release.
 
+Chunk generation (`NoiseGenerator::generate(seed, chunk_x, chunk_z, consumer)`, the newer source's `generate(seed,
+chunkX, chunkZ, consumer)`) samples the chunk and its one-block border, an 18×18 grid from -1 to 16, `dz` outer and
+`dx` inner, at `(chunkX << 4) + dx` in `int` math (so the edge chunks wrap), into one `NoiseData` and hands it to the
+consumer once; `height_noise(seed, x, z)` is `getHeightNoise` (one reset sample). As in Java every position is sampled
+into the data's own sample with no reset in between, so the river noise carries over from position to position: the
+river carver only multiplies it (inside a valley) and only an ocean or beach position resets it to 1, so once a valley
+lowers it, it stays low for the following land positions of the chunk and each further valley lowers it again. Java
+keeps that `NoiseData` per thread and reuses it for the thread's next chunk, so a chunk's river noise also depends on
+which chunk the same thread generated before; the port does not reproduce that (it depends on scheduling): every chunk
+starts from a new `NoiseData`, which is Java's first chunk on a thread. A failing sample (a custom terrain noise)
+returns an error and the consumer is not called, where Java throws out of the loop. The jar's `generate(chunkX, chunkZ,
+consumer)` has the same loop with its constructor's seed (and the same carry-over; `version/compare.sh` also compares
+`generate`, `getHeightNoise` and `getNoiseSample`); #105's seedless `NoiseGenerator` trait (the jar's binding of the
+seed into the generator, `with(seed, levels)`) is not implemented by this seed-first generator. `NoiseChunkOracle.java`
+(same folder, `run-chunks.sh`) runs the source's `generate` for two `TerrainLevels`, both terrain sets and four runtime
+seeds (the `int` extremes included) over eight chunks (negative ones, ones crossing the `int` wrap, two in river
+valleys at seed 0), each on a new thread, hashing every `NoiseData` element and the data's final sample. The test
+matches its 128 chunk lines (the hash and the number of cells whose river noise differs from a reset sample's: 56
+chunks have some) bit for bit, in debug and release. Run one after another on one thread, up to six of the eight
+chunks come out different in Java.
+
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives, the biome climate types, the climate settings, the climate module, the climate stage, the continent factory, the generator context, the heightmap, the world generator factory, TerraForged's terrain levels, its terrain data, its terrain generator, its terrain-blend utilities, its terrain blender with its nearest-terrain search (and the newer source's seed-first blender), noise-graph reseeding, the cave noise primitives, the biome viability rules, the biome overrides, the continent control points, the continent cell primitives, the continent configuration, the continent shape blending, the continent cell generator with its spawn-offset search, the continent river nodes, the continent river carver's arithmetic, the continent river networks with their nearest-node sampling and their warped, carved river sampling, the newer source's seed-first noise sources, scalar noise graphs, domain warps, selectors, graph caches, terraces, legacy terraces, advanced terraces, curves, transforms (steps, frequency, gradient and modulation), special sources (boost, cell, cell edge and sine) and lines, and its bounded concurrent lossy cache with the continent's cell and
-river-piece caches on it, the continent noise module that joins the continent layers, and the newer source's terrain height sampler. They change nothing in the game, so there is
+river-piece caches on it, the continent noise module that joins the continent layers, and the newer source's terrain height sampler with its bordered chunk generation. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development

@@ -28,7 +28,7 @@ use super::{
     terraforged_continent_points::{BEACH, COAST, SHALLOW_OCEAN},
     terraforged_engine::{ControlPoints, Terrain},
     terraforged_terrain_blender::{Blender, TerrainBlender},
-    terraforged_terrain_data::NoiseSample,
+    terraforged_terrain_data::{NoiseData, NoiseSample},
     terraforged_terrain_levels::TerrainLevels,
 };
 
@@ -106,6 +106,50 @@ impl NoiseGenerator {
     /// overwrites its state).
     pub fn blender_resource(&self) -> Blender {
         self.land.blender_resource()
+    }
+
+    /// `getHeightNoise(seed, x, z)`: the height noise of `getNoiseSample`, a reset sample filled by
+    /// [`Self::sample`]. `Err` where [`Self::sample`] fails.
+    pub fn height_noise(&self, seed: i32, x: i32, z: i32) -> Result<f32, &'static str> {
+        let mut sample = NoiseSample::new(&self.continent.context().terrain);
+        let mut blender = self.blender_resource();
+        Ok(self
+            .sample(seed, x, z, &mut sample, &mut blender)?
+            .height_noise)
+    }
+
+    /// `generate(seed, chunkX, chunkZ, consumer)`: samples the chunk and its one-block border (`dz`, then `dx`, from
+    /// `NoiseData::MIN` to `MAX - 1`, at `(chunkX << 4) + dx`, `int` wrap) into one [`NoiseData`] and hands it to
+    /// `consumer` once. As in Java, every position is sampled into the data's own sample without a reset, so a field
+    /// a position leaves alone keeps the previous position's value (the river noise, which the carver multiplies and
+    /// only an ocean or beach position resets to 1); the data's sample ends as the last position's. Java's data is
+    /// thread-local and reused by the thread's next chunk, so its first sample starts from whatever chunk that thread
+    /// generated before; the port starts every chunk from a new `NoiseData` (Java's first chunk on a thread), so its
+    /// output doesn't depend on which thread generated what. `Err` (and no `consumer` call) where a sample fails, where
+    /// Java throws out of the loop.
+    pub fn generate(
+        &self,
+        seed: i32,
+        chunk_x: i32,
+        chunk_z: i32,
+        consumer: impl FnOnce(&NoiseData),
+    ) -> Result<(), &'static str> {
+        let mut noise_data = NoiseData::new(&self.continent.context().terrain);
+        let mut sample = noise_data.sample().clone();
+        let mut blender = self.blender_resource();
+        let start_x = chunk_x.wrapping_shl(4);
+        let start_z = chunk_z.wrapping_shl(4);
+        for dz in NoiseData::MIN..NoiseData::MAX {
+            for dx in NoiseData::MIN..NoiseData::MAX {
+                let x = start_x.wrapping_add(dx);
+                let z = start_z.wrapping_add(dz);
+                self.sample(seed, x, z, &mut sample, &mut blender)?;
+                noise_data.set_noise(dx, dz, &sample);
+            }
+        }
+        *noise_data.sample_mut() = sample;
+        consumer(&noise_data);
+        Ok(())
     }
 
     /// `sample(seed, x, z, sample, blender)`: [`Self::sample_terrain`] then [`Self::sample_river`] at
@@ -626,5 +670,386 @@ grid 2 1 -21491124 3ed3d59af446ef82";
             }
         }
         assert!(ocean > 0 && land > 0);
+    }
+
+    /// `NoiseChunkOracle.java` (`.local/terraforged/oracles/noise_generator/`, `run-chunks.sh`): the newer source's
+    /// `generate` per chunk on a new thread (a fresh thread-local `NoiseData`), every element of the four maps in index
+    /// order and the data's final sample folded, then the number of cells whose river noise differs from a reset
+    /// sample's (the carry-over of `generate`'s unreset sample). Its `seq` lines are not checked (see `generate`).
+    const EXPECTED_CHUNKS: &str = "\
+chunk 0 0 0 0 0 33f9ab2a26bddfbf 0\n\
+chunk 0 0 0 -1 -1 33f9ab2a26bddfbf 0\n\
+chunk 0 0 0 3 -5 a9c002ec4a863e9e 0\n\
+chunk 0 0 0 -7 12 f42d404c9c5a4feb 323\n\
+chunk 0 0 0 134217727 -134217728 fddc020c3219786a 0\n\
+chunk 0 0 0 2147483647 -2147483648 33f9ab2a26bddfbf 0\n\
+chunk 0 0 0 24 16 1ac160303595d18b 72\n\
+chunk 0 0 0 -40 -16 52fec1c70ce43ce1 323\n\
+chunk 0 0 -17 0 0 ddee617251540b5 51\n\
+chunk 0 0 -17 -1 -1 24b3d749ba024de6 254\n\
+chunk 0 0 -17 3 -5 b11a422e4028708 323\n\
+chunk 0 0 -17 -7 12 ec5f931cff5c6a36 0\n\
+chunk 0 0 -17 134217727 -134217728 aa1c4c2b009524cd 272\n\
+chunk 0 0 -17 2147483647 -2147483648 bb9a40751c520bdd 248\n\
+chunk 0 0 -17 24 16 fdbac3c85223b618 323\n\
+chunk 0 0 -17 -40 -16 4a5c3d54dea7694 323\n\
+chunk 0 0 2147483647 0 0 e3110db0303d9d3c 0\n\
+chunk 0 0 2147483647 -1 -1 e3110db0303d9d3c 0\n\
+chunk 0 0 2147483647 3 -5 ae9954bfdd6e24e6 0\n\
+chunk 0 0 2147483647 -7 12 c24657905290fff6 0\n\
+chunk 0 0 2147483647 134217727 -134217728 eda2f383b2e046a2 17\n\
+chunk 0 0 2147483647 2147483647 -2147483648 e3110db0303d9d3c 0\n\
+chunk 0 0 2147483647 24 16 12b06ae65a7f7bee 310\n\
+chunk 0 0 2147483647 -40 -16 3cbfe9fcd0ed3dd5 0\n\
+chunk 0 0 -2147483648 0 0 afde55dad5ced8dc 58\n\
+chunk 0 0 -2147483648 -1 -1 2228ea5665de043f 0\n\
+chunk 0 0 -2147483648 3 -5 a566c37fa03b8609 323\n\
+chunk 0 0 -2147483648 -7 12 cc14313bb44080e7 323\n\
+chunk 0 0 -2147483648 134217727 -134217728 fddc020c3219786a 0\n\
+chunk 0 0 -2147483648 2147483647 -2147483648 3af4111f81d301e7 0\n\
+chunk 0 0 -2147483648 24 16 2ba636a6d803bcd8 323\n\
+chunk 0 0 -2147483648 -40 -16 c656c89a05738f7d 0\n\
+chunk 0 1 0 0 0 d5c82093c8d4457a 0\n\
+chunk 0 1 0 -1 -1 66f4fc10e27e066a 0\n\
+chunk 0 1 0 3 -5 b964f082b990ad4e 0\n\
+chunk 0 1 0 -7 12 49047b0025e50759 323\n\
+chunk 0 1 0 134217727 -134217728 fddc020c3219786a 0\n\
+chunk 0 1 0 2147483647 -2147483648 6fdcd1d6bf8275d6 0\n\
+chunk 0 1 0 24 16 2be4fb4f32596c71 72\n\
+chunk 0 1 0 -40 -16 d355d67972463d32 323\n\
+chunk 0 1 -17 0 0 ddee617251540b5 51\n\
+chunk 0 1 -17 -1 -1 ead534382dfea410 254\n\
+chunk 0 1 -17 3 -5 e34043bfc39ea68f 323\n\
+chunk 0 1 -17 -7 12 1b2b7c2e58a2ba2 0\n\
+chunk 0 1 -17 134217727 -134217728 f6419b317d98357f 272\n\
+chunk 0 1 -17 2147483647 -2147483648 d52ac797c94bc405 248\n\
+chunk 0 1 -17 24 16 98b698c340852644 323\n\
+chunk 0 1 -17 -40 -16 8e5dbb2d56e925b0 323\n\
+chunk 0 1 2147483647 0 0 64c7aa8f7eebd492 0\n\
+chunk 0 1 2147483647 -1 -1 fdcd38500e866a84 0\n\
+chunk 0 1 2147483647 3 -5 ce80bed9d401d172 0\n\
+chunk 0 1 2147483647 -7 12 412904514ffabe55 0\n\
+chunk 0 1 2147483647 134217727 -134217728 de05d0d990937a5e 17\n\
+chunk 0 1 2147483647 2147483647 -2147483648 37f7f6b40944b9a7 0\n\
+chunk 0 1 2147483647 24 16 6073cf22d32d89f9 310\n\
+chunk 0 1 2147483647 -40 -16 3cbfe9fcd0ed3dd5 0\n\
+chunk 0 1 -2147483648 0 0 a7c43bd81d7b4ec0 58\n\
+chunk 0 1 -2147483648 -1 -1 2228ea5665de043f 0\n\
+chunk 0 1 -2147483648 3 -5 76eaef3510d0b812 323\n\
+chunk 0 1 -2147483648 -7 12 4db9264965dbe257 323\n\
+chunk 0 1 -2147483648 134217727 -134217728 fddc020c3219786a 0\n\
+chunk 0 1 -2147483648 2147483647 -2147483648 3af4111f81d301e7 0\n\
+chunk 0 1 -2147483648 24 16 be1cfafa81b7a3ba 323\n\
+chunk 0 1 -2147483648 -40 -16 c656c89a05738f7d 0\n\
+chunk 2 0 0 0 0 7e9ed248355589da 0\n\
+chunk 2 0 0 -1 -1 7e9ed248355589da 0\n\
+chunk 2 0 0 3 -5 ce230caf46dcd600 0\n\
+chunk 2 0 0 -7 12 e997293de62673dc 323\n\
+chunk 2 0 0 134217727 -134217728 31cf2a204cbf9596 0\n\
+chunk 2 0 0 2147483647 -2147483648 7e9ed248355589da 0\n\
+chunk 2 0 0 24 16 dbdfb360d6d10176 323\n\
+chunk 2 0 0 -40 -16 15a700ecd3632500 317\n\
+chunk 2 0 -17 0 0 e225667706d973f1 49\n\
+chunk 2 0 -17 -1 -1 5998a5757be96574 256\n\
+chunk 2 0 -17 3 -5 9dd0f528b544d206 323\n\
+chunk 2 0 -17 -7 12 33e39bcfb10fd066 0\n\
+chunk 2 0 -17 134217727 -134217728 30e38c8222c7937f 0\n\
+chunk 2 0 -17 2147483647 -2147483648 7507bde1378d15a1 250\n\
+chunk 2 0 -17 24 16 eb95aea0a241bdbb 0\n\
+chunk 2 0 -17 -40 -16 a7cf7c84d7b93648 284\n\
+chunk 2 0 2147483647 0 0 e0e0c0d66422e276 0\n\
+chunk 2 0 2147483647 -1 -1 e0e0c0d66422e276 0\n\
+chunk 2 0 2147483647 3 -5 e0dd5eb3a9e9d49a 0\n\
+chunk 2 0 2147483647 -7 12 be9d87a64bd99175 0\n\
+chunk 2 0 2147483647 134217727 -134217728 4169efdb445c056e 0\n\
+chunk 2 0 2147483647 2147483647 -2147483648 e0e0c0d66422e276 0\n\
+chunk 2 0 2147483647 24 16 49824e91cde75c68 303\n\
+chunk 2 0 2147483647 -40 -16 6faff3681952bd25 0\n\
+chunk 2 0 -2147483648 0 0 eb6359863b3e36e5 65\n\
+chunk 2 0 -2147483648 -1 -1 4c7cb8190bcfc595 0\n\
+chunk 2 0 -2147483648 3 -5 a07614c1e1a4d82d 323\n\
+chunk 2 0 -2147483648 -7 12 ef2d618f795fb024 323\n\
+chunk 2 0 -2147483648 134217727 -134217728 a2415c9af7c27437 0\n\
+chunk 2 0 -2147483648 2147483647 -2147483648 43540a92f2ee1bba 0\n\
+chunk 2 0 -2147483648 24 16 80d0f5f3030b2e92 0\n\
+chunk 2 0 -2147483648 -40 -16 c04ac2241d15e3ce 0\n\
+chunk 2 1 0 0 0 38c0edfd2a915ab9 0\n\
+chunk 2 1 0 -1 -1 bcb3f143bca56ac7 0\n\
+chunk 2 1 0 3 -5 7d3acc0f73c203a4 0\n\
+chunk 2 1 0 -7 12 c0539ed87169b975 323\n\
+chunk 2 1 0 134217727 -134217728 7de15fb84ffad504 0\n\
+chunk 2 1 0 2147483647 -2147483648 3c5a9744531d7000 0\n\
+chunk 2 1 0 24 16 46a93c1223fc7fcf 323\n\
+chunk 2 1 0 -40 -16 f05433c485f91dba 317\n\
+chunk 2 1 -17 0 0 e225667706d973f1 49\n\
+chunk 2 1 -17 -1 -1 66c355b2572a037e 256\n\
+chunk 2 1 -17 3 -5 6c05c34c81f7e159 323\n\
+chunk 2 1 -17 -7 12 8d90a25a0409e1cb 0\n\
+chunk 2 1 -17 134217727 -134217728 172f25ca11b76736 0\n\
+chunk 2 1 -17 2147483647 -2147483648 320e1ca6df54d0c6 250\n\
+chunk 2 1 -17 24 16 81bd19464404e117 0\n\
+chunk 2 1 -17 -40 -16 c6012c05d208214f 284\n\
+chunk 2 1 2147483647 0 0 130000da40b9f482 0\n\
+chunk 2 1 2147483647 -1 -1 21b724d7083be2a3 0\n\
+chunk 2 1 2147483647 3 -5 e8f8e04d868c2e36 0\n\
+chunk 2 1 2147483647 -7 12 565e4795e9119dce 0\n\
+chunk 2 1 2147483647 134217727 -134217728 12a18869899028d6 0\n\
+chunk 2 1 2147483647 2147483647 -2147483648 9b48d047fe051cdb 0\n\
+chunk 2 1 2147483647 24 16 c5ed31a25b250860 303\n\
+chunk 2 1 2147483647 -40 -16 6faff3681952bd25 0\n\
+chunk 2 1 -2147483648 0 0 f3a99312fa7d235a 65\n\
+chunk 2 1 -2147483648 -1 -1 4c7cb8190bcfc595 0\n\
+chunk 2 1 -2147483648 3 -5 1c1063e4da8e7959 323\n\
+chunk 2 1 -2147483648 -7 12 a7adfd63118a8bbb 323\n\
+chunk 2 1 -2147483648 134217727 -134217728 1f38b823ce236878 0\n\
+chunk 2 1 -2147483648 2147483647 -2147483648 43540a92f2ee1bba 0\n\
+chunk 2 1 -2147483648 24 16 317cf9e789e7fcc7 0\n\
+chunk 2 1 -2147483648 -40 -16 c04ac2241d15e3ce 0";
+
+    const CHUNKS: [(i32, i32); 8] = [
+        (0, 0),
+        (-1, -1),
+        (3, -5),
+        (-7, 12),
+        (134_217_727, -134_217_728),
+        (i32::MAX, i32::MIN),
+        (24, 16),
+        (-40, -16),
+    ];
+
+    fn chunk_lines(variant: usize, set: usize, seed: i32) -> Vec<String> {
+        let generator = generator(variant, set);
+        let terrains = Arc::clone(&generator.continent().context().terrain);
+        let mut blender = generator.blender_resource();
+        let id = format!("{variant} {set} {seed}");
+        let mut lines = Vec::new();
+        for (chunk_x, chunk_z) in CHUNKS {
+            let mut called = false;
+            generator
+                .generate(seed, chunk_x, chunk_z, |data| {
+                    called = true;
+                    let mut fold = Fold::new();
+                    for index in 0..data.index().length() {
+                        fold.float(data.height().get_index(index));
+                        fold.float(data.base().get_index(index));
+                        fold.float(data.river().get_index(index));
+                        fold.add(
+                            data.terrain()
+                                .get_index(index)
+                                .map_or(-1, |terrain| i64::from(terrain.id()))
+                                as u64,
+                        );
+                    }
+                    fold.sample(data.sample());
+                    let hash = fold.0;
+                    let mut carried = 0;
+                    for dz in NoiseData::MIN..NoiseData::MAX {
+                        for dx in NoiseData::MIN..NoiseData::MAX {
+                            let mut fresh = NoiseSample::new(&terrains);
+                            let (x, z) = (
+                                chunk_x.wrapping_shl(4).wrapping_add(dx),
+                                chunk_z.wrapping_shl(4).wrapping_add(dz),
+                            );
+                            generator
+                                .sample(seed, x, z, &mut fresh, &mut blender)
+                                .unwrap();
+                            if fresh.river_noise.to_bits() != data.river().get(dx, dz).to_bits() {
+                                carried += 1;
+                            }
+                        }
+                    }
+                    lines.push(format!("chunk {id} {chunk_x} {chunk_z} {hash:x} {carried}"));
+                })
+                .unwrap();
+            assert!(called);
+        }
+        lines
+    }
+
+    #[test]
+    fn chunks_match_current_java_generator() {
+        let mut lines = Vec::new();
+        for variant in [0, 2] {
+            for set in 0..2 {
+                for seed in [0, -17, i32::MAX, i32::MIN] {
+                    lines.extend(chunk_lines(variant, set, seed));
+                }
+            }
+        }
+        let expected: Vec<&str> = EXPECTED_CHUNKS.lines().collect();
+        assert_eq!(lines.len(), expected.len());
+        for (actual, expected) in lines.iter().zip(&expected) {
+            assert_eq!(actual, expected);
+        }
+        // The river valleys' carry-over is exercised.
+        assert!(lines.iter().any(|line| !line.ends_with(" 0")));
+    }
+
+    /// `generate` fills each cell with `sample`'s output at that position from the previous cell's sample, and
+    /// `height_noise` is a reset sample's height.
+    #[test]
+    fn chunk_cells_are_chained_samples() {
+        let generator = generator(0, 1);
+        let terrains = Arc::clone(&generator.continent().context().terrain);
+        let mut blender = generator.blender_resource();
+        let (seed, chunk_x, chunk_z) = (-17, -40, -16);
+        let mut sample = NoiseSample::new(&terrains);
+        let mut expected = Vec::new();
+        for dz in -1..17 {
+            for dx in -1..17 {
+                let (x, z) = (chunk_x * 16 + dx, chunk_z * 16 + dz);
+                generator
+                    .sample(seed, x, z, &mut sample, &mut blender)
+                    .unwrap();
+                expected.push((dx, dz, sample.clone()));
+                let mut fresh = NoiseSample::new(&terrains);
+                generator
+                    .sample(seed, x, z, &mut fresh, &mut blender)
+                    .unwrap();
+                assert_eq!(
+                    generator.height_noise(seed, x, z).unwrap().to_bits(),
+                    fresh.height_noise.to_bits()
+                );
+            }
+        }
+        generator
+            .generate(seed, chunk_x, chunk_z, |data| {
+                for (dx, dz, sample) in &expected {
+                    assert_eq!(
+                        data.height().get(*dx, *dz).to_bits(),
+                        sample.height_noise.to_bits()
+                    );
+                    assert_eq!(
+                        data.base().get(*dx, *dz).to_bits(),
+                        sample.base_noise.to_bits()
+                    );
+                    assert_eq!(
+                        data.river().get(*dx, *dz).to_bits(),
+                        sample.river_noise.to_bits()
+                    );
+                    assert!(
+                        data.terrain()
+                            .get(*dx, *dz)
+                            .unwrap()
+                            .is_same(&sample.terrain_type)
+                    );
+                }
+                let last = &expected.last().unwrap().2;
+                assert_eq!(
+                    data.sample().river_noise.to_bits(),
+                    last.river_noise.to_bits()
+                );
+                assert!(data.sample().terrain_type.is_same(&last.terrain_type));
+            })
+            .unwrap();
+    }
+
+    /// A chunk with a land cell fails on a custom terrain noise without calling the consumer (Java throws out of the
+    /// loop); an all-ocean chunk never reads the blender and equals the seed-first generator's.
+    #[test]
+    fn custom_land_noise_fails_the_chunk() {
+        let custom = generator_with(0, |context| {
+            vec![Arc::new(TerrainNoise::new(
+                context.terrain.get_by_name("hills").unwrap(),
+                1.0,
+                Module::custom(0.0, 1.0, |_, _| 0.25),
+            ))]
+        });
+        let reference = generator(0, 0);
+        let terrains = Arc::clone(&reference.continent().context().terrain);
+        let mut blender = reference.blender_resource();
+        let fold = |generator: &NoiseGenerator, chunk_x: i32, chunk_z: i32| {
+            let mut out = None;
+            let result = generator.generate(0, chunk_x, chunk_z, |data| {
+                let mut fold = Fold::new();
+                for index in 0..data.index().length() {
+                    fold.float(data.height().get_index(index));
+                    fold.float(data.base().get_index(index));
+                    fold.float(data.river().get_index(index));
+                    fold.add(i64::from(data.terrain().get_index(index).unwrap().id()) as u64);
+                }
+                out = Some(fold.0);
+            });
+            result.map(|()| out.unwrap())
+        };
+        let (mut ocean, mut land) = (false, false);
+        for i in -8..=8 {
+            let (chunk_x, chunk_z) = ((i * 613 - 211) >> 4, 97 >> 4);
+            let mut all_ocean = true;
+            let mut any_land = false;
+            for dz in -1..17 {
+                for dx in -1..17 {
+                    let mut sample = NoiseSample::new(&terrains);
+                    reference
+                        .sample(
+                            0,
+                            chunk_x * 16 + dx,
+                            chunk_z * 16 + dz,
+                            &mut sample,
+                            &mut blender,
+                        )
+                        .unwrap();
+                    all_ocean &= sample.continent_noise < BEACH;
+                    any_land |= !(sample.continent_noise < BEACH);
+                }
+            }
+            if all_ocean && !ocean {
+                ocean = true;
+                assert_eq!(
+                    fold(&custom, chunk_x, chunk_z),
+                    fold(&reference, chunk_x, chunk_z)
+                );
+            } else if any_land && !land {
+                land = true;
+                assert!(fold(&custom, chunk_x, chunk_z).is_err());
+            }
+        }
+        assert!(ocean && land);
+    }
+
+    /// Unlike Java's thread-local `NoiseData`, a chunk doesn't depend on what the thread generated before: worker
+    /// threads generating the chunks in different orders at once get the sequential results.
+    #[test]
+    fn chunks_do_not_depend_on_the_thread_or_order() {
+        let generator = generator(0, 1);
+        let digest = |chunk_x: i32, chunk_z: i32| {
+            let mut out = 0;
+            generator
+                .generate(-17, chunk_x, chunk_z, |data| {
+                    let mut fold = Fold::new();
+                    for index in 0..data.index().length() {
+                        fold.float(data.height().get_index(index));
+                        fold.float(data.river().get_index(index));
+                    }
+                    fold.sample(data.sample());
+                    out = fold.0;
+                })
+                .unwrap();
+            out
+        };
+        let sequential: Vec<u64> = CHUNKS.iter().map(|&(x, z)| digest(x, z)).collect();
+        std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..4)
+                .map(|worker| {
+                    let digest = &digest;
+                    scope.spawn(move || {
+                        let mut order: Vec<usize> = (0..CHUNKS.len()).collect();
+                        order.rotate_left(worker * 3 % CHUNKS.len());
+                        if worker % 2 == 1 {
+                            order.reverse();
+                        }
+                        order
+                            .into_iter()
+                            .map(|i| (i, digest(CHUNKS[i].0, CHUNKS[i].1)))
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            for worker in workers {
+                for (i, value) in worker.join().unwrap() {
+                    assert_eq!(value, sequential[i]);
+                }
+            }
+        });
     }
 }
