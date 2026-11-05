@@ -23,7 +23,7 @@
  */
 
 use super::{
-    terraforged::{clamp, java_max, java_min, lerp, map},
+    terraforged::{Source, SourceConfig, SourceKind, clamp, java_max, java_min, lerp, map},
     terraforged_continent_config::{ContinentConfig, RiverConfig},
     terraforged_continent_points::{BEACH, COAST},
     terraforged_river_nodes::{CarverSample, NodeSample},
@@ -38,10 +38,13 @@ const BORDER_RANGE: f32 = 0.95;
 
 /// TerraForged's continent `RiverCarver` (`worldgen.noise.continent.river`, the newer source's; its carving
 /// arithmetic is byte-identical to the 1.18.2-0.3.1 jar's): cuts the valley, banks and bed of the nearest river and
-/// lake node into a `NoiseSample`. The erosion noise (`Source.builder().seed(rivers.seed + 21221)` ridge, read
-/// seed-first by the newer source's `carve(seed, x, y, …)`) is not ported yet; `carve_with_erosion` takes its value.
+/// lake node into a `NoiseSample`. The erosion noise is read seed-first, as the newer source's `carve(seed, x, y, …)`
+/// does (the jar's `carve(x, y, …)` reads it seedless).
 pub struct RiverCarver {
     levels: NoiseLevels,
+    /// `erosionNoise`: `Source.builder().seed(rivers.seed + 21221).frequency(128).octaves(2).ridge()` (the builder's
+    /// ridge gain, 0.975).
+    erosion: Source,
     river_config: RiverConfig,
     lake_config: RiverConfig,
     /// `blendRadius`: `min(1, max(river valley max, lake valley max) + 0.2)` over the scaled configs. Java computes
@@ -51,7 +54,8 @@ pub struct RiverCarver {
 
 impl RiverCarver {
     /// `new RiverCarver(levels, config)`: copies the river and lake configs scaled by `levels.frequency / scale`
-    /// (`1f / int scale` in float: 0 gives infinity), minus the erosion module.
+    /// (`1f / int scale` in float: 0 gives infinity), and builds the erosion ridge (`rivers.seed + 21221` wraps like
+    /// a Java `int`).
     pub fn new(levels: NoiseLevels, config: ContinentConfig) -> Self {
         let frequency = levels.frequency * (1.0 / config.shape.scale as f32);
         let mut river_config = config.rivers.rivers;
@@ -61,10 +65,33 @@ impl RiverCarver {
         let valley_width = java_max(river_config.valley_width.max, lake_config.valley_width.max);
         Self {
             levels,
+            erosion: Source::new(
+                SourceKind::Ridge,
+                SourceConfig {
+                    seed: config.rivers.seed.wrapping_add(21221),
+                    frequency: 128.0,
+                    octaves: 2,
+                    gain: 0.975,
+                    ..SourceConfig::default()
+                },
+            ),
             river_config,
             lake_config,
             blend_radius: java_min(1.0, valley_width + 0.2),
         }
+    }
+
+    /// The newer source's `carve(seed, x, y, sample, carverSample)`: reads `erosionNoise.getValue(seed, x, y)`
+    /// (Noise2D seed-first: the ridge's own seed plus `seed`), then [`Self::carve_with_erosion`].
+    pub fn carve(
+        &self,
+        seed: i32,
+        x: f32,
+        y: f32,
+        sample: &mut NoiseSample,
+        carver: &CarverSample,
+    ) {
+        self.carve_with_erosion(self.erosion.value_seed_first(seed, x, y), sample, carver);
     }
 
     /// `carve(seed, x, y, sample, carverSample)` after its first line, with `erosion` standing for
