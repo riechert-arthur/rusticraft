@@ -1552,9 +1552,10 @@ zero, negative, NaN and infinite blend ranges and falloffs; NaN, ±inf, zero and
 `run-graphs.sh`; the tests match both bit for bit in debug and release.
 
 `Select` and `MultiBlend` follow the same pattern (control first, then the children Java evaluates, all with the call's
-seed). `Select` reads its four curve edges (`bound ∓ falloff`) and their ranges from the constructor; a zero falloff
-takes the hard edge (below `lowerBound` the lower source, above `upperBound` the upper one, the lower source otherwise,
-so reversed bounds pick the lower source first), and a NaN control or falloff falls through to the lower source.
+seed). `Select` reads its four curve edges (`bound ∓ falloff`) and their ranges from the constructor; a zero (or -0)
+falloff takes the hard edge (below `lowerBound` the lower source, else above `upperBound` the upper one, else the lower
+source; reversed bounds test the lower bound first, so only controls at or above it reach the upper source), and a NaN
+control or falloff falls through to the lower source.
 `MultiBlend` keeps the constructor's slots: `NoiseUtil.round(selector * maxIndex)` picks the slot, a zero `blendRange`
 returns its source, otherwise a control above (below) the slot blends with the next (previous) slot, alpha clamped to
 0..1 by `NoiseUtil.clamp`. These slots come from the constructor's float blend; only reseeding cuts it to an `int`.
