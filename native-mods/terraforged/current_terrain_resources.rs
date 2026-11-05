@@ -32,7 +32,7 @@ use super::terraforged_terrain_asset_registry::{
 /// The number of bundled terrain types.
 pub const TERRAIN_TYPE_COUNT: usize = 18;
 /// The number of bundled terrain noises.
-pub const TERRAIN_NOISE_COUNT: usize = 2;
+pub const TERRAIN_NOISE_COUNT: usize = 5;
 
 /// TerraForged Reimagined a24d450's `terrain_type` registry files
 /// (<https://github.com/Romoslayer/TerraForged-Reimagined/tree/a24d4503064780790e975cd17495866ae13eef11>,
@@ -144,7 +144,8 @@ pub fn decode_current_terrain_types(
     decode_terrain_type_assets(current_terrain_type_documents(), registry)
 }
 
-/// TerraForged Reimagined a24d450's flatland `terrain_noise` registry files, `plains` and `steppe`
+/// TerraForged Reimagined a24d450's flatland and hill `terrain_noise` registry files, `plains` and `steppe`, then
+/// `dales`, `hills_1` and `hills_2`
 /// (<https://github.com/Romoslayer/TerraForged-Reimagined/tree/a24d4503064780790e975cd17495866ae13eef11>,
 /// `src/main/resources/default/data/terraforged/worldgen/terrain_noise/`, MIT, (c) 2020 TerraForged, (c) 2026
 /// Romoslayer), bundled unchanged in `data/worldgen/terrain_noise/`, as (registry key, JSON) pairs.
@@ -160,6 +161,24 @@ pub fn current_terrain_noise_documents() -> [(&'static str, &'static str); TERRA
             "terraforged:steppe",
             text(crate::terraforged_data!(
                 "worldgen/terrain_noise/steppe.json"
+            )),
+        ),
+        (
+            "terraforged:dales",
+            text(crate::terraforged_data!(
+                "worldgen/terrain_noise/dales.json"
+            )),
+        ),
+        (
+            "terraforged:hills_1",
+            text(crate::terraforged_data!(
+                "worldgen/terrain_noise/hills_1.json"
+            )),
+        ),
+        (
+            "terraforged:hills_2",
+            text(crate::terraforged_data!(
+                "worldgen/terrain_noise/hills_2.json"
             )),
         ),
     ]
@@ -298,11 +317,14 @@ terraforged:wetland|wetland|wetland/category:WETLAND|wetland/category:WETLAND|WE
     /// `NoiseCodec`, its `type` bound in the terrain-type registry its 18 terrain_type files load, for each bundled
     /// terrain_noise file in registry order. Fields: key, terrain name/its delegate, whether it is the registry's own
     /// terrain of that name, weight bits, the raised noise's bounds and the #185 oracle's hash of seed-first samples.
-    const NOISE_ORACLE: &str = r##"terraforged:plains|flats/category:FLATLAND|true|weight=40200000|min=00000000|max=3f800000|hash=54dcba40e02603d8
+    const NOISE_ORACLE: &str = r##"terraforged:dales|hills/category:LOWLAND|true|weight=3fc00000|min=00000000|max=3f800000|hash=2a75f650c0578dc8
+terraforged:hills_1|hills/category:LOWLAND|true|weight=40000000|min=00000000|max=3f800000|hash=16d5050ff2aba2c1
+terraforged:hills_2|hills/category:LOWLAND|true|weight=40000000|min=00000000|max=3f800000|hash=e013cf848d1b6c6e
+terraforged:plains|flats/category:FLATLAND|true|weight=40200000|min=00000000|max=3f800000|hash=54dcba40e02603d8
 terraforged:steppe|flats/category:FLATLAND|true|weight=3fc00000|min=00000000|max=3f800000|hash=93dd73538804253f"##;
 
     #[test]
-    fn bundled_flatland_terrain_noises_match_reimagined() {
+    fn bundled_terrain_noises_match_reimagined() {
         let mut registry = TerrainRegistry::new();
         let types = decode_current_terrain_types(&mut registry).unwrap();
         let noises = decode_current_terrain_noises(&types).unwrap();
@@ -335,7 +357,7 @@ terraforged:steppe|flats/category:FLATLAND|true|weight=3fc00000|min=00000000|max
         let types = decode_current_terrain_types(&mut registry).unwrap();
         let noises = decode_current_terrain_noises(&types).unwrap();
         let ids = noises.entry_ids();
-        assert_eq!(ids, ["plains", "steppe"]);
+        assert_eq!(ids, ["dales", "hills_1", "hills_2", "plains", "steppe"]);
         let mut settings = CurrentTerrainSettings::default();
         settings
             .terrains
@@ -347,9 +369,38 @@ terraforged:steppe|flats/category:FLATLAND|true|weight=3fc00000|min=00000000|max
         let plains = Arc::clone(&noises["terraforged:plains"]);
         let values: Vec<_> = noises.into_values().collect();
         let applied = apply_terrain_overrides(&values, &ids, &settings);
-        assert_eq!(applied.len(), 2);
-        assert!(Arc::ptr_eq(&applied[0], &plains)); // a full-id key matches no terraforged: entry
-        assert_eq!(applied[1].weight().to_bits(), 4.0_f32.to_bits());
-        assert_eq!(applied[1].terrain().name(), "flats");
+        assert_eq!(applied.len(), TERRAIN_NOISE_COUNT);
+        assert!(Arc::ptr_eq(&applied[3], &plains)); // a full-id key matches no terraforged: entry
+        assert_eq!(applied[4].weight().to_bits(), 4.0_f32.to_bits());
+        assert_eq!(applied[4].terrain().name(), "flats");
+    }
+
+    #[test]
+    fn default_overrides_stretch_dales_but_not_the_hills() {
+        // `isMountain` matches ids containing "dales", so the default `mountainWidth` (3.5) stretches dales; the two
+        // hills (like the flatlands) have no override and pass through as the same entries.
+        let mut registry = TerrainRegistry::new();
+        let types = decode_current_terrain_types(&mut registry).unwrap();
+        let noises = decode_current_terrain_noises(&types).unwrap();
+        let ids = noises.entry_ids();
+        let values: Vec<_> = noises.into_values().collect();
+        let settings = CurrentTerrainSettings::default();
+        assert_eq!(settings.general.mountain_width.to_bits(), 3.5_f32.to_bits());
+        let applied = apply_terrain_overrides(&values, &ids, &settings);
+        assert_eq!(applied.len(), TERRAIN_NOISE_COUNT);
+        assert!(!Arc::ptr_eq(&applied[0], &values[0]));
+        assert!(applied[0].terrain().is_same(values[0].terrain()));
+        assert_eq!(applied[0].weight().to_bits(), values[0].weight().to_bits());
+        assert_ne!(
+            sample_hash(applied[0].noise()),
+            sample_hash(values[0].noise())
+        );
+        for (applied, original) in applied.iter().zip(&values).skip(1) {
+            assert!(
+                Arc::ptr_eq(applied, original),
+                "{}",
+                original.terrain().name()
+            );
+        }
     }
 }
