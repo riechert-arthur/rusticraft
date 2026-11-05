@@ -25,10 +25,10 @@
 use super::terraforged::{java_max, java_min, pack_seed, round};
 use super::terraforged_filters::FastRandom;
 use super::terraforged_terrain_levels::java_clamp;
-use std::{
-    collections::{HashMap, VecDeque},
-    sync::{Arc, Condvar, Mutex, MutexGuard},
-};
+use super::terraforged_util::pack;
+use std::collections::{HashMap, VecDeque};
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
 /// TerraForged's `worldgen.noise.erosion.NoiseTileSize` (newer source 6dd607eb; the 1.18.2-0.3.1 jar's class has the
 /// same bytecode): the square of chunks around a centre chunk that `ErodedNoiseGenerator` erodes together, `chunk_radius`
@@ -567,17 +567,35 @@ fn height_falloff(height: f32) -> f32 {
     }
 }
 
+// Adapted from TerraForged Reimagined (https://github.com/Romoslayer/TerraForged-Reimagined, a24d450):
+// `ErodedNoiseGenerator`'s region constants, region offsets and `getRegion` cache. MIT, see
+// LICENSE-TERRAFORGED-REIMAGINED.
+
+/// TerraForged Reimagined 26.3's eroded-region layout (`ErodedNoiseGenerator`'s `REGION_CHUNKS`,
+/// `MARGIN_CHUNKS`, `TOTAL_CHUNKS`, `MAP_SIZE`, `MARGIN_BLOCKS`, `REGION_CACHE`; Romoslayer/TerraForged-Reimagined
+/// a24d450): erosion runs once per square of 8x8 chunks over a 256x256 map that adds 4 chunks of margin on every
+/// side, and every chunk of the square reads its slice out of that map. Neither the 1.18.2-0.3.1 jar nor the newer
+/// source (6dd607eb) has regions: they erode a `NoiseTileSize` tile per chunk. All arithmetic is Java `int` math
+/// (`Math.floorDiv`, `Math.floorMod`, `>>`, `&` and wrapping `*`, `-`, `<<`), so chunk coordinates near the `int`
+/// limits wrap as in Java.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ErosionRegionLayout;
 
 impl ErosionRegionLayout {
+    /// `REGION_CHUNKS`: chunks per side of one eroded, cached region.
     pub const REGION_CHUNKS: i32 = 8;
+    /// `MARGIN_CHUNKS`: chunks simulated around a region and then discarded.
     pub const MARGIN_CHUNKS: i32 = 4;
+    /// `TOTAL_CHUNKS`: chunks per side of a region's map, margins included.
     pub const TOTAL_CHUNKS: i32 = Self::REGION_CHUNKS + Self::MARGIN_CHUNKS * 2;
+    /// `MAP_SIZE`: blocks per side of a region's map (256).
     pub const MAP_SIZE: i32 = Self::TOTAL_CHUNKS * NoiseTileSize::CHUNK_SIZE;
+    /// `MARGIN_BLOCKS`: blocks of margin on each side (64).
     pub const MARGIN_BLOCKS: i32 = Self::MARGIN_CHUNKS * NoiseTileSize::CHUNK_SIZE;
+    /// `REGION_CACHE`: regions an [`ErosionRegionCache`] keeps.
     pub const CACHE_SIZE: usize = 16;
 
+    /// `getRegion`'s `Math.floorDiv(chunk, REGION_CHUNKS)`: the region holding a chunk.
     pub fn region(chunk_x: i32, chunk_z: i32) -> (i32, i32) {
         (
             chunk_x.div_euclid(Self::REGION_CHUNKS),
@@ -585,6 +603,7 @@ impl ErosionRegionLayout {
         )
     }
 
+    /// `buildRegion`'s `region * REGION_CHUNKS - MARGIN_CHUNKS`: the chunk at a region map's (0, 0).
     pub fn origin_chunk(region_x: i32, region_z: i32) -> (i32, i32) {
         (
             region_x
@@ -596,22 +615,28 @@ impl ErosionRegionLayout {
         )
     }
 
+    /// `generate`'s `MARGIN_BLOCKS + (Math.floorMod(chunk, REGION_CHUNKS) << 4)`: a chunk's first block
+    /// along one axis of its region's map.
     pub fn chunk_offset(chunk: i32) -> i32 {
         Self::MARGIN_BLOCKS.wrapping_add(chunk.rem_euclid(Self::REGION_CHUNKS).wrapping_shl(4))
     }
 
+    /// `erodedHeight`'s `MARGIN_BLOCKS + (Math.floorMod(block >> 4, REGION_CHUNKS) << 4) + (block & 15)`: a
+    /// block's position along one axis of its region's map.
     pub fn block_offset(block: i32) -> i32 {
         Self::chunk_offset(block >> 4).wrapping_add(block & 15)
     }
 
+    /// `erodedHeight`'s `offsetZ * MAP_SIZE + offsetX`: a block's index in its region's map (always within it).
     pub fn block_index(x: i32, z: i32) -> usize {
         Self::block_offset(z)
             .wrapping_mul(Self::MAP_SIZE)
             .wrapping_add(Self::block_offset(x)) as usize
     }
 
+    /// `getRegion`'s cache key, `PosUtil.pack(regionX, regionZ)`.
     pub fn key(region_x: i32, region_z: i32) -> i64 {
-        (i64::from(region_x) << 32) | (i64::from(region_z) & 0xffff_ffff)
+        pack(region_x, region_z)
     }
 }
 
@@ -621,6 +646,7 @@ enum RegionState<T> {
     Failed,
 }
 
+/// One region's `CompletableFuture`: built once, by the caller that inserted it, and waited for by the others.
 struct RegionEntry<T> {
     state: Mutex<RegionState<T>>,
     ready: Condvar,
@@ -633,14 +659,33 @@ impl<T> RegionEntry<T> {
             ready: Condvar::new(),
         }
     }
+
+    fn finish(&self, state: RegionState<T>) {
+        *lock_unpoisoned(&self.state) = state;
+        self.ready.notify_all();
+    }
 }
 
 struct RegionCacheInner<T> {
     seed: Option<i32>,
     entries: HashMap<i64, Arc<RegionEntry<T>>>,
+    /// Access order, least recently used first (Java's access-ordered `LinkedHashMap`).
     order: VecDeque<i64>,
 }
 
+/// TerraForged Reimagined 26.3's eroded-region cache (`ErodedNoiseGenerator.regions` and `getRegion`, a24d450):
+/// the last [`ErosionRegionLayout::CACHE_SIZE`] regions by [`ErosionRegionLayout::key`], least recently used
+/// dropped first (Java: an access-ordered `LinkedHashMap` of `CompletableFuture`s whose `removeEldestEntry` keeps 16).
+///
+/// Like Java's, the cache holds one seed's regions: a call with another seed than the last one empties it
+/// first (Java's `regionSeed`/`hasRegionSeed`), so a hit always has the caller's seed and region. Everything else a
+/// region depends on (the height source, the erosion and smoothing settings) is the owner's: one cache belongs to
+/// one generator and one `build` function, as Java's is a field of one `ErodedNoiseGenerator`. Built regions then
+/// equal what `build` computes uncached.
+///
+/// Engine's `LossyCache`, `Cache` and `CacheEntry` (`terraforged_lossy_cache`, `terraforged_concurrent`) don't fit:
+/// they compute under the map's lock or hash into lossy buckets, while Reimagined builds outside its monitor on
+/// purpose, so that callers of other regions are never blocked behind a region build, and drops in access order.
 pub struct ErosionRegionCache<T> {
     inner: Mutex<RegionCacheInner<T>>,
 }
@@ -662,6 +707,13 @@ impl<T> ErosionRegionCache<T> {
         }
     }
 
+    /// `getRegion(seed, chunkX, chunkZ)`: the region holding the chunk, built by `build(region_x, region_z)` if the
+    /// cache has none for this seed. The first caller of a missing region inserts it (evicting the least recently
+    /// used beyond 16) and runs `build` on its own thread, holding no lock; callers of the same region meanwhile wait
+    /// for it, others go on. A `build` that panics removes its own entry (if still cached) and then fails the waiters
+    /// (Java: `regions.remove(key, mine)`, then `completeExceptionally`): they panic as Java's `join` throws, and the
+    /// next call builds again. A `build` that asks for its own region never returns (Java's `join` hangs too). An
+    /// entry evicted or dropped by a seed change while building is still handed to its caller and waiters.
     pub fn get_or_build(
         &self,
         seed: i32,
@@ -685,27 +737,36 @@ impl<T> ErosionRegionCache<T> {
                 let entry = Arc::new(RegionEntry::building());
                 inner.entries.insert(key, Arc::clone(&entry));
                 inner.order.push_back(key);
-                if inner.order.len() > ErosionRegionLayout::CACHE_SIZE {
-                    if let Some(oldest) = inner.order.pop_front() {
-                        inner.entries.remove(&oldest);
-                    }
+                if inner.order.len() > ErosionRegionLayout::CACHE_SIZE
+                    && let Some(oldest) = inner.order.pop_front()
+                {
+                    inner.entries.remove(&oldest);
                 }
                 (entry, true)
             }
         };
-        if mine {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                Arc::new(build(region_x, region_z))
-            }));
-            match result {
-                Ok(value) => {
-                    *lock_unpoisoned(&entry.state) = RegionState::Ready(Arc::clone(&value));
-                    entry.ready.notify_all();
-                    value
+        if !mine {
+            let mut state = lock_unpoisoned(&entry.state);
+            loop {
+                match &*state {
+                    RegionState::Building => {
+                        state = entry
+                            .ready
+                            .wait(state)
+                            .unwrap_or_else(PoisonError::into_inner);
+                    }
+                    RegionState::Ready(value) => return Arc::clone(value),
+                    RegionState::Failed => panic!("TerraForged erosion region build failed"),
                 }
-                Err(payload) => {
-                    *lock_unpoisoned(&entry.state) = RegionState::Failed;
-                    entry.ready.notify_all();
+            }
+        }
+        match catch_unwind(AssertUnwindSafe(|| Arc::new(build(region_x, region_z)))) {
+            Ok(value) => {
+                entry.finish(RegionState::Ready(Arc::clone(&value)));
+                value
+            }
+            Err(payload) => {
+                {
                     let mut inner = lock_unpoisoned(&self.inner);
                     if inner
                         .entries
@@ -715,27 +776,15 @@ impl<T> ErosionRegionCache<T> {
                         inner.entries.remove(&key);
                         inner.order.retain(|candidate| *candidate != key);
                     }
-                    std::panic::resume_unwind(payload)
                 }
-            }
-        } else {
-            let mut state = lock_unpoisoned(&entry.state);
-            loop {
-                match &*state {
-                    RegionState::Building => {
-                        state = entry
-                            .ready
-                            .wait(state)
-                            .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    }
-                    RegionState::Ready(value) => return Arc::clone(value),
-                    RegionState::Failed => panic!("TerraForged erosion region build failed"),
-                }
+                entry.finish(RegionState::Failed);
+                resume_unwind(payload)
             }
         }
     }
 }
 
+/// The `LinkedHashMap`'s access-order move of a hit to the most recently used end.
 fn touch(order: &mut VecDeque<i64>, key: i64) {
     if let Some(index) = order.iter().position(|candidate| *candidate == key) {
         order.remove(index);
@@ -743,10 +792,9 @@ fn touch(order: &mut VecDeque<i64>, key: i64) {
     order.push_back(key);
 }
 
+// Nothing panics while these locks are held, so a poisoned lock is still consistent (Java has no poisoning).
 fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 impl ErosionBrushes {
@@ -1622,5 +1670,240 @@ pub(crate) mod tests {
         }));
         assert!(failure.is_err());
         assert_eq!(*cache.get_or_build(1, 0, 0, |_, _| 7), 7);
+    }
+    /// `ErosionRegionOracle.java` (`.local/terraforged/oracles/erosion_region/`, `run.sh`) runs TerraForged Reimagined
+    /// a24d450's own `ErodedNoiseGenerator` over a stub height source whose region maps hold their own indices
+    /// (erosion and smoothing off): `g` lines are `getRegion` calls (seed, chunk, whether it built, whether it threw,
+    /// the build's first sample position bits), `b` lines `erodedHeight`'s map index, `k` lines `PosUtil.pack`.
+    const REGION_ORACLE: &str = "\
+g 42 -1 -1 1 0 c3400000 c3400000
+g 42 -8 -8 0 0 00000000 00000000
+g 42 0 0 1 0 c2800000 c2800000
+g 42 7 7 0 0 00000000 00000000
+g 42 8 0 1 0 42800000 c2800000
+g 42 16 0 1 0 43400000 c2800000
+g 42 24 0 1 0 43a00000 c2800000
+g 42 32 0 1 0 43e00000 c2800000
+g 42 40 0 1 0 44100000 c2800000
+g 42 48 0 1 0 44300000 c2800000
+g 42 56 0 1 0 44500000 c2800000
+g 42 64 0 1 0 44700000 c2800000
+g 42 72 0 1 0 44880000 c2800000
+g 42 80 0 1 0 44980000 c2800000
+g 42 88 0 1 0 44a80000 c2800000
+g 42 96 0 1 0 44b80000 c2800000
+g 42 104 0 1 0 44c80000 c2800000
+g 42 112 0 1 0 44d80000 c2800000
+g 42 -1 -1 0 0 00000000 00000000
+g 42 120 0 1 0 44e80000 c2800000
+g 42 0 0 1 0 c2800000 c2800000
+g 42 -1 -1 0 0 00000000 00000000
+g 42 8 0 1 0 42800000 c2800000
+g 42 16 0 1 0 43400000 c2800000
+g 42 127 7 0 0 00000000 00000000
+g 42 104 0 0 0 00000000 00000000
+g 43 -1 -1 1 0 c3400000 c3400000
+g 43 -1 -1 0 0 00000000 00000000
+g 42 -1 -1 1 0 c3400000 c3400000
+g 42 0 0 1 0 c2800000 c2800000
+g 42 100 100 0 1 00000000 00000000
+g 42 100 100 1 0 44b80000 44b80000
+g 42 103 101 0 0 00000000 00000000
+g 42 -9 8 1 0 c3a00000 42800000
+g 42 -16 15 0 0 00000000 00000000
+g 42 -17 16 1 0 c3e00000 43400000
+g 42 -2147483648 -2147483648 1 0 c2800000 c2800000
+g 42 2147483647 2147483647 1 0 c3400000 c3400000
+g 42 -2147483648 2147483647 1 0 c2800000 c3400000
+g 42 -2147483641 -2147483648 0 0 00000000 00000000
+g 42 2147483640 2147483647 0 0 00000000 00000000
+g 42 2147483639 2147483647 1 0 c3a00000 c3400000
+g -2147483648 0 0 1 0 c2800000 c2800000
+g 2147483647 0 0 1 0 c2800000 c2800000
+g 2147483647 3 3 0 0 00000000 00000000
+g -2147483648 0 0 1 0 c2800000 c2800000
+b -257 2147483647 49087
+b -256 -2147483648 16448
+b -145 128 16559
+b -144 127 49072
+b -17 16 20655
+b -16 15 20400
+b -1 0 16575
+b 0 -1 48960
+b 15 -16 45135
+b 16 -17 44880
+b 127 -144 45247
+b 128 -145 44864
+b -2147483648 -256 16448
+b 2147483647 -257 49087
+k 0 0 0000000000000000
+k -1 0 ffffffff00000000
+k 0 -1 00000000ffffffff
+k -1 -1 ffffffffffffffff
+k 268435455 -268435456 0ffffffff0000000
+k -2147483648 2147483647 800000007fffffff
+k 2147483647 -2147483648 7fffffff80000000
+";
+
+    #[test]
+    fn erosion_region_cache_matches_reimagined_java() {
+        const MIN: i32 = i32::MIN;
+        const MAX: i32 = i32::MAX;
+        #[rustfmt::skip]
+        const TRACE: [(i32, i32, i32, bool); 46] = [
+            (42, -1, -1, false), (42, -8, -8, false), (42, 0, 0, false), (42, 7, 7, false),
+            (42, 8, 0, false), (42, 16, 0, false), (42, 24, 0, false), (42, 32, 0, false), (42, 40, 0, false),
+            (42, 48, 0, false), (42, 56, 0, false), (42, 64, 0, false), (42, 72, 0, false), (42, 80, 0, false),
+            (42, 88, 0, false), (42, 96, 0, false), (42, 104, 0, false), (42, 112, 0, false), (42, -1, -1, false),
+            (42, 120, 0, false), (42, 0, 0, false), (42, -1, -1, false), (42, 8, 0, false), (42, 16, 0, false),
+            (42, 127, 7, false), (42, 104, 0, false),
+            (43, -1, -1, false), (43, -1, -1, false), (42, -1, -1, false), (42, 0, 0, false),
+            (42, 100, 100, true), (42, 100, 100, false), (42, 103, 101, false),
+            (42, -9, 8, false), (42, -16, 15, false), (42, -17, 16, false),
+            (42, MIN, MIN, false), (42, MAX, MAX, false), (42, MIN, MAX, false), (42, MIN + 7, MIN, false),
+            (42, MAX - 7, MAX, false), (42, MAX - 8, MAX, false),
+            (MIN, 0, 0, false), (MAX, 0, 0, false), (MAX, 3, 3, false), (MIN, 0, 0, false),
+        ];
+        const BLOCKS: [i32; 14] = [
+            -257, -256, -145, -144, -17, -16, -1, 0, 15, 16, 127, 128, MIN, MAX,
+        ];
+        const KEYS: [(i32, i32); 7] = [
+            (0, 0),
+            (-1, 0),
+            (0, -1),
+            (-1, -1),
+            (268_435_455, -268_435_456),
+            (MIN, MAX),
+            (MAX, MIN),
+        ];
+
+        // The stub's first sample of a build: `getNoiseCoord(originChunk << 4)` at frequency 1.
+        let first_sample = |region_x: i32, region_z: i32| {
+            let (chunk_x, chunk_z) = ErosionRegionLayout::origin_chunk(region_x, region_z);
+            (
+                chunk_x.wrapping_shl(4) as f32 * 1.0,
+                chunk_z.wrapping_shl(4) as f32 * 1.0,
+            )
+        };
+        let mut out = String::new();
+        let cache = ErosionRegionCache::new();
+        for (seed, chunk_x, chunk_z, fail) in TRACE {
+            let mut built = None;
+            let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                cache.get_or_build(seed, chunk_x, chunk_z, |region_x, region_z| {
+                    assert!(!fail, "fixture failure");
+                    built = Some(first_sample(region_x, region_z));
+                    first_sample(region_x, region_z)
+                })
+            }));
+            let threw = result.is_err();
+            let (x, z) = built.map_or((0, 0), |(x, z)| (x.to_bits(), z.to_bits()));
+            writeln!(
+                out,
+                "g {seed} {chunk_x} {chunk_z} {} {} {x:08x} {z:08x}",
+                u8::from(built.is_some()),
+                u8::from(threw)
+            )
+            .unwrap();
+        }
+        for (i, x) in BLOCKS.into_iter().enumerate() {
+            let z = BLOCKS[BLOCKS.len() - 1 - i];
+            writeln!(out, "b {x} {z} {}", ErosionRegionLayout::block_index(x, z)).unwrap();
+        }
+        for (x, z) in KEYS {
+            writeln!(out, "k {x} {z} {:016x}", ErosionRegionLayout::key(x, z)).unwrap();
+        }
+        for (rust, java) in out.lines().zip(REGION_ORACLE.lines()) {
+            assert_eq!(rust, java);
+        }
+        assert_eq!(out, REGION_ORACLE);
+    }
+
+    #[test]
+    fn erosion_region_cache_equals_uncached_across_seeds_and_threads() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // A region map that depends on the seed and both region coordinates, as the real build does.
+        fn uncached(seed: i32, region_x: i32, region_z: i32) -> Vec<i64> {
+            (0..64_i64)
+                .map(|i| {
+                    i64::from(seed)
+                        .wrapping_mul(0x9e37_79b9)
+                        .wrapping_add(pack(region_x, region_z).rotate_left(i as u32))
+                })
+                .collect()
+        }
+
+        const SEEDS: [i32; 4] = [0, 1, -1, i32::MIN];
+        let cache = ErosionRegionCache::new();
+        let builds = AtomicUsize::new(0);
+        let calls = AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            for thread in 0..8_u32 {
+                let (cache, builds, calls) = (&cache, &builds, &calls);
+                scope.spawn(move || {
+                    let mut random = 0x2545_f491_u32.wrapping_mul(thread + 1);
+                    for step in 0..2_000 {
+                        random ^= random << 13;
+                        random ^= random >> 17;
+                        random ^= random << 5;
+                        // Mostly one seed per phase (so the cache hits), sometimes another (so it resets).
+                        let seed = if random % 16 == 0 {
+                            SEEDS[(random >> 8) as usize % SEEDS.len()]
+                        } else {
+                            SEEDS[(step / 500) % SEEDS.len()]
+                        };
+                        // 24x3 regions around the origin, negative ones included: more than the cache holds.
+                        let chunk_x = (random >> 4) as i32 % 96 - 48;
+                        let chunk_z = (random >> 12) as i32 % 24 - 12;
+                        let value =
+                            cache.get_or_build(seed, chunk_x, chunk_z, |region_x, region_z| {
+                                builds.fetch_add(1, Ordering::Relaxed);
+                                uncached(seed, region_x, region_z)
+                            });
+                        let (region_x, region_z) = ErosionRegionLayout::region(chunk_x, chunk_z);
+                        assert_eq!(*value, uncached(seed, region_x, region_z));
+                        calls.fetch_add(1, Ordering::Relaxed);
+                    }
+                });
+            }
+        });
+        let (builds, calls) = (builds.into_inner(), calls.into_inner());
+        assert_eq!(calls, 16_000);
+        assert!(builds < calls, "the cache never hit: {builds} builds");
+    }
+
+    #[test]
+    fn failed_region_build_fails_its_waiters_then_rebuilds() {
+        use std::sync::Barrier;
+
+        let cache = ErosionRegionCache::new();
+        let started = Barrier::new(2);
+        let release = Barrier::new(2);
+        std::thread::scope(|scope| {
+            let builder = scope.spawn(|| {
+                std::panic::catch_unwind(AssertUnwindSafe(|| {
+                    cache.get_or_build(5, -3, 4, |_, _| -> i32 {
+                        started.wait();
+                        release.wait();
+                        panic!("fixture failure")
+                    })
+                }))
+                .is_err()
+            });
+            started.wait();
+            let waiter = scope.spawn(|| {
+                std::panic::catch_unwind(AssertUnwindSafe(|| {
+                    cache.get_or_build(5, -8, 7, |_, _| -> i32 { unreachable!() })
+                }))
+                .is_err()
+            });
+            // Let the waiter reach the entry before the build fails.
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            release.wait();
+            assert!(builder.join().unwrap());
+            assert!(waiter.join().unwrap());
+        });
+        assert_eq!(*cache.get_or_build(5, -1, 0, |x, z| x * 10 + z), -10);
     }
 }
