@@ -6978,6 +6978,222 @@ mod tests {
         assert_eq!(reversed.try_value_seed_first(1, 0.0, 0.0), Ok(0.25));
     }
 
+    /// `SeededSelectionEdgeOracle` (`.local/terraforged/oracles/seed_first/run-graphs.sh`): Select/MultiBlend with a
+    /// control fixed at, and one ulp beside, every curve edge, slot edge and rounding edge (plus NaN, ±inf, ±0 and
+    /// values outside 0..1); zero, -0, negative, NaN and infinite falloffs and blends; reversed, equal, overlapping,
+    /// NaN and infinite bounds; one to four sources and nested selectors. Samples where Engine throws (a slot outside
+    /// the sources) fold as `0xffffffff`, where the port panics.
+    #[test]
+    fn runtime_seeded_selection_edges_match_current_noise2d() {
+        let src = |kind, seed, octaves, gain, frequency| {
+            Module::source(Source::new(
+                kind,
+                SourceConfig {
+                    seed,
+                    octaves,
+                    gain,
+                    frequency,
+                    ..SourceConfig::default()
+                },
+            ))
+        };
+        let source = src(SourceKind::Simplex, i32::MAX, 2, 0.65, 0.125);
+        let control = src(SourceKind::Cubic, -91, 2, 0.5, 0.25);
+        let perlin = src(SourceKind::Perlin, 53, 2, 0.5, 0.5);
+        let zero = src(SourceKind::Simplex, 1337, 0, 0.5, 3.0);
+        let c = Module::constant;
+        let lo = control.clone().scale(c(0.35));
+        let up = source.clone().bias(c(0.2));
+        let (l, c3, c4) = (
+            Interpolation::Linear,
+            Interpolation::Curve3,
+            Interpolation::Curve4,
+        );
+        let (inf, nan) = (f32::INFINITY, f32::NAN);
+        let sel = |lb: f32, ub: f32, f: f32| vec![lb - f, lb + f, ub - f, ub + f];
+        // MultiBlend's constructor slots and `NoiseUtil.round`'s edges `(k + 0.5) / maxIndex`, as the oracle's `mb`.
+        let mb = |n: i32, blend: f32| {
+            let spacing = 1.0 / n as f32;
+            let radius = spacing / 2.0;
+            let cell_radius = (radius - radius * blend) / 2.0;
+            let mut out = Vec::new();
+            for i in 0..n {
+                let pos = i as f32 * spacing + radius;
+                let min = if i == 0 { 0.0 } else { pos - cell_radius };
+                let max = if i == n - 1 { 1.0 } else { pos + cell_radius };
+                out.extend([java_max(0.0, min), java_min(1.0, max)]);
+            }
+            out.extend((0..n - 1).map(|k| (k as f32 + 0.5) / (n - 1) as f32));
+            out
+        };
+        type Family = Box<dyn Fn(Module) -> Module>;
+        let select = |lower: &Module, upper: &Module, lb, ub, f, i| {
+            let (lower, upper) = (lower.clone(), upper.clone());
+            Box::new(move |k: Module| k.select(lower.clone(), upper.clone(), lb, ub, f, i))
+                as Family
+        };
+        let multi = |blend, i, sources: Vec<Module>| {
+            Box::new(move |k: Module| k.multi_blend(blend, i, sources.clone())) as Family
+        };
+        let three = vec![lo.clone(), source.clone(), up.clone()];
+        let (nested_lo, nested_up) = (lo.clone(), up.clone());
+        let inner = control
+            .clone()
+            .select(lo.clone(), up.clone(), 0.3, 0.6, 0.1, c3);
+        let (pz, outer_up) = ((perlin.clone(), zero.clone()), up.clone());
+        let families: Vec<(Family, Vec<f32>)> = vec![
+            (
+                select(&lo, &up, 0.25, 0.75, 0.125, l),
+                sel(0.25, 0.75, 0.125),
+            ),
+            (
+                select(&lo, &up, 0.25, 0.75, 0.125, c3),
+                sel(0.25, 0.75, 0.125),
+            ),
+            (
+                select(&lo, &up, 0.25, 0.75, 0.125, c4),
+                sel(0.25, 0.75, 0.125),
+            ),
+            (select(&lo, &up, 0.25, 0.75, 0.0, l), sel(0.25, 0.75, 0.0)),
+            (
+                select(&lo, &up, 0.25, 0.75, -0.0, c3),
+                sel(0.25, 0.75, -0.0),
+            ),
+            (select(&lo, &up, 0.75, 0.25, 0.0, l), sel(0.75, 0.25, 0.0)),
+            (
+                select(&lo, &up, 0.75, 0.25, 0.125, c3),
+                sel(0.75, 0.25, 0.125),
+            ),
+            (
+                select(&lo, &up, 0.25, 0.75, -0.125, l),
+                sel(0.25, 0.75, -0.125),
+            ),
+            (select(&lo, &up, 0.25, 0.75, nan, l), vec![0.25, 0.75]),
+            (select(&lo, &up, 0.25, 0.75, inf, c3), vec![]),
+            (
+                select(&lo, &up, nan, 0.75, 0.125, l),
+                sel(0.75, 0.75, 0.125),
+            ),
+            (select(&lo, &up, -inf, inf, 0.1, c4), vec![]),
+            (select(&lo, &up, 0.5, 0.5, 0.125, c4), sel(0.5, 0.5, 0.125)),
+            (select(&lo, &up, 0.4, 0.5, 0.2, l), sel(0.4, 0.5, 0.2)),
+            (
+                select(&perlin, &zero, 0.25, 0.75, 0.125, l),
+                sel(0.25, 0.75, 0.125),
+            ),
+            (multi(0.8, l, three.clone()), mb(3, 0.8)),
+            (multi(0.8, c3, three.clone()), mb(3, 0.8)),
+            (multi(0.8, c4, three.clone()), mb(3, 0.8)),
+            (multi(0.0, l, three.clone()), mb(3, 0.0)),
+            (multi(-0.5, l, three.clone()), mb(3, -0.5)),
+            (multi(nan, c3, three.clone()), mb(3, nan)),
+            (multi(inf, l, three), mb(3, inf)),
+            (multi(1.0, l, vec![lo.clone(), up.clone()]), mb(2, 1.0)),
+            (multi(0.8, c4, vec![up.clone()]), mb(1, 0.8)),
+            (
+                multi(
+                    0.5,
+                    c3,
+                    vec![lo.clone(), perlin.clone(), zero.clone(), up.clone()],
+                ),
+                mb(4, 0.5),
+            ),
+            (
+                Box::new(move |k: Module| {
+                    let blend =
+                        k.clone()
+                            .multi_blend(0.6, l, vec![nested_lo.clone(), nested_up.clone()]);
+                    k.select(blend, nested_up.clone(), 0.3, 0.7, 0.1, c4)
+                }),
+                sel(0.3, 0.7, 0.1),
+            ),
+            (
+                Box::new(move |k: Module| {
+                    k.multi_blend(0.8, l, vec![inner.clone(), pz.0.clone(), pz.1.clone()])
+                }),
+                mb(3, 0.8),
+            ),
+            (
+                Box::new(move |k: Module| {
+                    control
+                        .clone()
+                        .select(k, outer_up.clone(), 0.25, 0.75, 0.125, l)
+                }),
+                vec![],
+            ),
+        ];
+        let expected: [u64; 28] = [
+            0xfae2353372aa902a,
+            0xfacaf9eb07abeb9d,
+            0xd1394f80092eee6b,
+            0x0b076edbbb9b39a7,
+            0x0b076edbbb9b39a7,
+            0x0254ef578f48f1ff,
+            0x7de7aae8af94c617,
+            0x856037abf854d397,
+            0x5722d36fc293342f,
+            0x8140df62a62c4a45,
+            0xbf0a737ef81956b1,
+            0x289952a1f15fe007,
+            0x963ee0503b41860c,
+            0x78eb54330c218951,
+            0x154d8d8d27fd1a03,
+            0x45a82743bb704526,
+            0x742c3bd7f9dcf105,
+            0x51627b2be93017c7,
+            0x2a856dec816ccce7,
+            0x819e56f9a80457bd,
+            0xed17bf3a299a7456,
+            0x5dff42a84d785641,
+            0x8e6efa194c9210ef,
+            0xb4d700345f8454d7,
+            0x737657bbdfe4029e,
+            0x94d25371ac4dc341,
+            0xfd8e8f36004b0f27,
+            0xf6aa889af07bb771,
+        ];
+        let specials = [nan, inf, -inf, 0.0, -0.0, 0.5, 1.0, 0.3, 0.7, -0.3, 1.3];
+        let seeds = [0, 1, -1, 17, i32::MAX, i32::MIN, -987654321];
+        let points = [
+            (0.0, 0.0),
+            (12.34, 56.78),
+            (-1234.5, 987.25),
+            (-0.0, 3.5),
+            (f32::NAN, 1.0),
+            (f32::INFINITY, 2.0),
+        ];
+        for (index, ((family, edges), expected)) in families.iter().zip(expected).enumerate() {
+            let controls = edges
+                .iter()
+                .flat_map(|&e| [e, e.next_down(), e.next_up()])
+                .chain(specials);
+            let mut hash = 0xcbf29ce484222325u64;
+            for v in controls {
+                // A Java module overriding only `getValue`: the value `v` with `Noise`'s default 0..1 bounds.
+                let graph = family(Module::node(ModuleKind::Constant(v), 0.0, 1.0));
+                for seed in seeds {
+                    for (x, y) in points {
+                        let bits = match std::panic::catch_unwind(|| {
+                            graph.try_value_seed_first(seed, x, y)
+                        }) {
+                            Ok(value) => {
+                                let value = value.unwrap();
+                                if value.is_nan() {
+                                    0x7fc0_0000
+                                } else {
+                                    value.to_bits()
+                                }
+                            }
+                            Err(_) => 0xffff_ffff,
+                        };
+                        hash = (hash ^ u64::from(bits)).wrapping_mul(0x100000001b3);
+                    }
+                }
+            }
+            assert_eq!(hash, expected, "family {index}");
+        }
+    }
+
     #[test]
     fn module_graph_matches_engine_0_3_0() {
         let base = Module::source(Source::new(

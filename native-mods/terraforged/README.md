@@ -1560,7 +1560,11 @@ returns its source, otherwise a control above (below) the slot blends with the n
 0..1 by `NoiseUtil.clamp`. These slots come from the constructor's float blend; only reseeding cuts it to an `int`.
 A control far enough outside 0..1 to pick a missing slot panics where Java throws. Neither class calls `NoiseUtil.map`.
 `TerraForgedSeededSelectionOracle.java` (five graphs, three interpolations, four seeds, four points, plus nine controls
-across one `Select` window) runs in the same `run-graphs.sh`; the test matches it bit for bit in debug and release.
+across one `Select` window) and `SeededSelectionEdgeOracle.java` (28 families with the control at and one ulp beside
+every curve, slot and rounding edge, NaN, ±inf, ±0 and values outside 0..1; zero, -0, negative, NaN and infinite
+falloffs and blends; reversed, equal, overlapping, NaN and infinite bounds; one to four sources; nested selectors; seven
+seeds including both `int` extremes; six points with NaN, infinity and -0; Java's exceptions where the port panics) run
+in the same `run-graphs.sh`; the tests match both bit for bit in debug and release.
 
 The bounded concurrent lossy cache (`lossy_cache.rs`, `ConcurrentLossyCache`) ports the newer source tree's
 `LossyCache.Concurrent` and its `LossyCache.Stamped` buckets (`com.terraforged.mod.util.storage`, 6dd607eb). The
