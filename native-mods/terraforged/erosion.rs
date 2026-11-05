@@ -643,7 +643,10 @@ impl ErosionRegionLayout {
 enum RegionState<T> {
     Building,
     Ready(Arc<T>),
-    Failed,
+    /// The build panicked.
+    Panicked,
+    /// The build returned this error.
+    Failed(&'static str),
 }
 
 /// One region's `CompletableFuture`: built once, by the caller that inserted it, and waited for by the others.
@@ -721,6 +724,22 @@ impl<T> ErosionRegionCache<T> {
         chunk_z: i32,
         build: impl FnOnce(i32, i32) -> T,
     ) -> Arc<T> {
+        match self.try_get_or_build(seed, chunk_x, chunk_z, |x, z| Ok(build(x, z))) {
+            Ok(value) => value,
+            Err(error) => unreachable!("an infallible region build failed: {error}"),
+        }
+    }
+
+    /// [`Self::get_or_build`] for a `build` that can fail: an `Err` is handled like Java's throwing `buildRegion`
+    /// (and like a panic here): the entry is removed if still cached, the caller and the region's waiters get the
+    /// `Err` (Java's `throw t` and `join`'s exception), and the next call builds again.
+    pub fn try_get_or_build(
+        &self,
+        seed: i32,
+        chunk_x: i32,
+        chunk_z: i32,
+        build: impl FnOnce(i32, i32) -> Result<T, &'static str>,
+    ) -> Result<Arc<T>, &'static str> {
         let (region_x, region_z) = ErosionRegionLayout::region(chunk_x, chunk_z);
         let key = ErosionRegionLayout::key(region_x, region_z);
         let (entry, mine) = {
@@ -755,31 +774,37 @@ impl<T> ErosionRegionCache<T> {
                             .wait(state)
                             .unwrap_or_else(PoisonError::into_inner);
                     }
-                    RegionState::Ready(value) => return Arc::clone(value),
-                    RegionState::Failed => panic!("TerraForged erosion region build failed"),
+                    RegionState::Ready(value) => return Ok(Arc::clone(value)),
+                    RegionState::Failed(error) => return Err(*error),
+                    RegionState::Panicked => panic!("TerraForged erosion region build failed"),
                 }
             }
         }
-        match catch_unwind(AssertUnwindSafe(|| Arc::new(build(region_x, region_z)))) {
-            Ok(value) => {
+        // `failure`: the build's error (`Ok`) or its panic payload (`Err`), raised again after the cleanup.
+        let (state, failure) = match catch_unwind(AssertUnwindSafe(|| build(region_x, region_z))) {
+            Ok(Ok(value)) => {
+                let value = Arc::new(value);
                 entry.finish(RegionState::Ready(Arc::clone(&value)));
-                value
+                return Ok(value);
             }
-            Err(payload) => {
-                {
-                    let mut inner = lock_unpoisoned(&self.inner);
-                    if inner
-                        .entries
-                        .get(&key)
-                        .is_some_and(|current| Arc::ptr_eq(current, &entry))
-                    {
-                        inner.entries.remove(&key);
-                        inner.order.retain(|candidate| *candidate != key);
-                    }
-                }
-                entry.finish(RegionState::Failed);
-                resume_unwind(payload)
+            Ok(Err(error)) => (RegionState::Failed(error), Ok(error)),
+            Err(payload) => (RegionState::Panicked, Err(payload)),
+        };
+        {
+            let mut inner = lock_unpoisoned(&self.inner);
+            if inner
+                .entries
+                .get(&key)
+                .is_some_and(|current| Arc::ptr_eq(current, &entry))
+            {
+                inner.entries.remove(&key);
+                inner.order.retain(|candidate| *candidate != key);
             }
+        }
+        entry.finish(state);
+        match failure {
+            Ok(error) => Err(error),
+            Err(payload) => resume_unwind(payload),
         }
     }
 }
