@@ -1171,15 +1171,17 @@ gradient and water level, bit for bit.
 
 The terrain-generator layer (`terrain_generator.rs`, the mod's `TerrainGenerator` and `ObjectPool` as in the
 1.18.2-0.3.1 jar) turns a noise generator's chunk `NoiseData` into `TerrainData` and answers `getHeight` (height noise
-scaled by `TerrainLevels`). `NoiseGenerator` is the part of the mod's `INoiseGenerator` it calls; as in the jar, the
-seed is bound into the noise generator, so calls take coordinates only. The ported noise generator
-(`noise_generator.rs`, below) is the newer source's seed-first one and does not implement this trait. The pool keeps the mod's quirk: `take` always builds a new value
+scaled by `TerrainLevels`). `NoiseGenerator` is the part of the mod's `INoiseGenerator` it calls, seed-first as in the
+newer source (`height_noise(seed, x, z)`, `generate(seed, chunk_x, chunk_z, consumer)`; `TerrainGenerator::generate`
+and `height` take the seed too and only pass it on, as the newer source's do). The jar instead binds the seed into the
+noise generator (`with(seed, levels)`) and its calls take coordinates only, so a jar caller passes the seed it bound.
+The ported noise generator (`noise_generator.rs`, below) implements the trait. The pool keeps the mod's quirk: `take` always builds a new value
 (the polled one is dropped), so every `generate` fills a fresh `TerrainData` and restored data is never reused; its
 capacity is `Environment.CORES` (the processor count) and `forCacheSize` uses `NoiseUtil.floor`. Its test replays
 `TerrainGeneratorOracle.java` (in `.local/terraforged/oracles/terrain_generator/`), which runs the jar's classes over
 a stub noise generator (the same stubs as the terrain-data oracle): pool take/restore sequences, `forCacheSize`, and
 heights, noise coordinates and every cell of generated chunks for four `TerrainLevels` over plain and special values,
-bit for bit.
+bit for bit (the stub ignores the seed the test passes, as the jar's has none).
 
 The terrain-blend utilities (`terrain_blend_util.rs`, the mod's `MathUtil.rand(int)`, `WeightMap`,
 `Object2FloatCache` and `SpiralIterator` as in the 1.18.2-0.3.1 jar) are the pieces TerraForged's terrain blender
@@ -1886,8 +1888,9 @@ which chunk the same thread generated before; the port does not reproduce that (
 starts from a new `NoiseData`, which is Java's first chunk on a thread. A failing sample (a custom terrain noise)
 returns an error and the consumer is not called, where Java throws out of the loop. The jar's `generate(chunkX, chunkZ,
 consumer)` has the same loop with its constructor's seed (and the same carry-over; `version/compare.sh` also compares
-`generate`, `getHeightNoise` and `getNoiseSample`); #105's seedless `NoiseGenerator` trait (the jar's binding of the
-seed into the generator, `with(seed, levels)`) is not implemented by this seed-first generator. `NoiseChunkOracle.java`
+`generate`, `getHeightNoise` and `getNoiseSample`). The generator implements the terrain generator's seed-first
+`NoiseGenerator` trait with these two methods; the trait has no error, so a failing chunk or height panics there, as
+Java throws. `NoiseChunkOracle.java`
 (same folder, `run-chunks.sh`) runs the source's `generate` for two `TerrainLevels`, both terrain sets and four runtime
 seeds (the `int` extremes included) over eight chunks (negative ones, ones crossing the `int` wrap, two in river
 valleys at seed 0), each on a new thread, hashing every `NoiseData` element and the data's final sample. The test
@@ -1917,6 +1920,18 @@ noise), seven block positions (negative ones and the `int` extremes, where the f
 pairs (a zero minimum included): 2,688 searches, interpreted and JIT-compiled alike. The test matches its 16 folded lines
 bit for bit, in debug and release, including the per-line count of searches whose result changes when every candidate
 gets a fresh sample (5 to 38 per line), which shows the carried sample is reproduced.
+
+The erosion tile geometry (`erosion.rs`, the mod's `worldgen.noise.erosion.NoiseTileSize`; the newer source's class and
+the jar's have the same bytecode) sizes the square of chunks that TerraForged's eroded noise generator erodes together:
+`chunk_radius` chunks on each side of the centre chunk (`NoiseGenerator.getNoiseTileSize` uses 2, `DEFAULT` is 1), its
+chunk and block offset ranges, the heightmap length, and the relative chunk and block indices
+(`chunkIndexOfRel`, `indexOfRel`), all in Java `int` math, so negative or huge radii give Java's wrapped values; it is
+separate from Engine's power-of-two tile `Size`. The eroded generator itself (its tile cache, heightmap filling and
+erosion) comes later. `NoiseTileSizeOracle.java` (`.local/terraforged/oracles/noise_generator/`, `run-tile-size.sh`)
+runs the source's own class and the jar's, interpreted and JIT-compiled alike, over 16 radii (the `int` extremes and
+overflowing products included) and 16 coordinates, and replays `ErodedNoiseGenerator`'s chunk-to-tile loops
+(`collectNeighbours`, `generateCenterChunk`, `awaitNeighbours`) for six radii and five chunks (negative ones and the
+`int` extremes, where the chunk offsets wrap). The test matches its 63 lines bit for bit, in debug and release.
 
 ## Status: development only
 
