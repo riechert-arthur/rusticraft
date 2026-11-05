@@ -374,4 +374,33 @@ terraforged:steppe|flats/category:FLATLAND|true|weight=3fc00000|min=00000000|max
         assert_eq!(applied[4].weight().to_bits(), 4.0_f32.to_bits());
         assert_eq!(applied[4].terrain().name(), "flats");
     }
+
+    #[test]
+    fn default_overrides_stretch_dales_but_not_the_hills() {
+        // `isMountain` matches ids containing "dales", so the default `mountainWidth` (3.5) stretches dales; the two
+        // hills (like the flatlands) have no override and pass through as the same entries.
+        let mut registry = TerrainRegistry::new();
+        let types = decode_current_terrain_types(&mut registry).unwrap();
+        let noises = decode_current_terrain_noises(&types).unwrap();
+        let ids = noises.entry_ids();
+        let values: Vec<_> = noises.into_values().collect();
+        let settings = CurrentTerrainSettings::default();
+        assert_eq!(settings.general.mountain_width.to_bits(), 3.5_f32.to_bits());
+        let applied = apply_terrain_overrides(&values, &ids, &settings);
+        assert_eq!(applied.len(), TERRAIN_NOISE_COUNT);
+        assert!(!Arc::ptr_eq(&applied[0], &values[0]));
+        assert!(applied[0].terrain().is_same(values[0].terrain()));
+        assert_eq!(applied[0].weight().to_bits(), values[0].weight().to_bits());
+        assert_ne!(
+            sample_hash(applied[0].noise()),
+            sample_hash(values[0].noise())
+        );
+        for (applied, original) in applied.iter().zip(&values).skip(1) {
+            assert!(
+                Arc::ptr_eq(applied, original),
+                "{}",
+                original.terrain().name()
+            );
+        }
+    }
 }
