@@ -168,10 +168,10 @@ impl NoiseGenerator {
     /// not a river, when its river noise is below 0.75 (no built-in terrain is both overground and a river, so the
     /// river test always applies to them). As in Java the continent and the rivers are sampled at those block
     /// coordinates as they are, not scaled by the frequency again as [`Self::sample`] does (the same point only when
-    /// the frequency is 1). As in Java one sample (reset once, at the start) is reused for
-    /// every candidate, so the continent fields are overwritten each time while the river carver's height and river
-    /// noise carry over from the candidates before (it only multiplies the river noise, and every candidate it
-    /// carves is on land, where nothing resets it).
+    /// the frequency is 1). As in Java one sample (reset once, at the start) is reused for every candidate: the
+    /// continent fields are overwritten each time, while the height and river noise the river carver reads carry over
+    /// from the candidates before (the carver only multiplies the river noise, and resets it to 1 only below `BEACH`,
+    /// which `find` never carves). `finds_match_current_java_generator` counts the results this changes.
     ///
     /// `Err` where the blender's warp has no seed-first form (a custom module), and where the blender has no terrain
     /// noise named like `terrain`: there `findNearest` returns `null` and Java's `find` throws a
