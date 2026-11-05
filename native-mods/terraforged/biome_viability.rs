@@ -33,8 +33,9 @@ use super::{
 /// and `climate_shape` is `getClimateSampler().getShape(x, z)`.
 ///
 /// `seed` (and `climate_shape`'s seed argument) come from the newer TerraForged source, whose context carries the
-/// world seed and whose `IBiomeSampler.getShape` takes it. The jar has neither: the seed is kept for the
-/// runtime-seed layers and is unused until they land; jar parity means `climate_shape` ignores it.
+/// world seed and whose `IBiomeSampler.getShape` takes it. The jar has neither. The seed is kept because the
+/// decoration layer (#213) implements this trait with it, but no rule depends on it: jar parity means
+/// `climate_shape` implementations ignore it.
 pub trait ViabilityContext {
     fn seed(&self) -> i32;
     fn edge(&self) -> bool;

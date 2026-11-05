@@ -1253,7 +1253,8 @@ rules, `SumViability.Builder`, the two `getFallOff` curves, and the `ViabilityCo
 `TerrainData` (no biome edges). Heights scale by `maxY / 255`; a height outside the band scores 1, as in the jar;
 NaN fails every threshold test; the sum is clamped with `NoiseUtil.clamp` (NaN passes); a sum with fewer weights
 than rules panics where Java throws. The context's seed comes from the newer TerraForged source (the jar has none)
-and is unused until the runtime-seed layers. Their Cereal specs and codec are not ported, and nothing uses the
+and is kept for the decoration layer (#213), which implements the context; no rule depends on it.
+The rules' Cereal specs and codec are not ported, and nothing uses the
 rules yet. `BiomeViabilityOracle.java` (`.local/terraforged/oracles/biome_viability/`) runs the jar's own classes
 on stub contexts (every rule over signed zeros, infinities, NaN, the smallest subnormal and heights at and next
 to each threshold, for seven `maxY` values) and on real `TerrainData` chunks through the jar's `ViabilityContext`;
