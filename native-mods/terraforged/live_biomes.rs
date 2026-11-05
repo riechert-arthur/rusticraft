@@ -200,6 +200,9 @@ impl LiveBiomeBindings {
     }
 
     /// [`TerraForgedGenerator::surface_biome_sampler`] over these pools and this plains: build ONE per world.
+    /// `wetlands` and `mountain_usage` are Reimagined's `TerraSettings.rivers.wetlands` and
+    /// `miscellaneous.mountainBiomeUsage`; its defaults are `WetlandSettings::default()` and
+    /// `MiscellaneousSettings::default().mountain_biome_usage` (`terraforged_current_settings`).
     pub fn surface_sampler<'a>(
         &'a self,
         generator: &'a TerraForgedGenerator,
