@@ -148,7 +148,7 @@ pub fn decode_current_terrain_types(
 /// `data/worldgen/terrain_noise/`:
 ///
 /// - TerraForged Reimagined a24d450's flatlands `plains` and `steppe`, hills `dales`, `hills_1`, `hills_2` and
-///   `torridonian`, mountains `mountains_ridge_1`, `mountains_ridge_2` and `dolomites`, and `plateau`
+///   `torridonian`, mountains `mountains_ridge_1`, `mountains_ridge_2` and `dolomites`, `plateau` and `badlands`
 ///   (<https://github.com/Romoslayer/TerraForged-Reimagined/tree/a24d4503064780790e975cd17495866ae13eef11>,
 ///   `src/main/resources/default/data/terraforged/worldgen/terrain_noise/`, MIT, (c) 2020 TerraForged, (c) 2026
 ///   Romoslayer; TerraForged 6dd607eb generates the same bytes);
@@ -236,7 +236,8 @@ pub fn current_terrain_noise_documents() -> [(&'static str, &'static str); TERRA
             text(crate::terraforged_data!(
                 "worldgen/terrain_noise/plateau.json"
             )),
-        ),        (
+        ),
+        (
             "terraforged:badlands",
             text(crate::terraforged_data!(
                 "worldgen/terrain_noise/badlands.json"
@@ -260,7 +261,7 @@ fn text(bytes: &'static [u8]) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::super::terraforged_current_settings::CurrentTerrainSettings;
-    use super::super::terraforged_engine::TerrainFormSettings;
+    use super::super::terraforged_engine::{TerrainFormSettings, TerrainProperties};
     use super::super::terraforged_terrain_asset::tests::{bits, sample_hash};
     use super::super::terraforged_terrain_asset_registry::tests::{category_name, describe};
     use super::super::terraforged_terrain_overrides::apply_terrain_overrides;
@@ -390,7 +391,8 @@ terraforged:wetland|wetland|wetland/category:WETLAND|wetland/category:WETLAND|WE
     /// and `mountains_3`, Reimagined's the rest). Fields: key, terrain name/its delegate, whether it is the registry's
     /// own terrain of that name, weight bits, the raised noise's bounds and the #185 oracle's hash of seed-first
     /// samples. The terrain column is Reimagined's registry; the port's differs where [`ENGINE_NOISE_LINES`] says.
-    const NOISE_ORACLE: &str = r##"terraforged:dales|hills/category:LOWLAND|true|weight=3fc00000|min=00000000|max=3f800000|hash=2a75f650c0578dc8
+    const NOISE_ORACLE: &str = r##"terraforged:badlands|badlands/category:LOWLAND|true|weight=3fe00000|min=00000000|max=3f800000|hash=884a7a1eddc2613a
+terraforged:dales|hills/category:LOWLAND|true|weight=3fc00000|min=00000000|max=3f800000|hash=2a75f650c0578dc8
 terraforged:dolomites|dolomites/terrain:mountains|true|weight=3fa00000|min=3f100000|max=3f400000|hash=ad60d1f97d47d31b
 terraforged:hills_1|hills/category:LOWLAND|true|weight=40000000|min=00000000|max=3f800000|hash=16d5050ff2aba2c1
 terraforged:hills_2|hills/category:LOWLAND|true|weight=40000000|min=00000000|max=3f800000|hash=e013cf848d1b6c6e
@@ -405,11 +407,13 @@ terraforged:steppe|flats/category:FLATLAND|true|weight=3fc00000|min=00000000|max
 terraforged:torridonian|torridonian/terrain:hills|true|weight=40200000|min=00000000|max=3f800000|hash=0d9ba14ddc9c79fe"##;
 
     /// The noise lines that differ, and only in their terrain column, because the registry is Engine 0.3.0's (see
-    /// [`ENGINE_REGISTRY_LINES`]): Engine makes the built-in `plateau` a lowland, Reimagined a highland. In both engines
-    /// the two categories have the same predicates (only `isOverground`) and differ only in their order, which only
-    /// Engine's composite terrains read; the noise, weight and bounds are unchanged.
-    /// These are the port's lines today; the test fails once the registry follows Reimagined (#206).
-    const ENGINE_NOISE_LINES: [&str; 1] = [
+    /// [`ENGINE_REGISTRY_LINES`]): Engine makes the built-in `badlands` a flatland, Reimagined a lowland, and the
+    /// built-in `plateau` a lowland, Reimagined a highland. Lowland and highland have the same predicates in both
+    /// engines (only `isOverground`); flatland adds `isFlat`, and Engine's `badlands` also erodes with a modifier of
+    /// 0.3 (Reimagined: 1), see [`badlands_keeps_engine_flatland_predicates`]. The noise, weight and bounds are
+    /// unchanged. These are the port's lines today; the test fails once the registry follows Reimagined (#206).
+    const ENGINE_NOISE_LINES: [&str; 2] = [
+        "terraforged:badlands|badlands/category:FLATLAND|true|weight=3fe00000|min=00000000|max=3f800000|hash=884a7a1eddc2613a",
         "terraforged:plateau|plateau/category:LOWLAND|true|weight=40000000|min=00000000|max=3f800000|hash=5a96e6ffb27bc660",
     ];
 
@@ -463,6 +467,25 @@ terraforged:torridonian|torridonian/terrain:hills|true|weight=40200000|min=00000
     }
 
     #[test]
+    fn badlands_keeps_engine_flatland_predicates() {
+        // Engine 0.3.0's `registerBadlands("badlands", FLATLAND)` is a `ConfiguredTerrain` with an erosion modifier of
+        // 0.3; Reimagined's `register("badlands", LOWLAND)` is a plain terrain (`isFlat` false, erosion 1). The bundled
+        // noise's terrain is the port's (Engine's) built-in. Only Engine's composite terrains read `isFlat` and only
+        // Engine's filter `Modifier` reads the erosion modifier; Reimagined's generator path reads neither.
+        let mut registry = TerrainRegistry::new();
+        let types = decode_current_terrain_types(&mut registry).unwrap();
+        let noises = decode_current_terrain_noises(&types).unwrap();
+        let terrain = noises["terraforged:badlands"].terrain();
+        assert!(terrain.is_same(&registry.get_by_name("badlands").unwrap()));
+        assert!(terrain.is_flat());
+        assert!(terrain.is_overground());
+        assert_eq!(terrain.erosion_modifier().to_bits(), 0.3_f32.to_bits());
+        let plateau = noises["terraforged:plateau"].terrain();
+        assert!(!plateau.is_flat());
+        assert_eq!(plateau.erosion_modifier().to_bits(), 1.0_f32.to_bits());
+    }
+
+    #[test]
     fn bundled_noise_ids_reach_the_terrain_overrides() {
         // `GeneratorPreset` zips `RegistryKey.entries` with `entryIds`: overrides are keyed by the path alone.
         let mut registry = TerrainRegistry::new();
@@ -472,6 +495,7 @@ terraforged:torridonian|torridonian/terrain:hills|true|weight=40200000|min=00000
         assert_eq!(
             ids,
             [
+                "badlands",
                 "dales",
                 "dolomites",
                 "hills_1",
@@ -499,9 +523,9 @@ terraforged:torridonian|torridonian/terrain:hills|true|weight=40200000|min=00000
         let values: Vec<_> = noises.into_values().collect();
         let applied = apply_terrain_overrides(&values, &ids, &settings);
         assert_eq!(applied.len(), TERRAIN_NOISE_COUNT);
-        assert!(Arc::ptr_eq(&applied[9], &plains)); // a full-id key matches no terraforged: entry
-        assert_eq!(applied[11].weight().to_bits(), 4.0_f32.to_bits());
-        assert_eq!(applied[11].terrain().name(), "flats");
+        assert!(Arc::ptr_eq(&applied[10], &plains)); // a full-id key matches no terraforged: entry
+        assert_eq!(applied[12].weight().to_bits(), 4.0_f32.to_bits());
+        assert_eq!(applied[12].terrain().name(), "flats");
     }
 
     #[test]
@@ -509,7 +533,7 @@ terraforged:torridonian|torridonian/terrain:hills|true|weight=40200000|min=00000
         // `isMountain` matches ids containing "mountain", "dolomites", "torridonian" or "dales" (of the bundled
         // noises: dales, dolomites, the mountains and torridonian), so the default `mountainWidth` (3.5) stretches
         // dales, dolomites, the five mountains (fancy mountains are on, so both ridges stay) and torridonian; the two
-        // hills, plateau and the flatlands have no override and pass through as the same entries.
+        // hills, plateau, badlands and the flatlands have no override and pass through as the same entries.
         let mut registry = TerrainRegistry::new();
         let types = decode_current_terrain_types(&mut registry).unwrap();
         let noises = decode_current_terrain_noises(&types).unwrap();
