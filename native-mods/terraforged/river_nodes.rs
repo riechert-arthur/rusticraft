@@ -23,11 +23,15 @@
  */
 
 use super::{
-    terraforged::Interpolation,
+    terraforged::{Interpolation, clamp, map},
     terraforged_engine::{Terrain, TerrainRegistry},
 };
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// TerraForged's `worldgen.noise.continent.river.RiverNode` (the mod's continent rivers, not Engine's
+/// `rivermap`): a river or lake segment from `a` to `b` with its height (`h`) and radius (`r`) at each end and
+/// a sideways displacement that bows the middle of the segment. No `PartialEq`: the Java record's `equals`
+/// compares floats with `Float.compare` (NaN equals NaN, -0 differs from 0), unlike Rust's `==`.
+#[derive(Clone, Copy, Debug)]
 pub struct RiverNode {
     pub ax: f32,
     pub ay: f32,
@@ -41,6 +45,8 @@ pub struct RiverNode {
 }
 
 impl RiverNode {
+    /// `getProjection`: where `(x, y)` projects onto the segment, clamped to 0..1 (NaN, e.g. for a zero-length
+    /// segment, passes through).
     pub fn projection(self, x: f32, y: f32) -> f32 {
         let delta_x = self.bx - self.ax;
         let delta_y = self.by - self.ay;
@@ -49,8 +55,9 @@ impl RiverNode {
         clamp(value, 0.0, 1.0)
     }
 
+    /// `getDistance2`: the squared distance from `(x, y)` to the displaced point at `projection`.
     pub fn distance_squared(self, x: f32, y: f32, projection: f32) -> f32 {
-        let pad = 0.05;
+        let pad = 0.05_f32;
         let alpha = map(projection, pad, 1.0 - pad, 1.0 - pad * 2.0);
         let alpha = if alpha < 0.5 {
             alpha / 0.5
@@ -60,15 +67,18 @@ impl RiverNode {
         let alpha = Interpolation::Curve3.apply(alpha) * self.displacement;
         let point_x = self.x(projection) - (self.by - self.ay) * alpha;
         let point_y = self.y(projection) + (self.bx - self.ax) * alpha;
-        let delta_x = x - point_x;
-        let delta_y = y - point_y;
+        // `Line.dist2(x, y, px, py)`: the deltas run from (x, y) to the point.
+        let delta_x = point_x - x;
+        let delta_y = point_y - y;
         delta_x * delta_x + delta_y * delta_y
     }
 
+    /// `getDistance(x, y, t)`: `NoiseUtil.sqrt` (`(float) Math.sqrt`) of [`Self::distance_squared`].
     pub fn distance(self, x: f32, y: f32, projection: f32) -> f32 {
         (self.distance_squared(x, y, projection) as f64).sqrt() as f32
     }
 
+    /// `getDistance(t, d2)`: 1 at the centre line falling to 0 at the radius at `projection`; 0 at or beyond it.
     pub fn radial_distance(self, projection: f32, distance_squared: f32) -> f32 {
         let radius = self.radius(projection);
         if distance_squared >= radius * radius {
@@ -92,6 +102,8 @@ impl RiverNode {
     }
 }
 
+/// TerraForged's `NodeSample`: the nearest node found for one terrain (`type` in Java). `distance` is NaN
+/// until [`Self::reset`] (invalid) and `f32::MAX` after it.
 #[derive(Clone, Debug)]
 pub struct NodeSample {
     pub projection: f32,
@@ -130,12 +142,15 @@ impl NodeSample {
     }
 }
 
+/// TerraForged's `CarverSample`: the river and lake samples of one position.
 pub struct CarverSample {
     pub river: NodeSample,
     pub lake: NodeSample,
 }
 
 impl CarverSample {
+    /// `new CarverSample()`: `terrains` is the world's registry, whose ids 5 and 6 are Engine's
+    /// `TerrainType.RIVER` and `TerrainType.LAKE`.
     pub fn new(terrains: &TerrainRegistry) -> Self {
         Self {
             river: NodeSample::new(terrains.get_by_id(5)),
@@ -150,6 +165,9 @@ impl CarverSample {
     }
 }
 
+/// TerraForged's `RiverPieces`: the river and lake nodes of one cell, in insertion order. The Java arrays grow
+/// one slot at a time and `reset` only zeroes the counts; a `Vec` gives the same contents. `RiverPieces.NONE`
+/// is `RiverPieces::default()`.
 #[derive(Default)]
 pub struct RiverPieces {
     pub rivers: Vec<RiverNode>,
@@ -162,22 +180,6 @@ impl RiverPieces {
         self.lakes.clear();
         self
     }
-}
-
-#[allow(clippy::manual_clamp)]
-pub(crate) fn clamp(value: f32, minimum: f32, maximum: f32) -> f32 {
-    if value < minimum {
-        minimum
-    } else if value > maximum {
-        maximum
-    } else {
-        value
-    }
-}
-
-pub(crate) fn map(value: f32, minimum: f32, maximum: f32, range: f32) -> f32 {
-    let delta = clamp(value, minimum, maximum) - minimum;
-    if delta > range { 1.0 } else { delta / range }
 }
 
 #[cfg(test)]
@@ -237,28 +239,209 @@ mod tests {
         assert!(degenerate.projection(0.0, 0.0).is_nan());
     }
 
-    #[test]
-    fn sample_lifecycle_preserves_java_sentinels() {
-        let mut samples = CarverSample::new(&TerrainRegistry::default());
-        assert!(samples.river.is_invalid());
-        assert!(samples.lake.is_invalid());
-        samples.reset();
-        assert_eq!(samples.river.distance, f32::MAX);
-        assert!(!samples.lake.is_invalid());
-        samples.river.level = 0.75;
-        samples.river.invalidate();
-        assert!(samples.river.is_invalid());
-        assert_eq!(samples.river.level, 0.75);
-        samples.reset();
-        assert_eq!(samples.river.level, 0.0);
-        let mut pieces = RiverPieces::default();
-        for _ in 0..8 {
-            pieces.rivers.push(node());
+    const VALUES: [f32; 20] = [
+        0.0,
+        -0.0,
+        1.0,
+        -1.0,
+        0.5,
+        0.05,
+        0.95,
+        0.25,
+        2.5,
+        -3.75,
+        1e-3,
+        1e10,
+        -1e10,
+        3e38,
+        -3e38,
+        f32::MAX,
+        f32::from_bits(1),
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        f32::NAN,
+    ];
+
+    const NODES: [[f32; 9]; 4] = [
+        [-1.25, 2.5, 4.75, -0.5, 0.9, 0.2, 0.125, 0.75, -0.2],
+        [10.0, 10.0, 90.0, 30.0, 0.4, 0.1, 6.0, 2.0, 0.35],
+        [-1000.5, 300.25, -1000.5, 900.75, 0.0, 1.0, 40.0, 40.0, 1.0],
+        [3.0, 3.0, 3.0, 3.0, 0.5, 0.5, 1.0, 2.0, 0.5],
+    ];
+
+    struct Fnv(u64, usize);
+
+    impl Fnv {
+        fn new() -> Self {
+            Self(0xcbf2_9ce4_8422_2325, 0)
         }
-        pieces.lakes.push(node());
-        assert_eq!(pieces.rivers.len(), 8);
+
+        /// Canonical NaN, as the oracle's `floatToIntBits`: NaN payload signs are not portable.
+        fn add(&mut self, value: f32) {
+            let bits = if value.is_nan() {
+                0x7fc0_0000
+            } else {
+                value.to_bits()
+            };
+            for byte in bits.to_le_bytes() {
+                self.0 = (self.0 ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
+            }
+            self.1 += 1;
+        }
+
+        fn point(&mut self, node: RiverNode, x: f32, y: f32) {
+            let projection = node.projection(x, y);
+            let distance = node.distance_squared(x, y, projection);
+            self.add(projection);
+            self.add(distance);
+            self.add(node.distance(x, y, projection));
+            self.add(node.radial_distance(projection, distance));
+            self.add(node.x(projection));
+            self.add(node.y(projection));
+            self.add(node.height(projection));
+            self.add(node.radius(projection));
+        }
+
+        fn check(&mut self, name: &str, count: usize, hash: u64) {
+            assert_eq!((self.1, self.0), (count, hash), "{name}");
+            *self = Self::new();
+        }
+    }
+
+    fn from_fields(f: [f32; 9]) -> RiverNode {
+        RiverNode {
+            ax: f[0],
+            ay: f[1],
+            bx: f[2],
+            by: f[3],
+            ah: f[4],
+            bh: f[5],
+            ar: f[6],
+            br: f[7],
+            displacement: f[8],
+        }
+    }
+
+    /// `RiverNodesOracle` (`.local/terraforged/oracles/river_nodes/`, the jar's RiverNode bytecode): every
+    /// method over NaN, infinities, signed zeros, subnormal and huge inputs, as points, parameters and nodes.
+    #[test]
+    fn river_node_edge_inputs_match_the_jar() {
+        let mut fnv = Fnv::new();
+        for fields in NODES {
+            let node = from_fields(fields);
+            for x in VALUES {
+                for y in VALUES {
+                    fnv.point(node, x, y);
+                }
+            }
+        }
+        fnv.check("points", 12_800, 0x3737_f68f_01bd_f5d6);
+        for fields in NODES {
+            let node = from_fields(fields);
+            for t in VALUES {
+                fnv.add(node.distance_squared(1.5, -2.0, t));
+                fnv.add(node.distance(-7.0, 0.25, t));
+                fnv.add(node.x(t));
+                fnv.add(node.y(t));
+                fnv.add(node.height(t));
+                fnv.add(node.radius(t));
+                for distance in VALUES {
+                    fnv.add(node.radial_distance(t, distance));
+                }
+            }
+        }
+        fnv.check("params", 2_080, 0x64cd_f159_41da_fdc4);
+        let points = [
+            (0.0, 0.0),
+            (2.0, 1.0),
+            (-3.0, 4.0),
+            (50.0, 20.0),
+            (-1000.5, 600.0),
+        ];
+        for fields in NODES {
+            for field in 0..9 {
+                for value in VALUES {
+                    let mut fields = fields;
+                    fields[field] = value;
+                    let node = from_fields(fields);
+                    for (x, y) in points {
+                        fnv.point(node, x, y);
+                    }
+                    fnv.add(node.distance_squared(4.0, -2.5, 0.3));
+                }
+            }
+        }
+        fnv.check("edges", 29_520, 0x99a8_b4c8_791d_2dcb);
+    }
+
+    /// The oracle's `terrain`/`new`/`invalidate`/`reset`/`pieces` lines.
+    #[test]
+    fn samples_and_pieces_match_the_jar() {
+        let terrains = TerrainRegistry::default();
+        let mut samples = CarverSample::new(&terrains);
+        assert!(
+            samples
+                .river
+                .terrain
+                .is_same(&terrains.get_by_name("river").unwrap())
+        );
+        assert!(
+            samples
+                .lake
+                .terrain
+                .is_same(&terrains.get_by_name("lake").unwrap())
+        );
+        assert_eq!(samples.river.terrain.id(), 5);
+        assert_eq!(samples.lake.terrain.id(), 6);
+        let fields = |sample: &NodeSample| {
+            [
+                sample.projection,
+                sample.distance,
+                sample.position,
+                sample.level,
+            ]
+            .map(f32::to_bits)
+        };
+        assert!(samples.river.is_invalid());
+        assert_eq!(fields(&samples.river), [0, 0x7fc0_0000, 0, 0]);
+        samples.river.projection = 0.5;
+        samples.river.position = 2.0;
+        samples.river.level = 0.75;
+        assert!(samples.river.invalidate().is_invalid());
+        assert_eq!(
+            fields(&samples.river),
+            [0x3f00_0000, 0x7fc0_0000, 0x4000_0000, 0x3f40_0000]
+        );
+        samples.reset();
+        assert!(!samples.river.is_invalid());
+        assert_eq!(fields(&samples.river), [0, 0x7f7f_ffff, 0, 0]);
+        assert!(!samples.lake.is_invalid());
+        assert_eq!(samples.lake.distance.to_bits(), 0x7f7f_ffff);
+
+        let node = |ax: f32| from_fields([ax, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        let mut pieces = RiverPieces::default();
+        pieces.rivers.extend((0..11).map(|i| node(i as f32)));
+        pieces.lakes.extend((0..3).map(|i| node(-i as f32)));
+        let count = |nodes: &[RiverNode]| nodes.len() as i32;
+        let mut seen = vec![count(&pieces.rivers), count(&pieces.lakes)];
+        seen.extend(
+            pieces
+                .rivers
+                .iter()
+                .chain(&pieces.lakes)
+                .map(|n| n.ax as i32),
+        );
         pieces.reset();
-        assert!(pieces.rivers.is_empty());
-        assert!(pieces.lakes.is_empty());
+        seen.extend([count(&pieces.rivers), count(&pieces.lakes)]);
+        pieces.rivers.push(node(42.0));
+        seen.extend([count(&pieces.rivers), pieces.rivers[0].ax as i32]);
+        let none = RiverPieces::default();
+        seen.extend([count(&none.rivers), count(&none.lakes)]);
+        assert_eq!(
+            seen,
+            [
+                11, 3, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 0, -1, -2, 0, 0, 1, 42, 0, 0
+            ]
+        );
     }
 }
