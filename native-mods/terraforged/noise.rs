@@ -2269,6 +2269,60 @@ impl Module {
         }
     }
 
+    /// Noise2D 2cb4843's `getValue(int seed, float x, float y)` for the scalar nodes: every node passes the call's
+    /// seed unchanged to its children (only octave sources add their own seed, see [`Source::value_seed_first`]);
+    /// their arithmetic and evaluation order are the jar's. Nodes not yet ported to seed-first sampling return an
+    /// error instead of falling back to [`Module::value`], which would ignore the seed.
+    pub fn try_value_seed_first(&self, seed: i32, x: f32, y: f32) -> Result<f32, &'static str> {
+        let sample = |module: &Module| module.try_value_seed_first(seed, x, y);
+        Ok(match &self.0.kind {
+            ModuleKind::Constant(value) => *value,
+            ModuleKind::Source(source) => source.value_seed_first(seed, x, y),
+            ModuleKind::Abs(source) => sample(source)?.abs(),
+            ModuleKind::Alpha(source, alpha) => {
+                let value = sample(source)?;
+                let alpha = sample(alpha)?;
+                value * alpha + (1.0 - alpha)
+            }
+            ModuleKind::Bias(source, bias) => sample(source)? + sample(bias)?,
+            ModuleKind::Clamp(source, min, max) => {
+                let value = sample(source)?;
+                clamp(value, sample(min)?, sample(max)?)
+            }
+            ModuleKind::Invert(source) => {
+                let value = sample(source)?;
+                if value > source.max_value() {
+                    source.min_value()
+                } else if value < source.min_value() {
+                    source.max_value()
+                } else {
+                    source.max_value() - value
+                }
+            }
+            ModuleKind::Map(source, min, max, range) => {
+                let alpha = (sample(source)? - source.min_value()) / range;
+                let min = sample(min)?;
+                let max = sample(max)?;
+                min + alpha * (max - min)
+            }
+            ModuleKind::Power(source, power) => {
+                let value = sample(source)?;
+                java_pow(value, sample(power)?)
+            }
+            ModuleKind::Scale(source, scale) => sample(source)? * sample(scale)?,
+            ModuleKind::Threshold(source, threshold) => {
+                let value = sample(source)?;
+                if value < sample(threshold)? { 0.0 } else { 1.0 }
+            }
+            ModuleKind::Add(sources) => try_combine(sources, seed, x, y, |a, b| a + b)?,
+            ModuleKind::Multiply(sources) => try_combine(sources, seed, x, y, |a, b| a * b)?,
+            ModuleKind::Max(sources) => try_combine(sources, seed, x, y, java_max)?,
+            ModuleKind::Min(sources) => try_combine(sources, seed, x, y, java_min)?,
+            ModuleKind::Subtract(sources) => try_combine(sources, seed, x, y, |a, b| a - b)?,
+            _ => return Err("runtime-seeded sampling is not implemented for this graph node"),
+        })
+    }
+
     pub fn min_value(&self) -> f32 {
         self.0.min
     }
@@ -3218,6 +3272,23 @@ fn combine(sources: &[Module], x: f32, y: f32, operation: impl Fn(f32, f32) -> f
     rest.iter().fold(first.value(x, y), |value, source| {
         operation(value, source.value(x, y))
     })
+}
+
+/// `Combiner.getValue(seed, x, y)`: [`combine`] with the runtime seed passed to every source.
+fn try_combine(
+    sources: &[Module],
+    seed: i32,
+    x: f32,
+    y: f32,
+    operation: impl Fn(f32, f32) -> f32,
+) -> Result<f32, &'static str> {
+    let Some((first, rest)) = sources.split_first() else {
+        return Ok(0.0);
+    };
+    rest.iter()
+        .try_fold(first.try_value_seed_first(seed, x, y)?, |value, source| {
+            Ok(operation(value, source.try_value_seed_first(seed, x, y)?))
+        })
 }
 
 /// `MultiBlend`'s `nodes[index]`. Engine throws `ArrayIndexOutOfBoundsException` when the control leaves 0..1 far
@@ -5374,6 +5445,355 @@ mod tests {
             bits(points.map(|(x, y)| rand.value_seeded(x, y, i32::MAX))),
             [0xbe1a0663, 0x3baa8000, 0xbceece10, 0x3f529ef7, 0xbf5f7d26]
         );
+    }
+
+    #[test]
+    fn scalar_graph_runtime_seeds_match_current_noise2d() {
+        let source = Module::source(Source::new(
+            SourceKind::Simplex,
+            SourceConfig {
+                seed: i32::MAX,
+                frequency: 0.125,
+                octaves: 2,
+                gain: 0.65,
+                ..SourceConfig::default()
+            },
+        ));
+        let control = Module::source(Source::new(
+            SourceKind::Cubic,
+            SourceConfig {
+                seed: -91,
+                frequency: 0.25,
+                octaves: 2,
+                ..SourceConfig::default()
+            },
+        ));
+        let perlin = Module::source(Source::new(
+            SourceKind::Perlin,
+            SourceConfig {
+                seed: 53,
+                frequency: 0.5,
+                octaves: 2,
+                ..SourceConfig::default()
+            },
+        ));
+        let graphs = [
+            source.clone().bias(Module::constant(-0.5)).abs(),
+            Module::modifier(ModuleKind::Alpha(source.clone(), control.clone()), &source),
+            source.clone().bias(control.clone()),
+            source.clone().clamp(
+                control.clone().scale(Module::constant(0.25)),
+                control.clone().bias(Module::constant(0.5)),
+            ),
+            source.clone().invert(),
+            source
+                .clone()
+                .map(control.clone(), control.clone().bias(Module::constant(1.0))),
+            source.clone().power(control.clone()),
+            source.clone().scale(control.clone()),
+            source.clone().threshold(control.clone()),
+            Module::add(vec![source.clone(), control.clone(), perlin.clone()]),
+            Module::multiply(vec![source.clone(), control.clone(), perlin.clone()]),
+            Module::max(vec![source.clone(), control.clone(), perlin.clone()]),
+            Module::min(vec![source.clone(), control.clone(), perlin.clone()]),
+            Module::subtract(vec![source.clone(), control.clone(), perlin.clone()]),
+            Module::modifier(ModuleKind::Alpha(source.clone(), control), &source)
+                .bias(perlin)
+                .scale(Module::constant(0.4)),
+        ];
+        let expected: [[u64; 4]; 15] = [
+            [
+                0x8b824554e95d207f,
+                0xedc0a832360a66e3,
+                0x8eb1146735546699,
+                0x0fae72a3c3dcfcad,
+            ],
+            [
+                0x59ee6d740a1343aa,
+                0x48705ce73409335b,
+                0xd1edde565fafa762,
+                0x538889865e0b70e1,
+            ],
+            [
+                0x3b92f1abc8e45f50,
+                0x68764f9bb8fbb0df,
+                0x623158244a3e2b8c,
+                0x25d5ee315e2d28da,
+            ],
+            [
+                0x50f2a377b15912ae,
+                0x3bc130116da65f12,
+                0xbdc6b0ff4ad9622c,
+                0x450fd4be505a6f55,
+            ],
+            [
+                0x1e239698f275a2ea,
+                0xe0fee26e714bca65,
+                0xd702afc3eae3fec4,
+                0x2e1d94886897eb0b,
+            ],
+            [
+                0x3b92f1abc8e45f50,
+                0x68764f9bb8fbb0df,
+                0x623158244a3e2b8c,
+                0x25d5ee315e2d28da,
+            ],
+            [
+                0xf4624c568d09236b,
+                0x82b99bb85dd1a662,
+                0xbf534a21076e4401,
+                0xbdbd4dba26d45d8a,
+            ],
+            [
+                0x17a555d585ff21a9,
+                0x44d7c9e5521cb3c0,
+                0x5dccc6b4e66049e4,
+                0x74607cd50a9808d9,
+            ],
+            [
+                0xcd257655fc4e13f5,
+                0xcd257655fc4e13f5,
+                0xcd257655fc4e13f5,
+                0x1c4480da054e13f5,
+            ],
+            [
+                0xaa39381cc76c5f1a,
+                0x849145194b59731f,
+                0xb855bcdfd94a5dbd,
+                0x819a14a07b4a4655,
+            ],
+            [
+                0x88d6e252bf908ec6,
+                0xccddacd105664bd7,
+                0xdf0831a9b00faf0b,
+                0x8af4f81c18508596,
+            ],
+            [
+                0xb8d75a41879ceaea,
+                0xe41b2c22133a98c1,
+                0x92db9db450d14888,
+                0xc0e062df4d7f2146,
+            ],
+            [
+                0x5c54076e34378b65,
+                0x64650211b2b4bce8,
+                0x5a8766b7fafd681b,
+                0x51b92185d19e4202,
+            ],
+            [
+                0x251e33703dd6424b,
+                0x3786c672f07bcc40,
+                0x74c5cc64837b82f0,
+                0xb2d9ad39da2786e3,
+            ],
+            [
+                0xbb94bb9ca033522e,
+                0x513402c20cb58f6e,
+                0x894487b8aba56da1,
+                0xfe50e3ae1f83f07c,
+            ],
+        ];
+        for (graph_index, (graph, hashes)) in graphs.iter().zip(expected).enumerate() {
+            for (seed, expected) in [0, 17, -91, i32::MAX].into_iter().zip(hashes) {
+                let mut hash = 0xcbf29ce484222325u64;
+                for (x, y) in [
+                    (0.0, 0.0),
+                    (0.125, -0.75),
+                    (12.34, 56.78),
+                    (-1234.5, 987.25),
+                ] {
+                    hash ^= u64::from(graph.try_value_seed_first(seed, x, y).unwrap().to_bits());
+                    hash = hash.wrapping_mul(0x100000001b3);
+                }
+                assert_eq!(hash, expected, "graph {graph_index}, seed {seed}");
+            }
+        }
+    }
+
+    #[test]
+    fn seeded_scalar_graph_rejects_unsupported_children() {
+        let unsupported = Module::constant(0.5).warp(Domain::direct());
+        assert!(unsupported.try_value_seed_first(1, 0.0, 0.0).is_err());
+        assert!(
+            Module::constant(0.25)
+                .bias(unsupported.clone())
+                .try_value_seed_first(1, 0.0, 0.0)
+                .is_err()
+        );
+        assert!(
+            Module::add(vec![Module::constant(0.0), unsupported])
+                .try_value_seed_first(1, 0.0, 0.0)
+                .is_err()
+        );
+        for empty in [
+            Module::add(vec![]),
+            Module::multiply(vec![]),
+            Module::min(vec![]),
+            Module::max(vec![]),
+            Module::subtract(vec![]),
+        ] {
+            assert_eq!(empty.try_value_seed_first(1, 0.0, 0.0), Ok(0.0));
+        }
+    }
+
+    /// Noise2D 2cb4843 over edge cases: zero-range sources (0 octaves, where seed-first sampling must use
+    /// `map_current`), an infinite range, Invert's out-of-bound branches, a zero-range Map, crossed Clamp bounds,
+    /// Power's special cases, a NaN threshold, empty and single-source combiners, deep nesting, both `int` extreme
+    /// seeds and NaN/infinite/-0 points. Hashes from `SeededGraphEdgeOracle.java` (`.local/terraforged/oracles/
+    /// seed_first/`), one per graph over the seeds, then the points, with canonical NaN bits.
+    #[test]
+    fn scalar_graph_runtime_seed_edges_match_current_noise2d() {
+        let src = |kind, seed, octaves, gain, frequency| {
+            Module::source(Source::new(
+                kind,
+                SourceConfig {
+                    seed,
+                    octaves,
+                    gain,
+                    frequency,
+                    ..SourceConfig::default()
+                },
+            ))
+        };
+        let source = src(SourceKind::Simplex, i32::MAX, 2, 0.65, 0.125);
+        let control = src(SourceKind::Cubic, -91, 2, 0.5, 0.25);
+        let perlin = src(SourceKind::Perlin, 53, 2, 0.5, 0.5);
+        let perlin2 = src(SourceKind::Perlin2, -7, 3, 0.5, 0.3);
+        let zero = src(SourceKind::Simplex, 1337, 0, 0.5, 3.0);
+        let zero_ridge = src(SourceKind::Ridge, 5, 0, 0.5, 1.0);
+        let huge = src(SourceKind::Billow, -5, 3, 1e20, 1.0);
+        let c = Module::constant;
+        let threshold = source.clone().scale(c(0.25)).threshold(control.clone());
+        let alpha = source.clone().bias(perlin.clone());
+        let graphs = [
+            Module::add(vec![zero.clone(), source.clone()]),
+            zero_ridge.clone().bias(perlin2.clone()),
+            Module::multiply(vec![huge.clone(), control.clone()]),
+            threshold.clone().invert(),
+            Module::subtract(vec![c(0.25), threshold]).invert(),
+            control.clone().invert().invert(),
+            c(0.3).map(source.clone(), control.clone()),
+            zero.clone().map(control.clone(), source.clone()),
+            huge.clone().map(c(-1.0), c(2.0)),
+            source.clone().clamp(c(0.5), c(-0.5)),
+            source.clone().abs().power(c(0.5)),
+            source.clone().power(control.clone().scale(c(40.0))),
+            c(-1.0).power(huge.clone()),
+            source.clone().threshold(c(f32::NAN)),
+            Module::add(vec![]),
+            Module::multiply(vec![]),
+            Module::max(vec![]),
+            Module::min(vec![]),
+            Module::subtract(vec![]),
+            Module::subtract(vec![source.clone()]),
+            Module::max(vec![perlin2.clone()]),
+            Module::max(vec![
+                Module::min(vec![
+                    Module::add(vec![source.clone(), perlin2.clone()]),
+                    Module::multiply(vec![control.clone(), zero.clone()]),
+                ]),
+                Module::subtract(vec![huge, perlin]),
+                zero_ridge,
+            ]),
+            // `Module.alpha` would skip this control (its bounds leave 0..1); the oracle uses `new Alpha`.
+            Module::modifier(ModuleKind::Alpha(alpha.clone(), control.clone()), &alpha)
+                .clamp(control, perlin2.abs())
+                .scale(zero.invert()),
+        ];
+        let expected: [u64; 23] = [
+            0x4fb359ebc491fb4e,
+            0x57515118049449ab,
+            0x932b91965afb271f,
+            0x9452c0977ede72c7,
+            0x6981bfd7e75e72c7,
+            0x2f1dd1f8753a883c,
+            0xf12b5210ed1e72c7,
+            0x2d31f1a1d5d0294c,
+            0x571ebe50c7bf9b08,
+            0x5edb6107d11e72c7,
+            0x5e92c4df24a1e42e,
+            0x9c4324424c566c0e,
+            0x7d16428f3a5e72c7,
+            0xd421388f395e72c7,
+            0x4e2fd09b7fde72c7,
+            0x4e2fd09b7fde72c7,
+            0x4e2fd09b7fde72c7,
+            0x4e2fd09b7fde72c7,
+            0x4e2fd09b7fde72c7,
+            0xd616aa7e1b6abd88,
+            0x3cfb29857940568a,
+            0x0d5f106d169e72c7,
+            0x3f65b81f249e72c7,
+        ];
+        let seeds = [0, 1, -1, 17, i32::MAX, i32::MIN, -987654321];
+        let points = [
+            (0.0, 0.0),
+            (0.125, -0.75),
+            (12.34, 56.78),
+            (-1234.5, 987.25),
+            (-0.0, 3.5),
+            (f32::NAN, 1.0),
+            (f32::INFINITY, 2.0),
+            (1e30, -1e30),
+            (65536.5, -32768.25),
+        ];
+        for (graph_index, (graph, expected)) in graphs.iter().zip(expected).enumerate() {
+            let values = seeds.into_iter().flat_map(|seed| {
+                points.map(|(x, y)| graph.try_value_seed_first(seed, x, y).unwrap())
+            });
+            let hash = canonical_bits(values)
+                .into_iter()
+                .fold(0xcbf29ce484222325u64, |hash, bits| {
+                    (hash ^ u64::from(bits)).wrapping_mul(0x100000001b3)
+                });
+            assert_eq!(hash, expected, "graph {graph_index}");
+        }
+    }
+
+    /// Without Perlin sources (which ignore the runtime seed), a `Bias` (whose bias reseeding drops), a combiner
+    /// (whose sources reseeding leaves unseeded) or a zero or infinite source range (where the jar's `map` and
+    /// `map_current` differ), seed-first sampling with seed `s` gives the bits of the jar path reseeded with `s`
+    /// (`with_seed`, #109): both add `s` to every source's seed.
+    #[test]
+    fn scalar_graph_runtime_seeds_match_reseeded_jar_graphs() {
+        let src = |kind, seed, octaves| {
+            Module::source(Source::new(
+                kind,
+                SourceConfig {
+                    seed,
+                    octaves,
+                    frequency: 0.2,
+                    ..SourceConfig::default()
+                },
+            ))
+        };
+        let source = src(SourceKind::Simplex, i32::MAX, 2);
+        let control = src(SourceKind::Cubic, -91, 3);
+        let ridge = src(SourceKind::Ridge, i32::MIN, 2);
+        let c = Module::constant;
+        let graphs = [
+            source.clone().abs().power(ridge.clone()),
+            ridge.clone().alpha(ridge.clone().abs()),
+            source.clone().clamp(control.clone(), ridge.clone()),
+            control.clone().invert(),
+            source.clone().map(c(-2.0), control.clone()),
+            source
+                .clone()
+                .scale(control.clone())
+                .threshold(ridge.clone()),
+        ];
+        for (graph_index, graph) in graphs.iter().enumerate() {
+            for seed in [0, 1, -1, 17, i32::MAX, i32::MIN] {
+                let reseeded = graph.with_seed(i64::from(seed));
+                for (x, y) in [(0.0, 0.0), (12.34, -56.78), (-0.0, f32::NAN), (1e30, 3.0)] {
+                    assert_eq!(
+                        canonical_bits([graph.try_value_seed_first(seed, x, y).unwrap()]),
+                        canonical_bits([reseeded.value(x, y)]),
+                        "graph {graph_index}, seed {seed}, ({x}, {y})"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
