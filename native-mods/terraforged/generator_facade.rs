@@ -95,8 +95,8 @@ pub struct BaseColumn {
     pub states: Vec<ColumnBlock>,
 }
 
-/// The queries Minecraft's `ChunkGenerator` asks Reimagined's `Generator`, over its `TerrainCache` of the eroded
-/// generator. Heights count from block 0 as TerraForged's levels do (`levels.max_y` is the exclusive top, 480 by
+/// The queries Minecraft's `ChunkGenerator` asks Reimagined's `Generator` (6dd607eb's for [`Self::base_height`]), over
+/// its `TerrainCache` of the eroded generator. Heights count from block 0 as TerraForged's levels do (`levels.max_y` is the exclusive top, 480 by
 /// default); mapping them into a dimension's build range is the job of the layer that registers the generator.
 pub struct TerraForgedGenerator {
     levels: TerrainLevels,
@@ -288,9 +288,12 @@ impl TerraForgedGenerator {
     /// one, the ocean-floor types the height plus one (Java `int` math). The height is not the eroded height the
     /// chunk is built to ([`Self::fill_from_noise`]), so on eroded ground it can differ from the filled surface, as in
     /// 6dd607eb (Reimagined reads `getErodedHeightNoise` here instead, so structures stand on the eroded ground; not
-    /// followed). `Err` where the noise has no seed-first form (a custom module; see
-    /// [`ErodedNoiseGenerator::noise_sample`]): the error is passed on rather than replaced by a height, and the
-    /// caller decides (Java has no such failure).
+    /// followed). The result counts in TerraForged's levels (from block 0 up to `levels.max_y`) and is never clipped,
+    /// unlike [`Self::fill_from_noise`], which clips the terrain to the chunk's build range: with the default levels
+    /// it can name a height above 26.3's overworld top (320). Mapping it is the registering layer's job, together with
+    /// the open world-height decision (widen, scale or clip). `Err` where the noise has no seed-first form (a custom
+    /// module; see [`ErodedNoiseGenerator::noise_sample`]): the error is passed on rather than replaced by a height,
+    /// and the caller decides (Java has no such failure).
     pub fn base_height(
         &self,
         x: i32,
