@@ -187,3 +187,10 @@ file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_terrain_blender"
 source = "terrain_blender.rs"
 visibility = "pub"
+
+[[module]]
+id = "cave_noise"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_cave_noise"
+source = "cave_noise.rs"
+visibility = "pub"
