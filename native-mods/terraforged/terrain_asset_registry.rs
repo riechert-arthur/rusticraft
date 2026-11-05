@@ -308,7 +308,7 @@ where
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::super::terraforged_engine::TerrainCategory;
     use super::*;
 
@@ -409,7 +409,7 @@ O 34 minecraft:y minecraft:y terraforged:y x:y | minecraft:y minecraft:y y x:y"#
             .unwrap()
     }
 
-    fn category_name(category: TerrainCategory) -> String {
+    pub(crate) fn category_name(category: TerrainCategory) -> String {
         let mut name = String::new();
         for (index, c) in format!("{category:?}").chars().enumerate() {
             if c.is_ascii_uppercase() && index > 0 {
@@ -420,7 +420,7 @@ O 34 minecraft:y minecraft:y terraforged:y x:y | minecraft:y minecraft:y y x:y"#
         name
     }
 
-    fn describe(terrain: &Terrain) -> String {
+    pub(crate) fn describe(terrain: &Terrain) -> String {
         match terrain.parent() {
             Some(parent) => format!("{}/terrain:{}", terrain.name(), parent.name()),
             None => format!(
