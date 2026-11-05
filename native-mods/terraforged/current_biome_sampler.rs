@@ -62,6 +62,12 @@ pub struct CurrentBiomeSampler<'a> {
     noise: &'a NoiseGenerator,
 }
 
+// TerraForged samples one sampler from its worker threads (`Source`'s `BiomeSampler`).
+const _: fn() = || {
+    fn shareable<T: Send + Sync>() {}
+    shareable::<CurrentBiomeSampler<'static>>();
+};
+
 impl<'a> CurrentBiomeSampler<'a> {
     /// `new Sampler(noiseGenerator)`: the levels' frequency and `createClimate(noiseGenerator)` (see
     /// [`CurrentBiomeSampler`] for the seed).
