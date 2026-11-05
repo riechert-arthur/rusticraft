@@ -989,13 +989,14 @@ impl Source {
         }
     }
 
+    /// `mapping` is the `NoiseUtil.map` of the API version: [`map`] (jar) or [`map_current`] (newer).
     fn evaluate(
         self,
         mut x: f32,
         mut y: f32,
         seed: i32,
         explicit_seed: bool,
-        map: fn(f32, f32, f32, f32) -> f32,
+        mapping: fn(f32, f32, f32, f32) -> f32,
     ) -> f32 {
         x *= self.config.frequency;
         y *= self.config.frequency;
@@ -1010,7 +1011,7 @@ impl Source {
                 amplitude *= self.config.gain;
                 sum += cubic(x, y, current_seed) * amplitude;
             }
-            return map(sum, self.min, self.max, self.range);
+            return mapping(sum, self.min, self.max, self.range);
         }
         if matches!(
             self.kind,
@@ -1037,7 +1038,7 @@ impl Source {
                 y *= self.config.lacunarity;
                 amplitude *= self.config.gain;
             }
-            let result = map(value, self.min, self.max, self.range);
+            let result = mapping(value, self.min, self.max, self.range);
             return if matches!(self.kind, SourceKind::Billow) {
                 1.0 - result
             } else {
@@ -1069,7 +1070,7 @@ impl Source {
             y *= self.config.lacunarity;
             amplitude *= self.config.gain;
         }
-        map(sum, self.min, self.max, self.range)
+        mapping(sum, self.min, self.max, self.range)
     }
 }
 
