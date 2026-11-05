@@ -27,8 +27,10 @@ use super::{
     terraforged_continent_cell::{CellPoint, CellShape, CellSource},
     terraforged_continent_config::ContinentConfig,
     terraforged_continent_shape::ContinentCells,
+    terraforged_lossy_cache::ConcurrentLossyCache,
     terraforged_terrain_blend_util::SpiralIterator,
-    terraforged_util::{unpack_left, unpack_right},
+    terraforged_terrain_generator::available_processors,
+    terraforged_util::{pack, unpack_left, unpack_right},
 };
 use std::ops::RangeInclusive;
 
@@ -40,11 +42,15 @@ const CONTINENT_SAMPLE_SCALE: f32 = 400.0;
 const SPAWN_SEARCH_RADIUS: i32 = 100_000;
 /// `ContinentGenerator.VALID_SPAWN_RADIUS`.
 const VALID_SPAWN_RADIUS: i32 = 3;
+/// `ContinentGenerator.CELL_POINT_CACHE_SIZE`: the cell cache's capacity.
+const CELL_POINT_CACHE_SIZE: i32 = 2048;
 
 /// The cell half of TerraForged 1.18.2-0.3.1's `worldgen.noise.continent.ContinentGenerator` (the jar has no separate
 /// cell generator): jittered continent cells with their noise, the nearest-cell search and the spawn-offset search.
-/// The jar's lossy cell cache is transparent (it compares whole keys and its pool always hands out fresh points), so
-/// cells are computed directly. The river generator comes later.
+/// `getCell` ([`ContinentCells::cell`]) goes through the newer source's lossy cell cache (2048 cells,
+/// `Environment.CORES` buckets, see `ConcurrentLossyCache`); [`Self::compute_cell`] and the spawn search compute
+/// directly, as the source does. The cache never changes a result: a hit needs the same cell and runtime seed, and no
+/// cell point is pooled or reused. The river generator is `RiverNetwork`.
 ///
 /// Seeds: the jar has no runtime seed. `ContinentNoise.createContinent` binds the world seed by drawing `seed0` and
 /// `seed1` from `GeneratorContext.seed`, and every cell uses those. The `seed` parameters here are the newer source's
@@ -59,11 +65,18 @@ pub struct CellGenerator {
     source: CellSource,
     /// `shapeGenerator.threshold`: the spawn search's land test.
     threshold: f32,
+    cache: ConcurrentLossyCache<CellPoint>,
 }
 
 impl CellGenerator {
     /// `new ContinentGenerator(config, levels, controlPoints)`: the cell fields only.
+    /// The cell cache is `LossyCache.concurrent(CELL_POINT_CACHE_SIZE, ...)`: `Environment.CORES` buckets.
     pub fn new(config: ContinentConfig) -> Self {
+        Self::with_concurrency(config, available_processors())
+    }
+
+    /// [`Self::new`] with the cell cache's bucket count (`concurrency`, Java's `Environment.CORES`) given.
+    pub fn with_concurrency(config: ContinentConfig, concurrency: i32) -> Self {
         Self {
             seed: config.shape.seed0,
             sample_seed: config.shape.seed1.wrapping_add(SAMPLE_SEED_OFFSET),
@@ -71,6 +84,7 @@ impl CellGenerator {
             shape: config.shape.cell_shape,
             source: config.shape.cell_source,
             threshold: config.shape.threshold,
+            cache: ConcurrentLossyCache::new(CELL_POINT_CACHE_SIZE, concurrency),
         }
     }
 
@@ -123,6 +137,45 @@ impl CellGenerator {
         (0.0, 0.0)
     }
 
+    /// [`ContinentCells::nearest_cell`] reading its cells from `cell(x, y)` instead of the cache (with
+    /// [`Self::compute_cell`], the direct computation the cached one must equal).
+    pub fn nearest_cell_with(
+        &self,
+        x: f32,
+        y: f32,
+        mut cell: impl FnMut(i32, i32) -> CellPoint,
+    ) -> (i32, i32) {
+        let x = self.shape.adjust_x(x);
+        let y = self.shape.adjust_y(y);
+        // The rows loop runs forever past `None`; the columns loop only if a row runs.
+        let Some(rows) = window(floor(y).wrapping_sub(1)) else {
+            panic!("TerraForged's getNearestCell loops forever at ({x}, {y})");
+        };
+        let Some(columns) = window(floor(x).wrapping_sub(1)) else {
+            assert!(
+                rows.is_empty(),
+                "TerraForged's getNearestCell loops forever at ({x}, {y})"
+            );
+            return (0, 0);
+        };
+        let mut nearest = (0, 0);
+        let mut distance = f32::MAX;
+        for cell_y in rows {
+            for cell_x in columns.clone() {
+                let cell = cell(cell_x, cell_y);
+                // NoiseUtil.dist2(x, y, px, py)
+                let delta_x = x - cell.px;
+                let delta_y = y - cell.py;
+                let distance_squared = delta_x * delta_x + delta_y * delta_y;
+                if distance_squared < distance {
+                    distance = distance_squared;
+                    nearest = (cell_x, cell_y);
+                }
+            }
+        }
+        nearest
+    }
+
     /// `shapeGenerator.getThresholdValue(cell) != 0`: `noise < threshold` is ocean, anything else (NaN included) is
     /// land. Written as Java's comparison, negated, so NaN stays land.
     #[allow(clippy::neg_cmp_op_on_partial_ord)]
@@ -153,9 +206,10 @@ impl CellGenerator {
     }
 }
 
-// World generation shares the generator across threads.
+// World generation shares the generator across threads; with its cache it must still fit in a `Module::custom`
+// closure (Send + Sync + RefUnwindSafe), as the continent noise wraps it.
 const _: fn() = || {
-    fn shared<T: Send + Sync>() {}
+    fn shared<T: Send + Sync + std::panic::RefUnwindSafe>() {}
     shared::<CellGenerator>();
 };
 
@@ -169,9 +223,13 @@ pub fn window(min: i32) -> Option<RangeInclusive<i32>> {
 }
 
 impl ContinentCells for CellGenerator {
-    /// `getCell`.
+    /// `getCell`: [`CellGenerator::compute_cell`] through the lossy cell cache, keyed by `PosUtil.pack(x, y)`. A hit
+    /// needs the same key and runtime seed (the source's `LongCache` checks only the key), so this always equals
+    /// `compute_cell(seed, x, y)`.
     fn cell(&self, seed: i32, x: i32, y: i32) -> CellPoint {
-        self.compute_cell(seed, x, y)
+        *self.cache.compute_if_absent(seed, pack(x, y), |seed, key| {
+            self.compute_cell(seed, unpack_left(key), unpack_right(key))
+        })
     }
 
     fn cell_shape(&self) -> CellShape {
@@ -182,35 +240,7 @@ impl ContinentCells for CellGenerator {
     /// strictly nearest (first wins ties; NaN distances never win). Where `floor` returns `Integer.MAX_VALUE` (huge,
     /// infinite or `-2^31` points) the jar's window wraps and is empty: the answer is cell (0, 0), as in the jar.
     fn nearest_cell(&self, seed: i32, x: f32, y: f32) -> (i32, i32) {
-        let x = self.shape.adjust_x(x);
-        let y = self.shape.adjust_y(y);
-        // The rows loop runs forever past `None`; the columns loop only if a row runs.
-        let Some(rows) = window(floor(y).wrapping_sub(1)) else {
-            panic!("TerraForged's getNearestCell loops forever at ({x}, {y})");
-        };
-        let Some(columns) = window(floor(x).wrapping_sub(1)) else {
-            assert!(
-                rows.is_empty(),
-                "TerraForged's getNearestCell loops forever at ({x}, {y})"
-            );
-            return (0, 0);
-        };
-        let mut nearest = (0, 0);
-        let mut distance = f32::MAX;
-        for cell_y in rows {
-            for cell_x in columns.clone() {
-                let cell = self.cell(seed, cell_x, cell_y);
-                // NoiseUtil.dist2(x, y, px, py)
-                let delta_x = x - cell.px;
-                let delta_y = y - cell.py;
-                let distance_squared = delta_x * delta_x + delta_y * delta_y;
-                if distance_squared < distance {
-                    distance = distance_squared;
-                    nearest = (cell_x, cell_y);
-                }
-            }
-        }
-        nearest
+        self.nearest_cell_with(x, y, |cell_x, cell_y| self.cell(seed, cell_x, cell_y))
     }
 }
 
@@ -621,5 +651,62 @@ mod tests {
         assert_ne!(original, generator.cell(43, 3, -7));
         generator.cell(42, 100, 200);
         assert_eq!(original, generator.cell(42, 3, -7));
+    }
+
+    /// Runtime seeds for the cache tests: the `int` extremes, the offsets' wrap points and ordinary seeds.
+    fn cache_seeds() -> Vec<i32> {
+        let mut seeds = vec![0, 1, -1, 42, i32::MAX, i32::MIN, -6569, i32::MAX - 6568];
+        seeds.extend((0..56).map(|i: i32| i.wrapping_mul(0x9e37_79b9_u32 as i32)));
+        seeds
+    }
+
+    fn cell_bits(cell: CellPoint) -> [u32; 4] {
+        [cell.px, cell.py, cell.noise, cell.noise0].map(f32::to_bits)
+    }
+
+    /// The cell cache never changes a cell or a nearest cell: one generator shared by 8 threads, each walking every
+    /// seed over the same 9x9 cells in its own order (so slots keep changing seed and key), equals direct computation.
+    #[test]
+    fn cached_cells_equal_direct_for_many_seeds_and_threads() {
+        let seeds = cache_seeds();
+        for (shape, source) in CellShape::VALUES
+            .into_iter()
+            .flat_map(|shape| CellSource::VALUES.map(|source| (shape, source)))
+        {
+            let mut config = ContinentConfig::default();
+            config.shape.cell_shape = shape;
+            config.shape.cell_source = source;
+            let generator = CellGenerator::with_concurrency(config, 6);
+            std::thread::scope(|scope| {
+                for thread in 0..8 {
+                    let (generator, seeds) = (&generator, &seeds);
+                    scope.spawn(move || {
+                        for round in 0..seeds.len() {
+                            let seed = seeds[(round * 7 + thread * 5) % seeds.len()];
+                            for y in -4..=4 {
+                                for x in -4..=4 {
+                                    let (x, y) = if thread % 2 == 0 { (x, y) } else { (-y, x) };
+                                    let cached = generator.cell(seed, x, y);
+                                    let direct = generator.compute_cell(seed, x, y);
+                                    assert_eq!(
+                                        cell_bits(cached),
+                                        cell_bits(direct),
+                                        "{seed} ({x}, {y})"
+                                    );
+                                    let (px, py) = (x as f32 * 0.7 + 0.3, y as f32 * 0.9 - 0.2);
+                                    assert_eq!(
+                                        generator.nearest_cell(seed, px, py),
+                                        generator.nearest_cell_with(px, py, |cx, cy| {
+                                            generator.compute_cell(seed, cx, cy)
+                                        }),
+                                        "{seed} ({px}, {py})"
+                                    );
+                                }
+                            }
+                        }
+                    });
+                }
+            });
+        }
     }
 }

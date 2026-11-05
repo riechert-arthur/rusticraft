@@ -1338,11 +1338,12 @@ that position (lacunarity 2.75, gain 0.3, seed `seed1 + 6569`), and `noise0` is 
 `getNearestCell`: the strictly nearest of the 3x3 cells around the adjusted point's `NoiseUtil.floor`; where that floor
 is `Integer.MAX_VALUE` (points at or past 2^31, at -2^31, infinite) the jar's loop wraps and is empty, so the answer is
 cell (0, 0), and the continent shape on top of real cells never reaches its `i32` panics. The jar caches cells in a
-lossy cache whose pool always hands out fresh points, so the cache never changes a result; the port computes cells
-directly (the cache is a later layer). The jar has no runtime seed: `ContinentNoise.createContinent` binds the world
+lossy cache whose pool always hands out fresh points, so the cache never changes a result. The port's `cell` (`getCell`)
+goes through the newer source's cell cache (see the cache wiring below); `compute_cell` and the spawn search compute
+directly, as both versions do. The jar has no runtime seed: `ContinentNoise.createContinent` binds the world
 seed by drawing `seed0` and `seed1` from the generator context's `Seed`. The port's `seed` parameters are the newer
 source's runtime seed, added (Java `int` wrap) to both seeds; 0 gives the jar's cells, and seed `s` over `(a, b)`
-equals seed 0 over `(a + s, b + s)`. The river generator comes later.
+equals seed 0 over `(a + s, b + s)`. The river generator is `RiverNetwork`, below.
 `ContinentCellsOracle.java` (`.local/terraforged/oracles/continent_cells/`, with a `Mth` stub plus the biome override's
 and terrain levels' stubs) runs the jar's own `ContinentGenerator` (its constructor, cache and pool) and
 `ShapeGenerator` over 8 seed pairs (`int` extremes and wrapping sample seeds), 10 jitters (signed zeros, a subnormal,
@@ -1425,9 +1426,8 @@ runtime seed to both and never reads `rivers.seed` (which, in the newer source, 
 source's private `computeNodes` that way (and checks they agree) over both cell shapes and all three noise sources: a
 13×13 grid at seed 42, nine runtime seeds near the `int` offsets' wrap points with three shape-seed pairs, cells at
 the `int` extremes, and edge lake densities, thresholds and jitters (NaN, infinities, signed zeros). The tests match
-the piece counts and the hash of every node's float bits, in order, in debug and release. The piece and cell caches
-come later (#126, #127). The oracle bypasses the
-continent's cell cache: the jar's cache returns evicted cell points to a pool that later cells overwrite, which could
+the piece counts and the hash of every node's float bits, in order, in debug and release. The tests run the port's
+cell cache (cache wiring, below); the oracle bypasses the continent's cell cache: the jar's cache returns evicted cell points to a pool that later cells overwrite, which could
 change a cell still in use when two of the 21 cells read share a slot (not in these grids, on a 12-core run).
 
 `RiverNetwork::sample_nodes` ports the nearest-node sampling of the same class: the public `sample(seed, x, y,
@@ -1445,10 +1445,10 @@ hundred cells away from the `int` limits, so neither happens with it. Version ch
 `sample`, `sampleNode`, `recordNode` and `getNodes`; `sampleNode` and `recordNode` are the same in the jar and the newer
 source, and `sample` and `getNodes` differ only in the seed (the source passes its runtime seed to `getNearestCell` and
 `getNodes`), so the seed mapping above holds here too. The newer source's piece cache is keyed by the cell alone, so a
-generator called with two runtime seeds can return the other seed's pieces; the port has no cache yet and computes
-every cell for the seed it is given. `RiverSamplingOracle.java` (`run-sampling.sh`, same folder) runs the jar's and
-the compiled source's private `sample` with both caches bypassed (no cell recycling, no piece cache) and checks they
-agree; with the real caches the output is the same on these inputs (12-core run). It covers a 25×25 quarter-cell grid
+generator called with two runtime seeds can return the other seed's pieces; the port's caches also check the seed
+(cache wiring, below). `RiverSamplingOracle.java` (`run-sampling.sh`, same folder) runs the jar's and the compiled
+source's private `sample` with both caches bypassed (both always compute) and checks they agree; with the real caches
+(`Environment.CORES` fixed at 6, one thread) the output is the same, except on its `shared` lines. It covers a 25×25 quarter-cell grid
 at seed 42 over both cell shapes and all three noise sources, the nine runtime seeds with three shape-seed pairs, and
 26×26 edge points (NaN, infinities, signed zeros, subnormals, float extremes, ±2^31 and its float neighbours). It also
 runs `sampleNode` and `recordNode` on eleven hand-made node lists (equal and mirrored nodes, a zero-length node, NaN
@@ -1468,7 +1468,7 @@ are equal or infinitely apart; the jar's `map`, which `ShapeGenerator::base_nois
 finite, nonzero ranges, where both maps agree. Compared with the jar under the seed mapping above, the source differs
 in two more places: its erosion seed is `rivers.seed + 21221 + seed` where the jar's is `rivers.seed + 21221`, and
 those degenerate falloffs. `RiverPipelineOracle.java` (`.local/terraforged/oracles/river_pipeline/run.sh`) runs the
-source's `RiverGenerator.sample`, compiled against Noise2D 2cb4843, with the caches bypassed, and the jar's, which
+source's `RiverGenerator.sample`, compiled against Noise2D 2cb4843, with the caches bypassed (and once more with the real caches, below), and the jar's, which
 agrees wherever those differences don't apply. It covers both cell shapes and all three noise sources, each with: a
 25×25 quarter-cell grid over the shape's sample at two noise levels, 150 hand-set samples (continent, base, height
 and river noise) at 49 points, and 26×26 edge points with their warped points. It also covers eleven runtime seeds
@@ -1532,9 +1532,30 @@ on 48 colliding keys and three seeds always get the directly computed value, val
 one key under contention is computed once, a panicking function leaves the slot and the listener alone, and the
 listener runs outside the lock.
 
+The cache wiring follows 6dd607eb. `CellGenerator`'s `cell` (`ContinentGenerator.getCell`, used by the nearest-cell
+search, the shape's 5×5 blend and the river network) reads a 2,048-cell cache (`CELL_POINT_CACHE_SIZE`), and
+`RiverNetwork::nodes` (`RiverGenerator.getNodes`, used by the nearest-node sampling) a 1,024-cell piece cache
+(`RIVER_CACHE_SIZE`), both `LossyCache.concurrent` with `Environment.CORES` buckets and keyed by `PosUtil.pack(x,
+y)`; `with_concurrency` fixes the bucket count. `compute_cell`, `compute_nodes` and the spawn search stay direct, as in
+the source. Two differences, so that the caches never change a result: a hit needs the runtime seed too (the source's
+caches hit on the cell alone, so one generator called with two runtime seeds returns the first seed's cells and pieces
+for the second), and no cell point or piece list is pooled (the source's pools build a new value on every `take`, so
+that changes nothing). Evicted values are shared `Arc`s, so a sample holding pieces never sees them change. Per sample
+the caches save most of the work: without them, `sample_nodes` read the nearest-cell search's 9 cells and then
+computed the pieces of the 9 cells around it (each a new list, reading the cell, its neighbours and, for land, theirs);
+on a 9×9 quarter-cell grid at seed 42 that is 5,810 cell reads for 81 samples, against 895 on a first cached pass and
+exactly 9 per sample (all hits, no pieces computed) once the neighbourhood is cached. Checks: the river oracles above
+(`run-sampling.sh`, `river_pipeline/run.sh`) also run the source with its real caches, `CORES` fixed at 6 by an
+`Environment` stub, on one thread, and get the direct output; their `shared` lines reuse one generator across the
+runtime seeds of the `seeds` lines, where the source's output changes (its caches leak one seed into the next) and the
+direct one doesn't. The Rust tests run the cached path (6 buckets) against all of these lines, `shared` included
+(equal to `seeds`), and compare the cached cells, nearest cells, pieces and samples with a fully direct computation
+over 64 and 16 runtime seeds on 8 threads sharing one generator.
+
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives, the biome climate types, the climate settings, the climate module, the climate stage, the continent factory, the generator context, the heightmap, the world generator factory, TerraForged's terrain levels, its terrain data, its terrain generator, its terrain-blend utilities, its terrain blender with its nearest-terrain search, noise-graph reseeding, the cave noise primitives, the biome viability rules, the biome overrides, the continent control points, the continent cell primitives, the continent configuration, the continent shape blending, the continent cell generator with its spawn-offset search, the continent river nodes, the continent river carver's arithmetic, the continent river networks with their nearest-node sampling and their warped, carved river sampling, the newer source's seed-first noise sources, and its bounded concurrent lossy cache. They change nothing in the game, so there is
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives, the biome climate types, the climate settings, the climate module, the climate stage, the continent factory, the generator context, the heightmap, the world generator factory, TerraForged's terrain levels, its terrain data, its terrain generator, its terrain-blend utilities, its terrain blender with its nearest-terrain search, noise-graph reseeding, the cave noise primitives, the biome viability rules, the biome overrides, the continent control points, the continent cell primitives, the continent configuration, the continent shape blending, the continent cell generator with its spawn-offset search, the continent river nodes, the continent river carver's arithmetic, the continent river networks with their nearest-node sampling and their warped, carved river sampling, the newer source's seed-first noise sources, and its bounded concurrent lossy cache with the continent's cell and
+river-piece caches on it. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
