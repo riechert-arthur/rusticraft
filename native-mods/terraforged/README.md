@@ -1284,8 +1284,8 @@ registry's deep ocean below 0.25, shallow ocean below 0.5, coast below 0.55 and 
 `falloff_curve` turns Engine's `ControlPoints` (the same validated points the beach filter and climate use; the
 defaults when the settings fail `validate`) into five falloff points, and `falloff` maps continent noise through
 them with `MathUtil.map` (noise.rs's `map` then `lerp`); below every point it maps `0..last` onto `0..0.1`. A
-zero-width band, such as inland at exactly 1, gives NaN, as in the jar. Nothing uses them yet: the continent cells,
-configuration and shape come next. `ContinentPointsOracle.java` (`.local/terraforged/oracles/continent_points/`,
+zero-width band, such as inland at exactly 1, gives NaN, as in the jar. The continent shape reads the falloff
+curve. `ContinentPointsOracle.java` (`.local/terraforged/oracles/continent_points/`,
 which reuses the biome override's stubs) runs the jar's own bytecode over the constants, 31 continent values (each
 threshold and its neighbouring floats, signed zeros, subnormals, infinities, NaN) and eleven curves (six Engine
 settings, including invalid, NaN, subnormal and `-0` ones, and five hand-built curves: empty, one point, a NaN or
@@ -1296,8 +1296,8 @@ package: `CellPoint` (a cell's position and noise; `noise()` returns the `noise0
 and `CellSource`. A square cell sits at `cell + MathUtil.rand(hash, prime) * jitter` on each axis (noise.rs's `hash`
 and `terrain_blend_util.rs`'s `random`, in Java `int` math); `HEXAGON` shifts odd rows by half a cell with half the x
 jitter, and its `adjustY` scales y by 1.2 (x is never adjusted). The sources are Perlin (24 gradients, `CURVE3`),
-simplex and cubic noise, mapped to 0..1 by `(1 + sample) * 0.5`. Nothing uses them yet: the continent configuration,
-shape and cell generator come next. `ContinentCellOracle.java` (`.local/terraforged/oracles/continent_cell/`, which
+simplex and cubic noise, mapped to 0..1 by `(1 + sample) * 0.5`. The continent shape blends the cells; the cell
+generator that places them comes next. `ContinentCellOracle.java` (`.local/terraforged/oracles/continent_cell/`, which
 reuses the biome override's stubs) runs the jar's own bytecode over 12 hashes, 15 cell coordinates (`int` extremes and
 past 2^24), 14 jitters (signed zeros, a subnormal, huge, infinite and NaN) and 27 sample coordinates (the same kinds)
 for 6 seeds; the test matches its 177,604 results bit for bit, in debug and release.
@@ -1308,8 +1308,8 @@ and `FloatRange`. They are plain structs with the jar's defaults (cell size 400,
 falloff 0.01..0.25, `SQUARE` cells from `PERLIN` noise, falloffs 1.5 and 1, lake density 0.75), the river and lake
 presets, `copy`, and `scale`, which multiplies the three widths but not erosion or the depths; `FloatRange::at` is
 `NoiseUtil.lerp`, unclamped. The jar has no codec for them, so none is ported. The seeds stay 0 until the cell
-generator and the river pipeline read them (the jar only ever sets `seed0` and `seed1`). Nothing uses the
-configuration yet: the continent shape and cell generator come next. `ContinentConfigOracle.java`
+generator and the river pipeline read them (the jar only ever sets `seed0` and `seed1`). The continent shape reads
+it; the cell generator comes next. `ContinentConfigOracle.java`
 (`.local/terraforged/oracles/continent_config/`, which reuses the biome override's stubs) runs the jar's own bytecode
 over every default and 26 edge values (signed zeros, subnormals, `int`-precision limits, infinities, NaN) for `at`,
 `scale`, `copy` and the presets' `copy`/`scale` chains; the test matches its 89,024 results and every default bit for
