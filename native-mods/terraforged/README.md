@@ -1705,8 +1705,9 @@ tests match both bit for bit in debug and release.
 unchanged. It passes the call's seed unchanged to its radius and fade modules. As in Java, it reads the fades only
 away from the endpoints (an endpoint's width modifier is 0 without them), fade-in before fade-out, then the radius at
 every point; the segment distance is the jar's f32 arithmetic (projection clamped with `NoiseUtil.clamp`, no square
-root), so a zero-length segment, and a segment so short its squared length underflows to 0, sample NaN, as do the
-endpoints. Reseeding differs here: the jar's `Line` spec reads its children back without the seed, so `with_seed`
+root): a zero-length segment samples NaN everywhere (0/0), one whose squared length underflows to 0 samples NaN
+where its projection is 0/0 and measures to an endpoint elsewhere (±inf clamps to 0 or 1), and the endpoints sample
+NaN (an endpoint's width modifier, and so its radius, is 0). Reseeding differs here: the jar's `Line` spec reads its children back without the seed, so `with_seed`
 keeps their seeds while seed-first sampling reaches them. `TerraForgedSeededLineOracle.java` (the PR's line, four
 seeds, four points) and `SeededLineEdgeOracle.java` (21 lines: seeded, Perlin and 0-octave children, NaN, infinite,
 zero and negative radii and fades, feathers 0, 1 and NaN, zero-length, underflowing and overflowing segments, a nested
