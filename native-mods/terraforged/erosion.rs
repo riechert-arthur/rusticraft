@@ -275,10 +275,16 @@ impl ErosionDisc {
 }
 
 pub struct ErosionBrushes {
-    offsets: Vec<i32>,
-    weights: Vec<f32>,
-    edge_offsets: Vec<Option<Vec<i32>>>,
-    edge_weights: Vec<Option<Vec<f32>>>,
+    offsets: Box<[i32]>,
+    weights: Box<[f32]>,
+    /// Java's `edgeOffsets[i]`/`edgeWeights[i]` (both null or both set): one slot per cell.
+    edges: Box<[Option<Box<EdgeBrush>>]>,
+}
+
+/// A clipped, re-weighted brush of a cell near the map's edge.
+struct EdgeBrush {
+    offsets: Box<[i32]>,
+    weights: Box<[f32]>,
 }
 
 impl ErosionBrushes {
@@ -303,22 +309,21 @@ impl ErosionBrushes {
         let mut brushes = Self {
             offsets,
             weights,
-            edge_offsets: std::iter::repeat_with(|| None).take(length).collect(),
-            edge_weights: std::iter::repeat_with(|| None).take(length).collect(),
+            edges: std::iter::repeat_with(|| None).take(length).collect(),
         };
         brushes.init_edges(map_size, &disc);
         brushes
     }
 
     pub fn brush(&self, index: usize) -> (&[i32], &[f32]) {
-        match (&self.edge_offsets[index], &self.edge_weights[index]) {
-            (Some(offsets), Some(weights)) => (offsets, weights),
-            _ => (&self.offsets, &self.weights),
+        match &self.edges[index] {
+            Some(edge) => (&edge.offsets, &edge.weights),
+            None => (&self.offsets, &self.weights),
         }
     }
 
     fn init_edges(&mut self, size: i32, disc: &ErosionDisc) {
-        for index in 0..self.edge_offsets.len() {
+        for index in 0..self.edges.len() {
             let center_x = index as i32 % size;
             let center_y = index as i32 / size;
             let clipped = center_x < disc.reach
@@ -328,16 +333,18 @@ impl ErosionBrushes {
             if !clipped {
                 continue;
             }
+            let mut count = 0;
             let mut weight_sum = 0.0_f32;
             for point in 0..disc.weights.len() {
                 let x = center_x.wrapping_add(disc.x[point]);
                 let y = center_y.wrapping_add(disc.y[point]);
                 if x >= 0 && x < size && y >= 0 && y < size {
                     weight_sum += disc.weights[point];
+                    count += 1;
                 }
             }
-            let mut offsets = Vec::new();
-            let mut weights = Vec::new();
+            let mut offsets = Vec::with_capacity(count);
+            let mut weights = Vec::with_capacity(count);
             for point in 0..disc.weights.len() {
                 let x = center_x.wrapping_add(disc.x[point]);
                 let y = center_y.wrapping_add(disc.y[point]);
@@ -346,8 +353,10 @@ impl ErosionBrushes {
                     weights.push(disc.weights[point] / weight_sum);
                 }
             }
-            self.edge_offsets[index] = Some(offsets);
-            self.edge_weights[index] = Some(weights);
+            self.edges[index] = Some(Box::new(EdgeBrush {
+                offsets: offsets.into_boxed_slice(),
+                weights: weights.into_boxed_slice(),
+            }));
         }
     }
 }
@@ -840,6 +849,12 @@ pub(crate) mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn erosion_brushes_are_shareable_across_threads() {
+        fn shareable<T: Send + Sync>() {}
+        shareable::<ErosionBrushes>();
     }
 
     #[test]
