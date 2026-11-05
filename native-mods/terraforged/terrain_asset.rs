@@ -681,7 +681,7 @@ mod tests {
         assert_eq!(rust.join("\n"), ASSET_ORACLE.trim_end());
     }
 
-    /// `.local/terraforged/oracles/terrain_asset/cases.txt` (name, tab, the asset's JSON).
+    /// `.local/terraforged/oracles/terrain_asset/cases.txt` (name, tab, the asset's JSON); `sync.py` there copies it.
     const CASES: &str = r#"const	{"type":"terraforged:hills","weight":1.5,"noise":{"type":"Const","value":0.25}}
 const_default	{"type":"terraforged:hills","weight":1.5,"noise":{"type":"Const"}}
 const_neg_zero	{"type":"terraforged:hills","weight":1.5,"noise":{"type":"Const","value":-0.0}}
