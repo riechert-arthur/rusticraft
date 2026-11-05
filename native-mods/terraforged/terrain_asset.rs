@@ -190,7 +190,7 @@ fn type_name(raw: &RawValue) -> Result<String, TerrainAssetError> {
 
 /// `Identifier.read` (26.3): `namespace:path` split at the first `:`; no `:`, or a leading one, means `minecraft`.
 /// The namespace allows `a-z0-9_.-`, the path also `/`; either may be empty.
-fn identifier(name: &str) -> Option<String> {
+pub(super) fn identifier(name: &str) -> Option<String> {
     let (namespace, path) = match name.find(':') {
         Some(0) => ("minecraft", &name[1..]),
         Some(colon) => (&name[..colon], &name[colon + 1..]),
