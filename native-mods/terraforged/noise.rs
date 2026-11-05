@@ -1777,9 +1777,8 @@ impl Module {
         Self::node(ModuleKind::Constant(value), value, value)
     }
 
-    /// `new Constant(float)`, which keeps -0.0 (only Java oracles in the tests build these).
-    #[cfg(test)]
-    fn new_constant(value: f32) -> Self {
+    /// `new Constant(float)`, which keeps -0.0 (Cereal's `Const` spec and the Java oracles in the tests build these).
+    pub fn new_constant(value: f32) -> Self {
         Self::node(ModuleKind::Constant(value), value, value)
     }
 
@@ -3012,6 +3011,60 @@ impl Module {
     }
 }
 
+/// The Java constructors that Cereal's spec factories call (reseeding, terrain assets). Unlike `Module`'s shortcut
+/// methods (`alpha`, `bias`, `boost`, `clamp`, `map`, `pow`, `scale`), they never skip or replace the node.
+impl Module {
+    /// `new Alpha(source, alpha)`.
+    pub fn new_alpha(source: Self, alpha: Self) -> Self {
+        let bounds = source.clone();
+        Self::modifier(ModuleKind::Alpha(source, alpha), &bounds)
+    }
+
+    /// `new Bias(source, float)`: `this(source, Source.constant(bias))`.
+    pub fn new_bias(source: Self, bias: f32) -> Self {
+        let bias = Self::constant(bias);
+        let (min, max) = (
+            source.min_value() + bias.min_value(),
+            source.max_value() + bias.max_value(),
+        );
+        Self::node(ModuleKind::Bias(source, bias), min, max)
+    }
+
+    /// `new Boost(source, iterations)`: maps the source to 0..1 (through `Module.map`) and runs at least one
+    /// iteration (`Math.max(1, iterations)`).
+    pub fn new_boost(source: Self, iterations: i32) -> Self {
+        let source = source.map(Self::constant(0.0), Self::constant(1.0));
+        let iterations = iterations.max(1) as usize;
+        Self::modifier(ModuleKind::Boost(source.clone(), iterations), &source)
+    }
+
+    /// `new Clamp(source, min, max)`: reports `min.minValue()..max.maxValue()`.
+    pub fn new_clamp(source: Self, min: Self, max: Self) -> Self {
+        let (low, high) = (min.min_value(), max.max_value());
+        Self::node(ModuleKind::Clamp(source, min, max), low, high)
+    }
+
+    /// `new Map(source, min, max)`: the source's range is fixed here; reports `min.minValue()..max.maxValue()`.
+    pub fn new_map(source: Self, min: Self, max: Self) -> Self {
+        let range = source.max_value() - source.min_value();
+        let (low, high) = (min.min_value(), max.max_value());
+        Self::node(ModuleKind::Map(source, min, max, range), low, high)
+    }
+
+    /// `new Power(source, power)`.
+    pub fn new_power(source: Self, power: Self) -> Self {
+        let bounds = source.clone();
+        Self::modifier(ModuleKind::Power(source, power), &bounds)
+    }
+
+    /// `new Scale(source, scale)`: bounds are the products of the bounds, fixed here.
+    pub fn new_scale(source: Self, scale: Self) -> Self {
+        let min = source.min_value() * scale.min_value();
+        let max = source.max_value() * scale.max_value();
+        Self::node(ModuleKind::Scale(source, scale), min, max)
+    }
+}
+
 /// Reseeding (TerraForged's `ContextSeedable.withSeed`, 1.18.2-0.3.1): the jar serialises the module with Cereal
 /// and reads it back with `seed` in the context, so each node is rebuilt by its spec's factory (its Java
 /// constructor, not `Module`'s shortcut methods) and keeps only what its spec writes.
@@ -3041,7 +3094,7 @@ impl Module {
         let modifier = |kind, source: &Self| Self::modifier(kind, source);
         match &self.0.kind {
             // `Const`: the value goes through a `double` and back, so -0.0 and NaN payloads stay.
-            ModuleKind::Constant(value) => Self::node(ModuleKind::Constant(*value), *value, *value),
+            ModuleKind::Constant(value) => Self::new_constant(*value),
             ModuleKind::Custom(_) => {
                 panic!("Failed to reseed value: no spec registered for a custom module")
             }
@@ -3098,43 +3151,18 @@ impl Module {
                 let source = r(source);
                 modifier(ModuleKind::Abs(source.clone()), &source)
             }
-            ModuleKind::Alpha(source, alpha) => {
-                let source = r(source);
-                modifier(ModuleKind::Alpha(source.clone(), r(alpha)), &source)
-            }
+            ModuleKind::Alpha(source, alpha) => Self::new_alpha(r(source), r(alpha)),
             // `new Bias(source, spec.get("bias", asFloat))`: the bias was written as a module, so it reads back as 0.
-            ModuleKind::Bias(source, _) => {
-                let (source, bias) = (r(source), Self::constant(0.0));
-                let (min, max) = (source.min_value() + 0.0, source.max_value() + 0.0);
-                Self::node(ModuleKind::Bias(source, bias), min, max)
-            }
+            ModuleKind::Bias(source, _) => Self::new_bias(r(source), 0.0),
             // `new Boost(source, iterations)` maps its (already mapped) source again, through `Module.map`.
             ModuleKind::Boost(source, iterations) => {
-                let source = r(source).map(Self::constant(0.0), Self::constant(1.0));
-                modifier(ModuleKind::Boost(source.clone(), *iterations), &source)
+                Self::new_boost(r(source), i32::try_from(*iterations).unwrap_or(i32::MAX))
             }
-            ModuleKind::Clamp(source, min, max) => {
-                let (min, max) = (r(min), r(max));
-                let (low, high) = (min.min_value(), max.max_value());
-                Self::node(ModuleKind::Clamp(r(source), min, max), low, high)
-            }
+            ModuleKind::Clamp(source, min, max) => Self::new_clamp(r(source), r(min), r(max)),
             ModuleKind::Invert(source) => r(source).invert(),
-            ModuleKind::Map(source, min, max, _) => {
-                let (source, min, max) = (r(source), r(min), r(max));
-                let range = source.max_value() - source.min_value();
-                let (low, high) = (min.min_value(), max.max_value());
-                Self::node(ModuleKind::Map(source, min, max, range), low, high)
-            }
-            ModuleKind::Power(source, power) => {
-                let source = r(source);
-                modifier(ModuleKind::Power(source.clone(), r(power)), &source)
-            }
-            ModuleKind::Scale(source, scale) => {
-                let (source, scale) = (r(source), r(scale));
-                let min = source.min_value() * scale.min_value();
-                let max = source.max_value() * scale.max_value();
-                Self::node(ModuleKind::Scale(source, scale), min, max)
-            }
+            ModuleKind::Map(source, min, max, _) => Self::new_map(r(source), r(min), r(max)),
+            ModuleKind::Power(source, power) => Self::new_power(r(source), r(power)),
+            ModuleKind::Scale(source, scale) => Self::new_scale(r(source), r(scale)),
             ModuleKind::Threshold(source, threshold) => r(source).threshold(r(threshold)),
             ModuleKind::Warp(source, domain) => r(source).warp(domain.reseed(seed)),
             ModuleKind::Base {

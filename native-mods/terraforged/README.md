@@ -2419,10 +2419,40 @@ Noise2D 2cb4843 (identical to Reimagined's noise package), and runs 22 settings 
 scales, dropped ridges, missing and namespaced ids) interpreted and JIT-compiled; it prints the defaults and, per
 case, each returned terrain's identity, weight, noise bounds and seed-first samples. The tests match every line.
 
+The terrain assets (`decode_terrain_asset`, `terrain_asset.rs`) are TerraForged Reimagined a24d450's
+`TerrainNoise.CODEC` and `NoiseCodec.CODEC` (MIT, as above), reading a `worldgen/terrain_noise/*.json` file as
+Minecraft 26.3 loads it (strict JSON). `type` must be a string and is parsed like `Identifier.read` (no namespace, or
+a leading `:`, means `minecraft`); the caller's `resolve` gets the full id and does the registry lookup, which is the
+next layer's job (inline `TerrainType` objects are not supported). `weight` is a JSON number read with
+`Float.parseFloat`. `noise` goes through Cereal as `SuperCodec` runs it: DFU's `JsonOps.convertTo` first rebuilds every
+number as a `long`, `float` or `double` (Gson's `BigDecimal` limits apply), then each spec reads its fields with
+Java's `intValue`/`floatValue`/`doubleValue`; a missing or non-numeric scalar takes the spec's default (a non-number
+reads as 0), enums must match a constant exactly, a missing child is an error, a combiner skips non-object entries,
+and JSON `null` anywhere in the graph is an error. Nodes are built with their Java constructors, which never skip a
+node as `Module`'s shortcut methods do (`Module::new_alpha`, `new_bias`, `new_boost`, `new_clamp`, `new_map`,
+`new_power`, `new_scale` in `noise.rs`, shared with reseeding). The specs' quirks are kept: `Bias` reads its bias as a
+float, so the module bias Reimagined's own assets write reads as 0 (every bias in the 14 shipped assets is dropped,
+as in Java); `CellEdge` ignores `distance` (always 1); `Boost` runs at least one iteration. Where Java's constructor
+throws (a negative octave count for every source but `Cubic` and `CellEdge`, more than 30 for `Ridge` and `Billow`,
+negative terrace steps), decoding fails; where Java builds a graph that throws on every sample (`SimplexRidge` above 30
+octaves, a terrace with no steps), decoding fails too. Supported are the nodes the 14 Reimagined assets use (the eight
+octave sources, `CellEdge`, `Const`, `Alpha`, `Bias`, `Boost`, `Clamp`, `Invert`, `Map`, `Pow`, `PowCurve`, `Scale`,
+`Warp` with `DomainWarp`/`DirectionWarp`, `Blend`, `Terrace`, `AdvTerrace`, `Steps` with an `Interpolation` curve)
+plus `Min` and `Sub`; the other specs Reimagined registers (`Cell`, `Sin`, `Line`, `Rand`, `Abs`, `Cache`, `Curve`,
+`Freq`, `Grad`, `LegacyTerrace`, `Modulate`, `Threshold`, `VariCurve`, `Base`, `MultiBlend`, `Select`, `VariBlend`,
+`CumulativeWarp`, and the `MidPointCurve`/`SCurve` curves) decode in Java but return an "unsupported" error here.
+`TerrainAssetOracle.java` (`.local/terraforged/oracles/terrain_asset/`, `run.sh`) compiles Reimagined's Cereal, noise
+package, `DataUtil`, `SuperCodec`, `NoiseCodec` and `TerrainNoise` from source against Minecraft 26.3's server jar
+(`StrictJsonParser`, `Identifier`, DFU, Gson), runs 154 cases (defaults, number forms and limits, enum and identifier
+errors, constructor edge cases) and the 14 assets interpreted and JIT-compiled, and prints each decoded id, weight,
+bounds and a hash of 294 seed-first samples over seven seeds (`sync.py` copies its cases and output into the tests).
+The tests match every line, reading "err" where Java decodes a graph that only throws; the asset lines are checked
+when Reimagined's sources are unpacked locally (the assets are not copied into this repository).
+
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives, the biome climate types, the climate settings, the climate module, the climate stage, the continent factory, the generator context, the heightmap, the world generator factory, TerraForged's terrain levels, its terrain data, its terrain generator, its terrain-blend utilities, its terrain blender with its nearest-terrain search (and the newer source's seed-first blender), noise-graph reseeding, the cave noise primitives, the biome viability rules, the biome overrides (and TerraForged Reimagined's wider beach band), the continent control points, the continent cell primitives, the continent configuration, the continent shape blending, the continent cell generator with its spawn-offset search, the continent river nodes, the continent river carver's arithmetic, the continent river networks with their nearest-node sampling and their warped, carved river sampling, the newer source's seed-first noise sources, scalar noise graphs, domain warps, selectors, graph caches, terraces, legacy terraces, advanced terraces, curves, transforms (steps, frequency, gradient and modulation), special sources (boost, cell, cell edge and sine) and lines, and its bounded concurrent lossy cache with the continent's cell and
-river-piece caches on it, the continent noise module that joins the continent layers, the newer source's terrain height sampler with its bordered chunk generation and its nearest-terrain search, the erosion tile geometry, and TerraForged Reimagined's heightmap smoothing, erosion brushes, hydraulic erosion filter, eroded-region cache, eroded region build, eroded chunk generation, terrain cache, generator queries, chunk fill, the terrain stage hand-off to it, the biome chunk fill, the cave biome sampler, the biome pool fallback, the surface-biome decisions, the initial biome selection, the current climate noise, the biome sampler bridge, the surface biome sampler, the chunk biome hook, the biome registry pools, their live biome bindings and the biome settings. They change nothing in the game, so there is
+river-piece caches on it, the continent noise module that joins the continent layers, the newer source's terrain height sampler with its bordered chunk generation and its nearest-terrain search, the erosion tile geometry, and TerraForged Reimagined's heightmap smoothing, erosion brushes, hydraulic erosion filter, eroded-region cache, eroded region build, eroded chunk generation, terrain cache, generator queries, chunk fill, the terrain stage hand-off to it, the biome chunk fill, the cave biome sampler, the biome pool fallback, the surface-biome decisions, the initial biome selection, the current climate noise, the biome sampler bridge, the surface biome sampler, the chunk biome hook, the biome registry pools, their live biome bindings, the biome settings, the terrain overrides and the terrain asset decoder. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
