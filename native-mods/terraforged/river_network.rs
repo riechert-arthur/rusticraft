@@ -24,7 +24,7 @@
  */
 
 use super::{
-    terraforged::{Source, SourceConfig, SourceKind, hash, hash_2d, map},
+    terraforged::{Source, SourceConfig, SourceKind, hash, hash_2d, map, map_current},
     terraforged_continent_carver::RiverCarver,
     terraforged_continent_cell::CellPoint,
     terraforged_continent_cells::window,
@@ -208,15 +208,15 @@ impl<'a, Cells: ContinentCells> RiverNetwork<'a, Cells> {
     }
 
     /// `recordNode`: for a winner, the distance becomes its square root (`NoiseUtil.sqrt`, `(float)
-    /// Math.sqrt`), `position` the node's radius and `level` the shape's base noise of its height, both at the
-    /// sample's projection; without one the sample is invalidated (its other fields keep their reset values).
+    /// Math.sqrt`), `position` the node's radius and `level` the shape's base noise of its height
+    /// ([`Self::base_noise`]), both at the sample's projection; without one the sample is invalidated (its other fields keep their reset values).
     fn record_node(&self, node: Option<&RiverNode>, sample: &mut NodeSample) {
         if let Some(node) = node {
             let level = node.height(sample.projection);
             let radius = node.radius(sample.projection);
             sample.distance = (sample.distance as f64).sqrt() as f32;
             sample.position = radius;
-            sample.level = self.shape.base_noise(level);
+            sample.level = self.base_noise(level);
         } else {
             sample.invalidate();
         }
@@ -327,7 +327,15 @@ impl<'a, Cells: ContinentCells> RiverNetwork<'a, Cells> {
     /// `hasLake`: the cell hash's draw at most the lake density, or a base noise below 0.25.
     fn has_lake(&self, cell: CellPoint, cell_hash: i32) -> bool {
         random(cell_hash.wrapping_add(37171)) <= self.lake_density
-            || self.shape.base_noise(cell.noise()) < 0.25
+            || self.base_noise(cell.noise()) < 0.25
+    }
+
+    /// `continent.shapeGenerator.getBaseNoise(value)` as the newer source runs it: through Noise2D 2cb4843's
+    /// `NoiseUtil.map` ([`map_current`]), which gives 1 where the base falloffs are equal or infinitely apart and
+    /// the jar's (`ShapeGenerator::base_noise`) gives NaN. (`hasLake`'s `< 0.25` is false for both.)
+    fn base_noise(&self, value: f32) -> f32 {
+        let (min, max) = (self.shape.base_falloff_min, self.shape.base_falloff_max);
+        map_current(value, min, max, max - min)
     }
 
     /// `getBaseValue`: `noise()` on land, 0 in the ocean.
@@ -630,7 +638,7 @@ mod tests {
             });
         }
 
-        /// The oracle's `synthetic` (hand-set samples) and `edges` lines, at runtime seed 42.
+        /// The oracle's `synthetic` line (hand-set samples), at runtime seed 42.
         fn synthetic(&self, fold: &mut Fold) {
             self.run(|network, carver, _, _| {
                 for (x, y) in points(&steps(3, 0.5, 0.2), &steps(3, 0.5, -0.1)) {
@@ -655,12 +663,15 @@ mod tests {
             });
         }
 
-        fn edges(&self, fold: &mut Fold) {
+        /// The oracle's `edges` (folding the warped points) and `falloffs` lines: one hand-set sample per point.
+        fn hand_set(&self, fold: &mut Fold, points: &[(f32, f32)], warp: bool) {
             self.run(|network, carver, _, _| {
-                for (x, y) in points(&POINTS, &POINTS) {
-                    let (warp_x, warp_y) = network.warp(42, x, y);
-                    fold.float(warp_x);
-                    fold.float(warp_y);
+                for &(x, y) in points {
+                    if warp {
+                        let (warp_x, warp_y) = network.warp(42, x, y);
+                        fold.float(warp_x);
+                        fold.float(warp_y);
+                    }
                     let mut sample = NoiseSample::new(&self.terrains);
                     sample.continent_noise = 0.75;
                     sample.base_noise = 0.6;
@@ -684,20 +695,33 @@ mod tests {
     /// `RiverGenerator.sample(seed, x, y, NoiseSample)` end to end (warp, nearest nodes, seed-first erosion carve),
     /// caches bypassed, per configuration in `SHAPES` x `SOURCES` order: a 25x25 grid over the shape's sample at two
     /// noise levels, hand-set samples, edge points (with the warped points), runtime and shape seeds (with the
-    /// warped points) and `rivers.seed`s around the `+ 21221` wrap. The jar (seed mapping) prints the same lines
-    /// except `rivers` (its erosion seed ignores the runtime seed). `(carved samples, hash)` per line.
+    /// warped points), degenerate base falloffs and `rivers.seed`s around the `+ 21221` wrap. The jar (seed
+    /// mapping) prints the same lines except `rivers` (its erosion seed ignores the runtime seed) and `falloffs`
+    /// (its `NoiseUtil.map` gives NaN for a zero or infinite range). `(carved samples, hash)` per line.
     #[test]
     fn river_pipeline_matches_current_java() {
         #[rustfmt::skip]
-        const EXPECTED: [[(usize, u64); 6]; 6] = [
-            [(41, 0x78fafcf1c28d9a79), (45, 0xbf381479070b76a8), (600, 0xaac9f8fe8b277d87), (36, 0x5a51039d01f3e7ce), (42, 0x6e0d75ae6b904782), (48, 0x33cb76f39c6aee22)],
-            [(24, 0xd409cbcbc5eb854e), (28, 0xe95e8ad21ba1dfaf), (600, 0xbc27e9de9b3e5f71), (45, 0xd41fab625b366238), (40, 0x93f215b46af66b37), (36, 0x5c65405b514d42fc)],
-            [(61, 0x3cee7166f9cf5f52), (70, 0xa9036b15fff0faa6), (600, 0x67eddf12cc0d3f4b), (47, 0xb068d2e0c34cd6c9), (37, 0x9c24212ce3e8482b), (78, 0x19325249466e6d04)],
-            [(31, 0x50d043d78592d68d), (40, 0x7325e41767027060), (600, 0x429fe2452fe4bba1), (39, 0x7d27a2bc9b369d6c), (29, 0x6c6e7c2b8bba9ea8), (66, 0x971efeeac500edfc)],
-            [(19, 0xc914583a0772235f), (26, 0x26e6f13fd803007d), (450, 0xe0538f8807e2f67f), (36, 0x7f4cc77330799ef1), (30, 0x01727813f9e257d5), (84, 0xe89dfa314049b210)],
-            [(50, 0xbbfb5270640c6882), (54, 0xce28ffe950ae9dbf), (450, 0xd2d327820489eeab), (53, 0xc78b9162e5f3bb50), (30, 0x31509070fcea72b1), (78, 0x8b9e10bdb44b83c9)],
+        const EXPECTED: [[(usize, u64); 7]; 6] = [
+            [(41, 0x78fafcf1c28d9a79), (45, 0xbf381479070b76a8), (600, 0xaac9f8fe8b277d87), (36, 0x5a51039d01f3e7ce), (42, 0x6e0d75ae6b904782), (165, 0xb4bbcb1ba97a18c0), (48, 0x33cb76f39c6aee22)],
+            [(24, 0xd409cbcbc5eb854e), (28, 0xe95e8ad21ba1dfaf), (600, 0xbc27e9de9b3e5f71), (45, 0xd41fab625b366238), (40, 0x93f215b46af66b37), (97, 0x998b28bd09b2bf36), (36, 0x5c65405b514d42fc)],
+            [(61, 0x3cee7166f9cf5f52), (70, 0xa9036b15fff0faa6), (600, 0x67eddf12cc0d3f4b), (47, 0xb068d2e0c34cd6c9), (37, 0x9c24212ce3e8482b), (244, 0xe201abd8b5225f2a), (78, 0x19325249466e6d04)],
+            [(31, 0x50d043d78592d68d), (40, 0x7325e41767027060), (600, 0x429fe2452fe4bba1), (39, 0x7d27a2bc9b369d6c), (29, 0x6c6e7c2b8bba9ea8), (125, 0x1c45a0cc95924e1d), (66, 0x971efeeac500edfc)],
+            [(19, 0xc914583a0772235f), (26, 0x26e6f13fd803007d), (450, 0xe0538f8807e2f67f), (36, 0x7f4cc77330799ef1), (30, 0x01727813f9e257d5), (77, 0x59d88b08e8fde027), (84, 0xe89dfa314049b210)],
+            [(50, 0xbbfb5270640c6882), (54, 0xce28ffe950ae9dbf), (450, 0xd2d327820489eeab), (53, 0xc78b9162e5f3bb50), (30, 0x31509070fcea72b1), (200, 0xfb53a3e983dacf51), (78, 0x8b9e10bdb44b83c9)],
         ];
-        const NAMES: [&str; 6] = ["grid0", "grid1", "synthetic", "edges", "seeds", "rivers"];
+        const NAMES: [&str; 7] = [
+            "grid0",
+            "grid1",
+            "synthetic",
+            "edges",
+            "seeds",
+            "falloffs",
+            "rivers",
+        ];
+        const INF: f32 = f32::INFINITY;
+        // Equal and infinite base falloffs: `recordNode`'s `getBaseNoise` over a zero or infinite range (1 in the
+        // newer source, NaN in the jar).
+        const FALLOFFS: [(f32, f32); 4] = [(0.1, 0.1), (0.0, 0.0), (-0.3, INF), (-INF, INF)];
         #[rustfmt::skip]
         const RUNTIME: [i32; 11] = [0, 42, -1, i32::MAX, i32::MIN, -827_614, i32::MAX - 20_106, i32::MIN + 9_802,
             123_456_789, -8_657_124, i32::MAX - 5_123_677];
@@ -728,7 +752,7 @@ mod tests {
             let pipeline = Pipeline::new(&setup, 0, levels[0]);
             pipeline.synthetic(&mut fold);
             line(&mut fold);
-            pipeline.edges(&mut fold);
+            pipeline.hand_set(&mut fold, &points(&POINTS, &POINTS), true);
             line(&mut fold);
             for seed in RUNTIME {
                 for base in BASE {
@@ -738,6 +762,13 @@ mod tests {
             }
             line(&mut fold);
             setup.seeds = (0, 0);
+            for (min, max) in FALLOFFS {
+                let mut pipeline = Pipeline::new(&setup, 0, levels[0]);
+                pipeline.config.shape.base_falloff_min = min;
+                pipeline.config.shape.base_falloff_max = max;
+                pipeline.hand_set(&mut fold, &grid, false);
+            }
+            line(&mut fold);
             for river_seed in RIVER_SEEDS {
                 for seed in RUNTIME {
                     Pipeline::new(&setup, river_seed, levels[0])
