@@ -210,6 +210,13 @@ impl HeightmapSmoothing {
         }
     }
 }
+
+/// The hydraulic erosion settings of TerraForged Reimagined 26.3's `ErodedNoiseGenerator`
+/// (`TerraSettings.Erosion`, copied field by field into the `FilterSettings.Erosion` its
+/// `ErosionFilter` reads): 350 droplets per chunk, lifetime 25, volume and velocity 0.7, erosion
+/// and deposit rates 0.5. The 1.18.2-0.3.1 jar and 6dd607eb build Engine's `FilterSettings.Erosion`
+/// (`terraforged_filters::ErosionSettings`) and set only the 350 droplets, so their lifetime is
+/// Engine's 12. Adapted from TerraForged Reimagined (MIT, see `LICENSE-TERRAFORGED-REIMAGINED`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ErosionFilterSettings {
     pub droplets_per_chunk: i32,
@@ -233,6 +240,9 @@ impl Default for ErosionFilterSettings {
     }
 }
 
+/// Reimagined's `ErosionFilter.Disc`: the unclipped brush (every cell with `dx² + dy² < r²`, rows
+/// then columns), its raw `1 - d / r` weights, their f32 sum in that order, and its reach (6 at
+/// radius 7).
 struct ErosionDisc {
     x: Vec<i32>,
     y: Vec<i32>,
@@ -274,6 +284,14 @@ impl ErosionDisc {
     }
 }
 
+/// The radius-7 erosion brushes of TerraForged's `ErosionFilter` (the mod's hydraulic erosion), in
+/// TerraForged Reimagined 26.3's layout (Romoslayer/TerraForged-Reimagined a24d450, MIT, see
+/// `LICENSE-TERRAFORGED-REIMAGINED`): one normalized disc of offsets relative to the droplet's cell,
+/// shared by every interior cell, plus a clipped, re-weighted copy for each cell within the disc's
+/// reach of an edge. Every cell gets the same points, order and weight bits as the 1.18.2-0.3.1
+/// jar's and 6dd607eb's per-cell absolute tables, which are Engine's `Erosion.initBrushes` at
+/// radius 7 (`terraforged_filters::ErosionBrushes`, flat). It stays a separate type because that
+/// layout grows with the map's area: ~110 MB for Reimagined's 256x256 region map, against ~6 MB here.
 pub struct ErosionBrushes {
     offsets: Box<[i32]>,
     weights: Box<[f32]>,
@@ -288,8 +306,12 @@ struct EdgeBrush {
 }
 
 impl ErosionBrushes {
+    /// `ErosionFilter.erosionRadius`.
     pub const RADIUS: i32 = 7;
 
+    /// `new ErosionFilter(mapSize, ..)`'s brush tables, in Java `int` math: a negative `map_size`
+    /// whose square is positive gives empty brushes, as in Java. Panics where Java throws (the
+    /// square wraps negative).
     pub fn new(map_size: i32) -> Self {
         let disc = ErosionDisc::new(Self::RADIUS);
         let offsets = disc
@@ -315,6 +337,8 @@ impl ErosionBrushes {
         brushes
     }
 
+    /// The offsets (added to `index`) and weights `applyDrop` erodes through for a droplet in cell
+    /// `index`. Panics past `map_size²` cells, where Java throws.
     pub fn brush(&self, index: usize) -> (&[i32], &[f32]) {
         match &self.edges[index] {
             Some(edge) => (&edge.offsets, &edge.weights),
@@ -734,7 +758,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn erosion_brushes_match_current_java_source() {
+    fn erosion_settings_and_cell_brushes_match_reimagined_java() {
         let settings = ErosionFilterSettings::default();
         assert_eq!(
             [
