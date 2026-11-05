@@ -135,9 +135,18 @@ impl<'a, Cells: ContinentCells> RiverNetwork<'a, Cells> {
         pieces
     }
 
-    /// The newer source's public `RiverGenerator.sample(seed, x, y, NoiseSample)`: warps the point with `riverWarp`
-    /// (`Domain.warp(x, y, constant(0.004))`, Noise2D seed-first: each axis adds `(simplex - 0.5) * 0.004f`, both read
-    /// at the unwarped point), samples the nearest nodes there ([`Self::sample_nodes`]) and carves `sample` with
+    /// `riverWarp.getX(seed, x, y)` and `getY`: `Domain.warp(x, y, constant(0.004))` in Noise2D 2cb4843, seed-first.
+    /// `DomainWarp` maps each 0..1 simplex to -0.5..0.5 (`Map`: `-0.5f + (value - 0) / 1 * 1`, which is
+    /// `-0.5 + value` bit for bit, unclamped) and scales it by `0.004f`; both axes read the unwarped point.
+    pub fn warp(&self, seed: i32, x: f32, y: f32) -> (f32, f32) {
+        (
+            x + (-0.5 + self.warp_x.value_seed_first(seed, x, y)) * 0.004,
+            y + (-0.5 + self.warp_y.value_seed_first(seed, x, y)) * 0.004,
+        )
+    }
+
+    /// The newer source's public `RiverGenerator.sample(seed, x, y, NoiseSample)`: warps the point ([`Self::warp`]),
+    /// samples the nearest nodes there ([`Self::sample_nodes`]) and carves `sample` with
     /// `carver` at the warped point. `terrains` is the world registry the carver sample's terrains come from.
     pub fn sample(
         &self,
@@ -148,8 +157,7 @@ impl<'a, Cells: ContinentCells> RiverNetwork<'a, Cells> {
         carver: &RiverCarver,
         terrains: &TerrainRegistry,
     ) {
-        let point_x = x + (-0.5 + self.warp_x.value_seed_first(seed, x, y)) * 0.004;
-        let point_y = y + (-0.5 + self.warp_y.value_seed_first(seed, x, y)) * 0.004;
+        let (point_x, point_y) = self.warp(seed, x, y);
         let mut nodes = CarverSample::new(terrains);
         self.sample_nodes(seed, point_x, point_y, &mut nodes);
         carver.carve(seed, point_x, point_y, sample, &nodes);
@@ -538,57 +546,203 @@ mod tests {
         f32::MAX, -f32::MAX, 2_147_483_520.0, 2_147_483_648.0, -2_147_483_648.0, -2_147_483_520.0, 16_777_216.0,
         -16_777_216.0, 16_777_218.0, 0.5, -0.5, 1.75, -2.25, 123.4, -98.76, 0.999_999_94, -1.0];
 
-    /// The PR's warped carving grid: `RiverGenerator.sample(42, x, y, NoiseSample)` after `ShapeGenerator.sample`
-    /// on a 7x7 grid per configuration, folding the carved continent, base, height and river noise and the terrain.
+    /// The river pipeline of one configuration (as `RiverPipelineOracle`'s `pipe`).
+    struct Pipeline {
+        config: ContinentConfig,
+        levels: NoiseLevels,
+        terrains: TerrainRegistry,
+    }
+
+    impl Pipeline {
+        fn new(setup: &Setup, river_seed: i32, levels: NoiseLevels) -> Self {
+            let mut config = ContinentConfig::default();
+            config.shape.cell_shape = setup.shape;
+            config.shape.cell_source = setup.source;
+            (config.shape.seed0, config.shape.seed1) = setup.seeds;
+            config.rivers.seed = river_seed;
+            Self {
+                config,
+                levels,
+                terrains: TerrainRegistry::new(),
+            }
+        }
+
+        /// The oracle's `fold`: the four noises and the terrain code (0 none, 1 river, 2 lake, 3 other); `rivers`
+        /// counts the carved samples.
+        fn fold(&self, fold: &mut Fold, sample: &NoiseSample) {
+            for value in [
+                sample.continent_noise,
+                sample.base_noise,
+                sample.height_noise,
+                sample.river_noise,
+            ] {
+                fold.float(value);
+            }
+            let terrain = &sample.terrain_type;
+            let code = if terrain.is_same(&self.terrains.get_by_id(5)) {
+                1
+            } else if terrain.is_same(&self.terrains.get_by_id(6)) {
+                2
+            } else if terrain.is_same(&self.terrains.get_by_id(0)) {
+                0
+            } else {
+                3
+            };
+            fold.rivers += usize::from(code == 1 || code == 2);
+            fold.add(code);
+        }
+
+        /// Runs `f(network, carver, shape, cells)` on this pipeline.
+        fn run(
+            &self,
+            f: impl FnOnce(&RiverNetwork<CellGenerator>, &RiverCarver, &ShapeGenerator, &CellGenerator),
+        ) {
+            let cells = CellGenerator::new(self.config);
+            let shape = ShapeGenerator::new(
+                self.config,
+                ControlPoints::new(WorldControlPoints::default()),
+            );
+            let network = RiverNetwork::new(&cells, &shape, self.config);
+            f(
+                &network,
+                &RiverCarver::new(self.levels, self.config),
+                &shape,
+                &cells,
+            );
+        }
+
+        /// The oracle's `shaped` at each point (folding the warped point first when `warp`): the shape's sample with
+        /// the stand-in height `toHeightNoise(base, 0.35)`, then the pipeline.
+        fn shaped(&self, fold: &mut Fold, seed: i32, points: &[(f32, f32)], warp: bool) {
+            self.run(|network, carver, shape, cells| {
+                for &(x, y) in points {
+                    if warp {
+                        let (warp_x, warp_y) = network.warp(seed, x, y);
+                        fold.float(warp_x);
+                        fold.float(warp_y);
+                    }
+                    let mut sample = NoiseSample::new(&self.terrains);
+                    shape.sample(cells, seed, x, y, &mut sample);
+                    sample.height_noise = self.levels.to_height_noise(sample.base_noise, 0.35);
+                    network.sample(seed, x, y, &mut sample, carver, &self.terrains);
+                    self.fold(fold, &sample);
+                }
+            });
+        }
+
+        /// The oracle's `synthetic` (hand-set samples) and `edges` lines, at runtime seed 42.
+        fn synthetic(&self, fold: &mut Fold) {
+            self.run(|network, carver, _, _| {
+                for (x, y) in points(&steps(3, 0.5, 0.2), &steps(3, 0.5, -0.1)) {
+                    let mut sample = NoiseSample::new(&self.terrains);
+                    for continent in [0.25, 0.5, 0.75, 1.0, f32::NAN] {
+                        for base in [0.0, 0.3, 0.6, 1.0, -1.0] {
+                            for (height, river) in [0.2, 0.5, 0.9]
+                                .into_iter()
+                                .flat_map(|h| [(h, 1.0), (h, 0.5)])
+                            {
+                                sample.continent_noise = continent;
+                                sample.base_noise = base;
+                                sample.height_noise = height;
+                                sample.river_noise = river;
+                                sample.terrain_type = self.terrains.get_by_id(0);
+                                network.sample(42, x, y, &mut sample, carver, &self.terrains);
+                                self.fold(fold, &sample);
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        fn edges(&self, fold: &mut Fold) {
+            self.run(|network, carver, _, _| {
+                for (x, y) in points(&POINTS, &POINTS) {
+                    let (warp_x, warp_y) = network.warp(42, x, y);
+                    fold.float(warp_x);
+                    fold.float(warp_y);
+                    let mut sample = NoiseSample::new(&self.terrains);
+                    sample.continent_noise = 0.75;
+                    sample.base_noise = 0.6;
+                    sample.height_noise = 0.5;
+                    network.sample(42, x, y, &mut sample, carver, &self.terrains);
+                    self.fold(fold, &sample);
+                }
+            });
+        }
+    }
+
+    /// `RiverPipelineOracle.java` (`.local/terraforged/oracles/river_pipeline/run.sh`): the newer source's public
+    /// `RiverGenerator.sample(seed, x, y, NoiseSample)` end to end (warp, nearest nodes, seed-first erosion carve),
+    /// caches bypassed, per configuration in `SHAPES` x `SOURCES` order: a 25x25 grid over the shape's sample at two
+    /// noise levels, hand-set samples, edge points (with the warped points), runtime and shape seeds (with the
+    /// warped points) and `rivers.seed`s around the `+ 21221` wrap. The jar (seed mapping) prints the same lines
+    /// except `rivers` (its erosion seed ignores the runtime seed). `(carved samples, hash)` per line.
     #[test]
-    fn warped_carving_pipeline_matches_current_java() {
-        let expected = [
-            (0xa09768f390824b4a, 5),
-            (0xb7898604981bbb00, 5),
-            (0x7d54a9341e2b731a, 8),
-            (0xf78c629e5c4541d4, 0),
-            (0x22ebd6c0ccfabeaa, 0),
-            (0x9cb05b15abf2c063, 2),
+    fn river_pipeline_matches_current_java() {
+        #[rustfmt::skip]
+        const EXPECTED: [[(usize, u64); 6]; 6] = [
+            [(41, 0x78fafcf1c28d9a79), (45, 0xbf381479070b76a8), (600, 0xaac9f8fe8b277d87), (36, 0x5a51039d01f3e7ce), (42, 0x6e0d75ae6b904782), (48, 0x33cb76f39c6aee22)],
+            [(24, 0xd409cbcbc5eb854e), (28, 0xe95e8ad21ba1dfaf), (600, 0xbc27e9de9b3e5f71), (45, 0xd41fab625b366238), (40, 0x93f215b46af66b37), (36, 0x5c65405b514d42fc)],
+            [(61, 0x3cee7166f9cf5f52), (70, 0xa9036b15fff0faa6), (600, 0x67eddf12cc0d3f4b), (47, 0xb068d2e0c34cd6c9), (37, 0x9c24212ce3e8482b), (78, 0x19325249466e6d04)],
+            [(31, 0x50d043d78592d68d), (40, 0x7325e41767027060), (600, 0x429fe2452fe4bba1), (39, 0x7d27a2bc9b369d6c), (29, 0x6c6e7c2b8bba9ea8), (66, 0x971efeeac500edfc)],
+            [(19, 0xc914583a0772235f), (26, 0x26e6f13fd803007d), (450, 0xe0538f8807e2f67f), (36, 0x7f4cc77330799ef1), (30, 0x01727813f9e257d5), (84, 0xe89dfa314049b210)],
+            [(50, 0xbbfb5270640c6882), (54, 0xce28ffe950ae9dbf), (450, 0xd2d327820489eeab), (53, 0xc78b9162e5f3bb50), (30, 0x31509070fcea72b1), (78, 0x8b9e10bdb44b83c9)],
         ];
-        let terrains = TerrainRegistry::new();
-        let levels = NoiseLevels::new(false, 1.0, 62, 22, 256, 128);
+        const NAMES: [&str; 6] = ["grid0", "grid1", "synthetic", "edges", "seeds", "rivers"];
+        #[rustfmt::skip]
+        const RUNTIME: [i32; 11] = [0, 42, -1, i32::MAX, i32::MIN, -827_614, i32::MAX - 20_106, i32::MIN + 9_802,
+            123_456_789, -8_657_124, i32::MAX - 5_123_677];
+        const RIVER_SEEDS: [i32; 6] = [0, 0x5eed, i32::MAX, i32::MIN, -21_221, i32::MAX - 21_220];
+        const BASE: [(i32, i32); 3] = [(0, 0), (i32::MAX, i32::MIN), (-6569, 987_654_321)];
+        let levels = [
+            NoiseLevels::new(false, 1.0, 62, 22, 256, 128),
+            NoiseLevels::new(true, 2.5, 62, 22, 480, 128),
+        ];
+        let grid = points(&steps(12, 0.25, 0.0625), &steps(12, 0.25, -0.125));
+        let small = points(&steps(2, 0.75, 0.3), &steps(2, 0.75, -0.2));
         for (index, (shape, source)) in SHAPES
             .into_iter()
             .flat_map(|shape| SOURCES.map(|source| (shape, source)))
             .enumerate()
         {
-            let mut config = ContinentConfig::default();
-            config.shape.cell_shape = shape;
-            config.shape.cell_source = source;
-            config.rivers.seed = i32::MAX;
-            let cells = CellGenerator::new(config);
-            let shape =
-                ShapeGenerator::new(config, ControlPoints::new(WorldControlPoints::default()));
-            let network = RiverNetwork::new(&cells, &shape, config);
-            let carver = RiverCarver::new(levels, config);
+            let mut setup = Setup::new(shape, source);
+            let mut lines = Vec::new();
             let mut fold = Fold::new();
-            let mut carved = 0;
-            for sample_y in -3..=3 {
-                for sample_x in -3..=3 {
-                    let x = sample_x as f32 + 0.125;
-                    let y = sample_y as f32 - 0.375;
-                    let mut sample = NoiseSample::new(&terrains);
-                    shape.sample(&cells, 42, x, y, &mut sample);
-                    sample.height_noise = levels.to_height_noise(sample.base_noise, 0.35);
-                    network.sample(42, x, y, &mut sample, &carver, &terrains);
-                    for value in [
-                        sample.continent_noise,
-                        sample.base_noise,
-                        sample.height_noise,
-                        sample.river_noise,
-                    ] {
-                        fold.add(value.to_bits() as u64);
-                    }
-                    fold.add(sample.terrain_type.id() as u64);
-                    carved += usize::from(sample.terrain_type.id() != 0);
+            let mut line = |fold: &mut Fold| {
+                lines.push((fold.rivers, fold.hash));
+                *fold = Fold::new();
+            };
+            for levels in levels {
+                Pipeline::new(&setup, 0, levels).shaped(&mut fold, 42, &grid, false);
+                line(&mut fold);
+            }
+            let pipeline = Pipeline::new(&setup, 0, levels[0]);
+            pipeline.synthetic(&mut fold);
+            line(&mut fold);
+            pipeline.edges(&mut fold);
+            line(&mut fold);
+            for seed in RUNTIME {
+                for base in BASE {
+                    setup.seeds = base;
+                    Pipeline::new(&setup, 0, levels[0]).shaped(&mut fold, seed, &small, true);
                 }
             }
-            assert_eq!((fold.hash, carved), expected[index]);
+            line(&mut fold);
+            setup.seeds = (0, 0);
+            for river_seed in RIVER_SEEDS {
+                for seed in RUNTIME {
+                    Pipeline::new(&setup, river_seed, levels[0])
+                        .shaped(&mut fold, seed, &small, false);
+                }
+            }
+            line(&mut fold);
+            for (line, (name, expected)) in lines
+                .into_iter()
+                .zip(NAMES.into_iter().zip(EXPECTED[index]))
+            {
+                assert_eq!(line, expected, "{name} {index}");
+            }
         }
     }
 
