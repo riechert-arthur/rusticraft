@@ -1247,13 +1247,14 @@ The blender's seed-first form (`TerrainBlender::try_value_seed_first`, `try_valu
 `try_iterator_seed_first`, `try_find_nearest_seed_first`, and `Blender`'s `try_*_seed_first`) ports the newer source
 tree's `TerrainBlender` (6dd607eb), which takes the world's seed on every call: its noise generator builds the blender
 once with the constant seed 45763218 and never reseeds it. Compiled and compared method by method with the jar's
-(`oracles/terrain_blender/source/version/compare.sh`), the two classes differ only in where the seed comes from:
+(`.local/terraforged/oracles/terrain_blender/source/version/compare.sh`), the two classes differ only in where the seed comes from:
 the jar hashes the cells from the `regionSeed` field (`(int) seed + 21491124`, set in the constructor), the newer
 source from the call's `seed + 21491124` (`int` wrap; the constructor's seed is not used there), and passes the
 call's seed to the warp's `getX`/`getY` and to every terrain noise (Noise2D 2cb4843: each source adds it to its own
 seed, Perlin ignores it). The warp's construction, the cell search, the weights, the `Object2FloatCache` blend with
 its NaN re-sample, `find` and the util classes (`WeightMap`, `Object2FloatCache`, `SpiralIterator`, `MathUtil`) are
-the same bytecode. So a blender built with seed 0 and sampled at runtime seed 0 gives the jar's values for seed 0
+the same bytecode (`SpiralIterator.PositionFinder` differs only by the newer compiler's null check of its outer
+instance). So a blender built with seed 0 and sampled at runtime seed 0 gives the jar's values for seed 0
 (where Noise2D 2cb4843's `NoiseUtil.map` agrees with the jar's: no zero or infinite source ranges). The port keeps
 the jar's methods as they are and adds the seed-first ones beside them over the same helpers; a terrain noise with a
 custom module (no seed-first form) makes them return an error rather than sample it seedless (the first error ends
