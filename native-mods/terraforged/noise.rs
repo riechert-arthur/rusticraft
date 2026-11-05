@@ -2,6 +2,7 @@
  * MIT License
  *
  * Copyright (c) 2021 TerraForged
+ * Copyright (c) 2020 TerraForged
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -950,11 +951,25 @@ impl Source {
     }
 
     pub fn value(self, x: f32, y: f32) -> f32 {
-        self.evaluate(x, y, self.config.seed, false)
+        self.evaluate(x, y, self.config.seed, false, map)
     }
 
     pub fn value_seeded(self, x: f32, y: f32, seed: i32) -> f32 {
-        self.evaluate(x, y, seed, true)
+        self.evaluate(x, y, seed, true, map)
+    }
+
+    /// The newer Noise2D's seed-first `getValue(seed, x, y)` (commit 2cb4843, used by the current
+    /// TerraForged source): `NoiseSource` samples with its own seed plus the call's (Java `int` wrap);
+    /// `PerlinNoise`/`PerlinNoise2` override it and ignore the call's seed. Outputs go through the newer
+    /// [`map_current`] (1, not NaN, for a zero or infinite range). [`Source::value`] and
+    /// [`Source::value_seeded`] keep the jar's construction-time seeding.
+    pub fn value_seed_first(self, seed: i32, x: f32, y: f32) -> f32 {
+        let seed = if matches!(self.kind, SourceKind::Perlin | SourceKind::Perlin2) {
+            self.config.seed
+        } else {
+            self.config.seed.wrapping_add(seed)
+        };
+        self.evaluate(x, y, seed, false, map_current)
     }
 
     /// `Module.minValue()`: only `CubicNoise` overrides it, with its raw octave bound (not the mapped
@@ -974,7 +989,15 @@ impl Source {
         }
     }
 
-    fn evaluate(self, mut x: f32, mut y: f32, seed: i32, explicit_seed: bool) -> f32 {
+    /// `mapping` is the `NoiseUtil.map` of the API version: [`map`] (jar) or [`map_current`] (newer).
+    fn evaluate(
+        self,
+        mut x: f32,
+        mut y: f32,
+        seed: i32,
+        explicit_seed: bool,
+        mapping: fn(f32, f32, f32, f32) -> f32,
+    ) -> f32 {
         x *= self.config.frequency;
         y *= self.config.frequency;
         if matches!(self.kind, SourceKind::Cubic) {
@@ -988,7 +1011,7 @@ impl Source {
                 amplitude *= self.config.gain;
                 sum += cubic(x, y, current_seed) * amplitude;
             }
-            return map(sum, self.min, self.max, self.range);
+            return mapping(sum, self.min, self.max, self.range);
         }
         if matches!(
             self.kind,
@@ -1015,7 +1038,7 @@ impl Source {
                 y *= self.config.lacunarity;
                 amplitude *= self.config.gain;
             }
-            let result = map(value, self.min, self.max, self.range);
+            let result = mapping(value, self.min, self.max, self.range);
             return if matches!(self.kind, SourceKind::Billow) {
                 1.0 - result
             } else {
@@ -1047,7 +1070,7 @@ impl Source {
             y *= self.config.lacunarity;
             amplitude *= self.config.gain;
         }
-        map(sum, self.min, self.max, self.range)
+        mapping(sum, self.min, self.max, self.range)
     }
 }
 
@@ -1126,11 +1149,23 @@ fn noise_exp(mut value: f32) -> f32 {
     value
 }
 
-/// `NoiseUtil.map(value, min, max, range)`.
+/// `NoiseUtil.map(value, min, max, range)` as the jar's Engine 0.3.0 has it.
 pub fn map(value: f32, min: f32, max: f32, range: f32) -> f32 {
     let clamped = clamp(value, min, max);
     let difference = clamped - min;
     if difference > range {
+        1.0
+    } else {
+        difference / range
+    }
+}
+
+/// The newer Noise2D's `NoiseUtil.map` (commit 2cb4843): `dif >= range ? 1 : dif / range`. It differs
+/// from the jar's [`map`] only where the difference equals the range and the division is not 1: a zero
+/// range (0/0) or an infinite one (inf/inf) give 1 here and NaN there.
+pub fn map_current(value: f32, min: f32, max: f32, range: f32) -> f32 {
+    let difference = clamp(value, min, max) - min;
+    if difference >= range {
         1.0
     } else {
         difference / range
@@ -4772,6 +4807,335 @@ mod tests {
                 [0xbd800000, 0xbf800000, 0x41c80000],
             ]
         );
+    }
+
+    /// Raw seed-first values at config seed `i32::MAX`, runtime seed 17 (the `v` lines of
+    /// `.local/terraforged/oracles/seed_first/`).
+    #[test]
+    fn seed_offset_sources_match_current_noise2d() {
+        let expected = [
+            [0x3f000000, 0x3f000000, 0x3edf0d3a],
+            [0x3f000000, 0x3f000000, 0x3f09e3f6],
+            [0x3f000000, 0x3e309b54, 0x3ef4b0d1],
+            [0x3f000000, 0x3db98455, 0x3ef1dd05],
+            [0x3ed71df8, 0x3f16df8b, 0x3f090c39],
+            [0x3f800000, 0x3f800000, 0x3f11065b],
+            [0, 0, 0x3eddf34a],
+            [0x3f800000, 0x3d9947bb, 0x3f0c6ac6],
+        ];
+        for (source_index, kind) in [
+            SourceKind::Perlin,
+            SourceKind::Perlin2,
+            SourceKind::Simplex,
+            SourceKind::Simplex2,
+            SourceKind::Cubic,
+            SourceKind::Ridge,
+            SourceKind::Billow,
+            SourceKind::SimplexRidge,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let source = Source::new(
+                kind,
+                SourceConfig {
+                    seed: i32::MAX,
+                    octaves: 2,
+                    gain: 0.65,
+                    frequency: 128.0,
+                    ..SourceConfig::default()
+                },
+            );
+            for (point_index, (x, y)) in [(0.0, 0.0), (0.125, -0.75), (12.34, 56.78)]
+                .into_iter()
+                .enumerate()
+            {
+                assert_eq!(
+                    source.value_seed_first(17, x, y).to_bits(),
+                    expected[source_index][point_index],
+                    "source={source_index}, point={point_index}"
+                );
+            }
+        }
+    }
+
+    /// Folds of every source kind over 7 configs (0 octaves, negative gain and lacunarity, an infinite
+    /// range), 5 config seeds × 8 runtime seeds (both `int` extremes) × 10 points (NaN, infinity, -0).
+    /// `SEED_FIRST` is the newer Noise2D (2cb4843) `getValue(seed, x, y)`; `JAR` is Engine 0.3.0's shaded
+    /// Noise2D built with the seed `config + seed` (`config` for Perlin/Perlin2) and sampled seedless.
+    /// They differ only where the newer `NoiseUtil.map` does (zero or infinite range). Oracle:
+    /// `.local/terraforged/oracles/seed_first/` (outside Git).
+    #[test]
+    fn seed_first_sources_match_current_noise2d_and_jar_seeding() {
+        const SEED_FIRST: [[u64; 7]; 8] = [
+            [
+                0x243943d826eb6b75,
+                0x38d416a31c45df05,
+                0x21701be7abbff025,
+                0x3634690f94334265,
+                0xdf984c0ff2b34265,
+                0xc5c1b14154ced265,
+                0xb2c55cfcf0334265,
+            ],
+            [
+                0x3bdafa4b42e56ba5,
+                0x718eced4b12bd305,
+                0x1038b11cc89eb155,
+                0x3634690f94334265,
+                0xdf984c0ff2b34265,
+                0x8dcd798b4055eab5,
+                0x376a51b4bd334265,
+            ],
+            [
+                0xf09bacdc83ab3058,
+                0x0d068c6120bc3a97,
+                0x3f4374db5f718a0a,
+                0x28c7db6f01ff2dd0,
+                0xdf984c0ff2b34265,
+                0xae4c9e5aa60080c5,
+                0x92490883ef334265,
+            ],
+            [
+                0x25e887b22090cca7,
+                0x37f16f226133bc71,
+                0x08f2313a81e3270f,
+                0xb2f41e40a5b1736c,
+                0xdf984c0ff2b34265,
+                0xd75b87b16179d253,
+                0x92490883ef334265,
+            ],
+            [
+                0xb375fb6b738ed66d,
+                0xf8921a5f6a72be25,
+                0x38ee61d8a4c0b296,
+                0x304394e304b8dbc0,
+                0xf324896d31927ee5,
+                0x9efe69d68bba55fb,
+                0x68ffad44fef34265,
+            ],
+            [
+                0x7b9c5757f077b1dc,
+                0x8ed93992156f3aea,
+                0xe5939fe1f8a78f47,
+                0xf3686f0d6ddc9153,
+                0xdf984c0ff2b34265,
+                0x3137a60464982347,
+                0x930945f2a7d0cec5,
+            ],
+            [
+                0xe2dbb6f99ab0e69c,
+                0xe7205f33b7711e5f,
+                0x39fa5e43c3ecd6f2,
+                0x8beb6d33cee9bb1e,
+                0x2c1b93daafb34265,
+                0x1d9684974953b644,
+                0x2020e11a2906abf0,
+            ],
+            [
+                0x5cbecd9bfd83899c,
+                0x9d727313621283c0,
+                0x035fcecf821ad34d,
+                0x422baf47f9cb8152,
+                0xdf984c0ff2b34265,
+                0x315a791a7adb2540,
+                0x2bde73c0fcb34265,
+            ],
+        ];
+        const JAR: [[u64; 7]; 8] = [
+            [
+                0x243943d826eb6b75,
+                0x38d416a31c45df05,
+                0x21701be7abbff025,
+                0x3634690f94334265,
+                0xb2c55cfcf0334265,
+                0xc5c1b14154ced265,
+                0xb2c55cfcf0334265,
+            ],
+            [
+                0x3bdafa4b42e56ba5,
+                0x718eced4b12bd305,
+                0x1038b11cc89eb155,
+                0x3634690f94334265,
+                0xb2c55cfcf0334265,
+                0x8dcd798b4055eab5,
+                0xb2c55cfcf0334265,
+            ],
+            [
+                0xf09bacdc83ab3058,
+                0x0d068c6120bc3a97,
+                0x3f4374db5f718a0a,
+                0x28c7db6f01ff2dd0,
+                0xb2c55cfcf0334265,
+                0xae4c9e5aa60080c5,
+                0xb2c55cfcf0334265,
+            ],
+            [
+                0x25e887b22090cca7,
+                0x37f16f226133bc71,
+                0x08f2313a81e3270f,
+                0xb2f41e40a5b1736c,
+                0xb2c55cfcf0334265,
+                0xd75b87b16179d253,
+                0xb2c55cfcf0334265,
+            ],
+            [
+                0xb375fb6b738ed66d,
+                0xf8921a5f6a72be25,
+                0x38ee61d8a4c0b296,
+                0x304394e304b8dbc0,
+                0xf324896d31927ee5,
+                0x9efe69d68bba55fb,
+                0xb2c55cfcf0334265,
+            ],
+            [
+                0x7b9c5757f077b1dc,
+                0x8ed93992156f3aea,
+                0xe5939fe1f8a78f47,
+                0xf3686f0d6ddc9153,
+                0xb2c55cfcf0334265,
+                0x3137a60464982347,
+                0x930945f2a7d0cec5,
+            ],
+            [
+                0xe2dbb6f99ab0e69c,
+                0xe7205f33b7711e5f,
+                0x39fa5e43c3ecd6f2,
+                0x8beb6d33cee9bb1e,
+                0xb2c55cfcf0334265,
+                0x1d9684974953b644,
+                0x2020e11a2906abf0,
+            ],
+            [
+                0x5cbecd9bfd83899c,
+                0x9d727313621283c0,
+                0x035fcecf821ad34d,
+                0x422baf47f9cb8152,
+                0xb2c55cfcf0334265,
+                0x315a791a7adb2540,
+                0x2bde73c0fcb34265,
+            ],
+        ];
+        let kinds = [
+            SourceKind::Perlin,
+            SourceKind::Perlin2,
+            SourceKind::Simplex,
+            SourceKind::Simplex2,
+            SourceKind::Cubic,
+            SourceKind::Ridge,
+            SourceKind::Billow,
+            SourceKind::SimplexRidge,
+        ];
+        let configs = [
+            (1, 0.5, 1.0, 2.0, Interpolation::Curve3),
+            (2, 0.65, 128.0, 2.0, Interpolation::Curve3),
+            (5, 0.975, 1.0 / 128.0, 1.7, Interpolation::Curve4),
+            (3, -0.3, 0.01, -1.5, Interpolation::Linear),
+            (0, 0.5, 3.0, 2.0, Interpolation::Curve3),
+            (4, 1.25, 0.37, 2.5, Interpolation::Linear),
+            (3, 1e20, 1.0, 2.0, Interpolation::Curve3),
+        ];
+        let config_seeds = [1337, i32::MAX, i32::MIN, -5, 0];
+        let seeds = [0, 1, -1, 17, i32::MAX, i32::MIN, 123_456_789, -987_654_321];
+        let points = [
+            (0.0, 0.0),
+            (0.125, -0.75),
+            (12.34, 56.78),
+            (-1000.5, 2000.25),
+            (1e6, -1e6),
+            (-0.0, 3.5),
+            (f32::NAN, 0.0),
+            (f32::INFINITY, 1.0),
+            (-7.9, -0.001),
+            (65536.5, -32768.25),
+        ];
+        // Java's `Float.floatToIntBits`: one canonical NaN.
+        let bits = |value: f32| {
+            if value.is_nan() {
+                0x7fc0_0000
+            } else {
+                u64::from(value.to_bits())
+            }
+        };
+        let fold = |hash: u64, value: f32| (hash ^ bits(value)).wrapping_mul(0x0000_0100_0000_01b3);
+        for (kind_index, kind) in kinds.into_iter().enumerate() {
+            let ignores_seed = matches!(kind, SourceKind::Perlin | SourceKind::Perlin2);
+            for (config_index, (octaves, gain, frequency, lacunarity, interpolation)) in
+                configs.into_iter().enumerate()
+            {
+                let config = |seed| SourceConfig {
+                    seed,
+                    octaves,
+                    gain,
+                    frequency,
+                    lacunarity,
+                    interpolation,
+                };
+                let (mut seed_first, mut jar) =
+                    (0xcbf2_9ce4_8422_2325_u64, 0xcbf2_9ce4_8422_2325_u64);
+                for config_seed in config_seeds {
+                    let source = Source::new(kind, config(config_seed));
+                    for seed in seeds {
+                        let bound = if ignores_seed {
+                            config_seed
+                        } else {
+                            config_seed.wrapping_add(seed)
+                        };
+                        let legacy = Source::new(kind, config(bound));
+                        for (x, y) in points {
+                            seed_first = fold(seed_first, source.value_seed_first(seed, x, y));
+                            jar = fold(jar, legacy.value(x, y));
+                        }
+                    }
+                }
+                assert_eq!(
+                    seed_first, SEED_FIRST[kind_index][config_index],
+                    "seed-first kind={kind_index}, config={config_index}"
+                );
+                assert_eq!(
+                    jar, JAR[kind_index][config_index],
+                    "jar kind={kind_index}, config={config_index}"
+                );
+            }
+        }
+    }
+
+    /// #109's `with_seed` (the jar's Cereal reseeding) adds the seed to a source's own, so where the maps
+    /// agree it gives the seed-first bits, except for Perlin/Perlin2, whose seed-first form ignores the seed.
+    #[test]
+    fn seed_first_sources_relate_to_reseeding() {
+        let config = SourceConfig {
+            seed: i32::MAX,
+            octaves: 3,
+            gain: 0.65,
+            frequency: 1.0 / 64.0,
+            ..SourceConfig::default()
+        };
+        for kind in [
+            SourceKind::Perlin,
+            SourceKind::Perlin2,
+            SourceKind::Simplex,
+            SourceKind::Simplex2,
+            SourceKind::Cubic,
+            SourceKind::Ridge,
+            SourceKind::Billow,
+            SourceKind::SimplexRidge,
+        ] {
+            let source = Source::new(kind, config);
+            for seed in [0, 17, -1, i32::MIN, i32::MAX] {
+                let reseeded = Module::source(source).with_seed(i64::from(seed));
+                for (x, y) in [(0.5, -3.25), (-1234.5, 87.125), (40_000.0, -0.75)] {
+                    let expected = if matches!(kind, SourceKind::Perlin | SourceKind::Perlin2) {
+                        source.value(x, y)
+                    } else {
+                        reseeded.value(x, y)
+                    };
+                    assert_eq!(
+                        source.value_seed_first(seed, x, y).to_bits(),
+                        expected.to_bits()
+                    );
+                }
+            }
+        }
     }
 
     #[test]

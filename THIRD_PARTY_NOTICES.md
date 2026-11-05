@@ -8,6 +8,12 @@ and its Engine 0.3.0/Noise2D dependencies by TerraForged. The unavailable depend
 recovered from bytecode shipped in TerraForged's official 0.3.1 alpha 2 jar. The code is licensed
 under MIT; its notice is preserved in `native-mods/terraforged/LICENSE-TERRAFORGED`.
 
+The seed-first source API additionally follows
+[Noise2D 2cb48431148a321f74319d7ef0ea61b26bf8e59c](https://github.com/TerraForged/Noise2D/tree/2cb48431148a321f74319d7ef0ea61b26bf8e59c),
+MIT, copyright (c) 2018 dags and (c) 2020 TerraForged. Its license is preserved in
+`native-mods/terraforged/LICENSE-NOISE2D`. This is the seed-first API used by the current
+TerraForged source, distinct from the older shaded dependency's seed-replacement API.
+
 ## wgpu-hal
 
 `third_party/wgpu-hal` is [wgpu-hal](https://github.com/gfx-rs/wgpu) 30.0.1 by the gfx-rs
