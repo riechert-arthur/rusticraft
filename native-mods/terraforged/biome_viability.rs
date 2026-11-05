@@ -237,6 +237,12 @@ impl SumBuilder {
     }
 }
 
+// Rules are shared by chunk-generation threads (the jar's records are immutable).
+const _: () = {
+    const fn shared<T: Send + Sync>() {}
+    shared::<Viability>();
+};
+
 /// `Viability.getFallOff(value, max)`.
 pub fn falloff(value: f32, maximum: f32) -> f32 {
     if value < maximum {
