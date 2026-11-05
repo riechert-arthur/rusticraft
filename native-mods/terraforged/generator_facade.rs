@@ -215,7 +215,6 @@ impl TerraForgedGenerator {
     /// `new BiomeSampler(noiseGenerator, biomeMapManager)` over this generator's noise, as `Source`'s memoized
     /// `Parts` builds it: see [`CurrentSurfaceBiomeSampler::new`]. Building it draws the climate noise, which is not
     /// cheap: build ONE per world and share it across chunk workers (it is `Send + Sync`), never one per chunk.
-    #[allow(clippy::too_many_arguments)]
     pub fn surface_biome_sampler<'a, T>(
         &'a self,
         wet: &'a BiomePools<T>,

@@ -2288,8 +2288,8 @@ override, which wins. It takes block coordinates and the runtime seed; the heigh
 one and its first error is returned, even where the override then replaces the biome (Java reads it in
 `getInitialBiome` first). The pools and the override biomes come from the caller (building them from the registry is
 a later layer), sharing one `Arc` per biome; Reimagined's debug `reportSlope` survey and `Source`'s per-column cache
-are not ported; `create_biomes` (below) fills chunks with it. `.local/terraforged/oracles/current_surface_biomes/` (`run.sh`)
-records, in a 6dd607eb JVM, what `sampleBiome` reads from the real `Sampler` and newer-source `NoiseGenerator` (the
+are not ported; `create_biomes` (below) fills chunks with it. `.local/terraforged/oracles/current_surface_biomes/`
+(`run.sh`) records, in a 6dd607eb JVM, what `sampleBiome` reads from the real `Sampler` and newer-source `NoiseGenerator` (the
 continent, the rivers and the five height reads of 7,272 columns: three levels variants, two terrain sets, six
 runtime seeds, `int`-edge and grid positions), then runs Reimagined's real `BiomeSampler`, `Sampler` and
 `ClimateNoise` over that record, interpreted and with `-Xcomp`, for four pool and settings configurations (absent
