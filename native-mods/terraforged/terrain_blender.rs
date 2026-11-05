@@ -879,8 +879,10 @@ mod tests {
         let blender = TerrainBlender::new(1, 64, 0.8, 0.65, vec![terrain(&registry, 1, 1.0, 1)]);
         let hills = registry.get_by_name("hills").unwrap();
         let finder = blender.find_nearest(0.0, 0.0, 1, 2, &hills);
+        let seed_first = blender.try_find_nearest_seed_first(17, 0.0, 0.0, 1, 2, &hills);
         drop(blender);
         owned(finder);
+        owned(seed_first);
     }
 
     #[test]
