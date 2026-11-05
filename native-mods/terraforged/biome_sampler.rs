@@ -27,7 +27,8 @@ use super::{
     terraforged_terrain_data::NoiseSample,
 };
 
-/// `ContinentPoints.DEEP_OCEAN`: continent noise of the deep-ocean control point.
+/// `ContinentPoints.DEEP_OCEAN`: continent noise of the deep-ocean control point. `DEEP_OCEAN`, `COAST` and
+/// `INLAND` are unused here until the continent control points (#113) re-export all five.
 pub const DEEP_OCEAN: f32 = 0.1;
 /// `ContinentPoints.SHALLOW_OCEAN`: at or below it, `getBiomeOverride` picks a deep ocean.
 pub const SHALLOW_OCEAN: f32 = 0.25;
