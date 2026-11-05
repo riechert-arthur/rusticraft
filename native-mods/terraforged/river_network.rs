@@ -562,7 +562,8 @@ mod tests {
             config.shape.cell_source = source;
             config.rivers.seed = i32::MAX;
             let cells = CellGenerator::new(config);
-            let shape = ShapeGenerator::new(config, ControlPoints::new(WorldControlPoints::default()));
+            let shape =
+                ShapeGenerator::new(config, ControlPoints::new(WorldControlPoints::default()));
             let network = RiverNetwork::new(&cells, &shape, config);
             let carver = RiverCarver::new(levels, config);
             let mut fold = Fold::new();
