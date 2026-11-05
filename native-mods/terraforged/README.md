@@ -1584,7 +1584,8 @@ for the inland-1 config, as expected. Its `shared` lines (one `ContinentNoise` a
 source's first-seed offset; the test checks that the port's equal its `fresh` lines (a new one per seed). The jar's
 continent-shape and continent-points oracles rerun with Noise2D 2cb4843 first on the class path give the `_current`
 variants' expected values (only the zero-range and infinite-range cases change). The tests match all of it bit for bit,
-in debug and release, and sample one `ContinentNoise` from four threads.
+in debug and release; twelve threads sampling one `ContinentNoise` at six runtime seeds at once get the same
+lines, and past 64 seeds the offset store starts over without mixing seeds up.
 
 ## Status: development only
 

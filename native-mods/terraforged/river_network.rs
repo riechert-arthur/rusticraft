@@ -49,7 +49,9 @@ pub const DIRECTIONS: [(i32, i32); 4] = [(1, 0), (0, 1), (-1, 0), (0, -1)];
 /// The newer source tree's `RiverGenerator.computeNodes` (`worldgen.noise.continent.river`): the river and lake
 /// pieces of one continent cell. The 1.18.2-0.3.1 jar draws from `config.rivers.seed` and reads seedless cells; the
 /// newer source (ported here) passes its runtime `seed` to both and never reads `rivers.seed`. [`Self::sample`] is
-/// the warped, carved `sample`; [`Self::nodes`] is `getNodes`, the piece cache (seed-checked, see there).
+/// the warped, carved `sample`; [`Self::nodes`] is `getNodes`, the piece cache (seed-checked, see there). `Cells`
+/// is the continent's cell provider, shared (`Arc<CellGenerator>`, as `ContinentNoise` holds it) or borrowed
+/// (`&CellGenerator`); the shape's parameters are copied in.
 pub struct RiverNetwork<Cells> {
     continent: Cells,
     shape: ShapeGenerator,
