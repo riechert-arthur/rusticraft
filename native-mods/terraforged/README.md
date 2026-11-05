@@ -2132,10 +2132,33 @@ the `-64..320`, `-64..480`, `-64..960`, `0..256` and `128..192` build ranges (te
 below the bottom of the other); the test matches every block and both heightmaps of
 each, bit for bit, including the ranges where Java's own chunk throws.
 
+The biome chunk fill (`biome_chunk_fill.rs`, `fill_noise_biomes`) is TerraForged Reimagined's
+`ChunkUtil.fillNoiseBiomes` with its `BiomeBuffer2D`s, as `Generator.createBiomes` runs it (a24d450, MIT, as above).
+6dd607eb's version samples one surface layer (`getNoiseBiome(x, -1, z)`) for the whole column; Reimagined adds a cave
+layer, and this port follows Reimagined. For the chunk's 4x4 quart columns (`QuartPos.fromBlock` of the chunk's
+first block, Java `int` math), `dz` then `dx`, it asks the surface biome and then the cave biome of each column, then
+fills every section of the chunk's build range from one of two 4x4 layers: sections wholly below y 0
+(`CAVE_BIOME_MAX_Y`, `isCaveBiomeSection`) take the cave layer when any column has a cave biome (a column without
+one keeps its surface biome there), all other sections the surface layer. A sampler error comes back before any
+section is written, as Java's exception leaves the chunk untouched. Like Reimagined it fills the sections directly,
+so 26.3's `ChunkAccess.fillBiomesFromNoise` decorations (blending, below-zero retrogen of upgraded chunks) do not
+apply. The samplers are the caller's closures: TerraForged's biome sampler, the cave layer, the seed the generator
+passes them (`createBiomes` uses the captured seed) and the mapping onto Horizon's biome registry come with later
+layers, as does the `createBiomes` hook itself (its terrain-cache hint included).
+
+`BiomeChunkFillOracle.java` (`.local/terraforged/oracles/biome_chunk_fill/`, `run.sh`) extracts Reimagined's
+`fillNoiseBiomes`, `isCaveBiomeSection` and `isCaveBiomeQuart` verbatim from `ChunkUtil.java` and runs them with
+Reimagined's real `BiomeBuffer2D` over a stub chunk whose sections fill as 26.3's `LevelChunkSection
+.fillBiomesFromNoise` does (transcribed from the 26.3 jar), interpreted and with `-Xcomp`. A stand-in biome source
+gives hashed ids per seed and column, with no, some or only cave biomes. 189 chunks (nine positions, the `int`
+limits included, seven build ranges from `128..192` to `-2032..2032`, three cave mixes, six seeds) are compared on
+the sampler's call trace and every cell of every section; failures at five calls, a reused resource and the band
+tests at the `int` limits are compared too. The tests match all of them.
+
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives, the biome climate types, the climate settings, the climate module, the climate stage, the continent factory, the generator context, the heightmap, the world generator factory, TerraForged's terrain levels, its terrain data, its terrain generator, its terrain-blend utilities, its terrain blender with its nearest-terrain search (and the newer source's seed-first blender), noise-graph reseeding, the cave noise primitives, the biome viability rules, the biome overrides, the continent control points, the continent cell primitives, the continent configuration, the continent shape blending, the continent cell generator with its spawn-offset search, the continent river nodes, the continent river carver's arithmetic, the continent river networks with their nearest-node sampling and their warped, carved river sampling, the newer source's seed-first noise sources, scalar noise graphs, domain warps, selectors, graph caches, terraces, legacy terraces, advanced terraces, curves, transforms (steps, frequency, gradient and modulation), special sources (boost, cell, cell edge and sine) and lines, and its bounded concurrent lossy cache with the continent's cell and
-river-piece caches on it, the continent noise module that joins the continent layers, the newer source's terrain height sampler with its bordered chunk generation and its nearest-terrain search, the erosion tile geometry, and TerraForged Reimagined's heightmap smoothing, erosion brushes, hydraulic erosion filter, eroded-region cache, eroded region build, eroded chunk generation, terrain cache, generator queries, chunk fill and the terrain stage hand-off to it. They change nothing in the game, so there is
+river-piece caches on it, the continent noise module that joins the continent layers, the newer source's terrain height sampler with its bordered chunk generation and its nearest-terrain search, the erosion tile geometry, and TerraForged Reimagined's heightmap smoothing, erosion brushes, hydraulic erosion filter, eroded-region cache, eroded region build, eroded chunk generation, terrain cache, generator queries, chunk fill, the terrain stage hand-off to it, and the biome chunk fill. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
