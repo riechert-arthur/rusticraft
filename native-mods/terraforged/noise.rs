@@ -5636,6 +5636,350 @@ mod tests {
         }
     }
 
+    /// Noise2D 2cb4843 over edge cases: zero-range sources (0 octaves, where seed-first sampling must use
+    /// `map_current`), an infinite range, Invert's out-of-bound branches, a zero-range Map, crossed Clamp bounds,
+    /// Power's special cases, a NaN threshold, empty and single-source combiners, deep nesting, both `int` extreme
+    /// seeds and NaN/infinite/-0 points. Hashes from `SeededGraphEdgeOracle.java` (`.local/terraforged/oracles/
+    /// seed_first/`), canonical NaN bits.
+    #[test]
+    fn scalar_graph_runtime_seed_edges_match_current_noise2d() {
+        let src = |kind, seed, octaves, gain, frequency| {
+            Module::source(Source::new(
+                kind,
+                SourceConfig {
+                    seed,
+                    octaves,
+                    gain,
+                    frequency,
+                    ..SourceConfig::default()
+                },
+            ))
+        };
+        let source = src(SourceKind::Simplex, i32::MAX, 2, 0.65, 0.125);
+        let control = src(SourceKind::Cubic, -91, 2, 0.5, 0.25);
+        let perlin = src(SourceKind::Perlin, 53, 2, 0.5, 0.5);
+        let perlin2 = src(SourceKind::Perlin2, -7, 3, 0.5, 0.3);
+        let zero = src(SourceKind::Simplex, 1337, 0, 0.5, 3.0);
+        let zero_ridge = src(SourceKind::Ridge, 5, 0, 0.5, 1.0);
+        let huge = src(SourceKind::Billow, -5, 3, 1e20, 1.0);
+        let c = Module::constant;
+        let threshold = source.clone().scale(c(0.25)).threshold(control.clone());
+        let alpha = source.clone().bias(perlin.clone());
+        let graphs = [
+            Module::add(vec![zero.clone(), source.clone()]),
+            zero_ridge.clone().bias(perlin2.clone()),
+            Module::multiply(vec![huge.clone(), control.clone()]),
+            threshold.clone().invert(),
+            Module::subtract(vec![c(0.25), threshold]).invert(),
+            control.clone().invert().invert(),
+            c(0.3).map(source.clone(), control.clone()),
+            zero.clone().map(control.clone(), source.clone()),
+            huge.clone().map(c(-1.0), c(2.0)),
+            source.clone().clamp(c(0.5), c(-0.5)),
+            source.clone().abs().power(c(0.5)),
+            source.clone().power(control.clone().scale(c(40.0))),
+            c(-1.0).power(huge.clone()),
+            source.clone().threshold(c(f32::NAN)),
+            Module::add(vec![]),
+            Module::multiply(vec![]),
+            Module::max(vec![]),
+            Module::min(vec![]),
+            Module::subtract(vec![]),
+            Module::subtract(vec![source.clone()]),
+            Module::max(vec![perlin2.clone()]),
+            Module::max(vec![
+                Module::min(vec![
+                    Module::add(vec![source.clone(), perlin2.clone()]),
+                    Module::multiply(vec![control.clone(), zero.clone()]),
+                ]),
+                Module::subtract(vec![huge, perlin]),
+                zero_ridge,
+            ]),
+            // `Module.alpha` would skip this control (its bounds leave 0..1); the oracle uses `new Alpha`.
+            Module::modifier(ModuleKind::Alpha(alpha.clone(), control.clone()), &alpha)
+                .clamp(control, perlin2.abs())
+                .scale(zero.invert()),
+        ];
+        let expected: [[u64; 7]; 23] = [
+            [
+                0x8f886568e74a6515,
+                0xf6ee6e40ef853efd,
+                0x6c0653120ca448b5,
+                0x3a4abc8ec56cc98e,
+                0xb405d18dfb75beaf,
+                0x96c97fd3d3b75300,
+                0x57c84436d6b04052,
+            ],
+            [
+                0x55388c100d418a2b,
+                0x55388c100d418a2b,
+                0x55388c100d418a2b,
+                0x55388c100d418a2b,
+                0x55388c100d418a2b,
+                0x55388c100d418a2b,
+                0x55388c100d418a2b,
+            ],
+            [
+                0x1fc0172983b5455b,
+                0xfc7070502732ab5d,
+                0x878c320fa1aeb0d9,
+                0x13a042099fc6cefd,
+                0xcd9e965c32bf70da,
+                0xd1534276dd30fd85,
+                0xa8a56b65fd31c6c6,
+            ],
+            [
+                0xb014a403b09029bf,
+                0xb014a403b09029bf,
+                0xb014a403b09029bf,
+                0xb014a403b09029bf,
+                0xb014a403b09029bf,
+                0xb014a403b09029bf,
+                0xb014a403b09029bf,
+            ],
+            [
+                0x17dd53b8ac1029bf,
+                0x17dd53b8ac1029bf,
+                0x17dd53b8ac1029bf,
+                0x17dd53b8ac1029bf,
+                0x17dd53b8ac1029bf,
+                0x17dd53b8ac1029bf,
+                0x17dd53b8ac1029bf,
+            ],
+            [
+                0x2d6d2ed5c47148ae,
+                0x77a688f290b2aceb,
+                0xfaeb41c2d398d267,
+                0x93c1d6cb5caefbc9,
+                0x328e419c2093e6ec,
+                0xd635d87c8785ecc1,
+                0xc95aa48f208f36a6,
+            ],
+            [
+                0x46628fb384d029bf,
+                0x46628fb384d029bf,
+                0x46628fb384d029bf,
+                0x46628fb384d029bf,
+                0x46628fb384d029bf,
+                0x46628fb384d029bf,
+                0x46628fb384d029bf,
+            ],
+            [
+                0x9d41270d58e0d4f6,
+                0xc97e54e92ac98afc,
+                0x189982912b3c1de1,
+                0x19767a18246661cc,
+                0x1245eccc44e2acba,
+                0x504aecbb43fea624,
+                0x50c01728b6182efb,
+            ],
+            [
+                0x4126cb16dd6ee853,
+                0xeca01095a170fd7f,
+                0xa0be9a6852ee8a3f,
+                0x036835efb72bb52d,
+                0xa0be9a6852ee8a3f,
+                0x4126cb16dd6ee853,
+                0x30a711602feb0a0e,
+            ],
+            [
+                0xd85163c9865029bf,
+                0x2dd4c7c8065029bf,
+                0xd85163c9865029bf,
+                0x7f733a23865029bf,
+                0xd85163c9865029bf,
+                0x78343053865029bf,
+                0x45b09ec1065029bf,
+            ],
+            [
+                0x6375dce0ddd2ef1d,
+                0xc89eeaf0b57dbbbc,
+                0xd83ff05b8dd8bdd3,
+                0x12b089565138b78a,
+                0xa26b7f21ea37c3cc,
+                0x5256e4ac6c291bf4,
+                0xa0f301e58b06549c,
+            ],
+            [
+                0x0402464b33e10d7e,
+                0x5fad552df72a9196,
+                0x2b7cb655d09a5507,
+                0xd5e11b4e20f2b455,
+                0x4f6901d2941f8627,
+                0xb2b291990b7ac7de,
+                0xcdc05d2204bde521,
+            ],
+            [
+                0x096049cce75029bf,
+                0x096049cce75029bf,
+                0x8994bd10401029bf,
+                0x8994bd10401029bf,
+                0x8994bd10401029bf,
+                0x096049cce75029bf,
+                0x096049cce75029bf,
+            ],
+            [
+                0x6f1f378f7d1029bf,
+                0x6f1f378f7d1029bf,
+                0x6f1f378f7d1029bf,
+                0x6f1f378f7d1029bf,
+                0x6f1f378f7d1029bf,
+                0x6f1f378f7d1029bf,
+                0x6f1f378f7d1029bf,
+            ],
+            [
+                0xe604823a249029bf,
+                0xe604823a249029bf,
+                0xe604823a249029bf,
+                0xe604823a249029bf,
+                0xe604823a249029bf,
+                0xe604823a249029bf,
+                0xe604823a249029bf,
+            ],
+            [
+                0xe604823a249029bf,
+                0xe604823a249029bf,
+                0xe604823a249029bf,
+                0xe604823a249029bf,
+                0xe604823a249029bf,
+                0xe604823a249029bf,
+                0xe604823a249029bf,
+            ],
+            [
+                0xe604823a249029bf,
+                0xe604823a249029bf,
+                0xe604823a249029bf,
+                0xe604823a249029bf,
+                0xe604823a249029bf,
+                0xe604823a249029bf,
+                0xe604823a249029bf,
+            ],
+            [
+                0xe604823a249029bf,
+                0xe604823a249029bf,
+                0xe604823a249029bf,
+                0xe604823a249029bf,
+                0xe604823a249029bf,
+                0xe604823a249029bf,
+                0xe604823a249029bf,
+            ],
+            [
+                0xe604823a249029bf,
+                0xe604823a249029bf,
+                0xe604823a249029bf,
+                0xe604823a249029bf,
+                0xe604823a249029bf,
+                0xe604823a249029bf,
+                0xe604823a249029bf,
+            ],
+            [
+                0x38ccaf7d583faed9,
+                0x0ab5840bc6498afc,
+                0x59d3033e773c1de1,
+                0x5aada81c6e6661cc,
+                0x537d18ddd662acba,
+                0x1183f9cef7fea624,
+                0xa13fdc7d4a720e38,
+            ],
+            [
+                0xc6a113af984614f4,
+                0xc6a113af984614f4,
+                0xc6a113af984614f4,
+                0xc6a113af984614f4,
+                0xc6a113af984614f4,
+                0xc6a113af984614f4,
+                0xc6a113af984614f4,
+            ],
+            [
+                0x18b766c352d029bf,
+                0x18b766c352d029bf,
+                0x18b766c352d029bf,
+                0x18b766c352d029bf,
+                0x18b766c352d029bf,
+                0x18b766c352d029bf,
+                0x18b766c352d029bf,
+            ],
+            [
+                0xe3b47ed672d029bf,
+                0xe3b47ed672d029bf,
+                0xe3b47ed672d029bf,
+                0xe3b47ed672d029bf,
+                0xe3b47ed672d029bf,
+                0xe3b47ed672d029bf,
+                0xe3b47ed672d029bf,
+            ],
+        ];
+        let seeds = [0, 1, -1, 17, i32::MAX, i32::MIN, -987654321];
+        let points = [
+            (0.0, 0.0),
+            (0.125, -0.75),
+            (12.34, 56.78),
+            (-1234.5, 987.25),
+            (-0.0, 3.5),
+            (f32::NAN, 1.0),
+            (f32::INFINITY, 2.0),
+            (1e30, -1e30),
+            (65536.5, -32768.25),
+        ];
+        for (graph_index, (graph, hashes)) in graphs.iter().zip(expected).enumerate() {
+            for (seed, expected) in seeds.into_iter().zip(hashes) {
+                let values = points.map(|(x, y)| graph.try_value_seed_first(seed, x, y).unwrap());
+                let hash = canonical_bits(values)
+                    .into_iter()
+                    .fold(0xcbf29ce484222325u64, |hash, bits| {
+                        (hash ^ u64::from(bits)).wrapping_mul(0x100000001b3)
+                    });
+                assert_eq!(hash, expected, "graph {graph_index}, seed {seed}");
+            }
+        }
+    }
+
+    /// Without Perlin sources (which ignore the runtime seed), a `Bias` (whose bias reseeding drops), a combiner
+    /// (whose sources reseeding leaves unseeded) or a zero or infinite source range (where the jar's `map` and
+    /// `map_current` differ), seed-first sampling with seed `s` gives the bits of the jar path reseeded with `s`
+    /// (`with_seed`, #109): both add `s` to every source's seed.
+    #[test]
+    fn scalar_graph_runtime_seeds_match_reseeded_jar_graphs() {
+        let src = |kind, seed, octaves| {
+            Module::source(Source::new(
+                kind,
+                SourceConfig {
+                    seed,
+                    octaves,
+                    frequency: 0.2,
+                    ..SourceConfig::default()
+                },
+            ))
+        };
+        let source = src(SourceKind::Simplex, i32::MAX, 2);
+        let control = src(SourceKind::Cubic, -91, 3);
+        let ridge = src(SourceKind::Ridge, i32::MIN, 2);
+        let c = Module::constant;
+        let graphs = [
+            source.clone().abs().power(ridge.clone()),
+            ridge.clone().alpha(ridge.clone().abs()),
+            source.clone().clamp(control.clone(), ridge.clone()),
+            control.clone().invert(),
+            source.clone().map(c(-2.0), control.clone()),
+            source
+                .clone()
+                .scale(control.clone())
+                .threshold(ridge.clone()),
+        ];
+        for (graph_index, graph) in graphs.iter().enumerate() {
+            for seed in [0, 1, -1, 17, i32::MAX, i32::MIN] {
+                let reseeded = graph.with_seed(i64::from(seed));
+                for (x, y) in [(0.0, 0.0), (12.34, -56.78), (-0.0, f32::NAN), (1e30, 3.0)] {
+                    assert_eq!(
+                        canonical_bits([graph.try_value_seed_first(seed, x, y).unwrap()]),
+                        canonical_bits([reseeded.value(x, y)]),
+                        "graph {graph_index}, seed {seed}, ({x}, {y})"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn module_graph_matches_engine_0_3_0() {
         let base = Module::source(Source::new(
