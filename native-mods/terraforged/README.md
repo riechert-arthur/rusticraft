@@ -1632,8 +1632,28 @@ seeded sources; seven seeds including both `int` extremes; six points with NaN, 
 `run-graphs.sh` (`.local/terraforged/oracles/seed_first/`, outside Git); the tests match both bit for bit in debug and
 release, check which children each sample reads, and that reseeding gives the same bits over non-Perlin sources.
 
-Fixed, variable and power curve modifiers (`Curve`, `VariableCurve`, `PowerCurve`) are seed-first too: every
-sampled child gets the call's seed, and the curve functions and Java's floating-point operation order are kept.
+The curve modifiers `Curve` (`Module.curve(CurveFunc)`: an `Interpolation`, a `MidPointCurve` or an `SCurve`),
+`VariableCurve` (`Module.curve(mid, steepness)` with noise controls) and `PowerCurve` (`Module.powCurve(n)`) are
+seed-first too: Noise2D 2cb4843's classes are the jar's apart from the seed parameter (and the `NoiseUtil.map` one of
+them calls). The source is sampled with the
+call's seed, then a `VariableCurve` reads its midpoint and then its steepness module with the same seed (Java reads
+all three, with no early exit); `Curve` and `PowerCurve` read only their source. The curve functions are the seedless
+path's (`NoiseUtil.curve` over `NoiseUtil.exp`, `SCurve`'s `(float) Math.pow` through `java_pow`), and `PowerCurve`
+keeps the bounds, midpoint and range its constructor fixed from the source's bounds (one helper serves both paths).
+`PowerCurve` is the one curve that calls `NoiseUtil.map`, so the seed-first path maps with `map_current`: where the
+curve's range is zero (a constant source) or infinite it gives 1, the jar's path NaN. Java throws nowhere here; NaN
+samples, controls and parameters give NaN as in Java. Reseeding still panics on a `MidPointCurve` or `SCurve` (Noise2D
+2cb4843's Cereal specs cannot read them back either), but seed-first sampling needs no reseeding.
+`TerraForgedSeededCurveOracle.java` (the PR's four curves over seeded Perlin/Simplex/Ridge sources, four seeds, four
+points) and `SeededCurveEdgeOracle.java` (44 families with the source at and one ulp beside every midpoint,
+`NoiseUtil.exp` zero-base point, `SCurve` zero-power point and `PowerCurve` source bound and midpoint, plus NaN, ±inf,
+±0, subnormals and ±1e30; zero, negative, infinite and NaN steepness and midpoints; `SCurve`s with a raised, NaN,
+infinite or signed-zero `upper`; all three interpolations; NaN, infinite and seeded variable-curve controls; powers
+0.8, 2, 0, -1, NaN, inf, 0.5, 1 and 3 over zero, infinite, inverted, NaN and wide bounds; power curves of seeded
+Perlin, 0-octave and infinite-range sources; nested curves; seven seeds including both `int` extremes; six points with
+NaN, infinity and -0) run in the same `run-graphs.sh` (`.local/terraforged/oracles/seed_first/`, outside Git); the
+tests match both bit for bit in debug and release, check which children each sample reads, and that reseeding gives
+the same bits over non-Perlin sources.
 
 The bounded concurrent lossy cache (`lossy_cache.rs`, `ConcurrentLossyCache`) ports the newer source tree's
 `LossyCache.Concurrent` and its `LossyCache.Stamped` buckets (`com.terraforged.mod.util.storage`, 6dd607eb). The
