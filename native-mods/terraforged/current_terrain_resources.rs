@@ -453,4 +453,30 @@ terraforged:steppe|flats/category:FLATLAND|true|weight=3fc00000|min=00000000|max
             }
         }
     }
+
+    #[test]
+    fn fancy_mountains_off_drops_the_mountain_ridge() {
+        // `applyTerrainOverrides` drops every id containing "ridge" when fancy mountains are off: of the bundled
+        // noises only `mountains_ridge_1`. With a width of 1 nothing is stretched, so the others pass through.
+        let mut registry = TerrainRegistry::new();
+        let types = decode_current_terrain_types(&mut registry).unwrap();
+        let noises = decode_current_terrain_noises(&types).unwrap();
+        let ids = noises.entry_ids();
+        let values: Vec<_> = noises.into_values().collect();
+        let mut settings = CurrentTerrainSettings::default();
+        settings.general.fancy_mountains = false;
+        settings.general.mountain_width = 1.0;
+        let applied = apply_terrain_overrides(&values, &ids, &settings);
+        let ridge = ids.iter().position(|id| id == "mountains_ridge_1").unwrap();
+        let kept: Vec<_> = values
+            .iter()
+            .enumerate()
+            .filter(|&(i, _)| i != ridge)
+            .map(|(_, noise)| noise)
+            .collect();
+        assert_eq!(applied.len(), TERRAIN_NOISE_COUNT - 1);
+        for (applied, original) in applied.iter().zip(kept) {
+            assert!(Arc::ptr_eq(applied, original));
+        }
+    }
 }
