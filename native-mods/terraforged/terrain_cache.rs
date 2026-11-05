@@ -256,9 +256,11 @@ impl TerrainCache<ErodedNoiseGenerator> {
 #[cfg(test)]
 mod tests {
     use super::super::{
+        terraforged::Module,
         terraforged_engine::TerrainRegistry,
         terraforged_erosion::{ErosionFilterSettings, HeightmapSmoothingSettings},
-        terraforged_noise_generator::tests::{Fold, generator},
+        terraforged_noise_generator::tests::{Fold, generator, generator_with},
+        terraforged_terrain_blender::TerrainNoise,
         terraforged_terrain_data::NoiseData,
         terraforged_terrain_levels::NoiseLevels,
     };
@@ -596,5 +598,34 @@ call 7 5 1 2
             fold(&cache.get_now(3, 0, 0)),
             fold(&uncached.generate(3, 0, 0))
         );
+    }
+
+    /// A custom terrain noise has no seed-first form: the eroded queries pass the generator's `Err` on (Java throws),
+    /// and the chunk task panics every reader, as Java's `join` throws.
+    #[test]
+    fn eroded_query_failures_are_errors() {
+        let failing = ErodedNoiseGenerator::new(
+            generator_with(0, |context| {
+                vec![Arc::new(TerrainNoise::new(
+                    context.terrain.get_by_name("hills").unwrap(),
+                    1.0,
+                    Module::custom(0.0, 1.0, |_, _| 0.25),
+                ))]
+            }),
+            ErosionFilterSettings::default(),
+            HeightmapSmoothingSettings::default(),
+        );
+        let levels = NoiseGenerator::terrain_levels(&failing);
+        let terrains = Arc::clone(&failing.generator().continent().context().terrain);
+        let cache = TerrainCache::with_pool(levels, failing, ThreadPool::create(2));
+        assert!(cache.noise_sample(1, 2, 3).is_err());
+        assert!(
+            cache
+                .sample(1, 2, 3, &mut NoiseSample::new(&terrains))
+                .is_err()
+        );
+        assert!(cache.eroded_height_noise(1, 2, 3).is_err());
+        assert!(catch_unwind(AssertUnwindSafe(|| cache.get_now(1, 0, 0))).is_err());
+        assert!(cache.get_async(1, 0, 0).is_done());
     }
 }
