@@ -2255,9 +2255,23 @@ seven seed draws before the constructor, each sampled at 8 runtime seeds and 181
 fractions, 2^24, 1e10, infinities, NaN, subnormals and a signed grid): the seed draws and a fold of every sample's
 bits match, as does `BiomeType.get` over a 1025x1025 grid from -0.5 to 1.5, in debug and release builds.
 
-The current biome-sampler bridge now scales block coordinates by terrain frequency and composes
-continent, river, and climate sampling in Java order. Climate-only and edge-shape queries preserve
-the caller's terrain sample just like `IBiomeSampler.Sampler`.
+The biome sampler bridge (`CurrentBiomeSampler`, `current_biome_sampler.rs`) ports `IBiomeSampler.Sampler` (the same
+in TerraForged Reimagined a24d450 and 6dd607eb; MIT, as above): it scales block coordinates by the noise levels'
+frequency and fills a fresh climate sample from the continent noise, its rivers and then the current climate noise,
+all at the runtime seed; `getShape` and `sample` run the climate alone (`sample` keeps the caller's terrain fields).
+The climate is built from the continent's context, so it draws its seeds after the continent's four. The two layers
+count seeds differently: the continent noise is 6dd607eb's (Engine 0.3.0's post-increment `Seed`, root `s` gives
+`s..s+3`), the climate Reimagined's (pre-increment). Both leave the seed at `s + 4`, so the climate gets Reimagined's
+seeds, while Reimagined's own continent would draw `s+1..s+4`: the composed sampler matches 6dd607eb's continent and
+Reimagined's climate, not either tree as a whole. Java draws the climate's seeds from the context it shares with the
+continent; here they come from a copy in the same state, so a second sampler over one generator gets the same climate
+(TerraForged builds one per world). Nothing calls it yet: composing the biome choice on top of it, and filling chunks
+with it, are later layers. `.local/terraforged/oracles/current_biome_sampler/` (`run.sh`) runs the real `Sampler` in
+two halves, since the two trees' Engine classes can't share a JVM: 6dd607eb's over the newer source's real
+`NoiseGenerator` for the terrain fields, and Reimagined's with its own `ClimateNoise`, `Seed` and settings (a stand-in
+continent drawing the continent's four seeds) for the climate fields, `getShape`, `sample` and the seed draws; three
+levels variants, two terrain sets, six runtime seeds and 202 block positions (`int` edges and a signed grid) match
+bit for bit in debug and release builds.
 
 ## Status: development only
 
