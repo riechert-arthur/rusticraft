@@ -324,6 +324,29 @@ mod tests {
         f32::NEG_INFINITY,
         f32::NAN,
     ];
+    /// Rounding inputs: halves and negative halves, negative fractions below -1, negative whole numbers.
+    const ROUNDING: [f32; 20] = [
+        0.5,
+        -0.5,
+        1.5,
+        -1.5,
+        -1.25,
+        -2.0,
+        62.5,
+        -62.5,
+        -480.5,
+        -0.0,
+        0.0,
+        -f32::from_bits(1),
+        2147483520.0,
+        -2147483520.0,
+        -2147483648.0,
+        3e9,
+        -3e9,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        f32::NAN,
+    ];
     const INTS: [i32; 11] = [0, 1, -1, 62, 63, -64, 320, 480, 4064, i32::MAX, i32::MIN];
 
     fn transforms(out: &mut String, name: &str, l: TerrainLevels) {
@@ -355,8 +378,8 @@ mod tests {
     /// (`.local/terraforged/oracles/terrain_levels/`, stubbing only `DimensionType` and the logger): the default,
     /// no-argument and constructed levels (clamps with `min > max`, sea levels from a small, negative or huge
     /// `max_y` argument, NaN, infinite, negative-zero and subnormal scales) and their `copy()`, `calcFrequency`
-    /// (zero and negative ranges) and every transform over signed zeros, subnormals, huge values, infinities and
-    /// NaN.
+    /// (zero and negative ranges), every transform over signed zeros, subnormals, huge values, infinities and
+    /// NaN, and (`R` lines) a `NoiseUtil.floor` rounding sweep of `getHeight`/`floor`/`ceil`.
     #[test]
     fn terrain_levels_match_terraforged() {
         const EXPECTED: &str = "\
@@ -473,6 +496,26 @@ X odd 7f7fffff 7e4ccccd 7eaaaaaa 7ecccccb 7f3bbbba 4ada740e 4ada740e 7f800000 7f
 X odd 7f800000 7f800000 7f800000 7f800000 7f800000 4ada740e 4ada740e 7f800000 7f800000 2147483647 2147483647
 X odd ff800000 ff800000 ff800000 ff800000 ff800000 4ada740e 4ada740e ff800000 ff800000 2147483647 2147483647
 X odd 7fc00000 7fc00000 7fc00000 7fc00000 7fc00000 bb5a740e 00000000 7fc00000 7fc00000 -1 -1
+R 3f000000 0 3efeeef0 3f000001 3f000000 3f010000 00000000 3b800000
+R bf000000 -1 bf000000 befeeeef bf010000 bf000000 bb800000 00000000
+R 3fc00000 1 3fbfbbbc 3fc00000 3fc00000 3fc08000 3b800000 3c000000
+R bfc00000 -2 bfc00001 bfbfbbbd bfc08000 bfc00000 bc000000 bb800000
+R bfa00000 -2 bfa00001 bf9fbbbd bfa08000 bfa00000 bc000000 bb800000
+R c0000000 -3 c0000000 bfffbbbc c0004000 c0000000 bc400000 bc000000
+R 427a0000 62 4279fddf 427a0001 427a0000 427a0400 3e780000 3e7c0000
+R c27a0000 -63 c27a0001 c279fddf c27a0400 c27a0000 be7c0000 be780000
+R c3f04000 -481 c3f04001 c3f03fbd c3f04080 c3f04000 bff08000 bff00000
+R 80000000 0 00000000 3b088889 00000000 3b800000 00000000 3b800000
+R 00000000 0 00000000 3b088889 00000000 3b800000 00000000 3b800000
+R 80000001 -1 bb088889 00000000 bb800000 00000000 00000000 3b800000
+R 4effffff 2147483520 4a888889 4a888889 4b000000 4b000000 4affffff 4affffff
+R ceffffff -2147483521 4a888889 4a888889 4b000000 4b000000 caffffff caffffff
+R cf000000 2147483647 4a888889 4a888889 4b000000 4b000000 4b000000 4b000000
+R 4f32d05e 2147483647 4a888889 4a888889 4b000000 4b000000 4b000000 4b000000
+R cf32d05e 2147483647 4a888889 4a888889 4b000000 4b000000 4b000000 4b000000
+R 7f800000 2147483647 4a888889 4a888889 4b000000 4b000000 4b000000 4b000000
+R ff800000 2147483647 4a888889 4a888889 4b000000 4b000000 4b000000 4b000000
+R 7fc00000 -1 bb088889 00000000 bb800000 00000000 bb800000 00000000
 ";
         let mut out = String::new();
         out.push_str(&format!("DEFAULT {}\n", fields(TerrainLevels::default())));
@@ -538,6 +581,24 @@ X odd 7fc00000 7fc00000 7fc00000 7fc00000 7fc00000 bb5a740e 00000000 7fc00000 7f
             "odd",
             TerrainLevels::new(true, 2.5, -32, 300, 100, 80, 20),
         );
+        // `R` lines: the default levels' `getHeight`/`floor`/`ceil` and those of `new NoiseLevels(false, 1, 62, 22,
+        // 256, 128)` (unit 1/256, so `floor(v / 256)` rounds `v` itself) over halves, negative halves, negative
+        // fractions below -1, negative whole numbers, signed zeros, the int limits, huge values and NaN.
+        let def = TerrainLevels::default();
+        let n256 = NoiseLevels::new(false, 1.0, 62, 22, 256, 128);
+        for v in ROUNDING {
+            out.push_str(&format!(
+                "R {} {} {} {} {} {} {} {}\n",
+                h(v),
+                def.height(v),
+                h(def.noise_levels.floor(v)),
+                h(def.noise_levels.ceil(v)),
+                h(n256.floor(v)),
+                h(n256.ceil(v)),
+                h(n256.floor(v / 256.0)),
+                h(n256.ceil(v / 256.0))
+            ));
+        }
         for (line, (got, want)) in out.lines().zip(EXPECTED.lines()).enumerate() {
             assert_eq!(got, want, "line {}", line + 1);
         }
