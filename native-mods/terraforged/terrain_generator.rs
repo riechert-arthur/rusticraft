@@ -97,8 +97,8 @@ impl<T, F: Fn() -> T> ObjectPool<T, F> {
     }
 }
 
-/// Java's `Runtime.availableProcessors()` (at least 1).
-fn available_processors() -> i32 {
+/// Java's `Runtime.availableProcessors()` (at least 1), TerraForged's `Environment.CORES`.
+pub fn available_processors() -> i32 {
     std::thread::available_parallelism().map_or(1, |n| i32::try_from(n.get()).unwrap_or(i32::MAX))
 }
 

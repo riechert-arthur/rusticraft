@@ -1492,9 +1492,41 @@ kind over seven configs (0 octaves, negative gain and lacunarity, an infinite ra
 seeds (both `int` extremes) and ten points (NaN, infinity, -0); the tests match both tables bit for bit in debug and
 release, through `value_seed_first` and through the seedless API.
 
-The newer source's bounded concurrent lossy cache (`lossy_cache.rs`, `LossyCache.Concurrent`) keeps the source's
-bucket rounding, FastUtil mixing, slot replacement and post-unlock removal callbacks; wiring it into the cell and river
-caches is a later layer.
+The bounded concurrent lossy cache (`lossy_cache.rs`, `ConcurrentLossyCache`) ports the newer source tree's
+`LossyCache.Concurrent` and its `LossyCache.Stamped` buckets (`com.terraforged.mod.util.storage`, 6dd607eb; the
+1.18.2-0.3.1 jar has no such class). The structure is the source's: `smallestEncompassingPowerOfTwo(concurrency)`
+buckets (`Environment.CORES`, Java's `availableProcessors()`, for `concurrent(capacity)`), each with
+`smallestEncompassingPowerOfTwo(NoiseUtil.floor((float) capacity / buckets))` slots; a key picks its bucket with
+`(int) (key ^ key >>> 16) & 0x7fffffff` and its slot with fastutil's `HashCommon.mix`, and a miss computes
+`function(seed, key)` under the bucket's write lock (as Java does), overwrites the slot and passes the replaced value to
+the removal listener after the lock is released. It differs from Java in three ways, all so that a value read through
+the cache always equals the one computed directly, on any machine:
+
+- **Hits need the seed too.** Java's `LongCache` matches the `long` key alone, so a slot computed for one seed answers
+  every other seed (the source's river-piece cache, keyed by cell, would hand one world's pieces to another). The port
+  stores the seed in the slot and treats a different seed as a miss in the same slot. With one seed, which is how the
+  source uses it, the hits, misses, eviction order and listener calls are Java's.
+- **No recycling of values in use.** Values are shared (`Arc`); an evicted value stays valid for everyone holding it,
+  and the listener gets the evicted `Arc`, so it can take a value back only once no one else holds it. TerraForged hands
+  evicted values to an `ObjectPool`, and `Stamped` calls the listener with the value it read before locking even when
+  it then returns another thread's newer value or the function throws, so a pooled value can be released twice or while
+  it is still cached. Whether that happens depends on the thread count (`Environment.CORES`), so TerraForged's own
+  output can depend on the machine; the port does not reproduce it, and ports no `ObjectPool` for these caches. Hits take a read lock rather than Java's optimistic read; a miss checks the slot again
+  under the write lock, as Java does when its lock conversion fails.
+- **Unusable sizes panic at construction**: no buckets or buckets of no slots (Java builds them, then throws
+  `ArrayIndexOutOfBoundsException` on the first lookup) and counts past 2^30 (Java's constructor throws). The plain
+  single-threaded `LossyCache.of`, which nothing in the source uses, is not ported.
+
+`LossyCacheOracle.java` (`.local/terraforged/oracles/lossy_cache/`, outside Git; `run.sh` compiles the source's
+`LossyCache`, `LongCache` and `LockUtil` with an `Environment` stub fixing `CORES` at 6 and runs them interpreted and
+JIT) checks nine capacity/concurrency pairs (one slot to 256 slots per bucket, 1 to 64 buckets, non-power-of-two
+sizes): the bucket and slot counts, the bucket and slot of 10 to 10,245 keys each (the `long` extremes, keys `i << 16`
+and `i << 32`, negatives), and per pair three single-threaded traces of 4 lookups per key (seeds 0, 12345,
+`Integer.MIN_VALUE`) recording every factory call, listener call and result; the `CORES` factory gives the same traces
+as concurrency 6. The test replays them bit for bit. Rust tests cover what Java can't show deterministically: 16 threads
+on 48 colliding keys and three seeds always get the directly computed value, values held across evictions stay intact,
+one key under contention is computed once, a panicking function leaves the slot and the listener alone, and the
+listener runs outside the lock.
 
 ## Status: development only
 
