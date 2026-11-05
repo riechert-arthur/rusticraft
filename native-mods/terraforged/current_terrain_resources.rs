@@ -148,7 +148,7 @@ pub fn decode_current_terrain_types(
 /// `data/worldgen/terrain_noise/`:
 ///
 /// - TerraForged Reimagined a24d450's flatlands `plains` and `steppe`, hills `dales`, `hills_1` and `hills_2`, and
-///   mountains `mountains_ridge_1` and `mountains_ridge_2`
+///   mountains `mountains_ridge_1`, `mountains_ridge_2` and `torridonian`
 ///   (<https://github.com/Romoslayer/TerraForged-Reimagined/tree/a24d4503064780790e975cd17495866ae13eef11>,
 ///   `src/main/resources/default/data/terraforged/worldgen/terrain_noise/`, MIT, (c) 2020 TerraForged, (c) 2026
 ///   Romoslayer; TerraForged 6dd607eb generates the same bytes);
@@ -446,9 +446,9 @@ terraforged:torridonian|torridonian/terrain:hills|true|weight=40200000|min=00000
     #[test]
     fn default_overrides_stretch_dales_and_the_mountains_but_not_the_hills() {
         // `isMountain` matches ids containing "mountain", "dolomites", "torridonian" or "dales" (of the bundled
-        // noises: dales and the mountains), so the default `mountainWidth` (3.5) stretches dales and the five
-        // mountains (fancy mountains are on, so both ridges stay); the two hills and the flatlands have no override
-        // and pass through as the same entries.
+        // noises: dales, the mountains and torridonian), so the default `mountainWidth` (3.5) stretches dales, the
+        // five mountains (fancy mountains are on, so both ridges stay) and torridonian; the two hills and the
+        // flatlands have no override and pass through as the same entries.
         let mut registry = TerrainRegistry::new();
         let types = decode_current_terrain_types(&mut registry).unwrap();
         let noises = decode_current_terrain_noises(&types).unwrap();
