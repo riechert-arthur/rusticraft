@@ -111,7 +111,7 @@ impl<'a> CurrentBiomeSampler<'a> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::super::{
         terraforged_climate::ClimateSettings,
         terraforged_context::GeneratorContext,
@@ -203,7 +203,7 @@ climate 2 -8763214 18749568 25456bf27da37de6 889c0d15d53069bd 91b5f99798f9aba6\n
     ];
 
     /// `Points.points()`: every pair of edge coordinates, then an 11x11 grid.
-    fn points() -> Vec<(i32, i32)> {
+    pub(crate) fn points() -> Vec<(i32, i32)> {
         let mut out = Vec::new();
         for x in EDGE {
             for z in EDGE {
@@ -220,7 +220,7 @@ climate 2 -8763214 18749568 25456bf27da37de6 889c0d15d53069bd 91b5f99798f9aba6\n
 
     /// `noise_generator.rs`' oracle generator, with Reimagined's `createContinentNoise` climate settings in the
     /// context (the continent doesn't read them).
-    fn generator(variant: usize, set: usize) -> NoiseGenerator {
+    pub(crate) fn generator(variant: usize, set: usize) -> NoiseGenerator {
         let levels = levels(variant);
         let mut settings = continent_settings(levels);
         settings.climate = ClimateSettings::terra_defaults();
