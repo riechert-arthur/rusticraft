@@ -1139,7 +1139,9 @@ automatic horizontal frequency `194 / (max_y - sea_level) * scale`. The settings
 `TerrainData`) came with the next layer. Its test replays `TerrainLevelsOracle.java` (in
 `.local/terraforged/oracles/terrain_levels/`), which runs TerraForged's own classes from the mod jar, stubbing only
 `DimensionType` and the logger: 19 constructed levels and their copies, the default and no-argument levels,
-`calcFrequency` and every transform over signed zeros, subnormals, huge values, infinities and NaN, bit for bit.
+`calcFrequency` and every transform over signed zeros, subnormals, huge values, infinities and NaN, plus a rounding
+sweep of `height`, `floor` and `ceil` (halves and negative halves, negative fractions and whole numbers, the `int`
+limits), bit for bit.
 
 The terrain-data layer (`terrain_data.rs`, again the mod's classes) adds the per-chunk storage TerraForged's
 generator fills: `Index` (`CHUNK` masks x and z into the chunk, so world coordinates of any chunk, negative ones

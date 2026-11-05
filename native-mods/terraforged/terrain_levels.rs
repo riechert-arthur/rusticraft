@@ -378,8 +378,8 @@ mod tests {
     /// (`.local/terraforged/oracles/terrain_levels/`, stubbing only `DimensionType` and the logger): the default,
     /// no-argument and constructed levels (clamps with `min > max`, sea levels from a small, negative or huge
     /// `max_y` argument, NaN, infinite, negative-zero and subnormal scales) and their `copy()`, `calcFrequency`
-    /// (zero and negative ranges) and every transform over signed zeros, subnormals, huge values, infinities and
-    /// NaN.
+    /// (zero and negative ranges), every transform over signed zeros, subnormals, huge values, infinities and
+    /// NaN, and (`R` lines) a `NoiseUtil.floor` rounding sweep of `getHeight`/`floor`/`ceil`.
     #[test]
     fn terrain_levels_match_terraforged() {
         const EXPECTED: &str = "\
