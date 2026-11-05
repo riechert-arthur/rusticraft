@@ -25,11 +25,14 @@
 
 use super::terraforged_engine::TerrainRegistry;
 use super::terraforged_terrain_asset_registry::{
-    TerrainAssetRegistryError, TerrainTypeAssets, decode_terrain_type_assets,
+    TerrainAssetRegistryError, TerrainNoiseAssets, TerrainTypeAssets, decode_terrain_noise_assets,
+    decode_terrain_type_assets,
 };
 
 /// The number of bundled terrain types.
 pub const TERRAIN_TYPE_COUNT: usize = 18;
+/// The number of bundled terrain noises.
+pub const TERRAIN_NOISE_COUNT: usize = 2;
 
 /// TerraForged Reimagined a24d450's `terrain_type` registry files
 /// (<https://github.com/Romoslayer/TerraForged-Reimagined/tree/a24d4503064780790e975cd17495866ae13eef11>,
@@ -141,14 +144,48 @@ pub fn decode_current_terrain_types(
     decode_terrain_type_assets(current_terrain_type_documents(), registry)
 }
 
+/// TerraForged Reimagined a24d450's flatland `terrain_noise` registry files, `plains` and `steppe`
+/// (<https://github.com/Romoslayer/TerraForged-Reimagined/tree/a24d4503064780790e975cd17495866ae13eef11>,
+/// `src/main/resources/default/data/terraforged/worldgen/terrain_noise/`, MIT, (c) 2020 TerraForged, (c) 2026
+/// Romoslayer), bundled unchanged in `data/worldgen/terrain_noise/`, as (registry key, JSON) pairs.
+pub fn current_terrain_noise_documents() -> [(&'static str, &'static str); TERRAIN_NOISE_COUNT] {
+    [
+        (
+            "terraforged:plains",
+            text(crate::terraforged_data!(
+                "worldgen/terrain_noise/plains.json"
+            )),
+        ),
+        (
+            "terraforged:steppe",
+            text(crate::terraforged_data!(
+                "worldgen/terrain_noise/steppe.json"
+            )),
+        ),
+    ]
+}
+
+/// Decodes the bundled terrain noises, their `type`s resolved in `types` (from [`decode_current_terrain_types`]), in
+/// registry order: hand `entry_ids()` and `into_values()` to `apply_terrain_overrides`.
+pub fn decode_current_terrain_noises(
+    types: &TerrainTypeAssets,
+) -> Result<TerrainNoiseAssets, TerrainAssetRegistryError> {
+    decode_terrain_noise_assets(current_terrain_noise_documents(), types)
+}
+
 fn text(bytes: &'static [u8]) -> &'static str {
     std::str::from_utf8(bytes).expect("TerraForged bundled JSON is UTF-8")
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::terraforged_current_settings::CurrentTerrainSettings;
+    use super::super::terraforged_engine::TerrainFormSettings;
+    use super::super::terraforged_terrain_asset::tests::{bits, sample_hash};
     use super::super::terraforged_terrain_asset_registry::tests::{category_name, describe};
+    use super::super::terraforged_terrain_overrides::apply_terrain_overrides;
     use super::*;
+    use std::sync::Arc;
 
     /// `oracles/current_terrain_resources/` (`run.sh`): TerraForged Reimagined a24d450's asset `TerrainType.DIRECT`
     /// and engine `TerrainType` registry over its own 18 terrain_type files, in registry order (shuffled orders give
@@ -255,5 +292,64 @@ terraforged:wetland|wetland|wetland/category:WETLAND|wetland/category:WETLAND|WE
             let name = key.strip_prefix("terraforged:").unwrap();
             assert!(json.contains(&format!(r#""name": "{name}""#)), "{key}");
         }
+    }
+
+    /// `oracles/current_terrain_resources/` (`run.sh`, noises.txt): Reimagined a24d450's `TerrainNoise` over its real
+    /// `NoiseCodec`, its `type` bound in the terrain-type registry its 18 terrain_type files load, for each bundled
+    /// terrain_noise file in registry order. Fields: key, terrain name/its delegate, whether it is the registry's own
+    /// terrain of that name, weight bits, the raised noise's bounds and the #185 oracle's hash of seed-first samples.
+    const NOISE_ORACLE: &str = r##"terraforged:plains|flats/category:FLATLAND|true|weight=40200000|min=00000000|max=3f800000|hash=54dcba40e02603d8
+terraforged:steppe|flats/category:FLATLAND|true|weight=3fc00000|min=00000000|max=3f800000|hash=93dd73538804253f"##;
+
+    #[test]
+    fn bundled_flatland_terrain_noises_match_reimagined() {
+        let mut registry = TerrainRegistry::new();
+        let types = decode_current_terrain_types(&mut registry).unwrap();
+        let noises = decode_current_terrain_noises(&types).unwrap();
+        assert_eq!(noises.len(), TERRAIN_NOISE_COUNT);
+        let rust: Vec<String> = noises
+            .iter()
+            .map(|(key, noise)| {
+                let terrain = noise.terrain();
+                let own = registry
+                    .get_by_name(terrain.name())
+                    .unwrap()
+                    .is_same(terrain);
+                format!(
+                    "{key}|{}|{own}|weight={:08x}|min={:08x}|max={:08x}|hash={:016x}",
+                    describe(terrain),
+                    bits(noise.weight()),
+                    bits(noise.noise().min_value()),
+                    bits(noise.noise().max_value()),
+                    sample_hash(noise.noise()),
+                )
+            })
+            .collect();
+        assert_eq!(rust.join("\n"), NOISE_ORACLE);
+    }
+
+    #[test]
+    fn bundled_noise_ids_reach_the_terrain_overrides() {
+        // `GeneratorPreset` zips `RegistryKey.entries` with `entryIds`: overrides are keyed by the path alone.
+        let mut registry = TerrainRegistry::new();
+        let types = decode_current_terrain_types(&mut registry).unwrap();
+        let noises = decode_current_terrain_noises(&types).unwrap();
+        let ids = noises.entry_ids();
+        assert_eq!(ids, ["plains", "steppe"]);
+        let mut settings = CurrentTerrainSettings::default();
+        settings
+            .terrains
+            .insert("steppe".to_owned(), TerrainFormSettings::new(4.0, 1.0, 1.0));
+        settings.terrains.insert(
+            "terraforged:plains".to_owned(),
+            TerrainFormSettings::new(7.0, 1.0, 1.0),
+        );
+        let plains = Arc::clone(&noises["terraforged:plains"]);
+        let values: Vec<_> = noises.into_values().collect();
+        let applied = apply_terrain_overrides(&values, &ids, &settings);
+        assert_eq!(applied.len(), 2);
+        assert!(Arc::ptr_eq(&applied[0], &plains)); // a full-id key matches no terraforged: entry
+        assert_eq!(applied[1].weight().to_bits(), 4.0_f32.to_bits());
+        assert_eq!(applied[1].terrain().name(), "flats");
     }
 }
