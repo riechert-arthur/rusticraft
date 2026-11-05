@@ -23,10 +23,10 @@
  */
 
 use super::{
-    terraforged::{clamp, map},
+    terraforged::{clamp, map, map_current},
     terraforged_continent_cell::{CellPoint, CellShape},
     terraforged_continent_config::ContinentConfig,
-    terraforged_continent_points::{FalloffPoint, falloff, falloff_curve},
+    terraforged_continent_points::{FalloffPoint, falloff, falloff_current, falloff_curve},
     terraforged_engine::ControlPoints,
     terraforged_terrain_data::NoiseSample,
 };
@@ -112,6 +112,18 @@ impl ShapeGenerator {
         map(value, min, max, max - min)
     }
 
+    /// The newer source's `getFalloff` (same bytecode as the jar's): [`falloff_current`], Noise2D 2cb4843's map.
+    pub fn falloff_current(&self, continent_noise: f32) -> f32 {
+        falloff_current(continent_noise, &self.falloff_points)
+    }
+
+    /// The newer source's `getBaseNoise` (same bytecode as the jar's) through Noise2D 2cb4843's `NoiseUtil.map`
+    /// ([`map_current`]): 1 instead of NaN where the base falloffs are equal or infinitely apart.
+    pub fn base_noise_current(&self, value: f32) -> f32 {
+        let (min, max) = (self.base_falloff_min, self.base_falloff_max);
+        map_current(value, min, max, max - min)
+    }
+
     /// `getValue(x, y)`: the continent falloff of the 3x3 cells' blended threshold values, clamped to 0..1 before
     /// the falloff. Nothing in the jar calls it. Panics where the cell window wraps past `i32` (see [`window`]).
     pub fn value(&self, continent: &impl ContinentCells, seed: i32, x: f32, y: f32) -> f32 {
@@ -151,6 +163,33 @@ impl ShapeGenerator {
         y: f32,
         sample: &mut NoiseSample,
     ) {
+        self.sample_with(continent, seed, x, y, sample, false);
+    }
+
+    /// The newer source's `sample(seed, x, y, sample)` (6dd607eb, the jar's bytecode with the seed passed down) as it
+    /// runs on Noise2D 2cb4843: [`Self::sample`] through [`Self::base_noise_current`] and [`Self::falloff_current`].
+    /// The two differ only where a map range is zero or infinite (equal base falloffs, an inland point of 1).
+    pub fn sample_current(
+        &self,
+        continent: &impl ContinentCells,
+        seed: i32,
+        x: f32,
+        y: f32,
+        sample: &mut NoiseSample,
+    ) {
+        self.sample_with(continent, seed, x, y, sample, true);
+    }
+
+    /// [`Self::sample`] (`current` false) or [`Self::sample_current`].
+    fn sample_with(
+        &self,
+        continent: &impl ContinentCells,
+        seed: i32,
+        x: f32,
+        y: f32,
+        sample: &mut NoiseSample,
+        current: bool,
+    ) {
         let (center_x, center_y) = continent.nearest_cell(seed, x, y);
         let shape = continent.cell_shape();
         let (x, y) = (shape.adjust_x(x), shape.adjust_y(y));
@@ -166,7 +205,7 @@ impl ShapeGenerator {
                 (minimum0, minimum1) = nearest(distance, minimum0, minimum1);
             }
         }
-        self.sample_edges(minimum0, minimum1, &cells, sample);
+        self.sample_edges(minimum0, minimum1, &cells, sample, current);
     }
 
     /// `sampleEdges`: the jar also passes the nearest cell's index, which it never reads.
@@ -176,6 +215,7 @@ impl ShapeGenerator {
         minimum1: f32,
         cells: &[(CellPoint, f32); 25],
         sample: &mut NoiseSample,
+        current: bool,
     ) {
         let border_distance = (minimum0 + minimum1) * 0.5;
         let base_blend = border_distance * self.base_falloff;
@@ -192,8 +232,14 @@ impl ShapeGenerator {
             base_weights += base_weight;
             continent_weights += continent_weight;
         }
-        sample.base_noise = self.base_noise(sum_base / base_weights);
-        sample.continent_noise = self.falloff(sum_continent / continent_weights);
+        let (base, continent) = (sum_base / base_weights, sum_continent / continent_weights);
+        if current {
+            sample.base_noise = self.base_noise_current(base);
+            sample.continent_noise = self.falloff_current(continent);
+        } else {
+            sample.base_noise = self.base_noise(base);
+            sample.continent_noise = self.falloff(continent);
+        }
     }
 }
 
@@ -262,6 +308,11 @@ mod tests {
     #[rustfmt::skip]
     const CENTERS: [(i32, i32); 5] = [(0, 0), (-1, -1), (5, -7), (-123_456, 16_777_217),
         (i32::MIN + 2, i32::MAX - 3)];
+    /// `ContinentShapeOracle` rerun with Noise2D 2cb4843's `NoiseUtil.map` first on the class path (`out-current.txt`,
+    /// the newer source's semantics: its `ShapeGenerator` is the jar's bytecode with the seed passed down): only config
+    /// 2 (equal base falloffs, a zero map range) changes, its `single` and `blend` hashes. Its `getValue` (jar only,
+    /// still [`ShapeGenerator::value`] there) reads only the falloff, whose curves have no zero-width band here.
+    const CURRENT_2: (u64, u64) = (0xe6ec_1cd8_d873_9cd1, 0x973a_4161_e0d8_0038);
     /// `ContinentShapeOracle` per config: derived threshold and base falloffs, then the `single` and `blend` hashes.
     const EXPECTED: [([u32; 3], u64, u64); 9] = [
         (
@@ -402,8 +453,9 @@ mod tests {
             .collect()
     }
 
+    /// The jar's outputs, then the current-source variants' (`sample_current`, `base_noise_current`, `falloff_current`).
     #[test]
-    fn continent_shape_matches_jar() {
+    fn continent_shape_matches_jar_and_newer_source() {
         let mut fnv = Fnv::new();
         for distance in EDGES {
             for origin in EDGES {
@@ -441,10 +493,30 @@ mod tests {
         controls[7] = points(0.05, 0.2, 0.3, 0.4, 0.6);
         controls[8] = points(0.5, 0.4, 0.3, 0.2, 0.1);
         let terrains = TerrainRegistry::new();
-        for (index, (config, (derived, single, blend))) in
-            configs.into_iter().zip(EXPECTED).enumerate()
+        for (current, (index, (config, (derived, mut single, mut blend)))) in
+            [false, true].into_iter().flat_map(|current| {
+                configs
+                    .into_iter()
+                    .zip(EXPECTED)
+                    .enumerate()
+                    .map(move |c| (current, c))
+            })
         {
+            if current && index == 2 {
+                (single, blend) = CURRENT_2;
+            }
             let generator = ShapeGenerator::new(config, controls[index]);
+            let (base_noise, falloff): (
+                fn(&ShapeGenerator, f32) -> f32,
+                fn(&ShapeGenerator, f32) -> f32,
+            ) = if current {
+                (
+                    ShapeGenerator::base_noise_current,
+                    ShapeGenerator::falloff_current,
+                )
+            } else {
+                (ShapeGenerator::base_noise, ShapeGenerator::falloff)
+            };
             let (threshold, min, max) = (
                 generator.threshold,
                 generator.base_falloff_min,
@@ -463,8 +535,8 @@ mod tests {
                     ..CellPoint::default()
                 };
                 fnv.add(generator.threshold_value(cell));
-                fnv.add(generator.base_noise(value));
-                fnv.add(generator.falloff(value));
+                fnv.add(base_noise(&generator, value));
+                fnv.add(falloff(&generator, value));
             }
             fnv.check(&format!("single {index}"), 120, single);
 
@@ -492,7 +564,11 @@ mod tests {
                     };
                     let mut blend = |x: f32, y: f32| {
                         let mut sample = NoiseSample::new(&terrains);
-                        generator.sample(&cells, 0, x, y, &mut sample);
+                        if current {
+                            generator.sample_current(&cells, 0, x, y, &mut sample);
+                        } else {
+                            generator.sample(&cells, 0, x, y, &mut sample);
+                        }
                         fnv.add(sample.base_noise);
                         fnv.add(sample.continent_noise);
                         fnv.add(generator.value(&cells, 0, x, y));
@@ -517,6 +593,34 @@ mod tests {
             visits
                 .into_inner()
                 .check("visits", 70_720, 0x8738_ee44_c85a_47e5);
+        }
+    }
+
+    /// Noise2D 2cb4843's `NoiseUtil.map` (`dif >= range ? 1 : dif / range`) against the jar's (`dif > range`): they
+    /// part only where the range is zero (equal base falloffs) or infinite (0/0 and inf/inf are NaN in the jar).
+    #[test]
+    fn current_base_noise_differs_only_at_zero_and_infinite_ranges() {
+        let base = |min, max| {
+            ShapeGenerator::new(config(0.0, min, max, 1.0, 1.0), ControlPoints::default())
+        };
+        for (generator, values) in [
+            (base(0.1, 0.1), [0.0, 0.1, 0.5, f32::INFINITY]),
+            (
+                base(f32::NEG_INFINITY, f32::INFINITY),
+                [0.0, -1.0, 1e30, f32::MAX],
+            ),
+        ] {
+            for value in values {
+                assert!(generator.base_noise(value).is_nan(), "{value}");
+                assert_eq!(generator.base_noise_current(value), 1.0, "{value}");
+            }
+            // NaN passes through `clamp` in both.
+            assert!(generator.base_noise_current(f32::NAN).is_nan());
+        }
+        let finite = base(0.01, 0.25);
+        for value in EDGES.into_iter().chain(PLAIN_NOISES) {
+            let (jar, current) = (finite.base_noise(value), finite.base_noise_current(value));
+            assert_eq!(jar.to_bits(), current.to_bits(), "{value}");
         }
     }
 

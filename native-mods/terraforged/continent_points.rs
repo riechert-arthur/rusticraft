@@ -23,7 +23,7 @@
  */
 
 use super::{
-    terraforged::{lerp, map},
+    terraforged::{lerp, map, map_current},
     terraforged_engine::{ControlPoints, Terrain, TerrainRegistry},
 };
 
@@ -81,6 +81,26 @@ pub fn falloff_curve(control_points: ControlPoints) -> [FalloffPoint; 5] {
 /// `continent_noise` (NaN matches none) maps it from `control_point..previous` (1 for the first point) onto
 /// `min..max`; past every point, `0..last` maps onto `0..DEEP_OCEAN`. A zero-width band gives NaN, as in the jar.
 pub fn falloff(continent_noise: f32, curve: &[FalloffPoint]) -> f32 {
+    falloff_with(continent_noise, curve, map)
+}
+
+/// [`falloff`] as the newer source tree runs it: the same bytecode, but its `MathUtil.map` reaches Noise2D 2cb4843's
+/// `NoiseUtil.map` ([`map_current`]), so a zero-width band (an inland point of 1, or a degenerate custom curve)
+/// gives `lerp(min, max, 1)` instead of NaN.
+pub fn falloff_current(continent_noise: f32, curve: &[FalloffPoint]) -> f32 {
+    falloff_with(continent_noise, curve, map_current)
+}
+
+/// `getFalloff` with `NoiseUtil.map` passed in (the jar's [`map`] or the newer source's [`map_current`]).
+fn falloff_with(
+    continent_noise: f32,
+    curve: &[FalloffPoint],
+    map: fn(f32, f32, f32, f32) -> f32,
+) -> f32 {
+    // TerraForged's `MathUtil.map(value, min, max, from, to)`: `NoiseUtil.lerp(from, to, NoiseUtil.map(value, min,
+    // max, max - min))`.
+    let math_map =
+        |value, min: f32, max: f32, from, to| lerp(from, to, map(value, min, max, max - min));
     let mut previous = 1.0;
     for point in curve {
         if continent_noise >= point.control_point {
@@ -95,12 +115,6 @@ pub fn falloff(continent_noise: f32, curve: &[FalloffPoint]) -> f32 {
         previous = point.control_point;
     }
     math_map(continent_noise, 0.0, previous, 0.0, DEEP_OCEAN)
-}
-
-/// TerraForged's `MathUtil.map(value, min, max, from, to)`: `NoiseUtil.lerp(from, to, NoiseUtil.map(value, min, max,
-/// max - min))`.
-fn math_map(value: f32, min: f32, max: f32, from: f32, to: f32) -> f32 {
-    lerp(from, to, map(value, min, max, max - min))
 }
 
 #[cfg(test)]
@@ -163,7 +177,33 @@ mod tests {
 
     /// The oracle's `curve` line (points' raw bits) and `falloff` line (FNV-1a over each result's canonical bits,
     /// at `INPUTS` then each point's control point with its neighbouring floats).
+    /// `ContinentPointsOracle` rerun with Noise2D 2cb4843's `NoiseUtil.map` first on the class path
+    /// (`out-current.txt`, the newer source's `getFalloff`): the curves whose fold changes (zero-width bands).
+    const CURRENT: [(&str, u64); 3] = [
+        ("subnormal", 0xdda8_dcd1_384c_ca15),
+        ("negzero", 0xcf7d_ae8a_83b6_3f17),
+        ("neginf", 0x810e_a3d7_6cf8_4b36),
+    ];
+
+    /// Checks the curve and its fold under [`falloff`], then under [`falloff_current`] (the jar's hash unless
+    /// [`CURRENT`] lists the curve).
     fn check_curve(name: &str, curve: &[FalloffPoint], points: &str, count: usize, hash: u64) {
+        check_curve_with(name, curve, points, count, hash, falloff);
+        let current = CURRENT
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map_or(hash, |&(_, h)| h);
+        check_curve_with(name, curve, points, count, current, falloff_current);
+    }
+
+    fn check_curve_with(
+        name: &str,
+        curve: &[FalloffPoint],
+        points: &str,
+        count: usize,
+        hash: u64,
+        falloff: fn(f32, &[FalloffPoint]) -> f32,
+    ) {
         let actual: Vec<String> = curve
             .iter()
             .map(|p| {
@@ -225,7 +265,7 @@ mod tests {
     }
 
     #[test]
-    fn continent_points_falloff_matches_jar() {
+    fn continent_points_falloff_matches_jar_and_newer_source() {
         let default = "3f008312,3f800000,3f800000 3ee56042,3f0ccccd,3f800000 3ea76c8b,3f000000,3f0ccccd \
             3e800000,3e800000,3f000000 3dcccccd,3dcccccd,3e800000";
         let engine = [
@@ -317,6 +357,11 @@ mod tests {
             1.0,
         )));
         assert!(falloff(1.0, &curve).is_nan());
+        // The newer source (Noise2D 2cb4843's map) gives the band's lerp at 1 there, and the deep-ocean tail of a
+        // zero deep-ocean point (`0..0`) maps a negative input to DEEP_OCEAN instead of NaN.
+        assert_eq!(falloff_current(1.0, &curve), 1.0);
+        assert!(falloff(-0.25, &curve).is_nan());
+        assert_eq!(falloff_current(-0.25, &curve), DEEP_OCEAN);
         let custom = falloff_curve(ControlPoints::new(settings(0.08, 0.22, 0.34, 0.47, 0.63)));
         assert_eq!(falloff(0.4, &custom).to_bits(), 0x3f05_e85f);
         assert_eq!(falloff(-0.25, &custom).to_bits(), 0);
