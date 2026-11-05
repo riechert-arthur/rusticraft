@@ -1390,21 +1390,21 @@ COAST)`), then carves the river node and then the lake node, each from the previ
 valley lerps the base noise from its level to the sample's base. The carver lowers the height towards the bank level
 across the valley, with an eroded U-to-linear falloff that fades out over the valley's last 2.5%, and towards the bed
 level inside the banks, where the node's terrain is taken. The river noise falls across the valley and the banks.
-Below `BEACH` the river noise is reset to 1. `getBaseNoise`'s -1 ("outside the valley") also skips a node whose
-carved base really is -1, as in Java. Version check: compiled from the newer source, `RiverCarver`, `NoiseLevels`,
+Below `BEACH` the river noise is reset to 1. `getBaseNoise`'s -1 ("outside the valley") also skips a node whose carved
+base really is -1, as in Java. Version check: compiled from the newer source, `RiverCarver`, `NoiseLevels`,
 `NoiseSample`, `ContinentPoints`, the three config classes, `NodeSample` and `CarverSample` give the same bytecode as
-the 1.18.2-0.3.1 jar except in one place. The source's `carve(int seed, float x, float y, …)` reads the erosion
-seed-first (`erosionNoise.getValue(seed, x, y)`, Noise2D); the jar's `carve(float x, float y, …)` calls
-`getValue(x, y)`. The erosion module itself (a two-octave ridge at frequency 128, seed `rivers.seed + 21221`) is not
-ported yet: #124 ports the seed-first sources and #125 wires it, so `carve_with_erosion` takes the erosion value.
-`ContinentCarverOracle.java` (`.local/terraforged/oracles/continent_carver/`, river nodes' class path and stubs; the
-bytecode comparison is in `version/`) runs the jar's own `carve` with the erosion module swapped for a constant by
-reflection. It covers 16 configurations (`int` scales 0, negative and `MAX`; NaN, infinite and signed-zero widths,
-depths and erosion; equal and crossed radii) over five noise levels, and a river grid of 766,080 carves. The grid
-takes each scaled radius with its float neighbours, points across the valley through the erosion fade, the 0.4/0.6
-shape and `COAST`/`BEACH` thresholds with their neighbours, the -1 sentinel, NaN, infinities and signed zeros. It also
-covers incoming river noise and river-then-lake precedence. The test matches the outputs (base, height, river noise,
-terrain) bit for bit, in debug and release.
+the 1.18.2-0.3.1 jar (up to constant-pool layout) except in one place. The source's `carve(int seed, float x, float y,
+…)` reads the erosion seed-first (`erosionNoise.getValue(seed, x, y)`, Noise2D); the jar's `carve(float x, float y,
+…)` calls `getValue(x, y)`. The erosion module itself (a two-octave ridge at frequency 128, seed `rivers.seed +
+21221`) is not ported yet: #124 ports the seed-first sources and #125 wires it, so `carve_with_erosion` takes the
+erosion value. `ContinentCarverOracle.java` (`.local/terraforged/oracles/continent_carver/`, river nodes' class path
+and stubs; the bytecode comparison is `version/compare.sh`) runs the jar's own `carve` with the erosion module swapped
+for a constant by reflection. It covers 16 configurations (`int` scales 0, negative and `MAX`; NaN, infinite and
+signed-zero widths, depths and erosion; equal and crossed radii) over five noise levels, and a river grid of 766,080
+carves. The grid takes each scaled radius with its float neighbours, points across the valley through the erosion
+fade, the 0.4/0.6 shape and `COAST`/`BEACH` thresholds with their neighbours, the -1 sentinel, NaN, infinities and
+signed zeros. It also covers incoming river noise and river-then-lake precedence. The test matches the outputs (base,
+height, river noise, terrain) bit for bit, in debug and release.
 
 ## Status: development only
 

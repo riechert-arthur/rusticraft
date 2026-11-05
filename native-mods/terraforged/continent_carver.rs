@@ -218,7 +218,7 @@ fn alpha(value: f32, minimum: f32, maximum: f32) -> f32 {
 
 /// Bit-exact tests against `ContinentCarverOracle.java` (`.local/terraforged/oracles/continent_carver/`), which runs
 /// the jar's own `RiverCarver.carve` with its erosion module replaced by a constant (the jar's carving bytecode is
-/// identical to the newer source's; `version/` there holds the comparison).
+/// identical to the newer source's; `version/compare.sh` there checks it).
 #[cfg(test)]
 mod tests {
     use super::super::{
