@@ -127,7 +127,7 @@ impl<T> RegistryBiome<T> {
     }
 
     /// `isNonSurface`: the `terraforged:non_surface` tag (with its bundled defaults), or a `cave/…` / `…_caves` path.
-    fn is_non_surface(&self) -> bool {
+    pub(super) fn is_non_surface(&self) -> bool {
         let path = identifier(&self.name).1;
         self.is(NON_SURFACE)
             || DEFAULT_NON_SURFACE.contains(&self.name.as_ref())
@@ -196,13 +196,13 @@ fn normalize(value: f32, minimum: f32, maximum: f32) -> f32 {
 }
 
 /// `Identifier.parse`'s split: `(namespace, path)`, the namespace `minecraft` when there is no `:`.
-fn identifier(name: &str) -> (&str, &str) {
+pub(super) fn identifier(name: &str) -> (&str, &str) {
     name.split_once(':').unwrap_or(("minecraft", name))
 }
 
 /// `BiomeUtil.BIOME_SORTER` (`Identifier.compareTo`): the path first, then the namespace, each by
 /// `String.compareTo` (UTF-16 code units).
-fn identifier_order(left: &str, right: &str) -> Ordering {
+pub(super) fn identifier_order(left: &str, right: &str) -> Ordering {
     let (left_namespace, left_path) = identifier(left);
     let (right_namespace, right_path) = identifier(right);
     left_path
@@ -411,7 +411,7 @@ impl RegistryBiomeMap<BiomeId> {
 
 /// Horizon's loaded biome registry as [`RegistryBiome`]s: one per biome id, with its climate settings and the
 /// (resolved) biome tags that list it.
-fn registry_entries(data: &GeneratorData) -> Vec<RegistryBiome<BiomeId>> {
+pub(super) fn registry_entries(data: &GeneratorData) -> Vec<RegistryBiome<BiomeId>> {
     data.biome_names
         .iter()
         .enumerate()

@@ -82,6 +82,14 @@ impl<T> CaveBiomeSampler<T> {
         self.frequency
     }
 
+    /// The equal-weight pool `typeMap.get(cave_type)` holds (UNIQUE already fallen back to GLOBAL if it was empty).
+    pub const fn pool(&self, cave_type: CaveType) -> &WeightMap<T> {
+        match cave_type {
+            CaveType::Global => &self.global,
+            CaveType::Unique => &self.unique,
+        }
+    }
+
     /// `getUnderGroundBiome(seed, x, z, type)`: `None` where Java returns null (empty pool, NaN noise).
     pub fn get_underground_biome(
         &self,
