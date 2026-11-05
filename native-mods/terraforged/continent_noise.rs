@@ -379,22 +379,32 @@ mod tests {
             assert_eq!(noise.world_offset(RUNTIME[index]), *offset);
             assert!(offsets[..index].iter().all(|other| other != offset));
         }
+        // Past OFFSET_CACHE_SIZE seeds the store starts over: still each seed's own offset, and bounded.
+        for seed in 0..(OFFSET_CACHE_SIZE as i32 * 2 + 3) {
+            assert_eq!(
+                noise.world_offset(seed),
+                noise.cells.world_offset(seed),
+                "{seed}"
+            );
+        }
+        assert!(noise.offsets.read().unwrap().len() <= OFFSET_CACHE_SIZE);
     }
 
+    /// TerraForged samples one `ContinentNoise` from its worker threads: twelve threads on one, two per runtime seed,
+    /// all starting before any offset is known, still get each seed's own grid and offset.
     #[test]
     fn continent_noise_samples_the_same_from_parallel_workers() {
-        let reference = {
-            let mut fold = Fold::new();
-            fold.grid(&noise(0), 0, 42);
-            fold.0
-        };
-        let shared_noise = noise(0);
+        let noise = noise(0);
+        let expected = &EXPECTED[0];
         std::thread::scope(|scope| {
-            for _ in 0..4 {
-                scope.spawn(|| {
+            for (index, seed) in RUNTIME.into_iter().enumerate().cycle().take(12) {
+                let noise = &noise;
+                scope.spawn(move || {
                     let mut fold = Fold::new();
-                    fold.grid(&shared_noise, 0, 42);
-                    assert_eq!(fold.0, reference);
+                    fold.grid(noise, 0, seed);
+                    assert_eq!(fold.0, expected.grid[index], "grid {seed}");
+                    let (x, y) = noise.world_offset(seed);
+                    assert_eq!((x.to_bits(), y.to_bits()), expected.offsets[index]);
                 });
             }
         });
