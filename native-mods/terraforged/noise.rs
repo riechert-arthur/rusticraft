@@ -2042,35 +2042,14 @@ impl Module {
                 max_index,
                 ..
             } => {
-                let noise_value = clamp(source.value(x, y), 0.0, 1.0);
-                let index = round(noise_value * *max_index as f32);
-                // `round` keeps a clamped sample (NaN rounds to 0) inside the steps; only a terrace without steps
-                // (`maxIndex` -1) leaves them, where Engine throws.
-                let step = usize::try_from(index)
-                    .ok()
-                    .and_then(|index| steps.get(index))
-                    .expect("LegacyTerrace samples a step outside its steps, where Engine throws");
-                let index = index as usize;
-                // As in Engine, a sample below the first step's window returns it without checking the upper window
-                // (which can matter for a blend range above 1, where the windows invert).
-                if noise_value < step.lower_bound {
-                    if index > 0 {
-                        let lower = &steps[index - 1];
-                        let alpha = (noise_value - lower.upper_bound)
-                            / (step.lower_bound - lower.upper_bound);
-                        let alpha = 1.0 - Interpolation::Curve3.apply(alpha);
-                        let range = step.value - lower.value;
-                        return step.value - alpha * range * upper_curve.value(x, y);
-                    }
-                } else if noise_value > step.upper_bound && (index as i32) < *max_index {
-                    let upper = &steps[index + 1];
-                    let alpha =
-                        (noise_value - step.upper_bound) / (upper.lower_bound - step.upper_bound);
-                    let alpha = Interpolation::Curve3.apply(alpha);
-                    let range = upper.value - step.value;
-                    return step.value + alpha * range * lower_curve.value(x, y);
-                }
-                step.value
+                let Ok(value) = legacy_terrace(
+                    source.value(x, y),
+                    steps,
+                    *max_index,
+                    || Ok::<_, std::convert::Infallible>(lower_curve.value(x, y)),
+                    || Ok(upper_curve.value(x, y)),
+                );
+                value
             }
             ModuleKind::AdvancedTerrace {
                 source,
@@ -2262,16 +2241,17 @@ impl Module {
     }
 
     /// Noise2D 2cb4843's `getValue(int seed, float x, float y)` for the scalar nodes, `Warp`, the `Base`,
-    /// `Blend`, `VariableBlend`, `Select` and `MultiBlend` selectors, `Cache` and `Terrace`: every node passes the
+    /// `Blend`, `VariableBlend`, `Select` and `MultiBlend` selectors, `Cache`, `Terrace` and `LegacyTerrace`: every node passes the
     /// call's seed unchanged to its children (only octave sources add their own seed, see
     /// [`Source::value_seed_first`]); their arithmetic and evaluation order are the jar's (`Cache` also keys its
     /// entry by the seed). `Warp` samples its source at the domain's seed-first coordinates ([`Domain::try_x_seed_first`]).
     /// Nodes not yet ported to seed-first sampling return an error instead of falling back to [`Module::value`],
-    /// which would ignore the seed. Selectors and `Terrace` evaluate only the children Java evaluates for that
-    /// sample (a terrace reads its ramp and cliff only inside a step's window, its ramp height only above the ramp),
+    /// which would ignore the seed. Selectors and terraces evaluate only the children Java evaluates for that
+    /// sample (a terrace reads its ramp and cliff only inside a step's window, its ramp height only above the ramp;
+    /// a legacy terrace reads one curve, and only outside a step's window),
     /// so an unsupported node in a branch the sample skips errors only at the points that reach it: one `Ok` sample
     /// does not prove the whole graph is supported. Where Java throws (a `MultiBlend` slot outside its sources, a
-    /// NaN terrace sample, a terrace without steps), this panics, as [`Module::value`] does.
+    /// NaN terrace sample, a terrace or legacy terrace without steps), this panics, as [`Module::value`] does.
     pub fn try_value_seed_first(&self, seed: i32, x: f32, y: f32) -> Result<f32, &'static str> {
         let sample = |module: &Module| module.try_value_seed_first(seed, x, y);
         Ok(match &self.0.kind {
@@ -2489,6 +2469,20 @@ impl Module {
                     value
                 }
             }
+            ModuleKind::LegacyTerrace {
+                source,
+                lower_curve,
+                upper_curve,
+                steps,
+                max_index,
+                ..
+            } => legacy_terrace(
+                sample(source)?,
+                steps,
+                *max_index,
+                || sample(lower_curve),
+                || sample(upper_curve),
+            )?,
             // Noise2D 2cb4843's `Cache` keeps one entry per thread keyed by `x == this.x && y == this.y` alone, so a
             // repeated point at another runtime seed returns the first seed's sample. The port keys the shared entry
             // by the seed too (and by the coordinates' bits, as the seedless path does): a hit is always the sample
@@ -3512,6 +3506,45 @@ fn terrace_steps(source: &Module, count: usize, blend_range: f32) -> (Vec<Terrac
         })
         .collect();
     (steps, max_index)
+}
+
+/// `LegacyTerrace.getValue` from its source sample on, shared by the seedless and seed-first paths (Engine 0.3.0 and
+/// Noise2D 2cb4843 agree here): clamps the sample to 0..1, rounds it to a step index (`round` sends NaN to 0), and
+/// eases into the neighbouring steps. Only the transition taken samples its curve. As in Java, a sample below the
+/// first step's window returns that step without checking the upper window (which can matter for a blend range above
+/// 1, where the windows invert).
+fn legacy_terrace<E>(
+    source_value: f32,
+    steps: &[TerraceStep],
+    max_index: i32,
+    lower_curve: impl FnOnce() -> Result<f32, E>,
+    upper_curve: impl FnOnce() -> Result<f32, E>,
+) -> Result<f32, E> {
+    let noise_value = clamp(source_value, 0.0, 1.0);
+    let index = round(noise_value * max_index as f32);
+    // `round` keeps a clamped sample inside the steps; only a terrace without steps (`maxIndex` -1) leaves them, where
+    // Java throws.
+    let step = usize::try_from(index)
+        .ok()
+        .and_then(|index| steps.get(index))
+        .expect("LegacyTerrace samples a step outside its steps, where Java throws");
+    let index = index as usize;
+    if noise_value < step.lower_bound {
+        if index > 0 {
+            let lower = &steps[index - 1];
+            let alpha = (noise_value - lower.upper_bound) / (step.lower_bound - lower.upper_bound);
+            let alpha = 1.0 - Interpolation::Curve3.apply(alpha);
+            let range = step.value - lower.value;
+            return Ok(step.value - alpha * range * upper_curve()?);
+        }
+    } else if noise_value > step.upper_bound && (index as i32) < max_index {
+        let upper = &steps[index + 1];
+        let alpha = (noise_value - step.upper_bound) / (upper.lower_bound - step.upper_bound);
+        let alpha = Interpolation::Curve3.apply(alpha);
+        let range = upper.value - step.value;
+        return Ok(step.value + alpha * range * lower_curve()?);
+    }
+    Ok(step.value)
 }
 
 /// The shortcut test shared by `Module.clamp` and `Module.map`.
@@ -7727,6 +7760,26 @@ mod tests {
             -f32::from_bits(1),
             0.999999f32.next_up(),
         ];
+        for (index, ((steps, blend, bounds, build), expected)) in
+            families.iter().zip(expected).enumerate()
+        {
+            let table = steps.map_or_else(Vec::new, |steps| edges(steps, *blend, *bounds));
+            let fold = seeded_edge_fold(&table, &specials, *bounds, build);
+            assert_eq!(fold, expected, "family {index}");
+        }
+    }
+
+    /// The fold of the seed-first edge oracles (`SeededTerraceEdgeOracle`, `SeededLegacyTerraceEdgeOracle`): each
+    /// table value and one ulp below and above it, then the specials, as a Java module returning that value with
+    /// `bounds` (a `Constant` node), put under `build` and sampled over seven seeds (both `int` extremes) and six
+    /// points (NaN, infinity, -0). Canonical NaN bits; a sample that panics (where Java throws) folds as `0xffffffff`.
+    /// Returns the number of values and the fold.
+    fn seeded_edge_fold(
+        table: &[f32],
+        specials: &[f32],
+        bounds: (f32, f32),
+        build: impl Fn(Module) -> Module,
+    ) -> (usize, u64) {
         let seeds = [0, 1, -1, 17, i32::MAX, i32::MIN, -987654321];
         let points = [
             (0.0, 0.0),
@@ -7736,24 +7789,18 @@ mod tests {
             (f32::NAN, 1.0),
             (f32::INFINITY, 2.0),
         ];
-        for (index, ((steps, blend, bounds, build), expected)) in
-            families.iter().zip(expected).enumerate()
-        {
-            let table = steps.map_or_else(Vec::new, |steps| edges(steps, *blend, *bounds));
-            let values: Vec<f32> = table
-                .iter()
-                .flat_map(|&e| [e, e.next_down(), e.next_up()])
-                .chain(specials)
-                .collect();
-            let mut hash = 0xcbf29ce484222325u64;
-            for &v in &values {
-                // A Java module returning `v` with the family's bounds.
-                let graph = build(Module::node(ModuleKind::Constant(v), bounds.0, bounds.1));
-                for seed in seeds {
-                    for (x, y) in points {
-                        let bits = match std::panic::catch_unwind(|| {
-                            graph.try_value_seed_first(seed, x, y)
-                        }) {
+        let values: Vec<f32> = table
+            .iter()
+            .flat_map(|&e| [e, e.next_down(), e.next_up()])
+            .chain(specials.iter().copied())
+            .collect();
+        let mut hash = 0xcbf29ce484222325u64;
+        for &v in &values {
+            let graph = build(Module::node(ModuleKind::Constant(v), bounds.0, bounds.1));
+            for seed in seeds {
+                for (x, y) in points {
+                    let bits =
+                        match std::panic::catch_unwind(|| graph.try_value_seed_first(seed, x, y)) {
                             Ok(value) => {
                                 let value = value.unwrap();
                                 if value.is_nan() {
@@ -7764,12 +7811,11 @@ mod tests {
                             }
                             Err(_) => 0xffff_ffff,
                         };
-                        hash = (hash ^ u64::from(bits)).wrapping_mul(0x100000001b3);
-                    }
+                    hash = (hash ^ u64::from(bits)).wrapping_mul(0x100000001b3);
                 }
             }
-            assert_eq!((values.len(), hash), expected, "family {index}");
         }
+        (values.len(), hash)
     }
 
     #[test]
@@ -7825,6 +7871,283 @@ mod tests {
         }
         assert!(terrace(0.25, &c(0.4), &c(0.7), &unsupported).is_ok());
         assert!(terrace(0.34, &c(0.4), &c(0.7), &unsupported).is_err());
+    }
+
+    #[test]
+    fn runtime_seeded_legacy_terrace_matches_current_noise2d() {
+        let source = Module::source(Source::new(
+            SourceKind::Simplex,
+            SourceConfig {
+                seed: i32::MAX,
+                octaves: 3,
+                gain: 0.65,
+                frequency: 0.125,
+                lacunarity: 2.0,
+                interpolation: Interpolation::Curve3,
+            },
+        ));
+        let lower = Module::source(Source::new(
+            SourceKind::Perlin2,
+            SourceConfig {
+                seed: -91,
+                octaves: 2,
+                gain: 0.5,
+                frequency: 0.25,
+                lacunarity: 2.0,
+                interpolation: Interpolation::Curve3,
+            },
+        ));
+        let upper = Module::source(Source::new(
+            SourceKind::Simplex2,
+            SourceConfig {
+                seed: 17,
+                octaves: 2,
+                gain: 0.5,
+                frequency: 0.0625,
+                lacunarity: 2.0,
+                interpolation: Interpolation::Curve3,
+            },
+        ));
+        let terrace = source.legacy_terrace(lower, upper, 7, 0.35);
+        for (seed, expected) in [0, 17, -91, i32::MAX].into_iter().zip([
+            0x4f7a00177771432e,
+            0x89d50db38b44a5ba,
+            0xa98eef2a5f901194,
+            0x2e30f88545dd8f60,
+        ]) {
+            let mut hash = 0xcbf29ce484222325u64;
+            for (x, y) in [
+                (0.0, 0.0),
+                (0.125, -0.75),
+                (12.34, 56.78),
+                (-1234.5, 987.25),
+            ] {
+                hash ^= u64::from(terrace.try_value_seed_first(seed, x, y).unwrap().to_bits());
+                hash = hash.wrapping_mul(0x100000001b3);
+            }
+            assert_eq!(hash, expected, "seed {seed}");
+        }
+    }
+
+    #[test]
+    fn seeded_legacy_terrace_matches_reseeding_and_evaluates_curves_lazily() {
+        // Over non-Perlin sources with finite, nonzero ranges, reseeding and seed-first sampling seed the same
+        // sources and use the same steps (both from the constructor's bounds), so they give the same bits.
+        let src = |kind, seed, octaves| {
+            Module::source(Source::new(
+                kind,
+                SourceConfig {
+                    seed,
+                    octaves,
+                    frequency: 0.2,
+                    ..SourceConfig::default()
+                },
+            ))
+        };
+        let source = src(SourceKind::Simplex, i32::MAX, 2);
+        let lower = src(SourceKind::Cubic, -91, 3);
+        let upper = src(SourceKind::Simplex2, i32::MIN, 2);
+        for steps in [1, 2, 7, 64] {
+            for blend in [0.35, 3.0] {
+                let graph =
+                    source
+                        .clone()
+                        .legacy_terrace(lower.clone(), upper.clone(), steps, blend);
+                for seed in [0, 1, -1, 17, i32::MAX, i32::MIN] {
+                    let reseeded = graph.with_seed(i64::from(seed));
+                    for (x, y) in [(0.0, 0.0), (12.34, -56.78), (-0.0, 3.5), (1e30, 3.0)] {
+                        assert_eq!(
+                            canonical_bits([graph.try_value_seed_first(seed, x, y).unwrap()]),
+                            canonical_bits([reseeded.value(x, y)]),
+                            "steps {steps}, blend {blend}, seed {seed}, ({x}, {y})"
+                        );
+                    }
+                }
+            }
+        }
+        // Five steps over 0..1 (windows ±0.09375 around 0, 0.25, ...): flat samples read no curve, below a window
+        // reads only the upper curve, above it only the lower curve.
+        let unsupported = unsupported_seeded_node(0.5);
+        let c = Module::constant;
+        let terrace = |value, blend, lower: &Module, upper: &Module| {
+            Module::node(ModuleKind::Constant(value), 0.0, 1.0)
+                .legacy_terrace(lower.clone(), upper.clone(), 5, blend)
+                .try_value_seed_first(1, 0.0, 0.0)
+        };
+        for value in [0.0, 0.2, 0.5, 1.0, f32::NAN] {
+            assert!(terrace(value, 0.25, &unsupported, &unsupported).is_ok());
+        }
+        assert!(terrace(0.14, 0.25, &unsupported, &c(0.9)).is_ok());
+        assert!(terrace(0.14, 0.25, &c(0.6), &unsupported).is_err());
+        assert!(terrace(0.36, 0.25, &c(0.6), &unsupported).is_ok());
+        assert!(terrace(0.36, 0.25, &unsupported, &c(0.9)).is_err());
+        // A blend range of 3 inverts the windows (first step: 0.25..-0.25): 0.1 lies below the first step's window
+        // and above its upper bound, and Java returns the step without reading the lower curve.
+        assert!(terrace(0.1, 3.0, &unsupported, &unsupported).is_ok());
+    }
+
+    /// `SeededLegacyTerraceEdgeOracle` (`.local/terraforged/oracles/seed_first/run-graphs.sh`): LegacyTerrace with a
+    /// source fixed at, and one ulp beside, every step's value and window bounds (the constructor's table) and every
+    /// rounding edge `(k + 0.5) / maxIndex` (plus NaN, ±inf, ±0, subnormals and values outside 0..1); 0, 1, 2, 5, 7, 64
+    /// and 1000 steps; zero, one, inverted (above 1), negative and NaN blend ranges; zero, NaN and infinite curves;
+    /// zero, wide, narrow and infinite source ranges; seeded curves; nested legacy terraces; and legacy terraces of
+    /// seeded sources. Samples where Java throws (no steps) fold as `0xffffffff`, where the port panics.
+    #[test]
+    fn runtime_seeded_legacy_terrace_edges_match_current_noise2d() {
+        let src = |kind, seed, octaves, gain, frequency| {
+            Module::source(Source::new(
+                kind,
+                SourceConfig {
+                    seed,
+                    octaves,
+                    gain,
+                    frequency,
+                    ..SourceConfig::default()
+                },
+            ))
+        };
+        let lower = src(SourceKind::Perlin2, -91, 2, 0.5, 0.25);
+        let upper = src(SourceKind::Simplex2, 17, 2, 0.5, 0.0625);
+        let zero = src(SourceKind::Simplex, 1337, 0, 0.5, 3.0);
+        let cubic = src(SourceKind::Cubic, -91, 2, 0.5, 0.25);
+        let simplex = src(SourceKind::Simplex, i32::MAX, 3, 0.65, 0.125);
+        let perlin = src(SourceKind::Perlin, 53, 2, 0.5, 0.5);
+        let c = Module::constant;
+        let (inf, nan) = (f32::INFINITY, f32::NAN);
+        type Build = Box<dyn Fn(Module) -> Module>;
+        let plain = |steps, blend: f32, lower: Module, upper: Module| {
+            Box::new(move |k: Module| k.legacy_terrace(lower.clone(), upper.clone(), steps, blend))
+                as Build
+        };
+        let consts = |steps, blend| plain(steps, blend, c(0.6), c(0.9));
+        let seeded = |steps, blend| plain(steps, blend, lower.clone(), upper.clone());
+        let fixed = |source: &Module, steps, blend, lower: &Module, upper: &Module| {
+            let (source, lower, upper) = (source.clone(), lower.clone(), upper.clone());
+            Box::new(move |_: Module| {
+                source
+                    .clone()
+                    .legacy_terrace(lower.clone(), upper.clone(), steps, blend)
+            }) as Build
+        };
+        let (nested_cubic, nested_upper) = (cubic.clone(), upper.clone());
+        // (steps of the edge table or None for no edges, blend, source bounds, legacy terrace)
+        let families: Vec<(Option<usize>, f32, (f32, f32), Build)> = vec![
+            (Some(0), 0.25, (0.0, 1.0), consts(0, 0.25)),
+            (Some(1), 0.25, (0.0, 1.0), consts(1, 0.25)),
+            (Some(1), 0.25, (0.5, 0.5), consts(1, 0.25)),
+            (Some(2), 0.25, (0.0, 1.0), consts(2, 0.25)),
+            (Some(5), 0.25, (0.0, 1.0), consts(5, 0.25)),
+            (Some(7), 0.35, (0.0, 1.0), seeded(7, 0.35)),
+            (Some(64), 0.5, (0.0, 1.0), seeded(64, 0.5)),
+            (Some(1000), 0.1, (0.0, 1.0), consts(1000, 0.1)),
+            (Some(5), 0.0, (0.0, 1.0), consts(5, 0.0)),
+            (Some(5), 1.0, (0.0, 1.0), consts(5, 1.0)),
+            (Some(5), 1.5, (0.0, 1.0), consts(5, 1.5)),
+            (Some(5), 3.0, (0.0, 1.0), seeded(5, 3.0)),
+            (Some(5), -0.5, (0.0, 1.0), consts(5, -0.5)),
+            (Some(5), nan, (0.0, 1.0), consts(5, nan)),
+            (Some(5), 0.25, (0.0, 1.0), plain(5, 0.25, c(0.0), c(2.0))),
+            (Some(5), 0.25, (0.0, 1.0), plain(5, 0.25, c(nan), c(inf))),
+            (Some(4), 0.25, (-1.0, 1.0), consts(4, 0.25)),
+            (Some(4), 0.25, (0.0, 0.5), consts(4, 0.25)),
+            (Some(3), 0.25, (0.0, inf), consts(3, 0.25)),
+            (
+                Some(6),
+                0.3,
+                (0.0, 1.0),
+                plain(6, 0.3, zero.clone(), cubic.clone()),
+            ),
+            (
+                Some(5),
+                0.25,
+                (0.0, 1.0),
+                Box::new(move |k: Module| {
+                    let inner = k.legacy_terrace(c(0.6), c(0.9), 3, 0.2);
+                    let lower = nested_cubic.clone().legacy_terrace(c(0.6), c(0.9), 4, 0.5);
+                    inner.legacy_terrace(lower, nested_upper.clone(), 5, 0.25)
+                }),
+            ),
+            (
+                None,
+                0.0,
+                (0.0, 1.0),
+                fixed(&simplex, 7, 0.35, &lower, &upper),
+            ),
+            (
+                None,
+                0.0,
+                (0.0, 1.0),
+                fixed(&simplex, 1, 0.35, &lower, &upper),
+            ),
+            (
+                None,
+                0.0,
+                (0.0, 1.0),
+                fixed(&perlin, 64, 0.5, &cubic, &zero),
+            ),
+        ];
+        let expected: [(usize, u64); 24] = [
+            (15, 0xac00b784dc89d43f),
+            (24, 0x89325b1f85d181e5),
+            (24, 0x89325b1f85d181e5),
+            (36, 0x9a346d92cce70d61),
+            (72, 0x9f7ca0645a1f581d),
+            (96, 0x8760a98042bd03c3),
+            (780, 0xad022569110921a5),
+            (12012, 0xf1e84c5fdcc5d113),
+            (72, 0xa85a6e0612372f65),
+            (72, 0x7b6627a8291ec347),
+            (72, 0x08c3fec71b409e1d),
+            (72, 0x7126e77349edacf7),
+            (72, 0x0cf9cee70e372f65),
+            (72, 0xa715fb322e372f65),
+            (72, 0xa9aa5c6fafada48d),
+            (72, 0x44a682fcb7b72f65),
+            (60, 0x13a55b77628248c5),
+            (60, 0x655003d9a3ec2561),
+            (48, 0x57df34647b5f30a5),
+            (84, 0x5344558cb4ae6229),
+            (72, 0x6378400bcd73dc8e),
+            (12, 0x740d5d9134f0c285),
+            (12, 0x463f236bcb8ac885),
+            (12, 0x71892f18c71d644d),
+        ];
+        // The constructor's step table (value, lower, upper per step), the rounding edges `(k + 0.5) / maxIndex`
+        // and 1.
+        let edges = |steps: usize, blend_range: f32, (min, max): (f32, f32)| {
+            let max_index = steps as i32 - 1;
+            let spacing = (max - min) / max_index as f32;
+            let mut out = Vec::new();
+            for i in 0..steps {
+                let value = i as f32 * spacing;
+                let bound = (spacing - spacing * blend_range) / 2.0;
+                out.extend([value, value - bound, value + bound]);
+            }
+            out.extend((0..max_index.max(0)).map(|k| (k as f32 + 0.5) / max_index as f32));
+            out.push(1.0);
+            out
+        };
+        let specials = [
+            nan,
+            inf,
+            -inf,
+            0.0,
+            -0.0,
+            0.5,
+            1.0,
+            -1.0,
+            2.0,
+            f32::from_bits(1),
+            -f32::from_bits(1),
+            1.0f32.next_down(),
+        ];
+        for (index, ((steps, blend, bounds, build), expected)) in
+            families.iter().zip(expected).enumerate()
+        {
+            let table = steps.map_or_else(Vec::new, |steps| edges(steps, *blend, *bounds));
+            let fold = seeded_edge_fold(&table, &specials, *bounds, build);
+            assert_eq!(fold, expected, "family {index}");
+        }
     }
 
     #[test]
@@ -9185,10 +9508,15 @@ nan 0x00000000";
             let module = Module::constant(value)
                 .clamp(Module::constant(0.0), Module::constant(1.0))
                 .legacy_terrace(Module::constant(1.0), Module::constant(1.0), 0, 0.35);
-            let panic = std::panic::catch_unwind(|| module.value(0.0, 0.0))
-                .expect_err("a legacy terrace without steps samples nothing");
-            let message = panic.downcast_ref::<String>().map_or("", String::as_str);
-            assert!(message.contains("Engine throws"), "{message}");
+            // Noise2D 2cb4843's seed-first `getValue` throws the same way.
+            for panic in [
+                std::panic::catch_unwind(|| module.value(0.0, 0.0)).map(|_| ()),
+                std::panic::catch_unwind(|| module.try_value_seed_first(17, 0.0, 0.0)).map(|_| ()),
+            ] {
+                let panic = panic.expect_err("a legacy terrace without steps samples nothing");
+                let message = panic.downcast_ref::<String>().map_or("", String::as_str);
+                assert!(message.contains("Java throws"), "{message}");
+            }
         }
     }
 
