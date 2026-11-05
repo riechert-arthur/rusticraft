@@ -25,14 +25,17 @@
 // Adapted from TerraForged Reimagined (https://github.com/Romoslayer/TerraForged-Reimagined, a24d450):
 // `src/main/java/com/terraforged/mod/worldgen/Generator.java` (`createState`'s seed capture, `getSeed`,
 // `getChunkData`, `getChunkDataAsync`, `getMinY`, `getSeaLevel`, `getGenDepth`, the terrain-cache hints and drop,
-// `getBaseHeight`, `getBaseColumn`) and `Seeds.java`. MIT License, Copyright (c) 2020 TerraForged, Copyright (c)
+// `getBaseHeight`, `getBaseColumn`, and `buildTerrain`'s hand-off to `fillFromNoise`) and `Seeds.java`. MIT License, Copyright (c) 2020 TerraForged, Copyright (c)
 // 2026 Romoslayer; see `LICENSE-TERRAFORGED-REIMAGINED`.
 
 use super::{
+    super::terrain::{TerrainBlockStates, TerrainChunk, TerrainError},
+    terraforged_chunk_fill::fill_chunk,
     terraforged_eroded_noise_generator::ErodedNoiseGenerator,
     terraforged_terrain_cache::{TerrainCache, TerrainDataHandle, TerrainTask},
     terraforged_terrain_levels::TerrainLevels,
 };
+use crate::registry::BlockStateId;
 use std::sync::atomic::{AtomicI32, AtomicI64, Ordering};
 
 /// `Seeds.get(long)`: the level seed as TerraForged's noise uses it, narrowed to a Java `int` (its low 32 bits).
@@ -164,6 +167,35 @@ impl TerraForgedGenerator {
         self.terrain.hint(seed, chunk_x, chunk_z);
     }
 
+    /// The terrain stage's first step: Reimagined's `buildTerrain` hands the chunk to
+    /// `terrainCache().combineAsync(EXECUTOR, seed, chunk, ..)` with the captured [`Self::seed`] (6dd607eb's
+    /// `fillFromNoise` passes `Seeds.get(state)` instead), which waits for the chunk's cached `TerrainData` at the
+    /// chunk's own position and runs `fillFromNoise`'s `ChunkUtil.fillChunk` + `primeHeightmaps` with `getSeaLevel()`
+    /// ([`fill_chunk`]). Returns that cache entry's data, for the later steps of the stage.
+    ///
+    /// Java runs the fill as a continuation on its executor; the port waits for the cache task on the calling thread
+    /// and fills there (same data, same blocks). Like Java it neither hints nor drops: the entry stays cached until
+    /// [`Self::drop_chunk`] (`applyBiomeDecoration`). The fill writes inside `chunk`'s own build range
+    /// (`min_y()`..`min_y() + height()`), clipping terrain outside it ([`fill_chunk`]); TerraForged's levels are not
+    /// rescaled to it. Not ported here: the rest of Java's `fillFromNoise` (`buildStructureTerrain`, Deep Caves,
+    /// Strata) and the stage's surface and carver steps.
+    ///
+    /// `Err` where the chunk refuses a write ([`fill_chunk`]). Panics where Java's future completes exceptionally: a
+    /// chunk whose region build failed (the cache task panicked; see [`TerrainCache::get_now`]). A failure after the
+    /// region is read leaves the data unfilled and the chunk is filled from it, as in Java
+    /// ([`ErodedNoiseGenerator::generate`]).
+    pub fn fill_from_noise<B: TerrainBlockStates>(
+        &self,
+        chunk: &mut TerrainChunk<'_, B>,
+        stone: BlockStateId,
+        water: BlockStateId,
+    ) -> Result<TerrainDataHandle<ErodedNoiseGenerator>, TerrainError> {
+        let position = chunk.position();
+        let terrain = self.chunk_data(self.seed(), position.x, position.z);
+        fill_chunk(self.sea_level(), chunk, &terrain, stone, water)?;
+        Ok(terrain)
+    }
+
     /// `terrainCache().drop(seed, pos)`, as `applyBiomeDecoration` calls it with `Seeds.get(region.getSeed())`.
     pub fn drop_chunk(&self, seed: i32, chunk_x: i32, chunk_z: i32) {
         self.terrain.remove(seed, chunk_x, chunk_z);
@@ -242,11 +274,13 @@ fn base_column_from_noise(levels: TerrainLevels, base_noise: f32, height_noise: 
 mod tests {
     use super::super::{
         terraforged::Module,
+        terraforged_chunk_fill::tests::{AIR, Properties, STONE, WATER, digest, registry},
         terraforged_erosion::{ErosionFilterSettings, HeightmapSmoothingSettings},
         terraforged_noise_generator::tests::{generator, generator_with},
         terraforged_terrain_blender::TerrainNoise,
     };
     use super::*;
+    use horizon_core::position::ChunkPos;
     use std::{
         panic::{AssertUnwindSafe, catch_unwind},
         sync::Arc,
@@ -604,5 +638,143 @@ q 3 -770 1240 3eafbae6 3f060470 3f0530fb 134 134 134 134 134 0
         let l = levels(0);
         assert!(catch_unwind(AssertUnwindSafe(|| base_column_from_noise(l, -1.0, -1.0))).is_err());
         assert!(catch_unwind(AssertUnwindSafe(|| base_column_from_noise(l, 0.25, -0.5))).is_err());
+    }
+
+    /// The stage fills the chunk at its own position from the cache entry of the captured seed (`Seeds.get`, not the
+    /// raw level seed), leaves that entry cached and returns it; `drop_chunk` removes it.
+    #[test]
+    fn fill_from_noise_uses_chunk_position_and_keeps_terrain_for_later_stages() {
+        let g = facade(0, 0, 0, 25, 0);
+        g.capture_seed((5_i64 << 32) | 7);
+        let blocks = registry();
+        let mut chunk =
+            TerrainChunk::new(ChunkPos::new(-2, 3), -64, 544, &blocks, Properties).unwrap();
+        let terrain = g.fill_from_noise(&mut chunk, STONE, WATER).unwrap();
+        assert!(terrain.ptr_eq(&g.chunk_data(7, -2, 3)));
+        assert!(!terrain.ptr_eq(&g.chunk_data(7, 3, -2)));
+        for z in 0..16 {
+            for x in 0..16 {
+                let height = terrain.height_at(x, z);
+                let water = TerrainLevels::water_level(x, z, g.sea_level(), &terrain);
+                let top = height.max(water);
+                assert_eq!(chunk.block(x, height, z), STONE);
+                assert_eq!(
+                    chunk.block(x, top, z),
+                    if top == height { STONE } else { WATER }
+                );
+                assert_eq!(chunk.block(x, top + 1, z), AIR);
+            }
+        }
+        g.drop_chunk(7, -2, 3);
+        assert!(!terrain.ptr_eq(&g.chunk_data(7, -2, 3)));
+    }
+
+    /// `TerrainStageOracle` cases (`oracles/generator_facade/run-stage.sh`): levels, terrain set, captured seed,
+    /// droplets, lifetime, smoothing; chunks.
+    const STAGE_CASES: [(usize, usize, i32, i32, i32, i32, &[(i32, i32)]); 4] = [
+        (0, 1, 0, 350, 25, 0, &[(0, 0), (-1, -1), (5, 3)]),
+        (2, 1, 42, 350, 25, 1, &[(0, 0), (-3, 2)]),
+        (1, 1, -17, 350, 25, 0, &[(18, -48)]),
+        (0, 0, i32::MIN, 100, 12, 0, &[(-1_875_000, 1_874_999)]),
+    ];
+    /// Build ranges (min Y, height): vanilla 26.3, 544 blocks from -64, Reimagined's widened overworld, 0..256 (one
+    /// chunk's terrain rises above its top), 128..192 (all terrain is below its bottom).
+    const STAGE_RANGES: [(i32, i32); 5] =
+        [(-64, 384), (-64, 544), (-64, 1024), (0, 256), (128, 64)];
+
+    /// `oracles/generator_facade/stage.txt` (interpreted and JIT-compiled alike): Reimagined's `buildTerrain` hand-off
+    /// end to end -- its real `TerrainCache.combineAsync` over its `TerrainGenerator`/`TerrainData` and the eroded
+    /// generator, `fillChunk` + `primeHeightmaps` copied onto a stub chunk. `t` lines: the data's section bounds; `f`
+    /// lines: digests of every block and both heightmaps per build range (Java filled in a -4096..4096 chunk and read
+    /// through the range; `same`, or the exception Java throws in a chunk of exactly that range). The oracle's `h`
+    /// lines (the -64..320 heightmaps spelled out, for diffs) are covered by the digests and not embedded.
+    const JAVA_STAGE: &str = "\
+t 0 0 0 119 210 77
+f 0 0 0 -64 384 f58f1bfde49a187b same
+f 0 0 0 -64 544 39de228e805d987b same
+f 0 0 0 -64 1024 4edfb9d4d3a8187b same
+f 0 0 0 0 256 2de995f6f5b1d87b same
+f 0 0 0 128 64 d7ef3c13c555ced8 throws ArrayIndexOutOfBoundsException
+t 0 -1 -1 119 214 77
+f 0 -1 -1 -64 384 caa11efaa5e6c0bc same
+f 0 -1 -1 -64 544 39a16fd642bcc0bc same
+f 0 -1 -1 -64 1024 bd6d6d73193ec0bc same
+f 0 -1 -1 0 256 f9e29f6c435d80bc same
+f 0 -1 -1 128 64 92849516840a2798 throws ArrayIndexOutOfBoundsException
+t 0 5 3 193 288 81
+f 0 5 3 -64 384 abf3d479618ddf2d same
+f 0 5 3 -64 544 bd8cbd2d1df85f2d same
+f 0 5 3 -64 1024 491262e5d337df2d same
+f 0 5 3 0 256 8dc8a4422d0d48e2 throws ArrayIndexOutOfBoundsException
+f 0 5 3 128 64 620e49ea1d1c0325 throws ArrayIndexOutOfBoundsException
+t 1 0 0 104 111 109
+f 1 0 0 -64 384 5f05181bdc1e6225 same
+f 1 0 0 -64 544 de4417169afae225 same
+f 1 0 0 -64 1024 f2bf37d257906225 same
+f 1 0 0 0 256 701347425f2c2225 same
+f 1 0 0 128 64 5ed8a67d98b3c325 throws ArrayIndexOutOfBoundsException
+t 1 -3 2 112 125 108
+f 1 -3 2 -64 384 e91ad63cb87323b9 same
+f 1 -3 2 -64 544 9355fb38b901a3b9 same
+f 1 -3 2 -64 1024 7810aae63aad23b9 same
+f 1 -3 2 0 256 368c741f546ce3b9 same
+f 1 -3 2 128 64 5ed8a67d98b3c325 throws ArrayIndexOutOfBoundsException
+t 2 18 -48 90 92 89
+f 2 18 -48 -64 384 b94f0ac577864e75 same
+f 2 18 -48 -64 544 9da8c821148ace75 same
+f 2 18 -48 -64 1024 e53d5e576b984e75 same
+f 2 18 -48 0 256 b26e6d146e840e75 same
+f 2 18 -48 128 64 5ed8a67d98b3c325 throws ArrayIndexOutOfBoundsException
+t 3 -1875000 1874999 130 145 120
+f 3 -1875000 1874999 -64 384 fdd51dfaf54e6eb8 same
+f 3 -1875000 1874999 -64 544 328463fba5aa6eb8 same
+f 3 -1875000 1874999 -64 1024 80391461b6be6eb8 same
+f 3 -1875000 1874999 0 256 172da0aebe292eb8 same
+f 3 -1875000 1874999 128 64 3bed1c90e336aeb8 same
+";
+
+    /// End to end against Reimagined's Java: whole filled chunks and their heightmaps, bit for bit, in every build
+    /// range (clipped where Java throws, as `fill_chunk` documents).
+    #[test]
+    fn terrain_stage_matches_reimagined_java() {
+        let blocks = registry();
+        let mut java = JAVA_STAGE.lines();
+        for (case, &(variant, set, seed, droplets, lifetime, smoothing, chunks)) in
+            STAGE_CASES.iter().enumerate()
+        {
+            let g = facade(variant, set, droplets, lifetime, smoothing);
+            g.capture_seed((-0x5eed_i64 << 32) | i64::from(seed as u32));
+            assert_eq!(g.seed(), seed);
+            for &(cx, cz) in chunks {
+                let terrain = g.chunk_data(seed, cx, cz);
+                let line = format!(
+                    "t {case} {cx} {cz} {} {} {}",
+                    terrain.min(),
+                    terrain.max(),
+                    terrain.max_base()
+                );
+                assert_eq!(java.next(), Some(line.as_str()));
+                for (min_y, height) in STAGE_RANGES {
+                    let mut chunk = TerrainChunk::new(
+                        ChunkPos::new(cx, cz),
+                        min_y,
+                        height,
+                        &blocks,
+                        Properties,
+                    )
+                    .unwrap();
+                    let filled = g.fill_from_noise(&mut chunk, STONE, WATER).unwrap();
+                    assert!(filled.ptr_eq(&terrain));
+                    let expected = java.next().unwrap();
+                    let prefix = format!(
+                        "f {case} {cx} {cz} {min_y} {height} {:016x} ",
+                        digest(&chunk)
+                    );
+                    assert!(expected.starts_with(&prefix), "{expected} vs {prefix}");
+                }
+                g.drop_chunk(seed, cx, cz);
+            }
+        }
+        assert_eq!(java.next(), None);
     }
 }

@@ -2089,8 +2089,18 @@ water level (`TerrainLevels::water_level`: the base height in a still river or l
 As in Java, water stops at that highest section's top even when the sea level is higher (an all-ocean chunk whose
 heights and base levels stay below the sea level's section), and a NaN height, which makes the chunk's lowest
 height -1, fills stone below section -16. OCEAN_FLOOR_WG takes each column's height and WORLD_SURFACE_WG
-`max(sea level, height)`, ignoring river water levels (Java's `primeHeightmaps` does the same). Nothing calls the
-fill yet; the terrain stage hand-off is a later layer.
+`max(sea level, height)`, ignoring river water levels (Java's `primeHeightmaps` does the same).
+
+The terrain stage hand-off (`TerraForgedGenerator::fill_from_noise`) is Reimagined's `buildTerrain` up to its fill:
+`terrainCache().combineAsync(EXECUTOR, seed, chunk, ..)` with the captured seed (`Seeds.get` of the level seed;
+6dd607eb passes `Seeds.get(state)`), which takes the cached `TerrainData` at the chunk's own position and runs
+`fillFromNoise`'s `fillChunk` and `primeHeightmaps` with the generator's sea level. It returns the cache entry's data
+for the later steps; like Java it neither hints nor drops the entry (`drop_chunk`, after decoration, does). Java runs
+the fill as a continuation on its executor; the port waits for the cache task on the calling thread and fills there.
+The chunk's own build range is what the fill clips to (below). A region build that fails panics where Java's
+future fails; a later sample failure leaves the data unfilled and the chunk is filled from it, as in Java. Not yet
+ported: the rest of `fillFromNoise` (`buildStructureTerrain`, Deep Caves, Strata), the surface and carver steps, and
+the registration that would let Horizon call the stage.
 
 **World height.** TerraForged's heights count from block 0 up to `levels.maxY` (480 by default), and Reimagined
 widens the overworld to `-64..960` so that its terrain always fits. Horizon 26.3's overworld is `-64..320`, and the
@@ -2113,10 +2123,19 @@ inside and above the terrain; NaN lowest heights; terrain at, one above and one 
 outside it). It fills each in a `-4096..4096` chunk and digests the case's build range; the test matches every
 digest, the five cases where Java throws in the case's own chunk included.
 
+`TerrainStageOracle.java` (`.local/terraforged/oracles/generator_facade/`, `run-stage.sh`, after `run.sh`) runs the
+hand-off end to end: Reimagined's real `TerrainCache.combineAsync`, `TerrainGenerator`, `TerrainData`,
+`TerrainLevels` and `ErodedNoiseGenerator` over the newer source's `NoiseGenerator`, with `fillChunk` and
+`primeHeightmaps` copied onto the chunk-fill oracle's stub chunk (`oracles/chunk_fill/ChunkStage.java`), interpreted
+and JIT-compiled alike. Seven chunks over three level sets and four seeds (negative chunks, the world border) are filled in
+the `-64..320`, `-64..480`, `-64..960`, `0..256` and `128..192` build ranges (terrain above the top of one and
+below the bottom of the other); the test matches every block and both heightmaps of
+each, bit for bit, including the ranges where Java's own chunk throws.
+
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives, the biome climate types, the climate settings, the climate module, the climate stage, the continent factory, the generator context, the heightmap, the world generator factory, TerraForged's terrain levels, its terrain data, its terrain generator, its terrain-blend utilities, its terrain blender with its nearest-terrain search (and the newer source's seed-first blender), noise-graph reseeding, the cave noise primitives, the biome viability rules, the biome overrides, the continent control points, the continent cell primitives, the continent configuration, the continent shape blending, the continent cell generator with its spawn-offset search, the continent river nodes, the continent river carver's arithmetic, the continent river networks with their nearest-node sampling and their warped, carved river sampling, the newer source's seed-first noise sources, scalar noise graphs, domain warps, selectors, graph caches, terraces, legacy terraces, advanced terraces, curves, transforms (steps, frequency, gradient and modulation), special sources (boost, cell, cell edge and sine) and lines, and its bounded concurrent lossy cache with the continent's cell and
-river-piece caches on it, the continent noise module that joins the continent layers, the newer source's terrain height sampler with its bordered chunk generation and its nearest-terrain search, the erosion tile geometry, and TerraForged Reimagined's heightmap smoothing, erosion brushes, hydraulic erosion filter, eroded-region cache, eroded region build, eroded chunk generation, terrain cache, generator queries and chunk fill. They change nothing in the game, so there is
+river-piece caches on it, the continent noise module that joins the continent layers, the newer source's terrain height sampler with its bordered chunk generation and its nearest-terrain search, the erosion tile geometry, and TerraForged Reimagined's heightmap smoothing, erosion brushes, hydraulic erosion filter, eroded-region cache, eroded region build, eroded chunk generation, terrain cache, generator queries, chunk fill and the terrain stage hand-off to it. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
