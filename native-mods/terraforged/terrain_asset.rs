@@ -59,7 +59,7 @@ fn error<T>(message: impl Into<String>) -> Result<T, TerrainAssetError> {
 
 /// Every spec name Reimagined's `NoiseSpec` registers (`MidPointCurve` and `SCurve` are only sub-specs of
 /// `CurveFunc`; `AddWarp` and `CompoundWarp` register under `CumulativeWarp`'s name).
-pub const SPEC_NAMES: &str = "Abs Add AdvTerrace Alpha Base Bias Billow Blend Boost Cache Cell CellEdge Clamp Const Cubic CumulativeWarp Curve DirectionWarp DomainWarp Freq Grad Interpolation Invert LegacyTerrace Line Map Max Min Modulate Mult MultiBlend Perlin Perlin2 Pow PowCurve Rand Ridge Scale Select Simplex Simplex2 SimplexRidge Sin Steps Sub Terrace Threshold VariBlend VariCurve Vec2f Vec2i Warp";
+const SPEC_NAMES: &str = "Abs Add AdvTerrace Alpha Base Bias Billow Blend Boost Cache Cell CellEdge Clamp Const Cubic CumulativeWarp Curve DirectionWarp DomainWarp Freq Grad Interpolation Invert LegacyTerrace Line Map Max Min Modulate Mult MultiBlend Perlin Perlin2 Pow PowCurve Rand Ridge Scale Select Simplex Simplex2 SimplexRidge Sin Steps Sub Terrace Threshold VariBlend VariCurve Vec2f Vec2i Warp";
 
 fn registered(name: &str) -> bool {
     SPEC_NAMES.split(' ').any(|spec| spec == name)
@@ -229,7 +229,7 @@ impl Number {
             None => (unsigned, 0),
         };
         let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
-        let scale = fraction.len() as i64 - exponent;
+        let scale = (fraction.len() as i64).saturating_sub(exponent);
         if text.len() > 10_000 || scale.unsigned_abs() >= 10_000 {
             return Err(invalid());
         }
@@ -833,6 +833,8 @@ noise_type_object	{"type":"terraforged:hills","weight":1.5,"noise":{"type":{},"v
 noise_type_null	{"type":"terraforged:hills","weight":1.5,"noise":{"type":null,"value":1}}
 noise_type_two	{"type":"terraforged:hills","weight":1.5,"noise":{"type":["Const","Const"],"value":1}}
 noise_unsupported_line	{"type":"terraforged:hills","weight":1.5,"noise":{"type":"Line"}}
+seed_exponent_min	{"type":"terraforged:hills","weight":1.5,"noise":{"type":"Perlin","seed":1e-9223372036854775808,"frequency":0.02}}
+seed_exponent_overflow	{"type":"terraforged:hills","weight":1.5,"noise":{"type":"Perlin","seed":1e99999999999999999999,"frequency":0.02}}
 "#;
 
     /// `.local/terraforged/oracles/terrain_asset/run.sh`'s `out.txt` up to the asset lines.
@@ -988,6 +990,8 @@ noise_type_object err
 noise_type_null err
 noise_type_two err
 noise_unsupported_line err
+seed_exponent_min err
+seed_exponent_overflow err
 "#;
 
     /// The rest of `out.txt`: Reimagined's 14 `terrain_noise` assets.
