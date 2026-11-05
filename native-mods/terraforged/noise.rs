@@ -2731,7 +2731,9 @@ impl Module {
     /// The specs' quirks are kept: `Bias` reads its bias module back as the float 0, `CellNoise`/`CellEdgeNoise`
     /// lose their displacement (back to the builder's 1), `MultiBlend` truncates its blend to an `int`, and the
     /// children of `Add`, `Multiply`, `Max`, `Min`, `Sub`, Engine's erosion `Ridge` (`Valley`) and `Line` are read
-    /// without the context, so their seeds stay (the quirks still apply there). Where the jar throws (no spec:
+    /// without the context, so their seeds stay (the quirks still apply there). A custom module in a combiner's or
+    /// `MultiBlend`'s list writes null and is dropped, a custom `CellNoise` lookup reads back as `Source.ZERO`, and
+    /// nothing under a `Bias`'s bias is read back. Where the jar throws (no spec:
     /// a custom module, `Domain.DIRECT`, `AddWarp` and `CompoundWarp`, whose specs are registered under
     /// `CumulativeWarp`'s name; a `MidPointCurve` or `SCurve`, which it cannot read back), this panics.
     pub fn with_seed(&self, seed: i64) -> Self {
