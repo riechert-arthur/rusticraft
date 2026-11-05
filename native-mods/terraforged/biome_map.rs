@@ -22,11 +22,20 @@
  * SOFTWARE.
  */
 
+// Adapted from TerraForged Reimagined (https://github.com/Romoslayer/TerraForged-Reimagined, a24d450):
+// `src/main/java/com/terraforged/mod/worldgen/biome/util/BiomeMapManager.java` (`fillEmptyClimates`, `distance`,
+// `midpoint`, `TEMPERATURE_BIAS`). TerraForged 6dd607eb and the 1.18.2-0.3.1 jar have no such fallback (an empty
+// climate samples plains). MIT License, Copyright (c) 2020 TerraForged, Copyright (c) 2026 Romoslayer; see
+// `LICENSE-TERRAFORGED-REIMAGINED`.
+
 use super::{terraforged_engine::BiomeType, terraforged_terrain_blend_util::WeightMap};
 use std::sync::Arc;
 
+/// `BiomeMapManager.TEMPERATURE_BIAS`: the temperature term of [`climate_distance`] counts twice.
 pub const TEMPERATURE_BIAS: f32 = 2.0;
 
+/// One biome pool per climate type (`Map<BiomeType, WeightMap<Holder<Biome>>>`, an `EnumMap`): `None` is a type
+/// with no entry.
 pub struct BiomePools<T> {
     pools: [Option<Arc<WeightMap<T>>>; 11],
 }
@@ -40,14 +49,20 @@ impl<T> Default for BiomePools<T> {
 }
 
 impl<T> BiomePools<T> {
+    /// `map.put(climate, pool)`.
     pub fn insert(&mut self, climate: BiomeType, pool: Arc<WeightMap<T>>) {
         self.pools[climate as usize] = Some(pool);
     }
 
+    /// `map.get(climate)`.
     pub fn get(&self, climate: BiomeType) -> Option<&Arc<WeightMap<T>>> {
         self.pools[climate as usize].as_ref()
     }
 
+    /// `fillEmptyClimates`: every type whose pool is absent or empty takes (shares) the pool of the nearest type that
+    /// had a non-empty pool before any filling ([`climate_distance`], strict `<`, so ties go to the first in enum
+    /// order). Nothing changes when every pool is empty. Returns one record per borrowing type, in enum order, where
+    /// Reimagined logs a debug line.
     pub fn fill_empty_climates(&mut self) -> Vec<BorrowedPool> {
         let donors = self.pools.clone();
         let mut borrowed = Vec::new();
@@ -69,6 +84,7 @@ impl<T> BiomePools<T> {
     }
 }
 
+/// A type that borrowed a pool: Reimagined's `Biome pool: {} has no biomes, borrowing {}` debug line.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BorrowedPool {
     pub climate: BiomeType,
@@ -98,6 +114,8 @@ fn nearest_donor<T>(
     nearest.map(|climate| (climate, nearest_distance))
 }
 
+/// `BiomeMapManager.distance(a, b)`: squared distance between the midpoints of the two types' temperature and
+/// moisture ranges, temperature scaled by [`TEMPERATURE_BIAS`] first (f32, Java's operation order).
 pub fn climate_distance(left: BiomeType, right: BiomeType) -> f32 {
     let mut temperature = midpoint(left.min_temperature(), left.max_temperature())
         - midpoint(right.min_temperature(), right.max_temperature());
