@@ -346,7 +346,9 @@ impl NoiseGenerator {
 /// The newer source's `INoiseGenerator` methods that `TerrainGenerator` calls, delegating to the seed-first
 /// [`NoiseGenerator::height_noise`] and [`NoiseGenerator::generate`] with the call's seed. Those return `Err` only for
 /// a graph with a custom (closure) module, which TerraForged's graphs never contain; the trait has no error, so this
-/// panics there, as Java throws out of `getHeightNoise`/`generate`.
+/// panics there, as Java throws out of `getHeightNoise`/`generate`. The trait's `levels` is Java's `getLevels` (the
+/// noise levels); the inherent [`NoiseGenerator::levels`] is `getTerrainLevels`, which method calls on the struct
+/// itself pick.
 impl super::terraforged_terrain_generator::NoiseGenerator for NoiseGenerator {
     fn levels(&self) -> NoiseLevels {
         self.levels.noise_levels
