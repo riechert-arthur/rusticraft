@@ -2498,31 +2498,34 @@ come out as in Reimagined and 6 differ: `ocean`, `mountain_chain`, `volcano` and
 engine `TerrainType` (registry order and three shuffled orders give the same result, interpreted and JIT-compiled) and
 checks the bundled copies are byte-identical; the test matches its 12 agreeing lines and pins the 6 differences.
 
-It also bundles twelve `terrain_noise` files, byte for byte in `data/worldgen/terrain_noise/`. Nine are Reimagined's
+It also bundles thirteen `terrain_noise` files, byte for byte in `data/worldgen/terrain_noise/`. Ten are Reimagined's
 (same folder in Reimagined, `terrain_noise` instead of `terrain_type`, MIT): the flatlands `plains` and `steppe`, the
 hills `dales`, `hills_1`, `hills_2` and `torridonian`, the mountain ridges `mountains_ridge_1` and `mountains_ridge_2`,
-and `dolomites` (6dd607eb generates the same bytes in `generated/.../worldgen/terrain/noise/`). The mountains
+`dolomites` and `plateau` (6dd607eb generates the same bytes in `generated/.../worldgen/terrain/noise/`). The mountains
 `mountains_1`, `mountains_2` and `mountains_3` are TerraForged 6dd607eb's generated files (MIT): Reimagined's copies
 differ (they replace the `Valley` erosion node, which Reimagined's codec cannot read, with other nodes), and the port
 follows the newer source. `decode_current_terrain_noises(&types)` decodes them with #185's decoder, their `type`
 (`terraforged:flats`, `terraforged:hills`, `terraforged:mountains`, `terraforged:torridonian`, a child of `hills`, or
-`terraforged:dolomites`, a child of `mountains`) resolved in the terrain types `decode_current_terrain_types` returned
+`terraforged:dolomites`, a child of `mountains`, or `terraforged:plateau`) resolved in the terrain types `decode_current_terrain_types` returned
 (so the terrains are the world registry's), into a `TerrainNoiseAssets` in registry order; its `entry_ids()` (`dales`,
 `dolomites`, `hills_1`, `hills_2`, `mountains_1`, `mountains_2`, `mountains_3`, `mountains_ridge_1`,
-`mountains_ridge_2`, `plains`, `steppe`, `torridonian`) and `into_values()` are what `apply_terrain_overrides` takes.
+`mountains_ridge_2`, `plains`, `plateau`, `steppe`, `torridonian`) and `into_values()` are what `apply_terrain_overrides` takes.
 With the default settings that stretches `dales`, `dolomites`, the five mountains and `torridonian` by the mountain
-width (`isMountain` matches their ids), not the two hills; turning fancy mountains off drops `mountains_ridge_1` and
-`mountains_ridge_2`. The other two noises (plateau, badlands) come with later layers; nothing calls it yet.
+width (`isMountain` matches their ids), not the two hills or `plateau`; turning fancy mountains off drops `mountains_ridge_1` and
+`mountains_ridge_2`. The last noise (badlands) comes with a later layer; nothing calls it yet.
 `CurrentTerrainNoisesOracle.java` (same oracle folder, `run.sh`) decodes each bundled file from the tree it comes from
 (6dd607eb's three mountains, Reimagined's copies of the rest) with Reimagined's real `NoiseCodec`, plus Engine 0.3.0's
 `Valley` registered as 6dd607eb does, and `TerrainNoise` into its terrain-type registry, and checks each bundled file
 is byte-identical to its source (and that the three 6dd607eb files are not Reimagined's); the test matches its lines
-(terrain, registry identity, weight, raised bounds and a hash of 294 seed-first samples over 7 seeds).
+(terrain, registry identity, weight, raised bounds and a hash of 294 seed-first samples over 7 seeds), except that
+`plateau`'s terrain is Engine 0.3.0's lowland built-in here and Reimagined's highland there (the registry difference
+above). Both categories only mark the terrain as overground, and its noise, weight and bounds match, so the test pins
+that one terrain column as a known difference.
 
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives, the biome climate types, the climate settings, the climate module, the climate stage, the continent factory, the generator context, the heightmap, the world generator factory, TerraForged's terrain levels, its terrain data, its terrain generator, its terrain-blend utilities, its terrain blender with its nearest-terrain search (and the newer source's seed-first blender), noise-graph reseeding, the cave noise primitives, the biome viability rules, the biome overrides (and TerraForged Reimagined's wider beach band), the continent control points, the continent cell primitives, the continent configuration, the continent shape blending, the continent cell generator with its spawn-offset search, the continent river nodes, the continent river carver's arithmetic, the continent river networks with their nearest-node sampling and their warped, carved river sampling, the newer source's seed-first noise sources, scalar noise graphs, domain warps, selectors, graph caches, terraces, legacy terraces, advanced terraces, curves, transforms (steps, frequency, gradient and modulation), special sources (boost, cell, cell edge and sine) and lines, and its bounded concurrent lossy cache with the continent's cell and
-river-piece caches on it, the continent noise module that joins the continent layers, the newer source's terrain height sampler with its bordered chunk generation and its nearest-terrain search, the erosion tile geometry, and TerraForged Reimagined's heightmap smoothing, erosion brushes, hydraulic erosion filter, eroded-region cache, eroded region build, eroded chunk generation, terrain cache, generator queries, chunk fill, the terrain stage hand-off to it, the biome chunk fill, the cave biome sampler, the biome pool fallback, the surface-biome decisions, the initial biome selection, the current climate noise, the biome sampler bridge, the surface biome sampler, the chunk biome hook, the biome registry pools, their live biome bindings, the biome settings, the terrain overrides, the terrain asset decoder, the terrain-type and terrain-noise registries, the bundled terrain types and the bundled flatland, hill and mountain terrain noises. They change nothing in the game, so there is
+river-piece caches on it, the continent noise module that joins the continent layers, the newer source's terrain height sampler with its bordered chunk generation and its nearest-terrain search, the erosion tile geometry, and TerraForged Reimagined's heightmap smoothing, erosion brushes, hydraulic erosion filter, eroded-region cache, eroded region build, eroded chunk generation, terrain cache, generator queries, chunk fill, the terrain stage hand-off to it, the biome chunk fill, the cave biome sampler, the biome pool fallback, the surface-biome decisions, the initial biome selection, the current climate noise, the biome sampler bridge, the surface biome sampler, the chunk biome hook, the biome registry pools, their live biome bindings, the biome settings, the terrain overrides, the terrain asset decoder, the terrain-type and terrain-noise registries, the bundled terrain types and the bundled flatland, hill, mountain and plateau terrain noises. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
