@@ -243,3 +243,10 @@ file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_continent_cells"
 source = "continent_cells.rs"
 visibility = "pub"
+
+[[module]]
+id = "river_nodes"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_river_nodes"
+source = "river_nodes.rs"
+visibility = "pub"
