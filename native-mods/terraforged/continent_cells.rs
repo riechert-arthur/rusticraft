@@ -159,10 +159,11 @@ const _: fn() = || {
     shared::<CellGenerator>();
 };
 
-/// `getNearestCell`'s loop bounds: `min..=min + 2` in Java `int` math, empty when the upper bound wraps below.
-/// `None` where the jar's loop never ends (upper bound `Integer.MAX_VALUE`: the counter wraps forever); `floor` of an
-/// `f32` never returns `Integer.MAX_VALUE - 1`, so this cannot happen from `nearest_cell`.
-fn window(min: i32) -> Option<RangeInclusive<i32>> {
+/// The 3-cell loop bounds of `getNearestCell` (and of `RiverGenerator.sample`): `min..=min + 2` in Java `int` math,
+/// empty when the upper bound wraps below. `None` where the jar's loop never ends (upper bound `Integer.MAX_VALUE`:
+/// the counter wraps forever); `floor` of an `f32` never returns `Integer.MAX_VALUE - 1`, so this cannot happen from
+/// `nearest_cell`.
+pub fn window(min: i32) -> Option<RangeInclusive<i32>> {
     let max = min.wrapping_add(2);
     (max != i32::MAX).then_some(min..=max)
 }

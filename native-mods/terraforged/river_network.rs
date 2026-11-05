@@ -25,9 +25,10 @@
 use super::{
     terraforged::{hash, hash_2d, map},
     terraforged_continent_cell::CellPoint,
+    terraforged_continent_cells::window,
     terraforged_continent_config::ContinentConfig,
     terraforged_continent_shape::{ContinentCells, ShapeGenerator},
-    terraforged_river_nodes::{RiverNode, RiverPieces},
+    terraforged_river_nodes::{CarverSample, NodeSample, RiverNode, RiverPieces},
     terraforged_terrain_blend_util::random,
 };
 
@@ -36,8 +37,8 @@ pub const DIRECTIONS: [(i32, i32); 4] = [(1, 0), (0, 1), (-1, 0), (0, -1)];
 
 /// The newer source tree's `RiverGenerator.computeNodes` (`worldgen.noise.continent.river`): the river and lake
 /// pieces of one continent cell. The 1.18.2-0.3.1 jar draws from `config.rivers.seed` and reads seedless cells; the
-/// newer source (ported here) passes its runtime `seed` to both and never reads `rivers.seed`. Its nearest-node
-/// sampling, river warp, carver call and piece cache are not ported here.
+/// newer source (ported here) passes its runtime `seed` to both and never reads `rivers.seed`. Its river warp,
+/// carver call and piece cache are not ported here.
 pub struct RiverNetwork<'a, Cells> {
     continent: &'a Cells,
     shape: &'a ShapeGenerator,
@@ -113,6 +114,65 @@ impl<'a, Cells: ContinentCells> RiverNetwork<'a, Cells> {
             });
         }
         pieces
+    }
+
+    /// The newer source's `RiverGenerator.sample(seed, x, y, NoiseSample)` up to its carver call, without the river
+    /// warp: `localRiverSample.get().reset()`, then the private `sample(seed, x, y, CarverSample)`. It takes the
+    /// nearest cell of the unadjusted point, adjusts the point for the cell shape, and runs [`sample_node`] over the
+    /// river nodes and the lake nodes of the 3x3 cells around that centre (rows outer, each in insertion order).
+    /// The winners are recorded by [`Self::record_node`]; a sample with no winner is invalidated (distance NaN).
+    /// The window follows Java's `int` loop bounds: empty when `centre ± 1` wraps, never-ending (a panic here)
+    /// when the upper bound is `Integer.MAX_VALUE`. [`CellGenerator`]'s centres stay far from both, so neither
+    /// happens with it. Pieces are computed directly: the source's lossy piece cache comes later.
+    ///
+    /// [`CellGenerator`]: super::terraforged_continent_cells::CellGenerator
+    pub fn sample_nodes(&self, seed: i32, x: f32, y: f32, sample: &mut CarverSample) {
+        sample.reset();
+        let (center_x, center_y) = self.continent.nearest_cell(seed, x, y);
+        // Java adjusts the point after the nearest-cell lookup (which adjusts its own copy).
+        let x = self.continent.cell_shape().adjust_x(x);
+        let y = self.continent.cell_shape().adjust_y(y);
+        let mut river = None;
+        let mut lake = None;
+        let Some(rows) = window(center_y.wrapping_sub(1)) else {
+            panic!(
+                "TerraForged's RiverGenerator.sample loops forever around cell ({center_x}, {center_y})"
+            );
+        };
+        let columns = window(center_x.wrapping_sub(1));
+        for cell_y in rows {
+            let Some(columns) = columns.clone() else {
+                panic!(
+                    "TerraForged's RiverGenerator.sample loops forever around cell ({center_x}, {center_y})"
+                );
+            };
+            for cell_x in columns {
+                let pieces = self.compute_nodes(seed, cell_x, cell_y);
+                for node in &pieces.rivers {
+                    sample_node(x, y, node, &mut river, &mut sample.river);
+                }
+                for node in &pieces.lakes {
+                    sample_node(x, y, node, &mut lake, &mut sample.lake);
+                }
+            }
+        }
+        self.record_node(river.as_ref(), &mut sample.river);
+        self.record_node(lake.as_ref(), &mut sample.lake);
+    }
+
+    /// `recordNode`: for a winner, the distance becomes its square root (`NoiseUtil.sqrt`, `(float)
+    /// Math.sqrt`), `position` the node's radius and `level` the shape's base noise of its height, both at the
+    /// sample's projection; without one the sample is invalidated (its other fields keep their reset values).
+    fn record_node(&self, node: Option<&RiverNode>, sample: &mut NodeSample) {
+        if let Some(node) = node {
+            let level = node.height(sample.projection);
+            let radius = node.radius(sample.projection);
+            sample.distance = (sample.distance as f64).sqrt() as f32;
+            sample.position = radius;
+            sample.level = self.shape.base_noise(level);
+        } else {
+            sample.invalidate();
+        }
     }
 
     /// `addRiverNodes`: a segment from `origin` to a point displaced sideways off the first quarter of the
@@ -233,6 +293,24 @@ impl<'a, Cells: ContinentCells> RiverNetwork<'a, Cells> {
     }
 }
 
+/// `sampleNode`: `node` wins when its squared distance at its projection is strictly below the sample's (so the
+/// first of equal distances stays, and NaN never wins); the sample then takes that distance and projection.
+fn sample_node(
+    x: f32,
+    y: f32,
+    node: &RiverNode,
+    nearest: &mut Option<RiverNode>,
+    sample: &mut NodeSample,
+) {
+    let projection = node.projection(x, y);
+    let distance = node.distance_squared(x, y, projection);
+    if distance < sample.distance {
+        *nearest = Some(*node);
+        sample.distance = distance;
+        sample.projection = projection;
+    }
+}
+
 /// `getRadius`: `1 - NoiseUtil.map(noise, 0.5, 0.7, 0.7 - 0.5)` (the range in `float`, as Java).
 fn radius(noise: f32) -> f32 {
     1.0 - map(noise, 0.5, 0.7, 0.7 - 0.5)
@@ -246,7 +324,7 @@ mod tests {
     use super::super::{
         terraforged_continent_cell::{CellShape, CellSource},
         terraforged_continent_cells::CellGenerator,
-        terraforged_engine::{ControlPoints, WorldControlPoints},
+        terraforged_engine::{ControlPoints, TerrainRegistry, WorldControlPoints},
     };
     use super::*;
 
@@ -328,8 +406,7 @@ mod tests {
             }
         }
 
-        /// Folds `computeNodes` at every cell of `xs` x `ys` (y outer, as the oracle).
-        fn fold(&self, fold: &mut Fold, seed: i32, xs: &[i32], ys: &[i32]) {
+        fn config(&self) -> ContinentConfig {
             let mut config = ContinentConfig::default();
             config.shape.cell_shape = self.shape;
             config.shape.cell_source = self.source;
@@ -338,6 +415,12 @@ mod tests {
             config.shape.threshold = self.threshold;
             config.rivers.lake_density = self.lake_density;
             config.rivers.seed = 0x5eed; // the newer source's network never reads it
+            config
+        }
+
+        /// Folds `computeNodes` at every cell of `xs` x `ys` (y outer, as the oracle).
+        fn fold(&self, fold: &mut Fold, seed: i32, xs: &[i32], ys: &[i32]) {
+            let config = self.config();
             let cells = CellGenerator::new(config);
             let shape =
                 ShapeGenerator::new(config, ControlPoints::new(WorldControlPoints::default()));
@@ -355,6 +438,251 @@ mod tests {
 
     fn span(radius: i32) -> Vec<i32> {
         (-radius..=radius).collect()
+    }
+
+    /// `RiverSamplingOracle`'s fold: river then lake, each sample's projection, distance, position and level
+    /// (canonical NaN bits); `rivers` counts the invalid samples.
+    fn fold_sample(fold: &mut Fold, sample: &NodeSample) {
+        fold.rivers += usize::from(sample.is_invalid());
+        for value in [
+            sample.projection,
+            sample.distance,
+            sample.position,
+            sample.level,
+        ] {
+            fold.float(value);
+        }
+    }
+
+    /// Samples every point of `points` on one network (as the oracle's `point`), folding both samples.
+    fn fold_points(
+        fold: &mut Fold,
+        setup: &Setup,
+        seed: i32,
+        points: impl IntoIterator<Item = (f32, f32)>,
+    ) {
+        let config = setup.config();
+        let cells = CellGenerator::new(config);
+        let shape = ShapeGenerator::new(config, ControlPoints::new(WorldControlPoints::default()));
+        let network = RiverNetwork::new(&cells, &shape, config);
+        let mut sample = CarverSample::new(&TerrainRegistry::new());
+        for (x, y) in points {
+            network.sample_nodes(seed, x, y, &mut sample);
+            fold_sample(fold, &sample.river);
+            fold_sample(fold, &sample.lake);
+        }
+    }
+
+    /// Row-major `xs` x `ys` points, y outer.
+    fn points(xs: &[f32], ys: &[f32]) -> Vec<(f32, f32)> {
+        ys.iter()
+            .flat_map(|&y| xs.iter().map(move |&x| (x, y)))
+            .collect()
+    }
+
+    fn steps(radius: i32, step: f32, offset: f32) -> Vec<f32> {
+        (-radius..=radius)
+            .map(|i| i as f32 * step + offset)
+            .collect()
+    }
+
+    /// `(invalid samples, hash)` per line of the oracle's output, configurations in `SHAPES` x `SOURCES` order.
+    fn check_sample(fold: &mut Fold, name: &str, expected: (usize, u64)) {
+        assert_eq!((fold.rivers, fold.hash), expected, "{name}");
+        *fold = Fold::new();
+    }
+
+    const MIN: f32 = f32::from_bits(1);
+    #[rustfmt::skip]
+    const POINTS: [f32; 26] = [f32::NAN, f32::NEG_INFINITY, f32::INFINITY, -0.0, 0.0, MIN, -MIN, 1e30, -1e30,
+        f32::MAX, -f32::MAX, 2_147_483_520.0, 2_147_483_648.0, -2_147_483_648.0, -2_147_483_520.0, 16_777_216.0,
+        -16_777_216.0, 16_777_218.0, 0.5, -0.5, 1.75, -2.25, 123.4, -98.76, 0.999_999_94, -1.0];
+
+    /// `RiverSamplingOracle.java` (`.local/terraforged/oracles/river_network/run-sampling.sh`): the private
+    /// `RiverGenerator.sample(.., CarverSample)` of the jar and of the newer source (equal under the seed mapping)
+    /// on a quarter-cell grid, over runtime and shape seeds, and at edge points (NaN, infinities, signed zeros,
+    /// subnormals, float extremes, the `int` boundaries; huge points take the jar's (0, 0) centre).
+    #[test]
+    fn node_sampling_matches_java() {
+        let grid = [
+            (706, 0x2c17faba74c46bb4),
+            (472, 0x79cde16049b3f6cd),
+            (139, 0xb066fde93ea82d0b),
+            (648, 0x7e2bb16f1f76f6be),
+            (471, 0x81b315f07a01beda),
+            (193, 0x107cea23980bcffd),
+        ];
+        let seeds = [
+            (751, 0xe4bf7b92cd459ba2),
+            (521, 0x525211a77578d080),
+            (739, 0xdfb1974f2c3ec05e),
+            (747, 0x63db1def59f9ca3e),
+            (545, 0xbd195ad50c627c07),
+            (731, 0x09363b705b05e264),
+        ];
+        let edges = [
+            (1071, 0x9b941d3645ffd2fe),
+            (1009, 0xc47f9143e7a14885),
+            (876, 0x308f816a061548fc),
+            (1032, 0x7256fc16be3eaf24),
+            (984, 0x156ad26d67201aa2),
+            (809, 0xf50443cd322f9ec2),
+        ];
+        const RUNTIME: [i32; 9] = [
+            0,
+            42,
+            -1,
+            i32::MAX,
+            i32::MIN,
+            -827_614,
+            i32::MAX - 20_106,
+            i32::MIN + 9_802,
+            123_456_789,
+        ];
+        const BASE: [(i32, i32); 3] = [(0, 0), (i32::MAX, i32::MIN), (-6569, 987_654_321)];
+        let mut fold = Fold::new();
+        for (index, (shape, source)) in SHAPES
+            .into_iter()
+            .flat_map(|shape| SOURCES.map(|source| (shape, source)))
+            .enumerate()
+        {
+            let mut setup = Setup::new(shape, source);
+            let grid_points = points(&steps(12, 0.25, 0.0625), &steps(12, 0.25, -0.125));
+            fold_points(&mut fold, &setup, 42, grid_points);
+            check_sample(&mut fold, "grid", grid[index]);
+            let seed_points = points(&steps(2, 0.75, 0.3), &steps(2, 0.75, -0.2));
+            for seed in RUNTIME {
+                for base in BASE {
+                    setup.seeds = base;
+                    fold_points(&mut fold, &setup, seed, seed_points.iter().copied());
+                }
+            }
+            check_sample(&mut fold, "seeds", seeds[index]);
+            setup.seeds = (0, 0);
+            fold_points(&mut fold, &setup, 42, points(&POINTS, &POINTS));
+            check_sample(&mut fold, "edges", edges[index]);
+        }
+    }
+
+    #[rustfmt::skip]
+    fn node(ax: f32, ay: f32, bx: f32, by: f32, ah: f32, bh: f32, ar: f32, br: f32, displacement: f32) -> RiverNode {
+        RiverNode { ax, ay, bx, by, ah, bh, ar, br, displacement }
+    }
+
+    /// The oracle's `nodes` line: `sampleNode` over hand-made lists (ties between equal nodes and mirrored ones, a
+    /// zero-length node, NaN and infinite fields, an empty list) at edge points, then `recordNode`; folds the
+    /// winner's index (-1 for none) and the sample.
+    #[test]
+    fn nearest_node_choice_matches_java() {
+        const NAN: f32 = f32::NAN;
+        const INF: f32 = f32::INFINITY;
+        let a = node(0.0, 0.0, 1.0, 0.0, 0.2, 0.3, 0.5, 1.0, 0.0);
+        #[rustfmt::skip]
+        let lists: [Vec<RiverNode>; 11] = [
+            vec![],
+            vec![a],
+            vec![a, node(0.0, 0.0, 1.0, 0.0, 0.9, 0.1, 0.25, 0.75, 0.0)],
+            vec![node(0.0, 1.0, 1.0, 1.0, 0.4, 0.6, 0.1, 0.2, 0.0), node(0.0, -1.0, 1.0, -1.0, 0.7, 0.8, 0.3, 0.4, 0.0)],
+            vec![node(0.5, 0.5, 0.5, 0.5, 0.6, 0.6, 1.0, 1.0, 0.0), a],
+            vec![node(NAN, 0.0, 1.0, 0.0, 0.5, 0.5, 1.0, 1.0, 0.0), node(0.0, NAN, 1.0, 0.0, 0.5, 0.5, 1.0, 1.0, 0.0)],
+            vec![node(NAN, 0.0, 1.0, 0.0, 0.5, 0.5, 1.0, 1.0, 0.0), a, node(0.0, 0.0, 1.0, 0.0, 0.1, 0.1, 0.1, 0.1, 0.5)],
+            vec![node(0.0, 0.0, 1.0, 0.0, NAN, 0.5, NAN, 1.0, 0.0), node(0.0, 0.0, INF, 0.0, 0.5, 0.5, 1.0, 1.0, 0.0)],
+            vec![node(-INF, 0.0, INF, 0.0, 0.5, 0.5, 1.0, 1.0, 0.0), node(0.0, 0.0, 1.0, 0.0, 0.5, 0.5, 1.0, 1.0, NAN)],
+            vec![node(0.0, 0.0, 1.0, 0.0, 0.5, 0.5, 1.0, 1.0, 1e30), node(0.0, 0.0, 1.0, 0.0, 0.5, 0.5, 1.0, 1.0, -0.0), a],
+            vec![node(1e30, 1e30, -1e30, -1e30, 0.3, 0.7, 0.2, 0.9, 0.1), node(MIN, -MIN, 0.0, 0.0, 0.5, 0.5, 1.0, 1.0, 0.0)],
+        ];
+        #[rustfmt::skip]
+        const NODE_POINTS: [f32; 15] = [0.0, -0.0, 0.5, 0.25, -0.25, 1.0, 1.5, -1.0, 1e20, -1e20, MIN, f32::MAX, INF,
+            -INF, NAN];
+        let setup = Setup::new(CellShape::Square, CellSource::Perlin);
+        let config = setup.config();
+        let cells = CellGenerator::new(config);
+        let shape = ShapeGenerator::new(config, ControlPoints::new(WorldControlPoints::default()));
+        let network = RiverNetwork::new(&cells, &shape, config);
+        let terrains = TerrainRegistry::new();
+        let mut sample = CarverSample::new(&terrains).river;
+        let mut fold = Fold::new();
+        for list in &lists {
+            for &y in &NODE_POINTS {
+                for &x in &NODE_POINTS {
+                    sample.reset();
+                    let mut nearest = None;
+                    let mut winner = -1;
+                    for (index, node) in list.iter().enumerate() {
+                        let distance = sample.distance.to_bits();
+                        sample_node(x, y, node, &mut nearest, &mut sample);
+                        // A win (strictly lower) always changes the distance's bits.
+                        if sample.distance.to_bits() != distance {
+                            winner = index as i32;
+                        }
+                    }
+                    fold.add(winner as u32 as u64);
+                    network.record_node(nearest.as_ref(), &mut sample);
+                    fold_sample(&mut fold, &sample);
+                }
+            }
+        }
+        check_sample(&mut fold, "nodes", (1866, 0x5a39aac3cad2ec2a));
+    }
+
+    /// A stub continent whose nearest cell is fixed (counting `cell` calls), for Java's `int` loop bounds around
+    /// the centre. Its cells are all default points (ocean, so no pieces).
+    struct Centre(i32, i32, std::cell::Cell<usize>);
+
+    impl ContinentCells for Centre {
+        fn cell(&self, _seed: i32, _x: i32, _y: i32) -> CellPoint {
+            self.2.set(self.2.get() + 1);
+            CellPoint::default()
+        }
+
+        fn nearest_cell(&self, _seed: i32, _x: f32, _y: f32) -> (i32, i32) {
+            (self.0, self.1)
+        }
+
+        fn cell_shape(&self) -> CellShape {
+            CellShape::Square
+        }
+    }
+
+    /// Cells visited around a stub centre: 9, or none where `centre ± 1` wraps (Java's loops are then empty).
+    fn visited(centre_x: i32, centre_y: i32) -> usize {
+        let config = ContinentConfig::default();
+        let cells = Centre(centre_x, centre_y, std::cell::Cell::new(0));
+        let shape = ShapeGenerator::new(config, ControlPoints::new(WorldControlPoints::default()));
+        let network = RiverNetwork::new(&cells, &shape, config);
+        let mut sample = CarverSample::new(&TerrainRegistry::new());
+        network.sample_nodes(0, 0.0, 0.0, &mut sample);
+        assert!(sample.river.is_invalid() && sample.lake.is_invalid());
+        cells.2.get()
+    }
+
+    #[test]
+    fn sampling_window_follows_java_int_loops() {
+        for centre in [0, 1, -1, i32::MAX - 2, i32::MIN + 1, 123_456] {
+            assert_eq!(visited(centre, centre), 9, "{centre}");
+        }
+        // Upper bound wraps below the lower one: empty rows, or empty columns in every row.
+        for (x, y) in [
+            (0, i32::MAX),
+            (0, i32::MIN),
+            (i32::MAX, 0),
+            (i32::MIN, 0),
+            (i32::MAX - 1, i32::MAX),
+        ] {
+            assert_eq!(visited(x, y), 0, "({x}, {y})");
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "loops forever")]
+    fn sampling_rows_ending_at_int_max_loop_forever_in_java() {
+        visited(0, i32::MAX - 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "loops forever")]
+    fn sampling_columns_ending_at_int_max_loop_forever_in_java() {
+        visited(i32::MAX - 1, 0);
     }
 
     #[test]
