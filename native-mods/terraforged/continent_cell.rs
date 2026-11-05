@@ -22,11 +22,14 @@
  * SOFTWARE.
  */
 
-use super::terraforged::{Interpolation, cubic, perlin2, simplex};
+use super::{
+    terraforged::{Interpolation, cubic, hash, perlin2, simplex},
+    terraforged_terrain_blend_util::{X_PRIME, Y_PRIME, random},
+};
 
-const X_PRIME: i32 = 1_619;
-const Y_PRIME: i32 = 31_337;
-
+/// TerraForged 1.18.2-0.3.1's `CellPoint` (`worldgen.noise.continent.cell`): a continent cell's jittered position
+/// and its two noise samples. Java's fields start at 0, as `Default` does. `PartialEq` compares fields (Java's
+/// `CellPoint` has no `equals`; nothing in the jar compares points).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct CellPoint {
     pub px: f32,
@@ -36,12 +39,15 @@ pub struct CellPoint {
 }
 
 impl CellPoint {
+    /// `CellPoint.noise()`: the jar returns `noise0`, not the `noise` field.
     #[allow(clippy::misnamed_getters)]
     pub fn noise(self) -> f32 {
         self.noise0
     }
 }
 
+/// `CellShape`: how continent cells sit on the grid. `SQUARE` jitters each cell inside its own square; `HEXAGON`
+/// stretches y by 1.2 and shifts odd rows by half a cell with half the x jitter.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CellShape {
     Square,
@@ -49,10 +55,15 @@ pub enum CellShape {
 }
 
 impl CellShape {
+    /// `CellShape.values()`, in declaration order.
+    pub const VALUES: [Self; 2] = [Self::Square, Self::Hexagon];
+
+    /// `adjustX`: the identity for both shapes.
     pub fn adjust_x(self, x: f32) -> f32 {
         x
     }
 
+    /// `adjustY`: `y * 1.2f` for `HEXAGON`, the identity for `SQUARE`.
     pub fn adjust_y(self, y: f32) -> f32 {
         match self {
             Self::Square => y,
@@ -60,22 +71,26 @@ impl CellShape {
         }
     }
 
+    /// `getCellX(hash, cellX, cellY, jitter)`: `MathUtil.getPosX(hash, cellX, jitter)`; `HEXAGON` adds
+    /// `(cellY & 1) * 0.5f` and halves the jitter on those odd rows.
     pub fn cell_x(self, hash: i32, cell_x: i32, cell_y: i32, jitter: f32) -> f32 {
         match self {
-            Self::Square => position(hash, cell_x, X_PRIME, jitter),
+            Self::Square => pos(hash, X_PRIME, cell_x, jitter),
             Self::Hexagon => {
                 let offset = (cell_y & 1) as f32 * 0.5;
                 let jitter = if offset > 0.0 { jitter * 0.5 } else { jitter };
-                position(hash, cell_x, X_PRIME, jitter) + offset
+                pos(hash, X_PRIME, cell_x, jitter) + offset
             }
         }
     }
 
+    /// `getCellY(hash, cellX, cellY, jitter)`: `MathUtil.getPosY(hash, cellY, jitter)` for both shapes.
     pub fn cell_y(self, hash: i32, _cell_x: i32, cell_y: i32, jitter: f32) -> f32 {
-        position(hash, cell_y, Y_PRIME, jitter)
+        pos(hash, Y_PRIME, cell_y, jitter)
     }
 }
 
+/// `CellSource`: the noise each continent cell samples at its position.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CellSource {
     Perlin,
@@ -84,6 +99,10 @@ pub enum CellSource {
 }
 
 impl CellSource {
+    /// `CellSource.values()`, in declaration order.
+    pub const VALUES: [Self; 3] = [Self::Perlin, Self::Simplex, Self::Cubic];
+
+    /// `sample(seed, x, y)`: `Noise.singlePerlin2(.., CURVE3)`, `Noise.singleSimplex` or `Noise.singleCubic`.
     pub fn sample(self, seed: i32, x: f32, y: f32) -> f32 {
         match self {
             Self::Perlin => perlin2(x, y, seed, Interpolation::Curve3),
@@ -92,46 +111,195 @@ impl CellSource {
         }
     }
 
+    /// `getValue(seed, x, y)`: the sample mapped from -1..1 to 0..1, `(1 + sample) * 0.5f`.
     pub fn value(self, seed: i32, x: f32, y: f32) -> f32 {
         (1.0 + self.sample(seed, x, y)) * 0.5
     }
 }
 
-fn position(hash: i32, cell: i32, prime: i32, jitter: f32) -> f32 {
-    cell as f32 + random(hash_1d(hash, prime)) * jitter
-}
-
-fn hash_1d(seed: i32, x: i32) -> i32 {
-    let mut hash = seed ^ Y_PRIME.wrapping_mul(x);
-    hash = hash
-        .wrapping_mul(hash)
-        .wrapping_mul(hash)
-        .wrapping_mul(60_493);
-    (hash >> 13) ^ hash
-}
-
-#[allow(clippy::manual_clamp)]
-fn random(mut value: i32) -> f32 {
-    value ^= X_PRIME;
-    value ^= Y_PRIME;
-    let value = value
-        .wrapping_mul(value)
-        .wrapping_mul(value)
-        .wrapping_mul(60_493) as f32
-        / 2_147_483_648.0;
-    let clamped = if value < -1.0 {
-        -1.0
-    } else if value > 1.0 {
-        1.0
-    } else {
-        value
-    };
-    (clamped + 1.0) / 2.0
+/// `MathUtil.getPosX`/`getPosY(hash, cell, jitter)`: `cell + MathUtil.rand(hash, prime) * jitter`, where
+/// `MathUtil.rand(hash, prime)` is `MathUtil.rand(NoiseUtil.hash(hash, prime))`.
+fn pos(hash_seed: i32, prime: i32, cell: i32, jitter: f32) -> f32 {
+    cell as f32 + random(hash(hash_seed, prime)) * jitter
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Expected values come from `ContinentCellOracle.java` (`.local/terraforged/oracles/continent_cell/`), which runs
+    // the 1.18.2-0.3.1 jar's own `CellPoint`, `CellShape`, `CellSource`, `MathUtil` and `Noise` bytecode over these
+    // inputs: each section is a count and an FNV-1a hash over every result's canonical bits (any NaN as 0x7fc00000).
+    const MIN: f32 = f32::from_bits(1);
+    const HASHES: [i32; 12] = [
+        0,
+        1,
+        -1,
+        17,
+        -918_273,
+        0x5a5a_5a5a,
+        1619,
+        31_337,
+        i32::MIN,
+        i32::MAX,
+        123_456_789,
+        -2_147_483_647,
+    ];
+    const CELLS: [i32; 15] = [
+        0,
+        1,
+        -1,
+        2,
+        -2,
+        3,
+        -3,
+        4,
+        -7,
+        9,
+        11,
+        16_777_217,
+        -16_777_217,
+        i32::MIN,
+        i32::MAX,
+    ];
+    const JITTERS: [f32; 14] = [
+        0.0,
+        -0.0,
+        MIN,
+        0.25,
+        0.5,
+        0.75,
+        1.0,
+        -1.0,
+        2.0,
+        1e30,
+        f32::MAX,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        f32::NAN,
+    ];
+    const COORDS: [f32; 27] = [
+        f32::NEG_INFINITY,
+        -f32::MAX,
+        -1e30,
+        -16_777_217.0,
+        -2_147_483_648.0,
+        -31.75,
+        -1.5,
+        -1.0,
+        -0.75,
+        -MIN,
+        -0.0,
+        0.0,
+        MIN,
+        f32::MIN_POSITIVE,
+        0.125,
+        0.5,
+        1.0,
+        4.25,
+        12.5,
+        18.5,
+        1234.5678,
+        16_777_216.0,
+        2_147_483_648.0,
+        1e30,
+        f32::MAX,
+        f32::INFINITY,
+        f32::NAN,
+    ];
+    const SEEDS: [i32; 6] = [0, 1, -1, 918_273, i32::MIN, i32::MAX];
+
+    struct Fnv(u64, usize);
+
+    impl Fnv {
+        fn new() -> Self {
+            Self(0xcbf2_9ce4_8422_2325, 0)
+        }
+
+        fn add(&mut self, value: f32) {
+            let bits = if value.is_nan() {
+                0x7fc0_0000
+            } else {
+                value.to_bits()
+            };
+            for byte in bits.to_le_bytes() {
+                self.0 = (self.0 ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
+            }
+            self.1 += 1;
+        }
+
+        fn check(&mut self, name: &str, count: usize, hash: u64) {
+            assert_eq!((self.1, self.0), (count, hash), "{name}");
+            *self = Self::new();
+        }
+    }
+
+    #[test]
+    fn continent_cell_random_matches_jar() {
+        let mut fnv = Fnv::new();
+        for prime in [X_PRIME, Y_PRIME] {
+            for seed in HASHES {
+                fnv.add(random(hash(seed, prime)));
+            }
+        }
+        fnv.check("rand", 24, 0x3a52_72ac_0b9a_296a);
+        assert_eq!(
+            CellPoint::default(),
+            CellPoint {
+                px: 0.0,
+                py: 0.0,
+                noise: 0.0,
+                noise0: 0.0
+            }
+        );
+    }
+
+    #[test]
+    fn continent_cell_shapes_match_jar() {
+        let expected = [
+            (0x77f0_834a_80ef_3179, 0x0d8b_6ace_4cfb_95d3),
+            (0xc685_68ce_85d4_4922, 0x3d9e_b068_4c5d_4ab7),
+        ];
+        let mut fnv = Fnv::new();
+        for (shape, (adjust, cells)) in CellShape::VALUES.into_iter().zip(expected) {
+            COORDS.into_iter().for_each(|c| fnv.add(shape.adjust_x(c)));
+            COORDS.into_iter().for_each(|c| fnv.add(shape.adjust_y(c)));
+            JITTERS.into_iter().for_each(|j| fnv.add(shape.adjust_y(j)));
+            fnv.check(&format!("adjust {shape:?}"), 68, adjust);
+            for seed in HASHES {
+                for cell_x in CELLS {
+                    for cell_y in CELLS {
+                        for jitter in JITTERS {
+                            fnv.add(shape.cell_x(seed, cell_x, cell_y, jitter));
+                            fnv.add(shape.cell_y(seed, cell_x, cell_y, jitter));
+                        }
+                    }
+                }
+            }
+            fnv.check(&format!("cell {shape:?}"), 75_600, cells);
+        }
+    }
+
+    #[test]
+    fn continent_cell_sources_match_jar() {
+        let expected = [
+            0xb76f_0b4f_7809_6888,
+            0xfacf_13f0_8866_1b5f,
+            0x1fb1_c39b_b3b6_8809,
+        ];
+        let mut fnv = Fnv::new();
+        for (source, hash) in CellSource::VALUES.into_iter().zip(expected) {
+            for seed in SEEDS {
+                for x in COORDS {
+                    for y in COORDS {
+                        fnv.add(source.sample(seed, x, y));
+                        fnv.add(source.value(seed, x, y));
+                    }
+                }
+            }
+            fnv.check(&format!("source {source:?}"), 8748, hash);
+        }
+    }
 
     #[test]
     fn cell_point_returns_primary_noise() {

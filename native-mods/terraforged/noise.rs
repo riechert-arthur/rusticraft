@@ -1180,7 +1180,8 @@ pub fn round(value: f32) -> i32 {
     }
 }
 
-fn hash(x: i32, y: i32) -> i32 {
+/// `NoiseUtil.hash(x, y)`, in Java `int` math.
+pub fn hash(x: i32, y: i32) -> i32 {
     let mut hash = x ^ 31337_i32.wrapping_mul(y);
     hash = hash
         .wrapping_mul(hash)
