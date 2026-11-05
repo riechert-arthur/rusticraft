@@ -7928,6 +7928,63 @@ mod tests {
         }
     }
 
+    #[test]
+    fn seeded_legacy_terrace_matches_reseeding_and_evaluates_curves_lazily() {
+        // Over non-Perlin sources with finite, nonzero ranges, reseeding and seed-first sampling seed the same
+        // sources and use the same steps (both from the constructor's bounds), so they give the same bits.
+        let src = |kind, seed, octaves| {
+            Module::source(Source::new(
+                kind,
+                SourceConfig {
+                    seed,
+                    octaves,
+                    frequency: 0.2,
+                    ..SourceConfig::default()
+                },
+            ))
+        };
+        let source = src(SourceKind::Simplex, i32::MAX, 2);
+        let lower = src(SourceKind::Cubic, -91, 3);
+        let upper = src(SourceKind::Simplex2, i32::MIN, 2);
+        for steps in [1, 2, 7, 64] {
+            for blend in [0.35, 3.0] {
+                let graph =
+                    source
+                        .clone()
+                        .legacy_terrace(lower.clone(), upper.clone(), steps, blend);
+                for seed in [0, 1, -1, 17, i32::MAX, i32::MIN] {
+                    let reseeded = graph.with_seed(i64::from(seed));
+                    for (x, y) in [(0.0, 0.0), (12.34, -56.78), (-0.0, 3.5), (1e30, 3.0)] {
+                        assert_eq!(
+                            canonical_bits([graph.try_value_seed_first(seed, x, y).unwrap()]),
+                            canonical_bits([reseeded.value(x, y)]),
+                            "steps {steps}, blend {blend}, seed {seed}, ({x}, {y})"
+                        );
+                    }
+                }
+            }
+        }
+        // Five steps over 0..1 (windows ±0.09375 around 0, 0.25, ...): flat samples read no curve, below a window
+        // reads only the upper curve, above it only the lower curve.
+        let unsupported = unsupported_seeded_node(0.5);
+        let c = Module::constant;
+        let terrace = |value, blend, lower: &Module, upper: &Module| {
+            Module::node(ModuleKind::Constant(value), 0.0, 1.0)
+                .legacy_terrace(lower.clone(), upper.clone(), 5, blend)
+                .try_value_seed_first(1, 0.0, 0.0)
+        };
+        for value in [0.0, 0.2, 0.5, 1.0, f32::NAN] {
+            assert!(terrace(value, 0.25, &unsupported, &unsupported).is_ok());
+        }
+        assert!(terrace(0.14, 0.25, &unsupported, &c(0.9)).is_ok());
+        assert!(terrace(0.14, 0.25, &c(0.6), &unsupported).is_err());
+        assert!(terrace(0.36, 0.25, &c(0.6), &unsupported).is_ok());
+        assert!(terrace(0.36, 0.25, &unsupported, &c(0.9)).is_err());
+        // A blend range of 3 inverts the windows (first step: 0.25..-0.25): 0.1 lies below the first step's window
+        // and above its upper bound, and Java returns the step without reading the lower curve.
+        assert!(terrace(0.1, 3.0, &unsupported, &unsupported).is_ok());
+    }
+
     /// `SeededLegacyTerraceEdgeOracle` (`.local/terraforged/oracles/seed_first/run-graphs.sh`): LegacyTerrace with a
     /// source fixed at, and one ulp beside, every step's value and window bounds (the constructor's table) and every
     /// rounding edge `(k + 0.5) / maxIndex` (plus NaN, ±inf, ±0, subnormals and values outside 0..1); 0, 1, 2, 5, 7, 64
