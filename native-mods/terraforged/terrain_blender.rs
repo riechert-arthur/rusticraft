@@ -77,6 +77,17 @@ impl TerrainNoise {
     pub fn noise(&self) -> &Module {
         &self.noise
     }
+
+    /// `withSeed(seed)`: a new terrain noise with the same terrain and weight and the noise reseeded
+    /// ([`Module::with_seed`]), through the constructor again. Reseeding reads a raised noise's bias back as 0, so
+    /// the clamped result reports a minimum of 0 and is raised once more.
+    pub fn with_seed(&self, seed: i64) -> Self {
+        Self::new(
+            self.terrain.clone(),
+            self.weight,
+            self.noise.with_seed(seed),
+        )
+    }
 }
 
 impl Weighted for TerrainNoise {
@@ -89,10 +100,10 @@ impl Weighted for TerrainNoise {
 /// TerraForged's `worldgen.terrain.TerrainBlender` (1.18.2-0.3.1), the terrain module of the mod's noise
 /// generator: the point is warped and scaled into a grid of jittered cells; each cell's hash picks a terrain from the
 /// weight map, and points near the border of their nearest cell blend in the neighbouring cells' terrain noises.
-/// As in the jar, the seed is bound when the blender is built. Not ported here: `withSeed` (reseeding the terrain
-/// noises).
+/// As in the jar, the seed is bound when the blender is built; [`TerrainBlender::with_seed`] builds a new one.
 pub struct TerrainBlender {
     region_seed: i32,
+    scale: i32,
     frequency: f32,
     jitter: f32,
     blending: f32,
@@ -127,6 +138,7 @@ impl TerrainBlender {
         };
         Self {
             region_seed: (seed as i32).wrapping_add(REGION_SEED_OFFSET),
+            scale,
             frequency,
             jitter,
             blending,
@@ -137,6 +149,18 @@ impl TerrainBlender {
                 Module::constant(scale as f32 / 2.5),
             ),
         }
+    }
+
+    /// `withSeed(seed)`: `new TerrainBlender(seed, scale, jitter, blending, reseeded)`, each terrain noise reseeded in
+    /// the weight map's order ([`TerrainNoise::with_seed`]). This blender is left as it is.
+    pub fn with_seed(&self, seed: i64) -> Self {
+        let terrains = self
+            .terrains
+            .values()
+            .iter()
+            .map(|terrain| Arc::new(terrain.with_seed(seed)))
+            .collect();
+        Self::new(seed, self.scale, self.jitter, self.blending, terrains)
     }
 
     /// `getValue(x, z)`, with this thread's [`Blender`] (`localBlender`; one per thread is shared by all
@@ -674,6 +698,84 @@ mod tests {
         assert_eq!(lines[20], "P 0 4 throw -1 -1 throw");
         assert_eq!(lines[380], "B 5 -2125992525");
         assert_eq!(fnv(&out), 0x14b1_fe45_32e6_a8ff);
+    }
+
+    /// The `withSeed` runs' seeds, one per blender of `SEEDS`.
+    const RESEEDS: [i64; 9] = [
+        7,
+        -91,
+        0x1_0000_0005,
+        i64::MIN,
+        i32::MIN as i64,
+        -21_491_124,
+        123_456_789_012,
+        0,
+        -1,
+    ];
+
+    /// A fresh resource's `getValue`, closest pair and terrain, as the oracle's `value` prints them.
+    fn reseed_value(blender: &TerrainBlender, x: f32, z: f32) -> String {
+        let mut resource = blender.blender_resource();
+        let value =
+            try_value(|| blender.value_with(x, z, &mut resource)).map_or("throw".to_owned(), h);
+        let name = catch_unwind(AssertUnwindSafe(|| {
+            blender.terrain(&resource).name().to_owned()
+        }))
+        .unwrap_or_else(|_| "throw".to_owned());
+        let (a, b) = (resource.closest_index(), resource.closest_index2());
+        format!("{value} {a} {b} {name}")
+    }
+
+    #[test]
+    fn reseeded_blenders_match_the_jar() {
+        // `TerrainBlenderOracle`'s R lines: each blender reseeded, its noises (raised again, as the jar's bias reads
+        // back as 0) and its values. Java throws on 226 of them.
+        let registry = TerrainRegistry::new();
+        let mut out = String::new();
+        for s in 0..SEEDS.len() {
+            let terrains = SETS[SET_OF[s]]
+                .iter()
+                .map(|&(t, weight, n)| terrain(&registry, t, weight, n))
+                .collect();
+            let blender =
+                TerrainBlender::new(SEEDS[s], SCALES[s], JITTERS[s], BLENDINGS[s], terrains);
+            let before = reseed_value(&blender, 37.25, -91.5);
+            let reseeded = blender.with_seed(RESEEDS[s]);
+            assert_eq!(
+                reseed_value(&blender, 37.25, -91.5),
+                before,
+                "withSeed leaves blender {s}"
+            );
+            writeln!(out, "R {s} {}", reseeded.region_seed).unwrap();
+            for (n, noise) in reseeded.terrains.values().iter().enumerate() {
+                let module = noise.noise();
+                writeln!(
+                    out,
+                    "RN {s} {n} {} {} {} {} {} {}",
+                    noise.terrain().name(),
+                    h(noise.weight),
+                    h(module.min_value()),
+                    h(module.max_value()),
+                    h(module.value(3.5, -7.25)),
+                    h(module.value(-1000.5, 77.0)),
+                )
+                .unwrap();
+            }
+            for (p, &(x, z)) in points().iter().enumerate() {
+                writeln!(out, "RP {s} {p} {}", reseed_value(&reseeded, x, z)).unwrap();
+            }
+        }
+        let lines: Vec<_> = out.lines().collect();
+        assert_eq!(lines.len(), 686);
+        assert_eq!(lines[0], "R 0 21491131");
+        assert_eq!(lines[4], "RP 0 0 3f666667 4 3 mountains");
+        assert_eq!(lines[381], "R 5 0");
+        assert_eq!(
+            lines[383],
+            "RN 5 1 hills 3f800000 00000000 3f800000 3eac10af 3e9f000e"
+        );
+        assert_eq!(out.matches("throw").count(), 226);
+        assert_eq!(fnv(&out), 0x9b02_f798_48a1_d38d);
     }
 
     /// The search runs' start points.
