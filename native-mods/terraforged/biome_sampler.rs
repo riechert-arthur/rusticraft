@@ -307,7 +307,8 @@ impl<T> InitialBiomeSelector<'_, T> {
     /// `BiomeSampler.getInitialBiome(seed, x, z, sample)`, in Java's order: the normal biome from the
     /// [`lowland_pool`] (missing or empty climate pool, or a noise past its last band or NaN: [`PLAINS`], returned
     /// at once); the [`uses_mountain_pool`] gate; the centre height noise, then [`is_steep_at`]; the highland pool's
-    /// biome (none, or the normal biome itself: normal); then [`keeps_snow_cover`] at the column's height
+    /// biome (none, or the normal biome itself: normal; the identity test only saves the snow check, which would keep
+    /// the same biome too); then [`keeps_snow_cover`] at the column's height
     /// (`levels.getHeight(levels.getScaledHeight(centre))`). Pools pick with `WeightMap.getValue(biomeNoise)`.
     /// `height_noise` is `getHeightNoise(seed, x, z)` for the world's seed (UN-eroded, see [`is_steep_at`]); `x`/`z`
     /// are block coordinates; the first error is returned. `getBiomeOverride` ([`biome_override`]) runs after this
