@@ -2503,14 +2503,15 @@ It also bundles eight `terrain_noise` files, byte for byte in `data/worldgen/ter
 hills `dales`, `hills_1` and `hills_2`, and the mountain `mountains_ridge_1` (6dd607eb generates the same bytes in
 `generated/.../worldgen/terrain/noise/`). The mountains `mountains_1` and `mountains_2` are TerraForged 6dd607eb's
 generated files (MIT): Reimagined's copies differ (they replace the `Valley` erosion node, which Reimagined's codec
-cannot read, with other nodes), and the port follows the newer source. `decode_current_terrain_noises(&types)` decodes them with #185's
-decoder, their `type` (`terraforged:flats`, `terraforged:hills` or `terraforged:mountains`) resolved in the terrain
-types `decode_current_terrain_types` returned (so the terrains are the world registry's), into a `TerrainNoiseAssets`
-in registry order; its `entry_ids()` (`dales`, `hills_1`, `hills_2`, `mountains_1`, `mountains_2`,
-`mountains_ridge_1`, `plains`, `steppe`) and `into_values()` are what `apply_terrain_overrides` takes. With the
-default settings that stretches `dales` and the three mountains by the mountain width (`isMountain` matches their
-ids), not the two hills; turning fancy mountains off would drop `mountains_ridge_1`. The other six noises (`mountains_3`,
-`mountains_ridge_2`, plateau, badlands, torridonian, dolomites) come with later layers; nothing calls it yet.
+cannot read, with other nodes), and the port follows the newer source. `decode_current_terrain_noises(&types)`
+decodes them with #185's decoder, their `type` (`terraforged:flats`, `terraforged:hills` or `terraforged:mountains`)
+resolved in the terrain types `decode_current_terrain_types` returned (so the terrains are the world registry's),
+into a `TerrainNoiseAssets` in registry order; its `entry_ids()` (`dales`, `hills_1`, `hills_2`, `mountains_1`,
+`mountains_2`, `mountains_ridge_1`, `plains`, `steppe`) and `into_values()` are what `apply_terrain_overrides` takes.
+With the default settings that stretches `dales` and the three mountains by the mountain width (`isMountain` matches
+their ids), not the two hills; turning fancy mountains off drops `mountains_ridge_1`. The other six noises
+(`mountains_3`, `mountains_ridge_2`, plateau, badlands, torridonian, dolomites) come with later layers; nothing calls
+it yet.
 `CurrentTerrainNoisesOracle.java` (same oracle folder, `run.sh`) decodes each bundled file from the tree it comes from
 (6dd607eb's two mountains, Reimagined's copies of the rest) with Reimagined's real `NoiseCodec`, plus Engine 0.3.0's
 `Valley` registered as 6dd607eb does, and `TerrainNoise` into its terrain-type registry, and checks each bundled file

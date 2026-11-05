@@ -155,8 +155,8 @@ pub fn decode_current_terrain_types(
 /// - TerraForged 6dd607eb's generated `mountains_1` and `mountains_2`
 ///   (<https://github.com/TerraForged/TerraForged/tree/6dd607ebfd41a3b7274e090b1f2cf565d53d1d44>,
 ///   `generated/resources/default/data/terraforged/worldgen/terrain/noise/`, MIT, (c) 2020 TerraForged), which use
-///   Engine 0.3.0's erosion `Valley` node; Reimagined's copies differ (no `Valley`), and the port follows the newer
-///   source here.
+///   Engine 0.3.0's erosion `Valley` node; Reimagined's copies replace that node (its codec cannot read it), and the
+///   port follows the newer source here.
 pub fn current_terrain_noise_documents() -> [(&'static str, &'static str); TERRAIN_NOISE_COUNT] {
     [
         (
