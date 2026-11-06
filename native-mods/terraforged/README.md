@@ -2459,20 +2459,21 @@ continent drawing the continent's four seeds) for the climate fields, `getShape`
 levels variants, two terrain sets, six runtime seeds and 202 block positions (`int` edges and a signed grid) match
 bit for bit in debug and release builds.
 The current surface override is 6dd607eb's `getBiomeOverride`, the same `biome_override` as the jar's
-(`biome_sampler.rs`): its `beachSize` is 0.005 (`BEACH_SIZE`), so the beach band is continent noise in
-(0.5, 0.505] (`BEACH + beachSize` folds to the float 0.505f, the same `<=` in `float`), and (0.505, 0.55] keeps the input
-biome or becomes a river. TerraForged Reimagined a24d450 sets `beachSize = COAST - BEACH` (0.05), which makes every column
-up to the coast marker a beach; that is not followed (it was the current path's band from #174 until #201).
+(`biome_sampler.rs`): its `beachSize` is 0.005 (`BEACH_SIZE`), so the beach band is continent noise in (0.5, 0.505]
+(`BEACH + beachSize` folds to the float 0.505f, the same `<=` in `float`), and (0.505, 0.55] keeps the input biome or
+becomes a river. TerraForged Reimagined a24d450 sets `beachSize = COAST - BEACH` (0.05), which makes every column up to
+the coast marker a beach; that is not followed (it was the current path's band from #174 until #201).
 `SourceBiomeOverrideOracle.java` (`.local/terraforged/oracles/biome_override/6dd607eb/`, `run.sh`) compiles
 6dd607eb's own `BiomeSampler`, `ClimateSample`, `NoiseSample` and `ContinentPoints` from source against Engine 0.3.0
 and runs them interpreted and with `-Xcomp` over 30 continent values (each threshold and its neighbouring floats, the
-floats next to 0.55 and either side of 0.55 included), every climate type, Engine's 16 built-in terrains and 10 river
-values; the test matches its 52,800 overrides and the beach size's and folded bound's bits, in debug and release.
+floats next to 0.55 and 0.5 + 0.0499 and 0.5 + 0.0501 included), every climate type, Engine's 16 built-in terrains and
+10 river values; the test matches its 52,800 overrides and the beach size's and folded bound's bits, in debug and release.
 
 The surface biome sampler (`CurrentSurfaceBiomeSampler`, `current_surface_biomes.rs`) is TerraForged Reimagined
 a24d450's `BiomeSampler.sampleBiome` (MIT, as above; 6dd607eb's has the same three steps over one pool): the biome
 sampler bridge's climate sample, then the initial biome selection, then 6dd607eb's surface override (`biome_override`,
-with the 0.005 beach band), which wins. It takes block coordinates and the runtime seed; the height noise is the generator's un-eroded
+with the 0.005 beach band), which wins. It takes block coordinates and the runtime seed; the height noise is the
+generator's un-eroded
 one and its first error is returned, even where the override then replaces the biome (Java reads it in
 `getInitialBiome` first). The pools and the override biomes come from the caller (building them from the registry is
 a later layer), sharing one `Arc` per biome; Reimagined's debug `reportSlope` survey and `Source`'s per-column cache
@@ -2481,7 +2482,8 @@ are not ported; `create_biomes` (below) fills chunks with it. `.local/terraforge
 continent, the rivers and the five height reads of 7,272 columns: three levels variants, two terrain sets, six
 runtime seeds, `int`-edge and grid positions), then runs Reimagined's real `BiomeSampler` (with 6dd607eb's
 `beachSize` declaration swapped in by `biome_override/6dd607eb/patch_beach.py`, which checks that the two trees'
-`getBiomeOverride` are otherwise byte-identical), `Sampler` and `ClimateNoise` over that record, interpreted and with `-Xcomp`, for four pool and settings configurations (absent
+`getBiomeOverride` are otherwise byte-identical), `Sampler` and `ClimateNoise` over that record, interpreted and with
+`-Xcomp`, for four pool and settings configurations (absent
 and empty pools, highland pools sharing the normal biome, mountain usages and wetland chances). The test matches
 every biome name, in debug and release builds.
 
@@ -2502,7 +2504,8 @@ registry and the registration of the hook are later layers.
 needs `oracles/noise_generator/run.sh`) runs it end to end in two JVMs, as the surface biome oracle does: 6dd607eb's
 real `Sampler` and the newer source's `NoiseGenerator` record what the surface sampler reads at every quart column of
 17 chunks (negative, far and `int`-limit chunks); then 6dd607eb's `fillNoiseBiomes` and `Source` members, copied
-verbatim (its `LossyCache` included), with its real `BiomeBuffer2D` and Reimagined's real `BiomeSampler` (6dd607eb's `beachSize` swapped in, as above), fill stub
+verbatim (its `LossyCache` included), with its real `BiomeBuffer2D` and Reimagined's real `BiomeSampler` (6dd607eb's
+`beachSize` swapped in, as above), fill stub
 1.19 chunk sections from that record, interpreted and with `-Xcomp`: three levels variants, two terrain sets, six
 runtime seeds (the low halves of level seeds with high bits set), the four pool configurations of the surface biome
 oracle, and six build ranges from `128..192` to `-2032..2032`. The test matches every cell of every section (612
