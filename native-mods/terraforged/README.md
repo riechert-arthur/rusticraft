@@ -2359,27 +2359,6 @@ registries (empty, one biome with and without `terraforged:cave`, up to nine bio
 Reimagined's classes, mask and fallback included, which no test reads now.) The tests match every digest in debug and
 release builds.
 
-The biome pool fallback (`biome_map.rs`, `BiomePools::fill_empty_climates`) is Reimagined's
-`BiomeMapManager.fillEmptyClimates` (a24d450, MIT, as above): every climate type whose pool is missing or empty takes
-the pool of the nearest climate type that had biomes of its own before any filling, so a borrowed pool is never lent
-on. Distance is between the midpoints of the types' temperature and moisture ranges (#93's `BiomeType`), temperature
-counted twice (`(2 dt)^2 + dm^2`, f32 in Java's order); ties go to the first type in enum order, and when every pool
-is empty nothing is filled (Reimagined's `BiomeSampler` then falls back to plains). The borrowing climate shares the
-donor's pool. Reimagined's debug log line is returned instead as a list of `BorrowedPool`s. Reimagined's
-`BiomeType` only fills its ranges when its lazy `Lookup` loads (the first `BiomeType.get`); before that every range,
-so every distance, is 0 and the first non-empty type in enum order wins. In a normal start `getWeightsMap` has
-already classified biomes through `BiomeType.get` (`BiomeUtil.getByClimate`), so the ranges are loaded; the port
-always uses them (#93's table, which equals Reimagined's baked `biome_types.bin`). TerraForged 6dd607eb and
-the 1.18.2-0.3.1 jar have no fallback (an empty climate gets plains). Building the pools (the registry's climate
-weights, the dry and highland filters) comes with a later layer.
-
-`BiomePoolOracle.java` (`.local/terraforged/oracles/biome_pool/`, `run.sh`) copies `fillEmptyClimates`,
-`distance` and `midpoint` verbatim from Reimagined's `BiomeMapManager` and runs them with Reimagined's own
-`WeightMap` and `BiomeType` (its baked lookup loaded), interpreted and with `-Xcomp`: every type's ranges, all 121
-distances, and all 177,147 combinations of the 11 types' pools being absent, present but empty, or holding biomes
-(weights 1, 0, NaN or none). The tests match every range and distance bit and every resulting pool, in debug and
-release builds.
-
 The initial biome (`initial_biome`, `biome_sampler.rs`) is TerraForged 6dd607eb's `BiomeSampler.getInitialBiome`
 (MIT): the climate type's pool (`getBiomeMap()`) picks with `WeightMap.getValue(biomeNoise)`, and a missing or empty
 pool gives `minecraft:plains`. It reads nothing else: Reimagined a24d450's wet and dry pools, highland swap,
@@ -2479,8 +2458,8 @@ runtime seeds (the low halves of level seeds with high bits set), the four pool 
 oracle, and six build ranges from `128..192` to `-2032..2032`. The test matches every cell of every section (612
 chunks per configuration) in debug and release builds.
 
-The biome registry pools (`RegistryBiomeMap`, `biome_registry.rs`) are TerraForged Reimagined a24d450's
-`BiomeMapManager` with `BiomeUtil`'s classification (MIT, as above). A registry entry is plain data here
+The biome registry pools (`RegistryBiomeMap`, `biome_registry.rs`, with `BiomePools` in `biome_map.rs`) are
+TerraForged 6dd607eb's `BiomeMapManager` with `BiomeUtil`'s classification (MIT). A registry entry is plain data here
 (`RegistryBiome`: its key, base temperature, downfall, precipitation and tags); `from_generator_data` reads Horizon's
 loaded biome registry and its resolved tags; the live biome bindings below tie the pools to Horizon's biome ids. How
 a biome, a mod's included, ends up in a pool:
@@ -2488,43 +2467,43 @@ a biome, a mod's included, ends up in a pool:
 1. It must be in the overworld list: tagged `minecraft:is_overworld`, or named by a climate file. A mod biome with
    neither is never placed.
 2. If climate files name it (`data/terraforged/worldgen/climate/<climate>.json`, `{"namespace:path": weight}`, a bare
-   path meaning `minecraft:`), it goes into each of those climates at that weight and nowhere else. A file's biomes
-   enter the pool in `ClimateType`'s hash-map order (fastutil's `Object2FloatOpenHashMap` over `Identifier.hashCode`),
-   not file order, and that is the pool's order. Names missing from the registry are skipped. Reimagined ships all
-   eleven files empty, so by default every biome is placed automatically.
-3. Otherwise it is placed at weight 1, unless it is a cave biome (`terraforged:non_surface`, or a path starting with
-   `cave/` or ending with `_caves`) or a water biome (the ocean, deep ocean, river and beach tags, or
-   `minecraft:stony_shore`); the cave sampler and the position override place those. Its climate is the first rule
-   that applies: `is_badlands` or `has_structure/village_desert` gives desert; `is_savanna` savanna; `is_jungle`
-   tropical rainforest; `is_taiga` tundra if it snows (precipitation and a base temperature below 0.15), else taiga;
-   `is_forest` tundra if it snows, temperate rainforest at a downfall of 0.8 or more, else temperate forest. Anything
-   else (most mod biomes carry none of these tags) is placed by its own climate: the base temperature normalized
-   over -0.7..1.2 and the downfall over 0..1, looked up in Reimagined's clamped climate table. Biomes are placed in
-   `BIOME_SORTER` order: path first, then namespace (`terralith:alpine_grove` comes before `minecraft:badlands`, and
-   `a:plains` before `minecraft:plains`).
-4. A climate left without biomes borrows the nearest climate's pool (the pool fallback above).
-5. The dry pool drops each climate's `terraforged:wetland` biomes (a climate of only wetlands keeps its full pool). The
-   highland pool keeps only `terraforged:highland` biomes, and climates left empty borrow again. Both weigh every biome
-   1, whatever its climate-file weight.
+   or `:`-prefixed path meaning `minecraft:`), it goes into each of those climates at that weight and nowhere else,
+   ahead of the climate's other biomes. A file's biomes enter the pool in `ClimateType`'s hash-map order (fastutil's
+   `Object2FloatOpenHashMap` over `Identifier.hashCode`), not file order. A name missing from the registry is an
+   error (Java's `getHolderOrThrow` throws in the constructor); the port reports the first one in the climate
+   registry's order, which 26.3 loads by `Identifier` (`terraforged:alpine` first), each file in its hash-map order.
+   TerraForged ships all eleven files empty (`{}`), so by default every biome is placed automatically.
+3. Otherwise it is placed at weight 1 in the first climate whose rule applies: `is_badlands` or
+   `has_structure/village_desert` gives desert; `is_savanna` savanna; `is_jungle` tropical rainforest; `is_taiga`
+   tundra if it snows, else taiga; `is_forest` tundra if it snows, temperate rainforest at a downfall of 0.8 or more,
+   else temperate forest. **Anything else is grassland**, whatever its temperature and downfall: that is where an
+   untagged mod biome (most carry none of these tags) goes. Ocean, river, beach and cave biomes are not filtered out
+   (they sit in grassland with the plains). Biomes are placed in `BIOME_SORTER` order: path first, then namespace
+   (`terralith:alpine_grove` comes before `minecraft:badlands`, and `a:plains` before `minecraft:plains`).
+4. Every climate has a pool, and an empty one stays empty: no climate borrows another's biomes (`getInitialBiome`
+   gives plains for it). With 26.3's biomes and no climate files, cold steppe, steppe and alpine are empty.
 
-The three `terraforged:` tags start from Reimagined's bundled tag files (swamp and mangrove swamp; the windswept,
-peak, slope, grove and badlands biomes; the four vanilla cave biomes and `terraforged:cave`), since Horizon's data has
-none. A data pack's own tag adds to them, but a replacing one (`"replace": true`) can't remove them. Every list and
-pool holds the same `Arc` per biome. Not ported: climate files named after no climate type (Reimagined adds their
-biomes to the overworld list only), the log lines, and the case where Reimagined's lazily loaded `BiomeType` ranges are
-still unloaded (then every climate distance is 0; the port always uses the loaded table, as the pool fallback does).
-6dd607eb and the 1.18.2-0.3.1 jar classify untagged biomes as grassland, keep water and cave biomes in the pools, and
-have no dry or highland pools and no borrowing.
+The registry's iteration order does not change the result: the overworld list is sorted and the files are hash maps.
+"It snows" needs a 26.3 stand-in: 1.18's biomes stored their precipitation, 26.3's keep only `has_precipitation` and
+decide snow per position, so the port takes TerraForged Reimagined a24d450's position-free `BiomeUtil.getPrecipitation`
+(MIT, as above): precipitation and a base temperature below 0.15, vanilla's own threshold. Every list and pool holds
+the same `Arc` per biome. Not ported: climate files named after no climate type (Java adds their biomes to the
+overworld list, and throws on an unknown one, but gives them no pool), and the codec's own checks (an invalid key or a
+non-number weight throws in Java; nothing decodes climate files yet). Reimagined's version of the manager (its `terraforged:non_surface`/`wetland`/`highland` tags,
+cave and water filters, climate lookup for untagged biomes, `fillEmptyClimates` borrowing and dry and highland pools)
+is not followed; 6dd607eb's sampler reads none of it.
 
-`BiomeRegistryOracle.java` (`.local/terraforged/oracles/biome_registry/`, `run.sh`) compiles Reimagined's own
-`BiomeMapManager`, `BiomeUtil` and `ClimateType` (climate files go through its codec), with its `WeightMap` and
-`BiomeType`, against stub registries, holders and tags, and runs them interpreted and with `-Xcomp` over: 26.3's 67
-biomes and their tags (from Horizon's prepared bundle) with Reimagined's empty default climate files; those plus 13
-mod-like biomes (untagged, a `cave/` path, mod wetland, highland, forest, taiga and ocean tags, one outside the
-overworld, and `a:plains`); the same with climate files (unknown, bare, ignored and non-overworld keys, and a 30-entry
-file that makes the hash map grow); vanilla with every tag but `is_overworld` removed, and with none; and 4,000 random
-registries and climate files. The tests (the vanilla ones through `from_generator_data`, skipped without the bundle)
-match the overworld list and every pool's biomes, order, weight bands and sharing, in debug and release builds.
+`BiomeMapManagerOracle.java` (`.local/terraforged/oracles/biome_registry/6dd607eb/`, `run.sh`) compiles 6dd607eb's own
+`BiomeMapManager`, `BiomeUtil`, `ClimateType` (climate files go through its codec), `LazyCodec`, `WeightMap` and
+`MathUtil`, renamed to 26.3's registry API by `patch.py` (nothing else changes; `patch.diff` lists every edit), and
+runs them interpreted and with `-Xcomp` over real 26.3 `MappedRegistry<Biome>`s: the server jar's 67 biome files and
+its biome tags (bound through 26.3's `TagLoader`), with no climate files and with TerraForged's eleven empty ones;
+those plus 16 mod-like biomes (untagged, a `cave/` path, forest, taiga, jungle and ocean tags, one outside the
+overworld, `a:plains`), registered forwards and backwards; with climate files (bare, `:`-prefixed, ignored,
+non-overworld and untagged keys, and a 30-entry file that makes the hash map grow); four sets of unknown keys; and
+3,000 random registries and climate files (registered in random order). The tests (the vanilla ones through
+`from_generator_data` over Horizon's prepared bundle, skipped without it) match the overworld list, every pool's
+biomes, order and weight bands, and the unknown key reported, in debug and release builds.
 
 The live biome bindings (`LiveBiomeBindings`, `live_biomes.rs`) bind what TerraForged Reimagined a24d450 looks up in the
 biome registry to Horizon's numeric biome ids (MIT, as above): the pools above, `minecraft:plains` (`getInitialBiome`'s
@@ -2533,10 +2512,10 @@ carver, a later layer, builds its own). `from_generator_data`
 reads the same loaded registry (`GeneratorData`) the generator uses, so the ids are the ones Horizon's generator writes
 into chunks and maps by name for saves and the network; a mod's biomes in that data are bound like vanilla's. The
 registry does not change while a world is loaded, so the bindings are built once per world. Keys match by namespace
-and path exactly. A missing key is an error, and no other biome stands in for it. Reimagined calls `getOrThrow` when a
+and path exactly. A missing key is an error (first a climate file's, as the pools above), and no other biome stands in for it. Reimagined calls `getOrThrow` when a
 column first needs the biome and throws there; the port checks all 14 keys up front and refuses the registry. Every
 list, pool and lookup holds the registry entry's own `Arc`. `surface_sampler` and `create_biomes` run the chunk biome
-hook above over these bindings, with the wet pools (`getBiomeMap()`) as the one pool 6dd607eb's sampler reads.
+hook above over these bindings, with the climate pools (`getBiomeMap()`) as 6dd607eb's sampler reads them.
 
 `LiveBiomesOracle.java` (`.local/terraforged/oracles/live_biomes/no_cave/`, `run.sh`) compiles Reimagined's own
 `BiomeMapManager` and `BiomeUtil` against the biome registry oracle's stubs. It runs them
@@ -2677,7 +2656,7 @@ heights either way. The noise, weight and bounds match, so the test pins the two
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives, the biome climate types, the climate settings, the climate module, the climate stage, the continent factory, the generator context, the heightmap, the world generator factory, TerraForged's terrain levels, its terrain data, its terrain generator, its terrain-blend utilities, its terrain blender with its nearest-terrain search (and the newer source's seed-first blender), noise-graph reseeding, the cave noise primitives, the biome viability rules, the biome overrides, the continent control points, the continent cell primitives, the continent configuration, the continent shape blending, the continent cell generator with its spawn-offset search, the continent river nodes, the continent river carver's arithmetic, the continent river networks with their nearest-node sampling and their warped, carved river sampling, the newer source's seed-first noise sources, scalar noise graphs, domain warps, selectors, graph caches, terraces, legacy terraces, advanced terraces, curves, transforms (steps, frequency, gradient and modulation), special sources (boost, cell, cell edge and sine) and lines, and its bounded concurrent lossy cache with the continent's cell and
-river-piece caches on it, the continent noise module that joins the continent layers, the newer source's terrain height sampler with its bordered chunk generation and its nearest-terrain search, its biome chunk fill, cave biome sampler, initial biome selection, surface biome sampler and chunk biome hook, the erosion tile geometry, and TerraForged Reimagined's heightmap smoothing, erosion brushes, hydraulic erosion filter, eroded-region cache, eroded region build, eroded chunk generation, terrain cache, generator queries, chunk fill, the terrain stage hand-off to it, the biome pool fallback, the current climate noise, the biome sampler bridge, the biome registry pools, their live biome bindings, the terrain overrides, the terrain asset decoder, the terrain-type and terrain-noise registries, the bundled terrain types and all 14 bundled terrain noises, the bundled noise caves and their reseeded cave array, and 6dd607eb's structure terrain columns with their
+river-piece caches on it, the continent noise module that joins the continent layers, the newer source's terrain height sampler with its bordered chunk generation and its nearest-terrain search, its biome chunk fill, cave biome sampler, initial biome selection, surface biome sampler, chunk biome hook and biome registry pools, the erosion tile geometry, and TerraForged Reimagined's heightmap smoothing, erosion brushes, hydraulic erosion filter, eroded-region cache, eroded region build, eroded chunk generation, terrain cache, generator queries, chunk fill, the terrain stage hand-off to it, the current climate noise, the biome sampler bridge, the live biome bindings, the terrain overrides, the terrain asset decoder, the terrain-type and terrain-noise registries, the bundled terrain types and all 14 bundled terrain noises, the bundled noise caves and their reseeded cave array, and 6dd607eb's structure terrain columns with their
 chunk adapter, piece selection and structure-aware terrain stage, 6dd607eb's surface erosion and water edge smoothing passes, and its preliminary surface-height cache. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 

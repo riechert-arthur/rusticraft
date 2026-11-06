@@ -22,19 +22,18 @@
  * SOFTWARE.
  */
 
-// Adapted from TerraForged Reimagined (https://github.com/Romoslayer/TerraForged-Reimagined, a24d450):
-// `src/main/java/com/terraforged/mod/worldgen/biome/util/BiomeMapManager.java` (`getOverworldBiomes`,
-// `getWeightsMap`, `getBiomeWeights`, `buildBiomeMap`, `buildDryBiomeMap`, `buildHighlandBiomeMap`, `filtered`) and
-// `BiomeUtil.java` (`getOverworldBiomes`, `BIOME_SORTER`, `isNonSurface`, `isWetland`, `isHighland`,
-// `isClimateBiome`, `isWaterPlaced`, `getType`, `getByClimate`, `getByRain`, `getByTemp`, `getPrecipitation`), with
-// the default `terraforged:{non_surface,wetland,highland}` tag files. 6dd607eb and the 1.18.2-0.3.1 jar have no dry
-// or highland pools, no climate lookup for untagged biomes and keep water and cave biomes in the pools. MIT License,
-// Copyright (c) 2020 TerraForged, Copyright (c) 2026 Romoslayer; see `LICENSE-TERRAFORGED-REIMAGINED`.
+// TerraForged 6dd607eb's `BiomeMapManager` (`getOverworldBiomes`, `getWeightsMap`, `getBiomeWeights`,
+// `buildBiomeMap`) and `BiomeUtil` (`getOverworldBiomes`, `BIOME_SORTER`, `getType`, `getByRain`, `getByTemp`), in
+// `src/main/java/com/terraforged/mod/worldgen/biome/util/`, with `ClimateType`'s weight map
+// (`src/main/java/com/terraforged/mod/worldgen/asset/ClimateType.java`); MIT, see `LICENSE-TERRAFORGED`. 1.18's
+// `Biome.getPrecipitation()` is gone in 26.3: its position-free stand-in (`snowy`) is TerraForged Reimagined
+// a24d450's `BiomeUtil.getPrecipitation` (https://github.com/Romoslayer/TerraForged-Reimagined, MIT License,
+// Copyright (c) 2020 TerraForged, Copyright (c) 2026 Romoslayer; see `LICENSE-TERRAFORGED-REIMAGINED`).
 
 use super::super::{biome::BiomeId, biome_temperature::BiomeTemperatureSettings};
 use super::{
-    GeneratorData, terraforged::java_min, terraforged_biome_map::BiomePools,
-    terraforged_engine::BiomeType, terraforged_terrain_blend_util::WeightMap,
+    GeneratorData, terraforged_biome_map::BiomePools, terraforged_engine::BiomeType,
+    terraforged_terrain_blend_util::WeightMap,
 };
 use std::{cmp::Ordering, collections::BTreeSet, sync::Arc};
 
@@ -45,44 +44,8 @@ const IS_SAVANNA: &str = "minecraft:is_savanna";
 const IS_JUNGLE: &str = "minecraft:is_jungle";
 const IS_TAIGA: &str = "minecraft:is_taiga";
 const IS_FOREST: &str = "minecraft:is_forest";
-const IS_OCEAN: &str = "minecraft:is_ocean";
-const IS_DEEP_OCEAN: &str = "minecraft:is_deep_ocean";
-const IS_RIVER: &str = "minecraft:is_river";
-const IS_BEACH: &str = "minecraft:is_beach";
-const NON_SURFACE: &str = "terraforged:non_surface";
-const WETLAND: &str = "terraforged:wetland";
-const HIGHLAND: &str = "terraforged:highland";
 /// `ClimateType.IGNORE`: a key the climate codec skips.
 const CLIMATE_IGNORE: &str = "forge:registry_name";
-
-/// `BiomeUtil.MIN_TEMPERATURE` / `MAX_TEMPERATURE`: the base-temperature span `getByClimate` normalizes over.
-const MIN_TEMPERATURE: f32 = -0.7;
-const MAX_TEMPERATURE: f32 = 1.2;
-
-// Reimagined's bundled tag files (`data/terraforged/tags/worldgen/biome/*.json`, `"replace": false`). Horizon's
-// data has no `terraforged:` tags, so these stand in for them; a data pack's own tag adds to them.
-const DEFAULT_WETLANDS: &[&str] = &["minecraft:swamp", "minecraft:mangrove_swamp"];
-const DEFAULT_HIGHLANDS: &[&str] = &[
-    "minecraft:windswept_hills",
-    "minecraft:windswept_gravelly_hills",
-    "minecraft:windswept_forest",
-    "minecraft:windswept_savanna",
-    "minecraft:stony_peaks",
-    "minecraft:snowy_slopes",
-    "minecraft:jagged_peaks",
-    "minecraft:frozen_peaks",
-    "minecraft:grove",
-    "minecraft:badlands",
-    "minecraft:eroded_badlands",
-    "minecraft:wooded_badlands",
-];
-const DEFAULT_NON_SURFACE: &[&str] = &[
-    "minecraft:deep_dark",
-    "minecraft:dripstone_caves",
-    "minecraft:lush_caves",
-    "minecraft:sulfur_caves",
-    "terraforged:cave",
-];
 
 /// One entry of the biome registry as plain data: a `Holder<Biome>` with its key (`name`, `namespace:path`), its
 /// climate record (base temperature, downfall, precipitation) and the biome tags it is in. `value` is the biome's
@@ -121,45 +84,16 @@ impl<T> RegistryBiome<T> {
         self.tags.contains(tag)
     }
 
-    /// `getPrecipitation(biome) == SNOW`: precipitation and a base temperature below 0.15.
+    /// `biome.getPrecipitation() == SNOW`. 1.18 stored the precipitation in the biome; 26.3 keeps only
+    /// `hasPrecipitation` and decides snow per position, so this is Reimagined's position-free rule: precipitation
+    /// and a base temperature below 0.15 (vanilla's snow threshold, which is how 1.18's biomes set it).
     fn snowy(&self) -> bool {
         self.has_precipitation && self.temperature < 0.15
     }
 
-    /// `isNonSurface`: the `terraforged:non_surface` tag (with its bundled defaults), or a `cave/…` / `…_caves` path.
-    pub(super) fn is_non_surface(&self) -> bool {
-        let path = identifier(&self.name).1;
-        self.is(NON_SURFACE)
-            || DEFAULT_NON_SURFACE.contains(&self.name.as_ref())
-            || path.starts_with("cave/")
-            || path.ends_with("_caves")
-    }
-
-    /// `isWaterPlaced`: the ocean, deep ocean, river and beach tags, or `minecraft:stony_shore` (`POSITIONAL`).
-    fn is_water_placed(&self) -> bool {
-        self.is(IS_OCEAN)
-            || self.is(IS_DEEP_OCEAN)
-            || self.is(IS_RIVER)
-            || self.is(IS_BEACH)
-            || identifier(&self.name) == ("minecraft", "stony_shore")
-    }
-
-    /// `isClimateBiome`: neither a cave biome nor one the override places by position.
-    fn is_climate_biome(&self) -> bool {
-        !self.is_non_surface() && !self.is_water_placed()
-    }
-
-    fn is_wetland(&self) -> bool {
-        self.is(WETLAND) || DEFAULT_WETLANDS.contains(&self.name.as_ref())
-    }
-
-    fn is_highland(&self) -> bool {
-        self.is(HIGHLAND) || DEFAULT_HIGHLANDS.contains(&self.name.as_ref())
-    }
-
     /// `BiomeUtil.getType`: the first of the badlands/desert-village, savanna, jungle, taiga (snowy → tundra) and
-    /// forest (snowy → tundra, downfall ≥ 0.8 → temperate rainforest) tags, else `getByClimate`: the base temperature
-    /// normalized over -0.7..1.2 and the downfall over 0..1, looked up in Reimagined's clamped `BiomeType.get`.
+    /// forest (snowy → tundra, downfall ≥ 0.8 → temperate rainforest) tags, else grassland. A biome with none of
+    /// these tags, a mod biome's usual case, is grassland whatever its climate.
     pub fn climate_type(&self) -> BiomeType {
         if self.is(IS_BADLANDS) || self.is(HAS_VILLAGE_DESERT) {
             BiomeType::Desert
@@ -182,22 +116,36 @@ impl<T> RegistryBiome<T> {
                 BiomeType::TemperateForest
             }
         } else {
-            let temperature = normalize(self.temperature, MIN_TEMPERATURE, MAX_TEMPERATURE);
-            let moisture = normalize(self.downfall, 0.0, 1.0);
-            BiomeType::at_climate_clamped(temperature, moisture)
+            BiomeType::Grassland
         }
     }
 }
 
-/// `BiomeUtil.normalize` (f32; NaN passes through).
-fn normalize(value: f32, minimum: f32, maximum: f32) -> f32 {
-    let t = (value - minimum) / (maximum - minimum);
-    if t < 0.0 { 0.0 } else { java_min(t, 1.0) }
+/// `type.name().toLowerCase(Locale.ROOT)`: the path of the climate file `terraforged:<name>` (`BiomeTypeHolder`).
+fn climate_name(climate: BiomeType) -> &'static str {
+    match climate {
+        BiomeType::TropicalRainforest => "tropical_rainforest",
+        BiomeType::Savanna => "savanna",
+        BiomeType::Desert => "desert",
+        BiomeType::TemperateRainforest => "temperate_rainforest",
+        BiomeType::TemperateForest => "temperate_forest",
+        BiomeType::Grassland => "grassland",
+        BiomeType::ColdSteppe => "cold_steppe",
+        BiomeType::Steppe => "steppe",
+        BiomeType::Taiga => "taiga",
+        BiomeType::Tundra => "tundra",
+        BiomeType::Alpine => "alpine",
+    }
 }
 
-/// `Identifier.parse`'s split: `(namespace, path)`, the namespace `minecraft` when there is no `:`.
+/// `Identifier.parse`'s split: `(namespace, path)`, the namespace `minecraft` when there is no `:` or nothing
+/// before it (`:plains` is `minecraft:plains`, as `Identifier.parse` and 1.18's `new ResourceLocation` read it).
 pub(super) fn identifier(name: &str) -> (&str, &str) {
-    name.split_once(':').unwrap_or(("minecraft", name))
+    match name.split_once(':') {
+        Some(("", path)) => ("minecraft", path),
+        Some(split) => split,
+        None => ("minecraft", name),
+    }
 }
 
 /// `BiomeUtil.BIOME_SORTER` (`Identifier.compareTo`): the path first, then the namespace, each by
@@ -264,8 +212,12 @@ fn open_hash_order(hashes: &[i32]) -> Vec<usize> {
 /// One weight of a climate file (`data/terraforged/worldgen/climate/<climate>.json`, a `ClimateType`): `biome` is
 /// the key as `Identifier.parse` reads it (no namespace = `minecraft`; `forge:registry_name` is skipped, as the
 /// codec does). Pass a file's entries in file order, one per JSON key; where two keys name one biome (`plains` and
-/// `minecraft:plains`), the later key's weight wins. The pool takes each file's biomes in `ClimateType`'s hash-map order, not
-/// file order (see [`RegistryBiomeMap::build`]).
+/// `minecraft:plains`), the later key's weight wins. The pool takes each file's biomes in `ClimateType`'s hash-map
+/// order, not file order (see [`RegistryBiomeMap::build`]). TerraForged's own climate files are all empty (`{}`).
+///
+/// Not represented: keys `Identifier.parse` rejects (the codec throws; whoever decodes the files must refuse them),
+/// and files named after no climate type (`terraforged:foo`): Java adds their biomes to the overworld list (and throws
+/// on an unknown one) but gives them no pool.
 #[derive(Clone)]
 pub struct ClimateWeight {
     pub climate: BiomeType,
@@ -273,39 +225,44 @@ pub struct ClimateWeight {
     pub weight: f32,
 }
 
-/// `BiomeMapManager`: the overworld biome list (`Source.possibleBiomes`) and the three pool maps.
+/// `BiomeMapManager`: the overworld biome list (`getOverworldBiomes`, `Source.possibleBiomes`) and one weighted
+/// pool per climate (`getBiomeMap`).
 pub struct RegistryBiomeMap<T> {
     pub overworld: Vec<Arc<T>>,
-    pub wet: BiomePools<T>,
-    pub dry: BiomePools<T>,
-    pub highland: BiomePools<T>,
+    pub pools: BiomePools<T>,
 }
 
 impl<T> RegistryBiomeMap<T> {
-    /// `new BiomeMapManager(access)` over `entries` (the biome registry) and `configured` (the climate files).
+    /// `new BiomeMapManager(access)` over `entries` (the biome registry, in any order: nothing below depends on it)
+    /// and `configured` (the climate files).
     ///
-    /// - `overworld`: every `minecraft:is_overworld` biome plus every registry biome a climate file names, sorted by
+    /// - `overworld`: every `minecraft:is_overworld` biome plus every biome a climate file names, sorted by
     ///   `BIOME_SORTER` (path, then namespace).
-    /// - `wet` (`getBiomeMap`): per climate type, first its file's biomes that are in the registry (others are
-    ///   skipped), with their weights, in the file's hash-map order; then, in `overworld` order at weight 1, every
-    ///   biome no file names that `isClimateBiome` (not a cave or water biome), in its `getType` climate. Then empty
-    ///   climates borrow the nearest one's pool ([`BiomePools::fill_empty_climates`]).
-    /// - `dry`: each pool without its wetland biomes, weights 1; a climate left with none keeps its wet pool.
-    /// - `highland`: each pool's highland biomes only, weights 1; climates left with none borrow, as above.
-    pub fn build(entries: &[RegistryBiome<T>], configured: &[ClimateWeight]) -> Self {
-        let mut overworld: Vec<_> = entries
-            .iter()
-            .filter(|entry| entry.is(IS_OVERWORLD))
-            .collect();
-        let mut registered = BTreeSet::new();
-        let mut weighted: [Vec<(Arc<T>, f32)>; 11] = std::array::from_fn(|_| Vec::new());
-
-        for climate in BiomeType::VALUES {
-            // The file as `ClimateType`'s `Object2FloatOpenHashMap<Identifier>`: one entry per key, last weight.
+    /// - `pools`: every climate type has a pool. First its file's biomes with their weights, in the file's hash-map
+    ///   order; then, in `overworld` order at weight 1, every biome no file names, in its [`climate_type`] (untagged
+    ///   biomes are grassland). Ocean, river, beach and cave biomes are not filtered out, and an empty pool stays
+    ///   empty: no climate borrows another's biomes.
+    ///
+    /// `Err` with the first key (`namespace:path`) a climate file names that the registry lacks, where Java's
+    /// `getHolderOrThrow` throws: files in the climate registry's order (26.3 loads data-driven registries in
+    /// `Identifier` order, so `terraforged:<type>` by type name), each in its hash-map order.
+    ///
+    /// [`climate_type`]: RegistryBiome::climate_type
+    pub fn build(
+        entries: &[RegistryBiome<T>],
+        configured: &[ClimateWeight],
+    ) -> Result<Self, Arc<str>> {
+        let find = |name: &str| {
+            let key = identifier(name);
+            entries.iter().find(|entry| identifier(&entry.name) == key)
+        };
+        // Each file as `ClimateType`'s `Object2FloatOpenHashMap<Identifier>` (one entry per key, the last weight),
+        // in its iteration order.
+        let files: [Vec<(&str, f32)>; 11] = std::array::from_fn(|climate| {
             let mut file: Vec<(&str, f32)> = Vec::new();
             for assignment in configured
                 .iter()
-                .filter(|a| a.climate == climate && a.biome.as_ref() != CLIMATE_IGNORE)
+                .filter(|a| a.climate as usize == climate && a.biome.as_ref() != CLIMATE_IGNORE)
             {
                 let key = identifier(&assignment.biome);
                 match file.iter_mut().find(|(name, _)| identifier(name) == key) {
@@ -314,15 +271,25 @@ impl<T> RegistryBiomeMap<T> {
                 }
             }
             let hashes: Vec<_> = file.iter().map(|(name, _)| identifier_hash(name)).collect();
-            for index in open_hash_order(&hashes) {
-                let (name, weight) = file[index];
-                let key = identifier(name);
-                let Some(entry) = entries.iter().find(|entry| identifier(&entry.name) == key)
-                else {
-                    continue;
-                };
-                weighted[climate as usize].push((Arc::clone(&entry.value), weight));
-                registered.insert(Arc::clone(&entry.name));
+            open_hash_order(&hashes)
+                .into_iter()
+                .map(|index| file[index])
+                .collect()
+        });
+
+        // `getOverworldBiomes`: the tagged biomes, then each file's biomes (climate registry order), then the sort.
+        let mut overworld: Vec<_> = entries
+            .iter()
+            .filter(|entry| entry.is(IS_OVERWORLD))
+            .collect();
+        let mut registry_order = BiomeType::VALUES;
+        registry_order.sort_by_key(|climate| climate_name(*climate));
+        let mut resolved: [Vec<(&RegistryBiome<T>, f32)>; 11] = std::array::from_fn(|_| Vec::new());
+        for climate in registry_order {
+            for &(name, weight) in &files[climate as usize] {
+                let (namespace, path) = identifier(name);
+                let entry = find(name).ok_or_else(|| Arc::from(format!("{namespace}:{path}")))?;
+                resolved[climate as usize].push((entry, weight));
                 if !overworld
                     .iter()
                     .any(|known| Arc::ptr_eq(&known.value, &entry.value))
@@ -331,80 +298,49 @@ impl<T> RegistryBiomeMap<T> {
                 }
             }
         }
-
         overworld.sort_by(|left, right| identifier_order(&left.name, &right.name));
-        for entry in &overworld {
-            if registered.contains(&entry.name) || !entry.is_climate_biome() {
-                continue;
+
+        // `getWeightsMap`.
+        let mut registered = BTreeSet::new();
+        let mut weighted: [Vec<(Arc<T>, f32)>; 11] = std::array::from_fn(|_| Vec::new());
+        for climate in BiomeType::VALUES {
+            for &(entry, weight) in &resolved[climate as usize] {
+                weighted[climate as usize].push((Arc::clone(&entry.value), weight));
+                registered.insert(Arc::clone(&entry.name));
             }
-            weighted[entry.climate_type() as usize].push((Arc::clone(&entry.value), 1.0));
+        }
+        for entry in &overworld {
+            if !registered.contains(&entry.name) {
+                weighted[entry.climate_type() as usize].push((Arc::clone(&entry.value), 1.0));
+            }
         }
 
-        let mut wet = BiomePools::default();
+        // `buildBiomeMap`.
+        let mut pools = BiomePools::default();
         for climate in BiomeType::VALUES {
             let (values, weights): (Vec<_>, Vec<_>) =
                 std::mem::take(&mut weighted[climate as usize])
                     .into_iter()
                     .unzip();
-            wet.insert(climate, Arc::new(WeightMap::new(values, &weights)));
+            pools.insert(climate, Arc::new(WeightMap::new(values, &weights)));
         }
-        wet.fill_empty_climates();
 
-        let dry = filtered_pools(&wet, entries, |entry| !entry.is_wetland(), true);
-        let mut highland = filtered_pools(&wet, entries, RegistryBiome::is_highland, false);
-        highland.fill_empty_climates();
-
-        Self {
+        Ok(Self {
             overworld: overworld
                 .into_iter()
                 .map(|entry| Arc::clone(&entry.value))
                 .collect(),
-            wet,
-            dry,
-            highland,
-        }
+            pools,
+        })
     }
-}
-
-/// `BiomeMapManager.filtered`: each climate's pool rebuilt from the biomes that pass `keep`, weights 1. A climate left
-/// with none keeps the very same pool when `keep_original_if_empty`, else has no entry.
-fn filtered_pools<T>(
-    source: &BiomePools<T>,
-    entries: &[RegistryBiome<T>],
-    keep: impl Fn(&RegistryBiome<T>) -> bool,
-    keep_original_if_empty: bool,
-) -> BiomePools<T> {
-    let mut result = BiomePools::default();
-    for climate in BiomeType::VALUES {
-        let Some(original) = source.get(climate) else {
-            continue;
-        };
-        let kept: Vec<_> = original
-            .values()
-            .iter()
-            .filter(|value| {
-                entries
-                    .iter()
-                    .find(|entry| Arc::ptr_eq(&entry.value, value))
-                    .is_some_and(&keep)
-            })
-            .cloned()
-            .collect();
-        if kept.is_empty() {
-            if keep_original_if_empty {
-                result.insert(climate, Arc::clone(original));
-            }
-        } else {
-            let weights = vec![1.0; kept.len()];
-            result.insert(climate, Arc::new(WeightMap::new(kept, &weights)));
-        }
-    }
-    result
 }
 
 impl RegistryBiomeMap<BiomeId> {
     /// [`RegistryBiomeMap::build`] over Horizon's loaded biome registry ([`registry_entries`]).
-    pub fn from_generator_data(data: &GeneratorData, configured: &[ClimateWeight]) -> Self {
+    pub fn from_generator_data(
+        data: &GeneratorData,
+        configured: &[ClimateWeight],
+    ) -> Result<Self, Arc<str>> {
         Self::build(&registry_entries(data), configured)
     }
 }
@@ -438,115 +374,160 @@ pub(super) fn registry_entries(data: &GeneratorData) -> Vec<RegistryBiome<BiomeI
 mod tests {
     use super::*;
 
+    fn spec<T>(value: T, name: &str, t: f32, d: f32, p: bool, tags: &[&str]) -> RegistryBiome<T> {
+        let tags = tags.iter().map(|tag| Arc::<str>::from(*tag));
+        RegistryBiome::new(value, name, t, d, p, tags)
+    }
+
+    fn names<T: Clone>(map: &RegistryBiomeMap<T>, climate: BiomeType) -> Vec<T> {
+        let pool = map.pools.get(climate).unwrap();
+        pool.values()
+            .iter()
+            .map(|value| (**value).clone())
+            .collect()
+    }
+
     #[test]
     fn pools_share_one_arc_per_biome() {
         let forest = [IS_OVERWORLD, IS_FOREST];
         let entries = [
-            spec("swamp", "minecraft:swamp", 0.8, 0.9, true, &forest),
-            spec(
-                "hills",
-                "minecraft:windswept_hills",
-                0.7,
-                0.9,
-                true,
-                &forest,
-            ),
+            spec("swamp", "minecraft:swamp", 0.8, 0.9, true, &[IS_OVERWORLD]),
+            spec("dark", "minecraft:dark_forest", 0.7, 0.9, true, &forest),
         ];
-        let map = RegistryBiomeMap::build(&entries, &[]);
-        let wet = map.wet.get(BiomeType::TemperateRainforest).unwrap();
-        let dry = map.dry.get(BiomeType::TemperateRainforest).unwrap();
-        let highland = map.highland.get(BiomeType::TemperateRainforest).unwrap();
-        assert!(Arc::ptr_eq(&wet.values()[1], &dry.values()[0]));
-        assert!(Arc::ptr_eq(&wet.values()[1], &highland.values()[0]));
-        assert!(Arc::ptr_eq(&map.overworld[1], &entries[1].value));
+        let configured = [ClimateWeight {
+            climate: BiomeType::Desert,
+            biome: Arc::from("swamp"),
+            weight: 2.0,
+        }];
+        let map = RegistryBiomeMap::build(&entries, &configured).unwrap();
+        let desert = map.pools.get(BiomeType::Desert).unwrap();
+        let rainforest = map.pools.get(BiomeType::TemperateRainforest).unwrap();
+        assert!(Arc::ptr_eq(&desert.values()[0], &entries[0].value));
+        assert!(Arc::ptr_eq(&rainforest.values()[0], &entries[1].value));
+        assert!(Arc::ptr_eq(&map.overworld[0], &entries[1].value));
+        assert!(Arc::ptr_eq(&map.overworld[1], &entries[0].value));
     }
 
-    // ---- BiomeRegistryOracle (`.local/terraforged/oracles/biome_registry/`): Reimagined's real BiomeMapManager ----
+    /// 6dd607eb's `getType` reads only tags: a mod biome with none of them is grassland (weight 1), whatever its
+    /// temperature and downfall, and a biome without `minecraft:is_overworld` is in no pool unless a climate file
+    /// names it. Oceans and caves stay in the pools, and empty climates stay empty.
+    #[test]
+    fn untagged_mod_biomes_are_grassland_and_nothing_is_filtered() {
+        let named = |name: &str, t, d, tags: &[&str]| spec(name.to_owned(), name, t, d, true, tags);
+        let entries = [
+            named("mod:frozen_waste", -1.0, 0.0, &[IS_OVERWORLD]),
+            named("mod:hot_jungle", 2.0, 1.0, &[IS_OVERWORLD]),
+            named("mod:not_overworld", 0.8, 0.4, &[]),
+            named(
+                "minecraft:ocean",
+                0.5,
+                0.5,
+                &[IS_OVERWORLD, "minecraft:is_ocean"],
+            ),
+            named("minecraft:lush_caves", 0.5, 0.5, &[IS_OVERWORLD]),
+            named("mod:snowy_wood", 0.0, 0.5, &[IS_OVERWORLD, IS_FOREST]),
+        ];
+        let map = RegistryBiomeMap::build(&entries, &[]).unwrap();
+        assert_eq!(
+            names(&map, BiomeType::Grassland),
+            [
+                "mod:frozen_waste",
+                "mod:hot_jungle",
+                "minecraft:lush_caves",
+                "minecraft:ocean"
+            ]
+        );
+        assert_eq!(names(&map, BiomeType::Tundra), ["mod:snowy_wood"]);
+        for climate in [BiomeType::Desert, BiomeType::Alpine, BiomeType::Steppe] {
+            assert!(map.pools.get(climate).unwrap().is_empty());
+        }
+        assert_eq!(map.overworld.len(), 5);
+    }
+
+    #[test]
+    fn identifiers_parse_like_java() {
+        assert_eq!(identifier("plains"), ("minecraft", "plains"));
+        assert_eq!(identifier(":plains"), ("minecraft", "plains"));
+        assert_eq!(identifier("a:b"), ("a", "b"));
+        assert_eq!(identifier("minecraft:"), ("minecraft", ""));
+    }
+
+    // ---- BiomeMapManagerOracle (`.local/terraforged/oracles/biome_registry/6dd607eb/`): 6dd607eb's real
+    // BiomeMapManager over real 26.3 registries ----
 
     /// The oracle's `H` lines: (section, lines, FNV-1a 64 of the section's lines).
-    const JAVA: [(&str, usize, u64); 6] = [
-        ("vanilla", 35, 0xcf8a_bfce_a2f1_bc9b),
-        ("modded", 35, 0xc7cb_ca0d_9d1e_1b39),
-        ("files", 35, 0xc3b7_7244_4eeb_7c1d),
-        ("untagged", 35, 0x2151_f6a2_4812_3642),
-        ("none", 35, 0x44c1_d955_2609_16a0),
-        ("random", 140_000, 0xb70e_6528_e966_a90e),
+    const JAVA: [(&str, usize, u64); 7] = [
+        ("vanilla", 13, 0x2a9d_716a_29c1_de20),
+        ("terraforged", 13, 0xbf2b_3444_bf56_4990),
+        ("modded", 13, 0xc970_8345_b412_5596),
+        ("backwards", 13, 0xc970_8345_b412_5596),
+        ("files", 13, 0x3eda_3296_c77e_8bf5),
+        ("unknown", 8, 0x9ef5_fac6_822c_cd0f),
+        ("random", 30_354, 0xdde3_2f86_1b67_4819),
     ];
-    const RANDOM_CASES: i64 = 4000;
+    const RANDOM_CASES: u64 = 3000;
 
-    struct Section(usize, u64, String);
+    struct Section(usize, u64);
     impl Section {
         fn new() -> Self {
-            Self(0, 0xcbf2_9ce4_8422_2325, String::new())
+            Self(0, 0xcbf2_9ce4_8422_2325)
         }
         fn emit(&mut self, line: String) {
             for byte in line.bytes().chain([b'\n']) {
                 self.1 = (self.1 ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
             }
             self.0 += 1;
-            self.2 += &line;
-            self.2.push('\n');
         }
         fn check(&self, section: &str) {
-            if let Some(path) = std::env::var_os("TF_BIOME_REGISTRY_DUMP") {
-                let path = std::path::Path::new(&path).join(section);
-                std::fs::write(path, &self.2).unwrap();
-            }
             let java = JAVA.iter().find(|(name, ..)| *name == section).unwrap();
             assert_eq!((self.0, self.1), (java.1, java.2), "{section}");
         }
-        fn case<T>(&mut self, case: &str, map: &RegistryBiomeMap<T>, name: impl Fn(&T) -> String) {
+        fn case<T>(
+            &mut self,
+            case: &str,
+            map: Result<RegistryBiomeMap<T>, Arc<str>>,
+            name: impl Fn(&T) -> String,
+        ) {
             self.emit(format!("C {case}"));
+            let map = match map {
+                Ok(map) => map,
+                Err(key) => return self.emit(format!("X {key}")),
+            };
             let mut line = String::from("O");
             for value in &map.overworld {
                 line = line + " " + &name(value);
             }
             self.emit(line);
-            for (kind, pools) in [("w", &map.wet), ("d", &map.dry), ("h", &map.highland)] {
-                for climate in BiomeType::VALUES {
-                    let Some(pool) = pools.get(climate) else {
-                        self.emit(format!("P {kind} {} -", climate as usize));
-                        continue;
-                    };
-                    let share = BiomeType::VALUES
-                        .iter()
-                        .position(|c| pools.get(*c).is_some_and(|p| Arc::ptr_eq(p, pool)))
-                        .unwrap();
-                    let mut line = format!("P {kind} {} s{share}", climate as usize);
-                    if kind == "d" && map.wet.get(climate).is_some_and(|w| Arc::ptr_eq(w, pool)) {
-                        line.push('w');
-                    }
-                    for value in pool.values() {
-                        line += &format!(" {}={:x}", name(value), pool.band(value) as u64);
-                    }
-                    self.emit(line);
+            for climate in BiomeType::VALUES {
+                let pool = map.pools.get(climate).unwrap();
+                let mut line = format!("P {}", climate as usize);
+                for value in pool.values() {
+                    line += &format!(" {}={:x}", name(value), pool.band(value) as u64);
                 }
+                self.emit(line);
             }
         }
     }
 
-    fn spec<T>(value: T, name: &str, t: f32, d: f32, p: bool, tags: &[&str]) -> RegistryBiome<T> {
-        let tags = tags.iter().map(|tag| Arc::<str>::from(*tag));
-        RegistryBiome::new(value, name, t, d, p, tags)
-    }
-
-    /// The oracle's `MODS`: name, temperature, downfall, precipitation, tags (o overworld, f forest, t taiga, c ocean,
-    /// h highland, w wetland).
+    /// The oracle's `MODS`: name, temperature, downfall, precipitation, tags (o overworld, f forest, t taiga,
+    /// j jungle, c ocean, h `terraforged:highland`, w `terraforged:wetland`: tags 6dd607eb doesn't read).
     const MODS: &str = "terralith:alpine_grove -0.2 0.5 1 o, terralith:sandstone_valley 1.5 0.0 0 o, \
         terralith:cave/frostfire_caves 0.0 0.5 1 o, terralith:moonlight_grove 0.6 0.85 1 of, \
         terralith:skylands 0.5 0.5 1 oh, terralith:yellowstone 0.9 0.4 1 o, biomesoplenty:bayou 0.8 0.95 1 ow, \
         biomesoplenty:tundra -0.3 0.3 1 o, biomesoplenty:cold_desert 0.0 0.0 0 o, biomesoplenty:lagoon 0.5 0.5 1 oc, \
-        biomesoplenty:crag 0.3 0.2 1 oth, biomesoplenty:not_overworld 0.8 0.4 1 -, a:plains 0.8 0.4 1 o";
+        biomesoplenty:crag 0.3 0.2 1 ot, biomesoplenty:snowy_crag 0.1 0.2 1 ot, biomesoplenty:not_overworld 0.8 0.4 1 -, \
+        zz:jungle_x 0.9 0.9 1 oj, a:plains 0.8 0.4 1 o, untagged:meadow 0.5 0.8 1 -";
 
     fn mods() -> impl Iterator<Item = (&'static str, f32, f32, bool, Vec<&'static str>)> {
         let tag = |code| match code {
             'o' => IS_OVERWORLD,
             'f' => IS_FOREST,
             't' => IS_TAIGA,
-            'c' => IS_OCEAN,
-            'h' => HIGHLAND,
-            'w' => WETLAND,
-            _ => "minecraft:other",
+            'j' => IS_JUNGLE,
+            'c' => "minecraft:is_ocean",
+            'h' => "terraforged:highland",
+            'w' => "terraforged:wetland",
+            _ => unreachable!(),
         };
         MODS.split(", ").map(move |row| {
             let f: Vec<_> = row.split_whitespace().collect();
@@ -570,8 +551,8 @@ mod tests {
         entries.iter().map(weight).collect()
     }
 
-    /// The oracle's `files()`: desert (unknown, bare, ignored and non-overworld keys), a 30-entry grassland (the hash
-    /// map grows), an empty taiga file and a one-entry tundra file.
+    /// The oracle's `files`: desert (bare, `:`-prefixed, ignored, non-overworld and untagged keys, one biome under
+    /// three keys), a 30-entry grassland (the hash map grows), a one-entry tundra file and an empty taiga file.
     fn files() -> Vec<ClimateWeight> {
         let grassland = "plains sunflower_plains meadow forest birch_forest dark_forest flower_forest cherry_grove \
             savanna taiga swamp jungle badlands desert snowy_plains ice_spikes grove stony_peaks windswept_hills \
@@ -594,10 +575,11 @@ mod tests {
             ("terralith:sandstone_valley", 3.0),
             ("minecraft:desert", 5.0),
             ("plains", 1.0),
-            ("missingmod:foo", 2.0),
             (CLIMATE_IGNORE, 7.0),
             ("biomesoplenty:not_overworld", 0.5),
+            (":plains", 2.0),
             ("minecraft:plains", 4.0),
+            ("untagged:meadow", 1.5),
         ];
         let mut all = weights(BiomeType::Desert, &desert);
         all.extend(weights(BiomeType::Grassland, &grassland));
@@ -609,7 +591,7 @@ mod tests {
     }
 
     #[test]
-    fn vanilla_and_modded_registries_match_reimagined_java() {
+    fn vanilla_and_modded_registries_match_6dd607eb_java() {
         let root = std::env::var_os("HORIZON_TEST_RESOURCES")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
@@ -630,32 +612,49 @@ mod tests {
             names.push(name.to_owned());
         }
         let name = |id: &BiomeId| names[id.0 as usize].clone();
-        let strip = |keep: bool| -> Vec<_> {
-            let mut entries = vanilla.clone();
-            for entry in &mut entries {
-                entry
-                    .tags
-                    .retain(|tag| keep && tag.as_ref() == IS_OVERWORLD);
-            }
-            entries
-        };
-        let cases: [(&str, &[RegistryBiome<BiomeId>], Vec<ClimateWeight>); 5] = [
-            ("vanilla", &vanilla, Vec::new()),
-            ("modded", &modded, Vec::new()),
-            ("files", &modded, files()),
-            ("untagged", &strip(true), Vec::new()),
-            ("none", &strip(false), Vec::new()),
+
+        let mut section = Section::new();
+        section.case(
+            "vanilla",
+            RegistryBiomeMap::from_generator_data(&data, &[]),
+            name,
+        );
+        section.check("vanilla");
+        // TerraForged's own climate files are all `{}`: the same pools.
+        let mut section = Section::new();
+        section.case("terraforged", RegistryBiomeMap::build(&vanilla, &[]), name);
+        section.check("terraforged");
+        let mut section = Section::new();
+        section.case("modded", RegistryBiomeMap::build(&modded, &[]), name);
+        section.check("modded");
+        let mut backwards = modded.clone();
+        backwards.reverse();
+        let mut section = Section::new();
+        section.case("modded", RegistryBiomeMap::build(&backwards, &[]), name);
+        section.check("backwards");
+        let mut section = Section::new();
+        section.case("files", RegistryBiomeMap::build(&modded, &files()), name);
+        section.check("files");
+
+        let unknown: [&[(BiomeType, &str)]; 4] = [
+            &[(BiomeType::Desert, "missingmod:foo")],
+            &[
+                (BiomeType::Desert, "missingmod:foo"),
+                (BiomeType::Alpine, "zz:missing"),
+            ],
+            &[(BiomeType::Tundra, "a:x"), (BiomeType::ColdSteppe, "b:y")],
+            &[(BiomeType::Grassland, ":nope")],
         ];
-        for (case, entries, configured) in cases {
-            let mut section = Section::new();
-            let map = if case == "vanilla" {
-                RegistryBiomeMap::from_generator_data(&data, &configured)
-            } else {
-                RegistryBiomeMap::build(entries, &configured)
-            };
-            section.case(case, &map, name);
-            section.check(case);
+        let mut section = Section::new();
+        for (index, extra) in unknown.iter().enumerate() {
+            let mut configured = files();
+            for &(climate, biome) in *extra {
+                configured.extend(weights(climate, &[(biome, 1.0)]));
+            }
+            let map = RegistryBiomeMap::build(&modded, &configured);
+            section.case(&format!("unknown{index}"), map, name);
         }
+        section.check("unknown");
     }
 
     /// The oracle's `Gen` LCG.
@@ -671,7 +670,7 @@ mod tests {
     }
 
     #[test]
-    fn random_registries_match_reimagined_java() {
+    fn random_registries_match_6dd607eb_java() {
         let ns: Vec<_> = "minecraft terralith biomesoplenty a zz terraforged"
             .split(' ')
             .collect();
@@ -680,38 +679,29 @@ mod tests {
             x_caves_y a-b a.b a_b ab cave/ caves"
             .split_whitespace()
             .collect();
-        let tags = [
+        let tags_pool = [
             IS_BADLANDS,
             HAS_VILLAGE_DESERT,
             IS_SAVANNA,
             IS_JUNGLE,
             IS_TAIGA,
             IS_FOREST,
-            IS_OCEAN,
+            "minecraft:is_ocean",
+            "terraforged:non_surface",
+            "minecraft:other",
         ];
-        let tags = tags.into_iter().chain([
-            IS_DEEP_OCEAN,
-            IS_RIVER,
-            IS_BEACH,
-            NON_SURFACE,
-            WETLAND,
-            HIGHLAND,
-        ]);
-        let tags_pool: Vec<_> = tags.chain(["minecraft:other"]).collect();
-        // Java float literals (`Float.MIN_VALUE` is 1e-45's nearest float).
+        // Java's `Float.parseFloat` of the oracle's literals.
         let parse =
             |text: &str| -> Vec<f32> { text.split(' ').map(|v| v.parse().unwrap()).collect() };
         let floats = parse(
             "-2.0 -0.7 -0.5 0.0 -0.0 0.1 0.14999999 0.15 0.15000001 0.2 0.25 0.3 0.4 0.5 0.6 0.7 0.79999995 \
-             0.8 0.8000001 0.9 0.95 1.0 1.2 1.5 2.0 NaN inf -inf 1e-45",
+             0.8 0.8000001 0.9 0.95 1.0 1.2 1.5 2.0 NaN Infinity -Infinity 1.4E-45",
         );
-        let weights = parse("1 5 0 0.5 3 2.5 NaN 1e-45 100 -1");
+        let weights = parse("1 5 0 0.5 3 2.5 NaN 1.4E-45 100 -1");
         let mut section = Section::new();
         for case in 0..RANDOM_CASES {
-            let mut g = Gen((case as u64)
-                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-                .wrapping_add(1));
-            let mut name =
+            let mut g = Gen(case.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(1));
+            let name =
                 |g: &mut Gen| format!("{}:{}", ns[g.next(ns.len())], paths[g.next(paths.len())]);
             let mut specs: Vec<RegistryBiome<String>> = Vec::new();
             for _ in 0..g.next(25) {
@@ -727,33 +717,37 @@ mod tests {
                     specs.push(spec(biome.clone(), &biome, t, d, p, &tags));
                 }
             }
-            let mut configured = Vec::new();
+            let mut configured: Vec<ClimateWeight> = Vec::new();
             for climate in BiomeType::VALUES {
-                let file = configured.len();
                 let count = match g.next(5) {
                     0 | 1 => 0,
                     4 => 20 + g.next(25),
                     _ => 1 + g.next(6),
                 };
+                if count == 0 && g.next(2) == 0 {
+                    continue; // no file at all: the same as an empty one
+                }
+                let file = configured.len();
                 for _ in 0..count {
-                    let pick = g.next(8);
-                    let biome = if pick == 0 {
+                    let pick = g.next(16);
+                    let biome = if pick == 0 || specs.is_empty() {
                         CLIMATE_IGNORE.to_owned()
-                    } else if pick < 4 && !specs.is_empty() {
+                    } else if pick == 1 && g.next(16) == 0 {
+                        name(&mut g)
+                    } else {
                         let biome = specs[g.next(specs.len())].name.to_string();
                         match biome.strip_prefix("minecraft:") {
-                            Some(path) if g.next(2) == 0 => path.to_owned(),
-                            _ => biome,
+                            Some(path) => match g.next(3) {
+                                0 => path.to_owned(),
+                                1 => format!(":{path}"),
+                                _ => biome,
+                            },
+                            None => biome,
                         }
-                    } else {
-                        name(&mut g)
                     };
                     let weight = weights[g.next(weights.len())];
-                    // One entry per JSON key, as the oracle's climate files.
-                    if !configured[file..]
-                        .iter()
-                        .any(|w: &ClimateWeight| *w.biome == *biome)
-                    {
+                    // One entry per JSON key (`JsonObject.has`).
+                    if !configured[file..].iter().any(|w| *w.biome == *biome) {
                         configured.push(ClimateWeight {
                             climate,
                             biome: Arc::from(biome),
@@ -763,7 +757,7 @@ mod tests {
                 }
             }
             let map = RegistryBiomeMap::build(&specs, &configured);
-            section.case(&case.to_string(), &map, String::clone);
+            section.case(&case.to_string(), map, String::clone);
         }
         section.check("random");
     }
