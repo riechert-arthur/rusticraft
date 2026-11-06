@@ -104,7 +104,9 @@ impl<N: NoiseGenerator> TerrainDataHandle<N> {
 
 impl<N: NoiseGenerator> TerrainDataHandle<N> {
     /// Reads the shared data (Java's plain field reads), waiting for a writer. A panic under a write guard does not
-    /// poison it: the next terrain stage starts again from the generated heights ([`Self::write_generated`]).
+    /// poison it: the next terrain stage starts again from the generated heights ([`Self::write_generated`]). Don't
+    /// hold a guard of an entry while the same thread runs a terrain stage on it: the stage's write would wait for it
+    /// forever (std's `RwLock` is not reentrant).
     pub fn read(&self) -> RwLockReadGuard<'_, TerrainData> {
         self.0.lock().read().unwrap_or_else(PoisonError::into_inner)
     }

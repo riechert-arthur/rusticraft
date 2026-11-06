@@ -232,7 +232,12 @@ impl TerraForgedGenerator {
     /// and `chunk.position()`. `stone`, `water` and `air` are the default states of `minecraft:stone`, `minecraft:water`
     /// and `minecraft:air` (`ChunkUtil.FILLER` and `StructureTerrain`'s `solid`/`air`).
     ///
-    /// `Err` where the chunk refuses a write, in either step; panics as [`Self::fill_from_noise`] does.
+    /// Run one of the two stages per chunk: [`Self::fill_from_noise`] on the same entry sets the generated heights back,
+    /// so mixing them would leave the later stages reading whichever ran last. Concurrent runs for one entry serialize
+    /// on its write guard and leave the same data. No guard of the entry may be held on the calling thread.
+    ///
+    /// `Err` where the chunk refuses a write, in either step, with the chunk and the entry's heights partly edited
+    /// (the next run starts again from the generated heights); panics as [`Self::fill_from_noise`] does.
     pub fn fill_from_noise_with_structures<B: TerrainBlockStates>(
         &self,
         chunk: &mut TerrainChunk<'_, B>,
@@ -937,6 +942,29 @@ q 3 -770 1240 3eafbae6 3f060470 135 135 134 134 134 0
         let mut plain_again = new_chunk();
         let plain_rerun = g.fill_from_noise(&mut plain_again, STONE, WATER).unwrap();
         assert_eq!(stage_state(&plain_rerun, &plain_again), plain_state);
+
+        // Concurrent runs serialize and leave the same chunk and heights.
+        thread::scope(|scope| {
+            let runs: Vec<_> = (0..4)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let mut chunk = new_chunk();
+                        let terrain = g
+                            .fill_from_noise_with_structures(
+                                &mut chunk,
+                                STONE,
+                                WATER,
+                                AIR,
+                                &structures,
+                            )
+                            .unwrap();
+                        digest(&chunk) == state.1 && terrain.ptr_eq(&cached)
+                    })
+                })
+                .collect();
+            assert!(runs.into_iter().all(|run| run.join().unwrap()));
+        });
+        assert_eq!(stage_state(&cached, &chunk), state);
 
         // The same two steps by hand on a freshly generated entry.
         g.drop_chunk(7, -2, 3);
