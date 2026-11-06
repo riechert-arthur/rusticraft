@@ -31,7 +31,7 @@
 use super::{Result, WorldGen, WorldPreset, read_saved_data, world_gen_settings, write_saved_data};
 use horizon_world::nbt::Tag;
 use horizon_world::worldgen::generator::terraforged_world_preset::{
-    GENERATOR_TYPE, PRESET, preset_json,
+    GENERATOR_TYPE, PRESET, overworld_type_json, preset_json,
 };
 use std::cell::Cell;
 use std::ops::ControlFlow;
@@ -153,7 +153,31 @@ fn write_terraforged(dir: &Path, seed: i64, options: WorldGen, flat: Option<Tag>
     if let Some(Tag::Compound(dimensions)) = settings.get_mut("dimensions") {
         dimensions.insert("minecraft:overworld".into(), overworld_stem());
     }
-    write_saved_data(dir, "world_gen_settings", settings)
+    write_saved_data(dir, "world_gen_settings", settings)?;
+    write_pack(dir)
+}
+
+/// The world's own data pack `datapacks/terraforged`, with TerraForged's taller overworld dimension type
+/// ([`overworld_type_json`], TerraForged's built-in pack's file): from y -64, 1024 blocks, so the generator's range,
+/// the level shapes and the synced `dimension_type` registry follow it as for any world pack (Horizon enables the
+/// packs in a world's folder unless `datapacks.json` disables them). TerraForged copies its whole built-in pack into
+/// every world the Create screen makes; only the dimension type is needed here (the rest is bundled), and only
+/// TerraForged worlds get it, so vanilla worlds keep 26.3's overworld.
+fn write_pack(dir: &Path) -> Result<()> {
+    let pack = dir.join("datapacks").join("terraforged");
+    let types = pack.join("data").join("minecraft").join("dimension_type");
+    std::fs::create_dir_all(&types)?;
+    let (major, _) = horizon_core::version::DATA_PACK_FORMAT;
+    let meta = serde_json::json!({
+        "pack": {
+            "description": "TerraForged's overworld",
+            "min_format": major,
+            "max_format": major,
+        }
+    });
+    std::fs::write(pack.join("pack.mcmeta"), meta.to_string())?;
+    std::fs::write(types.join("overworld.json"), overworld_type_json())?;
+    Ok(())
 }
 
 /// The overworld stem of TerraForged's world preset, as NBT.
@@ -270,6 +294,16 @@ mod tests {
         }
         assert!(!is_terraforged(&vanilla));
         assert_eq!(WorldGen::preset(&vanilla), "minecraft:normal");
+        // The world's own pack gives its overworld TerraForged's height; vanilla's has none.
+        let pack = dir.join("datapacks/terraforged/data/minecraft/dimension_type/overworld.json");
+        let written = std::fs::read_to_string(pack).unwrap();
+        assert_eq!(written, overworld_type_json());
+        let height = horizon_world::worldgen::overrides::LevelHeight::of_json(
+            &serde_json::from_str(&written).unwrap(),
+        )
+        .unwrap();
+        assert_eq!((height.min_y, height.height), (-64, 1024));
+        assert!(!vanilla.join("datapacks").exists());
         std::fs::remove_dir_all(&dir).unwrap();
         std::fs::remove_dir_all(&vanilla).unwrap();
     }

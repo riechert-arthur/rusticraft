@@ -462,11 +462,6 @@ impl SeededPipeline for TerraForgedPipeline {
             [1; 3],
         )
         .map_err(stage("surface"))?;
-        let write_max_y = generation
-            .min_y
-            .saturating_add(generation.height)
-            .saturating_sub(1)
-            .min(min.saturating_add(height).saturating_sub(1));
         let mut context = std::mem::take(&mut worker.terrain_context);
         let surface = build_surface(
             &mut chunk,
@@ -484,8 +479,10 @@ impl SeededPipeline for TerraForgedPipeline {
                 },
                 preliminary_surface: preliminary,
                 density_context: &mut context,
-                write_min_y: generation.min_y,
-                write_max_y,
+                // SurfaceSystem.buildSurface walks each column down from its own top: the
+                // whole level, not only the vanilla noise range.
+                write_min_y: min,
+                write_max_y: min + height - 1,
             },
             &vanilla.extensions,
         );
@@ -1012,8 +1009,9 @@ mod tests {
 
     #[test]
     fn the_terraforged_overworld_keeps_the_normal_build_range() {
-        // Only the build range is still the vanilla overworld's (TerraForged's levels are clipped to it); the
-        // blocks and biomes are TerraForged's now (see `terraforged_chunks_are_terraforged_and_repeatable`).
+        // Without the world's own pack (`datapacks/terraforged`, see `the_taller_overworld_keeps_terrain_above_320`)
+        // the build range is the vanilla overworld's (TerraForged's levels are clipped to it); the blocks and biomes
+        // are TerraForged's (see `terraforged_chunks_are_terraforged_and_repeatable`).
         let Some(data) = data() else { return };
         let seed = -4_172_144_997_902_289_642;
         let terraforged = OverworldGenerator::for_dimension(
@@ -1032,6 +1030,76 @@ mod tests {
         .unwrap();
         assert_eq!(terraforged.level(), normal.level());
         assert_eq!((terraforged.sea_level(), normal.sea_level()), (62, 63));
+    }
+
+    /// A TerraForged world's own pack (`client_world_type.rs`) gives the overworld TerraForged's dimension type:
+    /// the build range is -64..960, so terrain above 26.3's 320 is kept (filled, surfaced, in the heightmaps) and
+    /// the structure queries see it: `getBaseHeight` is not clipped at 320 and `getBaseColumn` reaches it.
+    #[test]
+    fn the_taller_overworld_keeps_terrain_above_320() {
+        use crate::worldgen::structure::{jigsaw::JigsawContext, start::StartContext};
+        let tall = |ov: &mut crate::worldgen::overrides::WorldgenOverrides| {
+            ov.set(
+                crate::worldgen::overrides::DIMENSION_TYPES,
+                "minecraft:overworld",
+                super::super::terraforged_world_preset::overworld_type_json().to_owned(),
+            )
+        };
+        let Some(normal_data) = data() else { return };
+        let mut ov = crate::worldgen::overrides::WorldgenOverrides::default();
+        tall(&mut ov);
+        let Some(data) = data_with(&ov) else { return };
+        // TerraForged's default levels seldom rise above 320 (the highest un-eroded height within 32768 blocks of
+        // the origin is about 310 to 350 for most seeds); seed 1234 has a peak near x -14848, z -32256.
+        let seed = 1234;
+        let (pipeline, overworld) = terraforged(&data, seed, false);
+        assert_eq!(overworld.level(), (-64, 1024));
+        assert_eq!(terraforged(&normal_data, seed, false).1.level(), (-64, 384));
+        // The peak's highest column, from the un-eroded height noise (a cheap read) on a 16-block grid.
+        let generator = &pipeline.generator;
+        let noise = generator.noise_generator();
+        let max_y = generator.levels().max_y as f32;
+        let height_at =
+            |(x, z): (i32, i32)| noise.height_noise(generator.seed(), x, z).unwrap() * max_y;
+        let (x, z) = (0..64 * 64)
+            .map(|i| (-14848 + (i % 64 - 32) * 16, -32256 + (i / 64 - 32) * 16))
+            .max_by(|a, b| height_at(*a).total_cmp(&height_at(*b)))
+            .unwrap();
+        assert!(height_at((x, z)) > 340.0, "{}", height_at((x, z)));
+        let pos = ChunkPos::new(x >> 4, z >> 4);
+        let chunk = overworld.worker().generate_proto(pos).unwrap();
+        let top = (0..256)
+            .map(|i| chunk.surface_height(i % 16, i / 16))
+            .max()
+            .unwrap();
+        assert!(top > 330, "the chunk's highest ground is {top}");
+        let (lx, lz) = (0..256)
+            .map(|i| (i % 16, i / 16))
+            .find(|&(lx, lz)| chunk.surface_height(lx, lz) == top)
+            .unwrap();
+        // Solid from 320 up to the surface: not cut off at 26.3's top.
+        for y in 320..top {
+            assert_ne!(
+                chunk.block_name(lx, y, lz),
+                "minecraft:air",
+                "{lx} {y} {lz}"
+            );
+        }
+        // The same chunk in a 384-block overworld is cut flat at y 319.
+        let (_, normal) = terraforged(&normal_data, seed, false);
+        let clipped = normal.worker().generate_proto(pos).unwrap();
+        assert!((0..256).all(|i| clipped.surface_height(i % 16, i / 16) <= 320));
+        // The structure queries follow the level: a base height above 320, and the column solid up to it.
+        let mut worker = overworld.worker();
+        let mut queries = pipeline.queries(&mut worker.state);
+        let (bx, bz) = (pos.x * 16 + lx, pos.z * 16 + lz);
+        let height = queries.base_height(bx, bz, HeightmapType::OceanFloorWg);
+        assert!(height > 320, "base height {height}");
+        assert_eq!(queries.min_y(), -64);
+        let column = StartContext::base_column(&mut queries, bx, bz, HeightmapType::OceanFloorWg);
+        assert_eq!(column.len(), 1024);
+        assert!(column[(height - 1 + 64) as usize]);
+        assert!(!column[(height + 64) as usize]);
     }
 
     #[test]

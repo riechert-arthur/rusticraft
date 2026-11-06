@@ -35,6 +35,14 @@ pub fn preset_json() -> &'static str {
     .expect("TerraForged world preset JSON is UTF-8")
 }
 
+/// TerraForged's taller overworld: `data/minecraft/dimension_type/overworld.json` of TerraForged Reimagined's built-in
+/// pack (a24d450, MIT; 6dd607eb's copy has the same `min_y`, `height` and `logical_height` in 1.18's format), bundled
+/// unchanged. From y -64, 1024 blocks and logical height, so `getGenDepth()` (`levels.maxY`, 480) always fits.
+pub fn overworld_type_json() -> &'static str {
+    std::str::from_utf8(crate::terraforged_data!("dimension_type/overworld.json"))
+        .expect("TerraForged dimension type JSON is UTF-8")
+}
+
 /// The `world_presets` bundle with TerraForged's preset; other bundles pass through. An
 /// entry already there is kept (Horizon reads no data-pack world presets today).
 pub fn with_preset(
@@ -71,6 +79,29 @@ mod tests {
         assert_eq!(
             preset["dimensions"]["minecraft:the_nether"]["generator"]["settings"],
             "minecraft:nether"
+        );
+    }
+
+    #[test]
+    fn the_taller_overworld_is_terraforgeds_1024_blocks_from_y_minus_64() {
+        let json: serde_json::Value = serde_json::from_str(overworld_type_json()).unwrap();
+        let height = crate::worldgen::overrides::LevelHeight::of_json(&json).unwrap();
+        assert_eq!(
+            height,
+            crate::worldgen::overrides::LevelHeight {
+                min_y: -64,
+                height: 1024,
+                logical_height: 1024,
+                has_skylight: true,
+            }
+        );
+        // The levels' top (480, exclusive) fits under the type's (960).
+        let preset: serde_json::Value = serde_json::from_str(preset_json()).unwrap();
+        let levels = &preset["dimensions"]["minecraft:overworld"]["generator"]["levels"];
+        assert!(levels["max_y"].as_i64().unwrap() <= i64::from(height.min_y + height.height));
+        assert_eq!(
+            preset["dimensions"]["minecraft:overworld"]["type"],
+            "minecraft:overworld"
         );
     }
 }

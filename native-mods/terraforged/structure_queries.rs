@@ -179,9 +179,12 @@ impl StartContext for TfQueries<'_> {
     fn base_column(&mut self, x: i32, z: i32, kind: HeightmapType) -> Vec<bool> {
         self.base_columns(x, z, &[kind]).pop().unwrap_or_default()
     }
+    /// [`Self::column`]'s opacities over the level's build range, indexed from [`Self::min_y`] as the callers read
+    /// them. Not the vanilla half's noise range: TerraForged's taller overworld (-64..960) keeps the vanilla noise
+    /// settings' -64..320, and its terrain above that is still the column's ground.
     fn base_columns(&mut self, x: i32, z: i32, kinds: &[HeightmapType]) -> Vec<Vec<bool>> {
         let settings = &self.pipeline.vanilla.settings;
-        let (min, height) = (settings.noise_min_y, settings.noise_height);
+        let (min, height) = (settings.level_min_y, settings.level_height);
         let column = self.column(x, z);
         let data = &self.pipeline.vanilla.data;
         let state = |block| {
@@ -260,6 +263,10 @@ mod tests {
         ] {
             assert_eq!(clip_to_level(height, -64, 384), clipped, "{height}");
         }
+        // TerraForged's taller overworld (-64..960) keeps every default-levels height (below 480).
+        assert_eq!(clip_to_level(405, -64, 1024), 405);
+        assert_eq!(clip_to_level(479, -64, 1024), 479);
+        assert_eq!(clip_to_level(1000, -64, 1024), 960);
         assert_eq!(clip_to_level(500, 0, 256), 256);
         assert_eq!(clip_to_level(500, i32::MAX - 4, 16), i32::MAX - 4);
         assert_eq!(clip_to_level(i32::MAX, i32::MAX - 4, 16), i32::MAX);
