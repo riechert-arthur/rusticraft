@@ -695,7 +695,28 @@ the world this game serves (beside its `level.dat`), so a mod adds only the biom
 none to a world type it doesn't generate. `None` is a client of another server: return every biome the mod
 can add, a superset of what any world gets; the client keeps those the server's registry names. The game
 reads them through `world_biomes::native_biomes(world)`, which skips an id that isn't a valid namespaced
-`Identifier` and keeps the first of each id.
+`Identifier` and keeps the first of each id. A mod that generates its own world type checks the world:
+
+```toml
+[[injection]]
+id = "native-biome-files"
+target = "horizon_client::world_biomes::native_biome_files"
+kind = "RETURN"
+helper = "hooks/native_biome_files.rs"
+bindings = [
+  { name = "world", ty = "Option<&Path>", value = "world" },
+  { name = "value", ty = "Vec<(String, Value)>", value = "$value" },
+]
+```
+
+```rust
+fn my_biome_files(world: Option<&Path>, mut value: Vec<(String, Value)>) -> Vec<(String, Value)> {
+    if world.is_none_or(my_world_type::is_mine) {
+        value.extend(my_biomes());
+    }
+    value
+}
+```
 
 The list is read once per world, when it opens, and one list feeds everything: the world's biome table
 (`biome::BiomeTable`, shared by the server and the chunk workers) holds vanilla's biomes and then the

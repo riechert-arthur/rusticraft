@@ -342,8 +342,9 @@ impl Biomes {
     /// This table for a world whose native mods add `native`, `(id, biome JSON)` (the world's
     /// list, `horizon_client::world_biomes::native_biomes`): vanilla's biomes, then each of
     /// `native` whose id vanilla lacks, in that order. Vanilla's ids never move, and a world
-    /// without mod biomes gets vanilla's table back. The mods' biomes count as built-in ones:
-    /// a data pack's biome goes over them as over vanilla's (`with_packs`).
+    /// without mod biomes gets vanilla's table back. Like `with_packs`, it starts from the
+    /// built-in table, without what packs gave `self`; the mods' biomes then count as
+    /// built-in ones, which a data pack's biome goes over as over vanilla's.
     pub fn with_native(&self, native: Vec<(String, Value)>) -> Self {
         let vanilla = self.builtin.len() - self.native.len();
         let mut list = self.builtin[..vanilla].to_vec();
