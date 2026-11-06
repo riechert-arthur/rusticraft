@@ -50,7 +50,7 @@ pub(super) fn build(
     dimension: &str,
     with_structures: bool,
 ) -> Result<OverworldGenerator, GeneratorError> {
-    if preset != PRESET || !is_terraforged(&data, dimension) {
+    if preset != PRESET || !is_terraforged(&data, preset, dimension) {
         return OverworldGenerator::build(data, seed, preset, dimension, with_structures);
     }
     let vanilla = OverworldGenerator::build(
@@ -68,13 +68,19 @@ pub(super) fn build(
     })
 }
 
-fn is_terraforged(data: &GeneratorData, dimension: &str) -> bool {
-    let Some(json) = data.world_presets.get(PRESET) else {
-        return false;
+/// Whether `dimension`'s level stem uses TerraForged's generator. A data pack's stem
+/// replaces the preset's, as `OverworldGenerator::build` and 26.3's
+/// `WorldDimensions.bake` pick it, so a pack's own overworld keeps its generator.
+fn is_terraforged(data: &GeneratorData, preset: &str, dimension: &str) -> bool {
+    let stem = match data.dimensions.get(dimension) {
+        Some(json) => serde_json::from_str::<Value>(json).ok(),
+        None => data
+            .world_presets
+            .get(preset)
+            .and_then(|json| serde_json::from_str::<Value>(json).ok())
+            .map(|preset| preset["dimensions"][dimension].clone()),
     };
-    serde_json::from_str::<Value>(json).is_ok_and(|preset| {
-        preset["dimensions"][dimension]["generator"]["type"].as_str() == Some(GENERATOR_TYPE)
-    })
+    stem.is_some_and(|stem| stem["generator"]["type"].as_str() == Some(GENERATOR_TYPE))
 }
 
 impl SeededPipeline for TerraForgedPipeline {
@@ -206,7 +212,7 @@ mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
 
-    fn data() -> Option<Arc<GeneratorData>> {
+    fn data_with(ov: &crate::worldgen::overrides::WorldgenOverrides) -> Option<Arc<GeneratorData>> {
         let root = std::env::var_os("HORIZON_TEST_RESOURCES")
             .map(PathBuf::from)
             .unwrap_or_else(|| {
@@ -217,7 +223,11 @@ mod tests {
             return None;
         }
         let registry = Box::leak(Box::new(crate::level::data::load_registry(&root).unwrap()));
-        Some(GeneratorData::load(&root.join("worldgen"), registry).unwrap())
+        Some(GeneratorData::load_with(&root.join("worldgen"), registry, ov).unwrap())
+    }
+
+    fn data() -> Option<Arc<GeneratorData>> {
+        data_with(&Default::default())
     }
 
     #[test]
@@ -245,5 +255,34 @@ mod tests {
         let mut worker = overworld.worker();
         let chunk = worker.generate_proto(ChunkPos::new(0, 0)).unwrap();
         assert_eq!(chunk.position(), ChunkPos::new(0, 0));
+    }
+
+    #[test]
+    fn a_data_pack_overworld_keeps_its_own_generator() {
+        let mut ov = crate::worldgen::overrides::WorldgenOverrides::default();
+        let vanilla = r#"{"type":"minecraft:overworld","generator":{"type":"minecraft:noise","biome_source":{"type":"minecraft:multi_noise","preset":"minecraft:overworld"},"settings":"minecraft:overworld"}}"#;
+        ov.set(
+            crate::worldgen::overrides::DIMENSIONS,
+            "minecraft:overworld",
+            vanilla.to_owned(),
+        );
+        let Some(data) = data_with(&ov) else { return };
+        assert!(!is_terraforged(&data, PRESET, "minecraft:overworld"));
+        let overworld =
+            OverworldGenerator::for_dimension(Arc::clone(&data), 7, PRESET, "minecraft:overworld")
+                .unwrap();
+        let normal = OverworldGenerator::for_dimension(
+            Arc::clone(&data),
+            7,
+            "minecraft:normal",
+            "minecraft:overworld",
+        )
+        .unwrap();
+        // The vanilla spawn search, not TerraForged's `ChunkGenerator.getOrigin` 0 0.
+        assert_ne!(normal.spawn_position().unwrap(), [0, 0]);
+        assert_eq!(
+            overworld.spawn_position().unwrap(),
+            normal.spawn_position().unwrap()
+        );
     }
 }
