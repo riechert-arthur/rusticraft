@@ -19,7 +19,9 @@ TerraForged's generated mountain terrain-noise data files `mountains_1.json`, `m
 (`generated/resources/default/data/terraforged/worldgen/terrain/noise/`, which use that `Valley` node; TerraForged
 Reimagined's copies differ) are bundled unchanged in `native-mods/terraforged/data/worldgen/terrain_noise/`.
 The cave asset decoder and cave array in `native-mods/terraforged/cave_assets.rs` follow TerraForged's own
-`NoiseCave.CODEC` and `NoiseCaveGenerator.createArray`.
+`NoiseCave.CODEC` and `NoiseCaveGenerator.createArray`. The noise-cave carver in
+`native-mods/terraforged/cave_carver.rs` and its pipeline stage follow TerraForged's own `NoiseCaveGenerator.carve`,
+`NoiseCaveCarver`, `CarverChunk` and `BiomeGenerator.carve`.
 The biome override and initial biome (`biome_override` and `initial_biome` in
 `native-mods/terraforged/biome_sampler.rs`) and the surface biome sampler in `current_surface_biomes.rs` follow
 TerraForged's own `BiomeSampler.getBiomeOverride` (with its 0.005 beach band), `getInitialBiome` (one climate pool,

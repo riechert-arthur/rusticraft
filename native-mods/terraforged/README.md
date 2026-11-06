@@ -1288,8 +1288,8 @@ and `cave_breach_noise` are 6dd607eb's `NoiseCaveGenerator.createUniqueNoise(500
 wrapping (`rangeY = maxY - minY`; a range of 0 or less gives 0), and `with_seed` reseeds the three modules through
 `Module::with_seed` while keeping the cave's own seed. `UniqueCaveDistributor` places jittered cells on staggered
 rows and zeroes cells above its density; `module()` makes it a `Module` with `Noise`'s default 0..1 bounds, as
-`NoiseCaveGenerator` uses it (`Module::seeded_custom`, a custom module with a seed-first sample too). The cave
-generator, carver and decorator are not ported yet. `CaveNoiseOracle.java`
+`NoiseCaveGenerator` uses it (`Module::seeded_custom`, a custom module with a seed-first sample too). The carver
+is `cave_carver.rs` (below); the cave decorator is not ported yet. `CaveNoiseOracle.java`
 (`.local/terraforged/oracles/cave_noise/`) runs the jar's own classes on 12 names, 8 distributors (and
 `NoiseCaveGenerator`'s clamp, map and warp graph over each) at 217 points (signed zeros, negative, huge, infinite
 and NaN), and 6 caves (TerraForged's `mega` cave and `int` wrap, NaN and overflow cases) over 72 block positions
@@ -1308,7 +1308,7 @@ terrain asset decoder (`decode_noise`, below), which reads `Abs` with `new Abs` 
 (`mega`, `mega_deep`, `synapse_high`, `synapse_low`, `synapse_mid`: a 26.3 data-pack registry sorts by path, then
 namespace; `ModCaves`' order only applies to data generation) and builds `NoiseCaveGenerator.createArray`'s array:
 each global cave twice, copy `j` reseeded with `j * 0xFA90C2L` (a `long`; `with_seed` keeps its low 32 bits), 8
-caves in all. Nothing carves them yet (the carver is a later layer). `CaveAssetsOracle.java`
+caves in all, which the carver (`cave_carver.rs`, below) builds once per world. `CaveAssetsOracle.java`
 (`.local/terraforged/oracles/cave_assets/`, `run.sh`) checks the bundled files against both trees, decodes them with
 6dd607eb's own `NoiseCave.CODEC`, `DataUtil`, `SuperCodec` and `withSeed` on Noise2D 2cb4843 and 26.3's DFU, runs
 `createArray` (copied verbatim) and folds each copy's seed-first height, cavern size and floor depth at 8 runtime
@@ -2675,14 +2675,39 @@ heights from `NoiseChunkUtil.initSurfaceCache` and 26.3's `WorldGenerationContex
 then `Surface.apply` (gen depth 480, `#minecraft:substrate_overworld` and `#minecraft:snow` erodible, as Reimagined chose). Decoration is still the vanilla overworld's;
 after it the chunk's terrain-cache entry is dropped, as `applyBiomeDecoration` does. `getSeaLevel()` is
 TerraForged's 62 and `Source.getNoiseBiome` answers biome queries. Not wired yet: structures and their terrain
-(#210; the vanilla half runs without structures), carvers and noise caves (#209), biome search (#211), TerraForged's
+(#210; the vanilla half runs without structures), biome search (#211), TerraForged's
 decoration (#213), distant terrain (#221) and the taller overworld (#215). Until then TerraForged's levels are not
 mapped onto 26.3's build range: the fill clips terrain to the chunk (cut flat at y 319, which the default levels
 seldom reach), and the preliminary surface heights are clipped the same way. The preliminary heights hold per 4x4
 column cell, as the cache stores them; 26.3's surface context reads one value per column. `base_height` is not
 used yet, so the structure height question (Reimagined's eroded height) waits for #210. A test generates a chunk
-twice in one world and once in a second world, checks the blocks are equal and differ from the normal overworld,
-and that every quart's biome is `getNoiseBiome`'s.
+twice in one world and once in a second world, checks the blocks and biomes are equal, the blocks differ from the
+normal overworld, and every quart's biome is `getNoiseBiome`'s except where a noise cave carved it.
+
+After the surface the pipeline carves TerraForged's noise caves (`cave_carver.rs`: 6dd607eb's
+`NoiseCaveGenerator.carve`, `NoiseCaveCarver` and `CarverChunk`). 6dd607eb's `applyCarvers` replaces the vanilla
+carvers, so none run. 26.3 has a single `ChunkGenerator.buildTerrain` for fill, surface and carvers (TerraForged
+Reimagined runs them in that order too), on a chunk whose persisted status is still BIOMES, so the carver's writes
+update the WG heightmaps and later caves read the lowered OCEAN_FLOOR_WG. The cave array (`current_caves()`) and
+`CaveBiomeSampler(800, …)` are built once per world: GLOBAL caves draw `terraforged:cave` (not registered in Horizon
+yet, so their pool is empty) and UNIQUE caves every registered biome in 26.3's registry order (6dd607eb's UNDERGROUND
+filter is commented out). Each cave, in array order, goes through the chunk's 256 columns with the `(int)` level
+seed: the surface is OCEAN_FLOOR_WG's first free block minus 2, raised by 9 off the sea-level band and lowered by
+`NoiseUtil.floor(16 * mask)` (mask = 1 - breach noise × river), the cavern size takes the unique-cave noise for
+UNIQUE caves, and `MathUtil.clamp` bounds top and bottom; every non-fluid block in between becomes air through
+`set_block_worldgen`, and quarts more than 16 blocks below the surface take the cave's biome. `CarverChunk.getBiome`'s
+single cache is shared by every cave and resamples whenever it holds null. Differences: where the pool is empty
+Java writes a null biome into the chunk (which fails later in Java); the port keeps the quart's biome and leaves the
+null out of the cave's biome list. Blocks and quarts outside the build range are skipped (Java would throw for a
+quart below it, which only a generator `min_y` under the chunk's reaches). The CarverChunk lists are returned but not
+kept (TerraForged's decoration, which reads them, is #213). `CaveCarverOracle.java`
+(`.local/terraforged/oracles/cave_carver/`, `run.sh`; needs `../seed_first/run.sh` first) runs 6dd607eb's own
+classes (patched mechanically, the diff in `patch.diff`) with the bundled caves on real 26.3 ProtoChunks, heightmaps
+and biome containers: 48 scenarios (build ranges, generator `min_y` and sea level, BIOMES and TERRAIN statuses,
+primed or unprimed heightmaps, seeds, chunks where unique caves form, caves in reverse registry order, with and
+without `terraforged:cave`, river maps, fluid pockets); the test matches its blocks, biomes, heightmaps and per-cave
+biome lists (including a `carve = false` replay) bit for bit, in debug and release. Another test generates four chunks
+with unique caves twice in one world and once in another, checks the blocks and biomes are equal, and that cave biomes were written (each in a carved quart).
 `client_world_type.rs` (a module of horizon-client's `save.rs`) offers the preset on the Create World screen. 26.3's
 world tab cycles through the `#minecraft:normal` world-preset tag: vanilla's five presets, then the
 `terraforged:normal` entry that TerraForged's tag file adds (both trees ship the same file; Horizon reads no
@@ -2707,7 +2732,7 @@ and generates new chunks with vanilla terrain. With the bundle applied, Horizon'
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives, the biome climate types, the climate settings, the climate module, the climate stage, the continent factory, the generator context, the heightmap, the world generator factory, TerraForged's terrain levels, its terrain data, its terrain generator, its terrain-blend utilities, its terrain blender with its nearest-terrain search (and the newer source's seed-first blender), noise-graph reseeding, the cave noise primitives, the biome viability rules, the biome overrides, the continent control points, the continent cell primitives, the continent configuration, the continent shape blending, the continent cell generator with its spawn-offset search, the continent river nodes, the continent river carver's arithmetic, the continent river networks with their nearest-node sampling and their warped, carved river sampling, the newer source's seed-first noise sources, scalar noise graphs, domain warps, selectors, graph caches, terraces, legacy terraces, advanced terraces, curves, transforms (steps, frequency, gradient and modulation), special sources (boost, cell, cell edge and sine) and lines, and its bounded concurrent lossy cache with the continent's cell and
 river-piece caches on it, the continent noise module that joins the continent layers, the newer source's terrain height sampler with its bordered chunk generation and its nearest-terrain search, its biome chunk fill, cave biome sampler, initial biome selection, surface biome sampler, chunk biome hook and biome registry pools, the erosion tile geometry, and TerraForged Reimagined's heightmap smoothing, erosion brushes, hydraulic erosion filter, eroded-region cache, eroded region build, eroded chunk generation, terrain cache, generator queries, chunk fill, the terrain stage hand-off to it, the current climate noise, the biome sampler bridge, the live biome bindings, the terrain asset decoder, the terrain-type and terrain-noise registries, the bundled terrain types and all 14 bundled terrain noises, the bundled noise caves and their reseeded cave array, and 6dd607eb's structure terrain columns with their
 chunk adapter, piece selection and structure-aware terrain stage, 6dd607eb's surface erosion and water edge smoothing passes, and its preliminary surface-height cache, and the `terraforged:normal` world preset, whose pipeline generates
-TerraForged's terrain, biomes and surfaces, and the Create World screen's TerraForged world type. A game built with the bundle offers it, but structures, carvers, caves and TerraForged's own decoration are not wired yet (see above), so it is still for development; install instructions come once they are.
+TerraForged's terrain, biomes, surfaces and noise caves, and the Create World screen's TerraForged world type. A game built with the bundle offers it, but structures and TerraForged's own decoration are not wired yet (see above), so it is still for development; install instructions come once they are.
 
 ## Development
 
