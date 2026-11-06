@@ -85,14 +85,17 @@ impl TfQueries<'_> {
             .collect()
     }
 
-    /// `getBaseColumn`: stone to the (eroded) terrain height and water to the base height, held from the terrain
-    /// height up (the original passes the height as the column's minimum). Panics where the noise has no seed-first
-    /// form (no bundled noise is a custom module; Java has no such failure).
+    /// `getBaseColumn` in the level's build range: stone from the level's bottom to the (eroded) terrain height, water
+    /// to the surface, air above, clipped as the fill clips, so it is the filled ground (`base_height` is one block
+    /// above it). TerraForged starts its column at the height instead, which makes column-placed structures float;
+    /// see `TerraForgedGenerator::base_column` (Arthur's decision). Panics where the noise has no seed-first form (no
+    /// bundled noise is a custom module; Java has no such failure).
     fn column(&self, x: i32, z: i32) -> NoiseColumn {
+        let settings = &self.pipeline.vanilla.settings;
         let column = self
             .pipeline
             .generator
-            .base_column(x, z)
+            .base_column(x, z, settings.level_min_y, settings.level_height)
             .expect("TerraForged's getBaseColumn: the noise has no seed-first form");
         NoiseColumn {
             min: column.min_y,

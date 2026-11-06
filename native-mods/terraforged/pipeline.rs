@@ -29,7 +29,8 @@
 // Copyright (c) 2021 TerraForged): `createBiomes`, `fillFromNoise`, `buildSurface` (`SurfaceDecorator.decorate`
 // over `NoiseChunkUtil.getNoiseChunk`, then `decoratePost`'s `Surface.apply`), `applyCarvers`
 // (`NoiseCaveGenerator.carve`), the `drop` at the end of `applyBiomeDecoration`, `getSeaLevel` and
-// `Source.getNoiseBiome`, and `ChunkGenerator`'s structure placement over `getBaseHeight`/`getBaseColumn`
+// `Source.getNoiseBiome` and `possibleBiomes` (which 26.3's `findClosestBiome3d`, `/locate biome`, searches), and
+// `ChunkGenerator`'s structure placement over `getBaseHeight`/`getBaseColumn`
 // (`structure_queries.rs`). Stages TerraForged does not replace yet run on the vanilla overworld pipeline it wraps
 // (`VanillaGen`).
 
@@ -650,10 +651,47 @@ impl SeededPipeline for TerraForgedPipeline {
     }
     fn find_closest_biome(
         &self,
-        worker: &mut WorkerState,
+        _worker: &mut WorkerState,
         search: &BiomeSearch<'_>,
     ) -> Option<(String, [i32; 3])> {
-        self.vanilla.find_closest_biome(worker, search)
+        // 26.3's BiomeSource.findClosestBiome3d (TerraForged's Source does not override it) over
+        // Source.possibleBiomes (BiomeMapManager.getOverworldBiomes). Source.getNoiseBiome ignores `y`, so a
+        // column's first sample height answers for all of them (Java samples the other heights in vain). A column
+        // whose pool has no biome (Java's null) matches nothing here; Java's `candidateBiomes.contains(null)` throws
+        // NullPointerException out of the command instead.
+        let data = self.vanilla.data();
+        let candidates: BTreeSet<BiomeId> = self
+            .biomes
+            .map
+            .overworld
+            .iter()
+            .map(|id| **id)
+            .filter(|id| (search.allowed)(data.biome_name(*id)))
+            .collect();
+        if candidates.is_empty() {
+            return None;
+        }
+        let y = *super::out_from_origin(
+            search.origin[1],
+            search.min_y + 1,
+            search.max_y + 1,
+            search.vertical,
+        )
+        .first()?;
+        // One sampler for the whole search; every sample reads the continent, river and climate noise only (no
+        // terrain-cache entry, no erosion region), as `noise_biomes` does.
+        let sampler = self.surface_sampler();
+        let radius = search.radius.div_euclid(search.horizontal);
+        for [sx, sz] in super::spiral_around(radius) {
+            let x = search.origin[0].wrapping_add(sx.wrapping_mul(search.horizontal));
+            let z = search.origin[2].wrapping_add(sz.wrapping_mul(search.horizontal));
+            // QuartPos.fromBlock, then `compute`'s `<< 2`: the quart's corner.
+            let biome = self.biome_at(&sampler, x & !3, z & !3);
+            if let Some(biome) = biome.filter(|biome| candidates.contains(biome)) {
+                return Some((data.biome_name(biome).to_owned(), [x, y, z]));
+            }
+        }
+        None
     }
     /// `Source.getNoiseBiome(x, y, z)` per quart: `sampleBiome(seed, x << 2, z << 2)`, whatever `y` (no cave
     /// layer), with the captured seed and without a terrain-cache hint. `None` where the column's pool has no
@@ -1129,5 +1167,68 @@ mod tests {
             .generate_proto(ChunkPos::new(center.x + 1, center.z))
             .unwrap();
         assert_eq!(pipeline.generator.cached_chunks(), 8);
+    }
+
+    /// `/locate biome` (`findClosestBiome3d`) follows the spiral over TerraForged's noise biomes: it answers with the
+    /// first sampled column whose biome is allowed, at the first sample height, and finds no biome outside
+    /// `possibleBiomes`. Searching adds no terrain-cache entry.
+    #[test]
+    fn locating_a_biome_follows_the_noise_biomes() {
+        let Some(data) = data() else { return };
+        let stem = terraforged_stem(&data, PRESET, "minecraft:overworld").unwrap();
+        let pipeline = Arc::new(TerraForgedPipeline::new(&data, 11, &stem, false).unwrap());
+        let overworld = OverworldGenerator {
+            pipeline: Arc::clone(&pipeline) as Arc<dyn SeededPipeline>,
+            noise_clamped: None,
+        };
+        let mut worker = overworld.worker();
+        // `search`'s radius, steps and level bounds.
+        let (origin, radius, horizontal, vertical) = ([-1_203, 75, 2_051], 2_400, 32, 64);
+        let (min_y, max_y) = (-64, 319);
+        // The spiral's columns and their noise biomes, as the search samples them.
+        let columns: Vec<[i32; 2]> = super::super::spiral_around(radius / horizontal)
+            .map(|[sx, sz]| [origin[0] + sx * horizontal, origin[2] + sz * horizontal])
+            .collect();
+        let quarts: Vec<[i32; 3]> = columns.iter().map(|c| [c[0] >> 2, 0, c[1] >> 2]).collect();
+        let biomes = worker.noise_biomes(&quarts);
+        let first = biomes[0].clone().unwrap();
+        let (index, target) = biomes
+            .iter()
+            .enumerate()
+            .find_map(|(i, b)| b.as_ref().filter(|b| **b != first).map(|b| (i, b.clone())))
+            .expect("one biome over the whole search");
+        let first_index = biomes
+            .iter()
+            .position(|b| b.as_deref() == Some(target.as_str()))
+            .unwrap();
+        assert_eq!(first_index, index);
+        let y = super::super::out_from_origin(origin[1], min_y + 1, max_y + 1, vertical)[0];
+        fn search<'a>(allowed: &'a dyn Fn(&str) -> bool, origin: [i32; 3]) -> BiomeSearch<'a> {
+            BiomeSearch {
+                allowed,
+                origin,
+                radius: 2_400,
+                horizontal: 32,
+                vertical: 64,
+                min_y: -64,
+                max_y: 319,
+            }
+        }
+        let only_target = |name: &str| name == target;
+        let [x, z] = columns[index];
+        assert_eq!(
+            worker.find_closest_biome(&search(&only_target, origin)),
+            Some((target.clone(), [x, y, z]))
+        );
+        // The origin's own biome is found at the origin.
+        let only_first = |name: &str| name == first;
+        assert_eq!(
+            worker.find_closest_biome(&search(&only_first, origin)),
+            Some((first.clone(), [origin[0], y, origin[2]]))
+        );
+        // A biome TerraForged's overworld never lists is not found.
+        let nether = |name: &str| name == "minecraft:nether_wastes";
+        assert_eq!(worker.find_closest_biome(&search(&nether, origin)), None);
+        assert_eq!(pipeline.generator.cached_chunks(), 0);
     }
 }
