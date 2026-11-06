@@ -150,10 +150,15 @@ pub fn write(
     ControlFlow::Break(write_vanilla(dir, seed, options, flat.clone()))
 }
 
-/// Horizon's settings for `options` (the inner write finds nothing armed), then the pack.
+/// Horizon's settings for `options` (the inner write finds nothing armed), then the pack. A
+/// vanilla world opens without it, as TerraForged's `createWorldDatapack` only logs a failed
+/// copy; a TerraForged world needs it for its height, so there a failure stops the creation.
 fn write_vanilla(dir: &Path, seed: i64, options: WorldGen, flat: Option<Tag>) -> Result<()> {
     super::write_world_gen_settings_with(dir, seed, options, flat)?;
-    write_pack(dir)
+    if let Err(error) = write_pack(dir) {
+        log::warn!("TerraForged: built-in pack for {}: {error}", dir.display());
+    }
+    Ok(())
 }
 
 /// Vanilla's settings for `options`, with TerraForged's overworld stem. The inner write
@@ -430,6 +435,26 @@ mod tests {
             }
             std::fs::remove_dir_all(&dir).unwrap();
         }
+    }
+
+    #[test]
+    fn only_a_terraforged_world_needs_the_pack() {
+        // `datapacks` is a file, so the pack can't be written.
+        let dir = scratch("unwritable");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("datapacks"), "").unwrap();
+        CREATING.set(Some(false));
+        assert!(matches!(
+            write(&dir, 1, WorldGen::default(), &None),
+            ControlFlow::Break(Ok(()))
+        ));
+        assert!(world_gen_settings(&dir).is_some());
+        CREATING.set(Some(true));
+        assert!(matches!(
+            write(&dir, 1, WorldGen::default(), &None),
+            ControlFlow::Break(Err(_))
+        ));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
