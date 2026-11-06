@@ -287,65 +287,98 @@ impl TerraForgedPipeline {
         Ok(chunk)
     }
 
-    /// Distant columns from TerraForged's base columns (stone to the terrain height,
-    /// water to the base level, as `getBaseColumn` builds them), their top blocks painted by
-    /// the vanilla surface rule over TerraForged's biome.
-    fn far_columns(&self, worker: &mut WorkerState, columns: &[(i32, i32)]) -> Vec<LodColumn> {
+    /// Horizon's far terrain (`SeededPipeline::lod_grid`; vanilla has no counterpart): each column is TerraForged's
+    /// ground as the fill builds it (`getBaseColumn`'s shape: stone from the level bottom to the terrain height,
+    /// water above it to the surface, clipped to the level as the fill clips it), and its top eight blocks are
+    /// painted by the vanilla surface rule as `buildSurface` paints a chunk: TerraForged's generation context (sea
+    /// level 62), its preliminary height at the column, and the column's TerraForged biome (the one the chunk stores
+    /// at the surface block's zoomed quart). Like vanilla's far sampling it skips the surface rule's slope reads and
+    /// column extensions, and `Surface.apply`, the carvers and the decoration. A failed height or biome sample is an
+    /// `Err` (the chunk would fail to generate there too).
+    fn far_columns(
+        &self,
+        worker: &mut WorkerState,
+        columns: &[(i32, i32)],
+    ) -> Result<Vec<LodColumn>, GeneratorError> {
         let vanilla = &self.vanilla;
-        let data = &vanilla.data;
-        let settings = &vanilla.settings;
-        let (Some(stone), Some(water)) = (
-            data.registry.default_state("minecraft:stone"),
-            data.registry.default_state("minecraft:water"),
-        ) else {
-            return columns.iter().map(|_| (None, Vec::new())).collect();
-        };
-        let min_y = settings.level_min_y;
-        let top_y = min_y + settings.level_height;
-        let mut geometry = Vec::with_capacity(columns.len());
-        let mut chunks: BTreeMap<(i32, i32), BiomeId> = BTreeMap::new();
+        let (min_y, level_height) = (vanilla.settings.level_min_y, vanilla.settings.level_height);
+        let top = min_y.saturating_add(level_height).saturating_sub(1);
+        let zoom = horizon_core::biome::BiomeZoom::new(obfuscate_seed(vanilla.seed));
         let sampler = self.surface_sampler();
+        let mut geometry = Vec::with_capacity(columns.len());
+        // The preliminary heights per 4x4 cell, and each column's biome at every quart its zoomed lookups can reach
+        // (`(y - 2) >> 2` and the next quart on each axis): the first column to claim a quart keeps it.
+        let mut heights = BTreeMap::new();
+        let mut quarts: BTreeMap<(i32, i32), BiomeId> = BTreeMap::new();
         for &(x, z) in columns {
-            let height = |heightmap| self.generator.base_height(x, z, heightmap).unwrap_or(min_y);
-            let solid =
-                (height(TerraHeightmap::OceanFloorWorldgen) - 1).clamp(min_y - 1, top_y - 1);
-            let surface =
-                (height(TerraHeightmap::WorldSurfaceWorldgen) - 1).clamp(solid, top_y - 1);
+            let floor = self
+                .generator
+                .base_height(x, z, TerraHeightmap::OceanFloorWorldgen)
+                .map_err(stage("far terrain"))?;
+            let surface = self
+                .generator
+                .base_height(x, z, TerraHeightmap::WorldSurfaceWorldgen)
+                .map_err(stage("far terrain"))?;
+            let (height, surface) = (floor.wrapping_sub(1), surface.wrapping_sub(1));
+            heights.entry(column_key(x & !3, z & !3)).or_insert(height);
+            // The stone and water tops, clipped as the fill clips them (cut flat at the top block).
+            let stone = height.min(top);
+            let water = surface.min(top);
+            let shown = if stone >= min_y {
+                stone
+            } else {
+                water.max(min_y)
+            };
+            let quart = zoom.quart_at_block(BlockPos::new(x, shown, z));
             let biome = self
-                .biome_at(&sampler, x & !3, z & !3)
-                .unwrap_or(BiomeId(0));
-            chunks.entry((x >> 4, z >> 4)).or_insert(biome);
+                .biome_at(&sampler, quart[0].wrapping_shl(2), quart[2].wrapping_shl(2))
+                .ok_or_else(|| resource("far biome: the column's pool has no biome"))?;
+            let (qx, qz) = (x.wrapping_sub(2) >> 2, z.wrapping_sub(2) >> 2);
+            for (dx, dz) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                quarts
+                    .entry((qx.wrapping_add(dx), qz.wrapping_add(dz)))
+                    .or_insert(biome);
+            }
             let mut spans = Vec::new();
-            if surface > solid {
-                spans.push((solid + 1, surface + 1, water));
+            let water_bottom = stone.saturating_add(1).max(min_y);
+            if water >= water_bottom {
+                spans.push((water_bottom, water + 1, self.water));
             }
-            if solid >= min_y {
-                spans.push((min_y, solid + 1, stone));
+            if stone >= min_y {
+                spans.push((min_y, stone + 1, self.stone));
             }
-            let water_top = (surface > solid).then_some((surface + 1, water));
-            let top = (solid >= min_y).then_some((solid + 1, stone));
-            geometry.push((top, water_top, solid + 1 - min_y, spans, biome));
+            let water_top = (water >= water_bottom).then_some((water + 1, self.water));
+            let solid = (stone >= min_y).then_some((stone + 1, self.stone));
+            geometry.push((solid, water_top, stone + 1 - min_y, spans, biome));
         }
-        let region = chunks
-            .iter()
-            .map(|(&(cx, cz), &biome)| {
-                BiomeChunk::new(ChunkPos::new(cx, cz), min_y, settings.level_height, biome)
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .ok()
-            .and_then(|chunks| BiomeRegion::new(chunks, obfuscate_seed(vanilla.seed)).ok());
-        let Some(region) = region else {
-            return geometry
-                .into_iter()
-                .map(|(.., spans, _)| (None, spans))
-                .collect();
-        };
-        let Ok(volume) = DensityVolume::new([1; 3], [columns[0].0, 0, columns[0].1], [1; 3]) else {
-            return geometry
-                .into_iter()
-                .map(|(.., spans, _)| (None, spans))
-                .collect();
-        };
+        // One 16-block section per chunk is enough: the region clamps every lookup's y into it.
+        let mut chunks: BTreeMap<(i32, i32), BiomeChunk<BiomeId>> = BTreeMap::new();
+        for (&(qx, qz), &biome) in &quarts {
+            let (cx, cz) = (qx >> 2, qz >> 2);
+            if let std::collections::btree_map::Entry::Vacant(entry) = chunks.entry((cx, cz)) {
+                let mut chunk = BiomeChunk::new(ChunkPos::new(cx, cz), min_y, 16, biome)
+                    .map_err(stage("far biome"))?;
+                chunk
+                    .fill(min_y, min_y + 15, |quart| {
+                        Ok::<_, std::convert::Infallible>(
+                            quarts.get(&(quart[0], quart[2])).copied().unwrap_or(biome),
+                        )
+                    })
+                    .map_err(stage("far biome"))?;
+                entry.insert(chunk);
+            }
+        }
+        let region = BiomeRegion::new(chunks.into_values().collect(), obfuscate_seed(vanilla.seed))
+            .map_err(stage("far biome"))?;
+        let generation = self.generation();
+        let preliminary: Arc<dyn DensitySampler> = Arc::new(PreliminarySurface::new(
+            heights,
+            min_y,
+            level_height,
+            generation.sea_level,
+        ));
+        let volume = DensityVolume::new([1; 3], [columns[0].0, 0, columns[0].1], [1; 3])
+            .map_err(stage("far material"))?;
         let queries = SurfaceQueries {
             pipeline: vanilla,
             temperatures: &mut worker.temperatures,
@@ -353,35 +386,17 @@ impl TerraForgedPipeline {
             uniform_biomes: None,
             possible: None,
         };
-        let preliminary: Arc<dyn DensitySampler> = Arc::new(PreliminarySurface {
-            heights: BTreeMap::new(),
-            fallback: settings.sea_level,
-        });
-        let material =
+        let sources =
             MaterialDensitySources::new(queries, volume, preliminary, SamplerContext::cached())
-                .ok()
-                .map(|sources| {
-                    MaterialConditions::<XoroshiroRandom, _>::new(
-                        vanilla.generation(),
-                        vanilla.root,
-                        sources,
-                    )
-                });
-        let Some(mut material) = material else {
-            return geometry
-                .into_iter()
-                .map(|(.., spans, _)| (None, spans))
-                .collect();
-        };
-        let Ok(rule) = material.add_rule(vanilla.rule.clone()) else {
-            return geometry
-                .into_iter()
-                .map(|(.., spans, _)| (None, spans))
-                .collect();
-        };
+                .map_err(stage("far material"))?;
+        let mut material =
+            MaterialConditions::<XoroshiroRandom, _>::new(generation, vanilla.root, sources);
+        let rule = material
+            .add_rule(vanilla.rule.clone())
+            .map_err(stage("far material"))?;
         let mut result = Vec::with_capacity(geometry.len());
-        for (&(wx, wz), (top, water, below, mut spans, biome)) in columns.iter().zip(geometry) {
-            let Some((height, mut state)) = top else {
+        for (&(wx, wz), (solid, water, below, mut spans, biome)) in columns.iter().zip(geometry) {
+            let Some((height, mut state)) = solid else {
                 result.push((None, spans));
                 continue;
             };
@@ -401,8 +416,7 @@ impl TerraForgedPipeline {
                 let (min, max, old) = spans[index];
                 let painted = material
                     .try_apply(rule, BlockPos::new(wx, y, wz))
-                    .ok()
-                    .flatten()
+                    .map_err(stage("far material"))?
                     .unwrap_or(old);
                 if depth == 1 {
                     state = painted;
@@ -430,7 +444,7 @@ impl TerraForgedPipeline {
                 spans,
             ));
         }
-        result
+        Ok(result)
     }
 }
 
@@ -743,7 +757,7 @@ impl SeededPipeline for TerraForgedPipeline {
         z: i32,
         spans: Option<&mut Vec<(i32, i32, BlockStateId)>>,
     ) -> Option<SurfaceSample> {
-        let (sample, column) = self.far_columns(worker, &[(x, z)]).pop()?;
+        let (sample, column) = self.far_columns(worker, &[(x, z)]).ok()?.pop()?;
         if let Some(spans) = spans {
             *spans = column;
         }
@@ -761,15 +775,17 @@ impl SeededPipeline for TerraForgedPipeline {
         if width <= 0 || side == 0 || side > 64 {
             return Err(resource("far sample dimensions"));
         }
+        // `approximate` (Reduced far detail) has nothing to trade here: each column is one height sample and one
+        // biome sample already. Columns in the order vanilla's `lod_grid` returns them (x first, then z).
         let columns: Vec<(i32, i32)> = (0..side * side)
             .map(|index| {
                 (
-                    x + (index % side) as i32 * width,
-                    z + (index / side) as i32 * width,
+                    x.wrapping_add((index % side) as i32 * width),
+                    z.wrapping_add((index / side) as i32 * width),
                 )
             })
             .collect();
-        Ok(self.far_columns(worker, &columns))
+        self.far_columns(worker, &columns)
     }
     fn structure_starts(
         &self,
