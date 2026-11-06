@@ -531,6 +531,55 @@ mod tests {
         assert_eq!(actual, EXPECTED);
     }
 
+    /// The oracle's `e` lines: degenerate biome sizes over Engine's defaults (root 5, runtime seed 3). Size 0 gives
+    /// an infinite frequency and NaN moisture (of either sign, raw bits compared); negative sizes mirror the cells.
+    const DEGENERATE: &str = "\
+e 0 3f7e87ec 00000000 ffc00000 3f066666 2\n\
+e 0 3f7e87ec 00000000 ffc00000 3f066666 2\n\
+e 0 3f7e87ec 00000000 ffc00000 3f066666 2\n\
+e 0 3f7e87ec 00000000 7fc00000 3f066666 2\n\
+e -1 3e4ab01a 3efcac76 3f064964 3f0896d7 4\n\
+e -1 3e73aab0 3e270de8 3e2d249b 3f02c1e5 5\n\
+e -1 3d252ba0 3e1dcf38 3ed16c3d 3e020c84 9\n\
+e -1 3f7e87ec 00000000 7fc00000 3f066666 2\n\
+e -220 3e4ab01a 3efcac76 3f064964 3f0896d7 4\n\
+e -220 3e4ab01a 3e71f7d0 3f064964 3f0896d7 4\n\
+e -220 3d22dd80 3f353a3f 3f689960 3f0ab94f 4\n\
+e -220 3f7e87ec 00000000 7fc00000 3f066666 2\n\
+e 1 3e4ab01a 3efcac76 3f064964 3f0896d7 4\n\
+e 1 3dcc19bc 3e0de650 3f6e6a5b 3f0e6100 3\n\
+e 1 3edad733 3e251e10 3f1ddb48 3f4bcb0f 4\n\
+e 1 3f7e87ec 00000000 7fc00000 3f066666 2\n";
+
+    #[test]
+    fn degenerate_biome_sizes_match_6dd607eb_java() {
+        let terrains = TerrainRegistry::new();
+        let mut actual = String::new();
+        for size in [0, -1, -220, 1] {
+            let mut settings = ClimateSettings::default();
+            settings.biome_shape.biome_size = size;
+            let noise = CurrentClimateNoise::new(&mut Seed::new(5), settings);
+            for (x, y) in [
+                (0.0, 0.0),
+                (12.5, -4.25),
+                (-3000.0, 7000.0),
+                (f32::NAN, 1.0),
+            ] {
+                let mut sample = ClimateSample::new(&terrains);
+                noise.sample(3, x, y, &mut sample);
+                actual.push_str(&format!(
+                    "e {size} {:08x} {:08x} {:08x} {:08x} {}\n",
+                    sample.biome_noise.to_bits(),
+                    sample.biome_edge_noise.to_bits(),
+                    sample.moisture.to_bits(),
+                    sample.temperature.to_bits(),
+                    sample.climate_type as i32,
+                ));
+            }
+        }
+        assert_eq!(actual, DEGENERATE);
+    }
+
     /// `createContinentNoise`'s climate: Engine's defaults with five fields changed.
     #[test]
     fn terraforged_settings_match_create_continent_noise() {

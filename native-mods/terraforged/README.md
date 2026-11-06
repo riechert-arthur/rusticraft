@@ -2393,7 +2393,9 @@ Engine's plain defaults, and 13 settings variants (macro sizes and edge warps se
 root seeds and seed offsets, swapped, out-of-range, narrow and NaN climate ranges, falloffs 0 to 10) with up to seven
 seed draws before the constructor, each sampled at 8 runtime seeds and 181 positions (zeros of both signs, fractions,
 2^24, 1e10, infinities, NaN, subnormals and a signed grid): the seed draws, the samples that throw (1,050 of the NaN
-variant) and a fold of every sample's bits match, as does `BiomeType.get` over 0..1, in debug and release builds.
+variant) and a fold of every sample's bits match, as does `BiomeType.get` over 0..1; so do the samples of four
+degenerate biome sizes (0, whose infinite frequency gives NaN moisture of either sign, -1, -220 and 1), in debug and
+release builds.
 
 The biome sampler bridge (`CurrentBiomeSampler`, `current_biome_sampler.rs`) ports TerraForged 6dd607eb's
 `IBiomeSampler.Sampler` (MIT; Reimagined a24d450's is the same): it scales block coordinates by the noise levels'
