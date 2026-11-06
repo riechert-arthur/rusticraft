@@ -268,6 +268,55 @@ pub fn identifier_order(a: &str, b: &str) -> std::cmp::Ordering {
     }
     split(a).cmp(&split(b))
 }
+/// The biomes native mods add, as `(id, biome JSON)`: built-in biomes after vanilla's in the
+/// game's table and the synchronized `minecraft:worldgen/biome` registry. A native mod adds
+/// its own with a RETURN hook here; the generator reads them from the mod's data pack.
+/// Readers go through [`native_biomes`], which drops the ids the game can't take.
+pub fn native_biome_files() -> Vec<(String, Value)> {
+    Vec::new()
+}
+
+/// [`native_biome_files`] as the game takes them: a valid `Identifier` each, with a non-empty
+/// namespace and path (`Identifier.isValidNamespace`/`isValidPath`; a client can't read
+/// others), the first of each id. The game's table and the synchronized registry both read
+/// this, so they hold the same biomes; both keep a vanilla biome over a mod's of the same id.
+pub fn native_biomes() -> Vec<(String, Value)> {
+    native_biomes_from(native_biome_files())
+}
+
+fn native_biomes_from(files: Vec<(String, Value)>) -> Vec<(String, Value)> {
+    fn valid(id: &str) -> bool {
+        let Some((ns, path)) = id.split_once(':') else {
+            return false;
+        };
+        let common = |c: char| matches!(c, 'a'..='z' | '0'..='9' | '_' | '-' | '.');
+        // Both parts non-empty: `Identifier.parse(":x")` reads `minecraft:x`, another name.
+        !ns.is_empty()
+            && !path.is_empty()
+            && ns.chars().all(common)
+            && path.chars().all(|c| common(c) || c == '/')
+    }
+    let mut out: Vec<(String, Value)> = Vec::new();
+    for (id, json) in files {
+        if !valid(&id) {
+            log::warn!("Horizon: a native mod's biome {id:?} is not a namespaced id; skipped");
+        } else if !out.iter().any(|(seen, _)| *seen == id) {
+            out.push((id, json));
+        }
+    }
+    out
+}
+
+/// Native mods' biomes join the built-in table after vanilla's, whose ids stay put; a vanilla
+/// biome keeps its id and data over a mod's of the same id.
+fn append_native(list: &mut Vec<BiomeInfo>, native: Vec<(String, Value)>, maps: &Colormaps) {
+    for (name, json) in native {
+        if !list.iter().any(|b| b.name == name) {
+            list.push(BiomeInfo::from_json(name, &json, maps));
+        }
+    }
+}
+
 impl Biomes {
     pub fn load(root: &Path) -> Result<Self> {
         let maps = Colormaps {
@@ -292,6 +341,7 @@ impl Biomes {
             let v: Value = serde_json::from_slice(&fs::read(&path)?)?;
             list.push(BiomeInfo::from_json(name, &v, &maps));
         }
+        append_native(&mut list, native_biomes(), &maps);
         let index = list
             .iter()
             .enumerate()
@@ -531,6 +581,53 @@ mod pack_tests {
         assert!(!other.contains("minecraft:molten_peaks"));
         assert_eq!(other.get(2).water, 0x3F76E4);
         assert!(!other.has_packs());
+    }
+
+    #[test]
+    fn no_native_biomes_without_a_mod() {
+        assert!(native_biome_files().is_empty());
+        assert!(native_biomes().is_empty());
+    }
+
+    #[test]
+    fn native_biomes_join_after_vanilla_with_valid_ids_once() {
+        let maps = Colormaps {
+            grass: Vec::new(),
+            foliage: Vec::new(),
+            dry: Vec::new(),
+        };
+        let blue = json!({"effects": {"water_color": 0x0000ff}});
+        let red = json!({"effects": {"water_color": 0xff0000}});
+        let native = native_biomes_from(vec![
+            ("mod:cave".to_owned(), blue.clone()),
+            ("cave".to_owned(), blue.clone()),
+            ("Mod:Upper".to_owned(), blue.clone()),
+            ("mod:".to_owned(), blue.clone()),
+            (":cave".to_owned(), blue.clone()),
+            ("mod:deep/caves".to_owned(), blue.clone()),
+            ("mod:cave".to_owned(), red.clone()),
+            ("minecraft:plains".to_owned(), red),
+        ]);
+        let ids: Vec<&str> = native.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, ["mod:cave", "mod:deep/caves", "minecraft:plains"]);
+        let mut list: Vec<BiomeInfo> = ["minecraft:meadow", "minecraft:plains"]
+            .iter()
+            .map(|n| BiomeInfo::from_json((*n).to_owned(), &json!({}), &maps))
+            .collect();
+        append_native(&mut list, native, &maps);
+        let names: Vec<&str> = list.iter().map(|b| b.name.as_str()).collect();
+        // Vanilla's ids stay put and vanilla's plains keeps its data.
+        assert_eq!(
+            names,
+            [
+                "minecraft:meadow",
+                "minecraft:plains",
+                "mod:cave",
+                "mod:deep/caves"
+            ]
+        );
+        assert_eq!(list[1].water, 0x3F76E4);
+        assert_eq!(list[2].water, 0x0000FF);
     }
 }
 

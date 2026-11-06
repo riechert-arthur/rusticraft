@@ -132,6 +132,24 @@ fn pack_entries(
     }
 }
 
+/// Native mods' biomes (`biome::native_biomes`), sent with their data as a pack's entries are,
+/// since no client's known packs hold them. An id the registry already has keeps its entry, as
+/// the game's biome table keeps it: a second entry of one id would fail a client's registry.
+fn native_entries(
+    native: Vec<(String, Value)>,
+    entries: &mut Vec<((String, String), Value, bool)>,
+) {
+    for (name, json) in native {
+        let Some((ns, path)) = name.split_once(':') else {
+            continue;
+        };
+        let key = (ns.to_owned(), path.to_owned());
+        if !entries.iter().any(|(k, ..)| *k == key) {
+            entries.push((key, json, true));
+        }
+    }
+}
+
 /// ResourceManagerRegistryLoadTask.load: the entries register sorted by the
 /// file `Identifier` FileToIdConverter.listMatchingResources keys them by
 /// (`<dir>/<path>.json`), path first, then namespace (Identifier.compareTo).
@@ -213,6 +231,9 @@ impl SyncData {
                 .collect();
             if PACK_REGISTRIES.contains(key) {
                 pack_entries(path, overlay, &mut entries);
+            }
+            if *key == "minecraft:worldgen/biome" {
+                native_entries(crate::biome::native_biomes(), &mut entries);
             }
             file_order(&mut entries);
             let mut e = Entries {
@@ -489,6 +510,38 @@ mod tests {
                 ),
                 ("minecraft:x-y".to_owned(), Value::Null, true),
                 ("minecraft:x".to_owned(), Value::Null, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn native_biomes_join_the_registry_once_with_their_data() {
+        let vanilla = |p: &str| (("minecraft".to_owned(), p.to_owned()), Value::Null, false);
+        let mut entries = vec![vanilla("badlands"), vanilla("plains"), vanilla("river")];
+        let cave = serde_json::json!({"temperature": 0.8});
+        native_entries(
+            vec![
+                ("terraforged:cave".to_owned(), cave.clone()),
+                ("minecraft:plains".to_owned(), cave.clone()),
+                ("terraforged:oak_forest".to_owned(), cave.clone()),
+            ],
+            &mut entries,
+        );
+        file_order(&mut entries);
+        let got: Vec<_> = entries
+            .iter()
+            .map(|((ns, p), v, from_pack)| (format!("{ns}:{p}"), v.is_null(), *from_pack))
+            .collect();
+        // Identifier order (path, then namespace); vanilla's plains stays one entry; the mods'
+        // biomes carry their data, which no client's known pack has.
+        assert_eq!(
+            got,
+            [
+                ("minecraft:badlands".to_owned(), true, false),
+                ("terraforged:cave".to_owned(), false, true),
+                ("terraforged:oak_forest".to_owned(), false, true),
+                ("minecraft:plains".to_owned(), true, false),
+                ("minecraft:river".to_owned(), true, false),
             ]
         );
     }

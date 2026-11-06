@@ -687,6 +687,26 @@ For mods that run where the world is simulated: a dedicated server, a LAN host, 
   a player's bucket at a block, and their blow on an entity, with the acting player swapped in. Canceled, the bucket
   does nothing and the blow does no harm.
 
+### Biomes
+
+`horizon_client_render::biome::native_biome_files()` returns the biomes native mods add, as `(id, biome
+JSON)` in 26.3's format; a mod adds its own with a RETURN hook on it. The game reads them through
+`biome::native_biomes()`, which skips an id that isn't a valid namespaced `Identifier` and keeps the first of
+each id. They join the game's biome table after vanilla's (whose ids stay put) and the synchronized
+`minecraft:worldgen/biome` registry in its Identifier order, sent with their data as a pack's entries are. A
+vanilla biome keeps its entry over a mod's of the same id. The generator reads a mod's biomes from its data
+pack, which keeps them now that the table knows them. Saves and the network refer to biomes by name.
+
+- Their colours, weather and mob spawns come from the JSON. Horizon reads a biome's water fog distance,
+  ambient particles, ambience and music only from vanilla's own files, so a mod's biome gets the defaults
+  there.
+- A vanilla client builds the biome from the data it is sent. A Horizon client without the mod draws it as
+  plains.
+- A world saved with a mod's biome loads without the mod as plains, as an unknown biome does, and with it
+  as saved.
+- The hook runs for every world (it is read once, when the game loads its biomes), so the biomes are in a
+  vanilla world's registry too.
+
 ### Mobs
 
 API 37, `crates/horizon-client/src/game/native_mobs.rs`: helpers for server mods, for the level in place, on a server only (on a
