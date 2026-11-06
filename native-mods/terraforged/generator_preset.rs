@@ -148,13 +148,6 @@ fn json_int(value: &Value) -> Option<i32> {
 /// types, the continent and the blender's terrains share one registry, Engine 0.3.0's built-ins
 /// ([`TerrainRegistry::new`], as 6dd607eb links Engine 0.3.0), so every identity test sees the same built-ins. `Err` where a bundled resource does not decode.
 pub fn build(levels: TerrainLevels) -> Result<TerraForgedGenerator, String> {
-    build_with_terrains(levels).map(|(generator, _)| generator)
-}
-
-/// [`build`], with the terrain registry it decoded (`/locateterrain` looks terrains up).
-pub fn build_with_terrains(
-    levels: TerrainLevels,
-) -> Result<(TerraForgedGenerator, Arc<TerrainRegistry>), String> {
     let mut registry = TerrainRegistry::new();
     let types = decode_current_terrain_types(&mut registry).map_err(|error| error.to_string())?;
     let noises = decode_current_terrain_noises(&types).map_err(|error| error.to_string())?;
@@ -168,15 +161,14 @@ pub fn build_with_terrains(
     );
     let continent = ContinentNoise::new(levels, context);
     let noise = NoiseGenerator::new(levels, continent, land);
-    let generator = TerraForgedGenerator::new(
+    Ok(TerraForgedGenerator::new(
         levels,
         ErodedNoiseGenerator::new(
             noise,
             erosion_settings(),
             HeightmapSmoothingSettings::default(),
         ),
-    );
-    Ok((generator, terrains))
+    ))
 }
 
 /// `withErosion`'s filter settings: 6dd607eb's `ErodedNoiseGenerator` takes Engine 0.3.0's `new FilterSettings.Erosion()`

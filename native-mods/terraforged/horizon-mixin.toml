@@ -637,7 +637,10 @@ id = "register-commands"
 target = "horizon_client::game::native_hooks::Game<'_>::native_register_commands"
 kind = "HEAD"
 helper = "hooks/register_commands.rs"
-bindings = [{ name = "commands", ty = "&mut Vec<NativeCommand>", value = "&mut *commands" }]
+bindings = [
+  { name = "game", ty = "&Game<'_>", value = "&*self" },
+  { name = "commands", ty = "&mut Vec<NativeCommand>", value = "&mut *commands" },
+]
 
 [[injection]]
 id = "perform-command"
@@ -650,3 +653,10 @@ bindings = [
   { name = "command", ty = "&str", value = "command" },
   { name = "ran", ty = "&mut bool", value = "&mut *ran" },
 ]
+
+[[injection]]
+id = "deliver-commands"
+target = "horizon_client::game::native_hooks::Game<'_>::native_server_tick"
+kind = "HEAD"
+helper = "hooks/deliver_commands.rs"
+bindings = [{ name = "game", ty = "&mut Game<'_>", value = "&mut *self" }]

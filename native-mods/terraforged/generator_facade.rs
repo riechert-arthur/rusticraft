@@ -54,8 +54,32 @@ use super::{
 use crate::registry::BlockStateId;
 use horizon_core::position::ChunkPos;
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicI64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
+
+/// The TerraForged generators of the pipelines alive in this process, by level seed and dimension (newest last).
+type LiveGenerators = Vec<(i64, String, Weak<TerraForgedGenerator>)>;
+static LIVE: Mutex<LiveGenerators> = Mutex::new(Vec::new());
+
+/// Records `generator` as the one a pipeline of `dimension` (`minecraft:overworld`) generates `level_seed`'s world
+/// with, for [`live_generator`]. The entry dies with the pipeline: it holds no reference that keeps it alive.
+pub fn register_live(level_seed: i64, dimension: &str, generator: &Arc<TerraForgedGenerator>) {
+    let mut live = LIVE.lock().unwrap_or_else(PoisonError::into_inner);
+    live.retain(|(_, _, entry)| entry.strong_count() > 0);
+    live.push((level_seed, dimension.to_owned(), Arc::downgrade(generator)));
+}
+
+/// `GeneratorPreset.getGenerator(level)`: the TerraForged generator `dimension` of `level_seed`'s world generates
+/// with, or `None` when that level's generator is not TerraForged's (no TerraForged pipeline of that seed and
+/// dimension is alive). Pipelines of one seed and dimension build the same generator from the same stem, so any one
+/// of them answers; the newest is taken.
+pub fn live_generator(level_seed: i64, dimension: &str) -> Option<Arc<TerraForgedGenerator>> {
+    let live = LIVE.lock().unwrap_or_else(PoisonError::into_inner);
+    live.iter()
+        .rev()
+        .filter(|(seed, name, _)| *seed == level_seed && name == dimension)
+        .find_map(|(_, _, entry)| entry.upgrade())
+}
 
 /// `Seeds.get(long)`: the level seed as TerraForged's noise uses it, narrowed to a Java `int` (its low 32 bits).
 pub const fn seed_of(level_seed: i64) -> i32 {
@@ -532,6 +556,29 @@ mod tests {
             1 => TerrainLevels::new(false, 1.0, -64, 256, 128, 62, 22),
             _ => TerrainLevels::new(true, 2.5, 0, 480, 200, 63, 30),
         }
+    }
+
+    #[test]
+    fn live_generators_answer_by_seed_and_dimension_while_their_pipeline_lives() {
+        // A seed no other test registers.
+        const SEED: i64 = -0x7e57_11fe_0219;
+        let first = Arc::new(facade(0, 0, 0, 12, 0));
+        register_live(SEED, "minecraft:overworld", &first);
+        let found = live_generator(SEED, "minecraft:overworld").expect("registered");
+        assert!(Arc::ptr_eq(&found, &first));
+        drop(found);
+        assert!(live_generator(SEED, "minecraft:the_nether").is_none());
+        assert!(live_generator(SEED.wrapping_add(1), "minecraft:overworld").is_none());
+        // The newest of one seed and dimension answers; a dropped one never does.
+        let second = Arc::new(facade(0, 0, 0, 12, 0));
+        register_live(SEED, "minecraft:overworld", &second);
+        let found = live_generator(SEED, "minecraft:overworld").expect("registered");
+        assert!(Arc::ptr_eq(&found, &second));
+        drop((found, second));
+        let found = live_generator(SEED, "minecraft:overworld").expect("the first still lives");
+        assert!(Arc::ptr_eq(&found, &first));
+        drop((found, first));
+        assert!(live_generator(SEED, "minecraft:overworld").is_none());
     }
 
     fn facade(

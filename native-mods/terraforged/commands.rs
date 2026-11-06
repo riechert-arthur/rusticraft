@@ -2,7 +2,6 @@
  * MIT License
  *
  * Copyright (c) 2021 TerraForged
- * Copyright (c) 2020 TerraForged
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -23,26 +22,34 @@
  * SOFTWARE.
  */
 
-// `TFCommands`: `/locateterrain <terrain> [radius]` and `/tf export structures` for
-// operators (level 2), on the native command hooks.
+// TerraForged 6dd607eb's `TFCommands`
+// (https://github.com/TerraForged/TerraForged/blob/6dd607ebfd41a3b7274e090b1f2cf565d53d1d44/src/main/java/com/terraforged/mod/command/TFCommands.java):
+// `/locateterrain <terrain> [radius]` and `/tf export structures`, for operators (level 2), on the native command
+// hooks. `/tf regen <radius>` (which regenerates chunks under a live server) is not ported.
 
 use super::super::Game;
 use super::super::native_server::{NativeCommand, NativeServerPlayer};
-use horizon_client::text::{ClickEvent, Style, Text};
+use horizon_client::save::terraforged_world_type::is_terraforged;
+use horizon_client::text::{self, ClickEvent, Style, Text};
 use horizon_world::worldgen::generator::{
-    terraforged_engine::TerrainRegistry,
-    terraforged_generator_facade::{TerraForgedGenerator, TerraHeightmap},
-    terraforged_generator_preset::{build_with_terrains, terrain_levels},
+    terraforged_generator_facade::{TerraForgedGenerator, TerraHeightmap, live_generator},
     terraforged_util::{unpack_left, unpack_right},
-    terraforged_world_preset::preset_json,
 };
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::{Arc, Mutex, PoisonError};
 
-const GREEN: u32 = 0x55_ff_55;
-const YELLOW: u32 = 0xff_ff_55;
-const RED: u32 = 0xff_55_55;
-
-pub(in crate::game) fn register(commands: &mut Vec<NativeCommand>) {
+/// `TFCommands.register`'s two roots, `requires(hasPermission(2))`. TerraForged registers them in every world (its
+/// `/locateterrain` then answers nothing where the level's generator is not TerraForged's); here only a TerraForged
+/// world has them, so other worlds keep vanilla's command tree (Arthur's choice for the pack and the boats).
+/// Horizon's native commands have no quotable `string` argument and no suggestions: the terrain is a `word`
+/// (TerraForged's terrain names are all words), and the radius' minimum of 1 is checked when it runs.
+pub(in crate::game) fn register(game: &Game<'_>, commands: &mut Vec<NativeCommand>) {
+    if !game
+        .native_world_dir()
+        .is_some_and(|world| is_terraforged(&world))
+    {
+        return;
+    }
     commands.push(NativeCommand::op(
         "locateterrain <terrain:word> [radius:integer]",
         2,
@@ -59,57 +66,130 @@ pub(in crate::game) fn perform(
     let words: Vec<&str> = command.split_whitespace().collect();
     match words.as_slice() {
         ["tf", "export", "structures"] => {
-            // The original's export is commented out; it only answers.
-            game.native_feedback(Text::colored("Exported structure settings", GREEN));
+            // `export`: its structure export is commented out in TerraForged, so it writes nothing and only answers
+            // (`sendSuccess(.., false)`).
+            game.feedback_unbroadcast(Text::colored("Exported structure settings", text::GREEN));
             true
         }
         ["locateterrain", terrain, rest @ ..] if rest.len() <= 1 => {
             let radius = match rest.first() {
-                Some(radius) => match radius.parse::<i32>() {
+                // `IntegerArgumentType.integer(1)`, which the tree sent to clients cannot carry.
+                Some(word) => match word.parse::<i32>() {
                     Ok(radius) if radius >= 1 => radius,
-                    _ => return false,
+                    found => {
+                        let message = match found {
+                            Ok(found) => Text::tr("argument.integer.low", &[&1, &found]),
+                            Err(_) => Text::tr("parsing.int.invalid", &[word]),
+                        };
+                        let cursor = command.trim_end().len() - word.len();
+                        syntax_failure(game, command, cursor, message);
+                        return true;
+                    }
                 },
                 None => 1,
             };
-            if let Some(line) = locate(game, player, terrain.trim_matches('"'), radius) {
-                game.native_feedback(line);
-            }
+            // `StringArgumentType.string()`: a quoted name reads without its quotes.
+            let name = terrain
+                .strip_prefix('"')
+                .and_then(|quoted| quoted.strip_suffix('"'))
+                .unwrap_or(terrain);
+            locate(game, player, name, radius);
             true
         }
         _ => false,
     }
 }
 
-/// `TFCommands.locate`; nothing outside a TerraForged world.
-fn locate(game: &Game<'_>, player: &NativeServerPlayer, name: &str, radius: i32) -> Option<Text> {
-    let world = game.native_world_dir()?;
-    if !horizon_client::save::terraforged_world_type::is_terraforged(&world) {
-        return None;
-    }
-    let built = generator(game.level.seed)?;
-    let (generator, terrains) = (&built.0, &built.1);
-    let Some(terrain) = terrains.get_by_name(name) else {
-        return Some(Text::colored(format!("Invalid terrain: {name}"), RED));
+/// `TFCommands.locate`. Nothing where the player's level does not generate with TerraForged
+/// (`GeneratorPreset.getGenerator(level) == null`: the Nether and the End). The answers go to the player
+/// (`sendSystemMessage`); a failure inside the search is Brigadier's `command.failed`.
+///
+/// The search runs on the server thread as in Java (`NoiseGenerator.find` takes microseconds), but the teleport's
+/// height does not: [`TerraForgedGenerator::base_height`] reads the eroded height, which builds an erosion region
+/// (0.25 to 1.2 s in an optimized build), so it runs on its own thread and its answer reaches the player at a later
+/// server tick ([`deliver`]).
+fn locate(game: &mut Game<'_>, player: &NativeServerPlayer, name: &str, radius: i32) {
+    let Some(generator) = live_generator(game.level.seed, &player.dimension) else {
+        return;
     };
+    let terrains = Arc::clone(&generator.noise_generator().continent().context().terrain);
+    let Some(terrain) = terrains.get_by_name(name) else {
+        game.native_feedback(Text::colored(format!("Invalid terrain: {name}"), text::RED));
+        return;
+    };
+    let unable = Text::colored(format!("Unable to locate terrain: {name}"), text::RED);
+    // `player.blockPosition()`.
     let at = player.position.map(|v| v.floor() as i32);
-    let max_radius = 100.min(radius + 50);
-    let pos = generator.noise_generator().find(
-        game.level.seed as i32,
+    let max_radius = 100.min(radius.wrapping_add(50));
+    if radius > max_radius {
+        // Above 100 the minimum radius passes the maximum, and TerraForged's spiral never leaves its first cell:
+        // Java's search then never ends unless that one cell happens to match (a hang the server's watchdog ends).
+        // The port answers as a miss instead.
+        game.native_feedback(unable);
+        return;
+    }
+    let found = generator.noise_generator().find(
+        generator.seed(),
         at[0],
         at[2],
         radius,
         max_radius,
         &terrain,
     );
-    if pos == 0 {
-        return Some(Text::colored(
-            format!("Unable to locate terrain: {name}"),
-            RED,
-        ));
+    let position = match found {
+        Ok(0) => return game.native_feedback(unable),
+        Ok(position) => position,
+        Err(cause) => return game.command_failure(failed(cause)),
+    };
+    let (x, z) = (unpack_left(position), unpack_right(position));
+    let shown = terrain.name().to_owned();
+    let (send, receive) = mpsc::channel();
+    let worker = Arc::clone(&generator);
+    let spawned = std::thread::Builder::new()
+        .name("TerraForged locateterrain".to_owned())
+        .spawn(move || drop(send.send(answer(&worker, at, x, z, &shown))));
+    match spawned {
+        Ok(_) => PENDING
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((player.uuid, receive)),
+        Err(_) => game.native_feedback(answer(&generator, at, x, z, terrain.name())),
     }
-    let (x, z) = (unpack_left(pos), unpack_right(pos));
-    let y = generator.base_height(x, z, TerraHeightmap::MotionBlocking);
-    // Vec3i.distToCenterSqr from the player's block.
+}
+
+/// The answer to a search that found `terrain` at `(x, z)`: `getFirstFreeHeight(x, z, MOTION_BLOCKING, ..)` (the
+/// generator's `getBaseHeight`), then the teleport message.
+fn answer(generator: &TerraForgedGenerator, at: [i32; 3], x: i32, z: i32, terrain: &str) -> Text {
+    match generator.base_height(x, z, TerraHeightmap::MotionBlocking) {
+        Ok(y) => teleport_message(at, x, y, z, terrain),
+        Err(cause) => Text::empty().append(failed(cause)).with_color(text::RED),
+    }
+}
+
+/// `/locateterrain` answers still being computed: the player's UUID and the answer's channel.
+type Pending = Vec<(u128, Receiver<Text>)>;
+static PENDING: Mutex<Pending> = Mutex::new(Vec::new());
+
+/// Each server tick: sends the `/locateterrain` answers that are ready to their players (dropped for a player who
+/// left).
+pub(in crate::game) fn deliver(game: &mut Game<'_>) {
+    let mut pending = PENDING.lock().unwrap_or_else(PoisonError::into_inner);
+    if pending.is_empty() {
+        return;
+    }
+    pending.retain(|(uuid, answer)| match answer.try_recv() {
+        Ok(line) => {
+            game.native_tell(*uuid, line);
+            false
+        }
+        Err(TryRecvError::Empty) => true,
+        Err(TryRecvError::Disconnected) => false,
+    });
+}
+
+/// `createTerrainTeleportMessage(pos, x, y, z, terrain)`. The distance is `Math.sqrt(pos.distToCenterSqr(x, y, z))`
+/// printed as `%.1f` (in the root locale's form; Java's uses the server's default locale).
+fn teleport_message(at: [i32; 3], x: i32, y: i32, z: i32, terrain: &str) -> Text {
     let d = [
         f64::from(at[0]) + 0.5 - f64::from(x),
         f64::from(at[1]) + 0.5 - f64::from(y),
@@ -122,39 +202,56 @@ fn locate(game: &Game<'_>, player: &NativeServerPlayer, name: &str, radius: i32)
             underlined: Some(true),
             click: Some(ClickEvent::RunCommand(format!("/tp {x} {y} {z}"))),
             hover: Some(Box::new(
-                Text::colored("Location: ", GREEN)
-                    .append(Text::colored(format!("{x};{y};{z}"), YELLOW)),
+                Text::colored("Location: ", text::GREEN)
+                    .append(Text::colored(format!("{x};{y};{z}"), text::YELLOW)),
             )),
-            ..Style::color(YELLOW)
+            ..Style::color(text::YELLOW)
         },
     );
-    Some(
-        Text::colored("Found terrain: ", GREEN)
-            .append(Text::colored(terrain.name().to_owned(), YELLOW))
-            .append(Text::colored(" Distance: ", GREEN))
-            .append(Text::colored(format!("{distance:.1}"), YELLOW))
-            .append(Text::colored(". ", GREEN))
-            .append(teleport),
-    )
+    Text::colored("Found terrain: ", text::GREEN)
+        .append(Text::colored(terrain.to_owned(), text::YELLOW))
+        .append(Text::colored(" Distance: ", text::GREEN))
+        .append(Text::colored(format!("{distance:.1}"), text::YELLOW))
+        .append(Text::colored(". ", text::GREEN))
+        .append(teleport)
 }
 
-type Built = Arc<(TerraForgedGenerator, Arc<TerrainRegistry>)>;
+/// `Commands.performCommand`'s answer to an exception: `command.failed`, its message on hover.
+fn failed(cause: &str) -> Text {
+    Text::translate("command.failed", &[]).with_style(&Style {
+        hover: Some(Box::new(Text::literal(cause))),
+        ..Style::default()
+    })
+}
 
-/// The world's generator, built once per seed.
-fn generator(seed: i64) -> Option<Built> {
-    static CACHE: Mutex<Option<(i64, Built)>> = Mutex::new(None);
-    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some((cached, built)) = cache.as_ref()
-        && *cached == seed
-    {
-        return Some(Arc::clone(built));
+/// `Commands.performCommand`'s answer to a `CommandSyntaxException` at `cursor` of `input`: the message, then the
+/// input's last 10 characters before the cursor and the rest underlined, with `<--[HERE]`.
+fn syntax_failure(game: &mut Game<'_>, input: &str, cursor: usize, message: Text) {
+    game.command_failure(message);
+    let mut context = Text::empty();
+    if cursor > 10 {
+        context.push("...");
     }
-    let preset: serde_json::Value = serde_json::from_str(preset_json()).ok()?;
-    let levels =
-        terrain_levels(&preset["dimensions"]["minecraft:overworld"]["generator"]["levels"]).ok()?;
-    let (generator, terrains) = build_with_terrains(levels).ok()?;
-    generator.capture_seed(seed);
-    let built = Arc::new((generator, terrains));
-    *cache = Some((seed, Arc::clone(&built)));
-    Some(built)
+    let start = (0..=cursor.saturating_sub(10))
+        .rev()
+        .find(|&i| input.is_char_boundary(i))
+        .unwrap_or(0);
+    context.push(&input[start..cursor]);
+    if cursor < input.len() {
+        context.push(
+            Text::literal(&input[cursor..])
+                .with_color(text::RED)
+                .underlined(),
+        );
+    }
+    context.push(
+        Text::translate("command.context.here", &[])
+            .with_color(text::RED)
+            .italic(),
+    );
+    let suggest = Style {
+        click: Some(ClickEvent::SuggestCommand(format!("/{input}"))),
+        ..Style::default()
+    };
+    game.command_failure(context.with_color(text::GRAY).with_style(&suggest));
 }
