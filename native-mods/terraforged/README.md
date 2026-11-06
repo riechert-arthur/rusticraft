@@ -2143,7 +2143,8 @@ binding layer decides). The cached terrain data is only read. Snow and water pos
 `smoothWater`) and the call from the surface decorator are later layers. The test runs `SurfaceErosionOracle`
 (6dd607eb's three methods, copied verbatim, over real 26.3 ProtoChunks, heightmaps and block tags): 160 generated
 chunks over three build ranges, four persisted statuses, primed and unprimed heightmaps, three gen depths and NaN
-gradients, comparing gradients, every block and all six heightmaps.
+gradients, comparing gradients, every block and all six heightmaps. Some of them put steep, all-erodible soil at the
+bottom of a 16..80 chunk, where the search runs into void air and copies it up the column, as Java does.
 
 The structure terrain columns (`structure_terrain.rs`, `StructureTerrain`) are TerraForged 6dd607eb's
 `worldgen.terrain.StructureTerrain.modify` and its helpers (MIT, as above), the per-column part of `fillFromNoise`'s
