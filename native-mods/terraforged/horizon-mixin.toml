@@ -512,6 +512,7 @@ id = "client_world_type"
 file = "crates/horizon-client/src/save.rs"
 name = "terraforged_world_type"
 source = "client_world_type.rs"
+visibility = "pub"
 
 [[injection]]
 id = "cycle-world-type"
@@ -601,3 +602,26 @@ id = "decorator"
 file = "crates/horizon-world/src/worldgen/generator_decoration.rs"
 name = "terraforged_decorator"
 source = "decorator.rs"
+
+[[module]]
+id = "boat"
+file = "crates/horizon-client/src/game/boats.rs"
+name = "terraforged_boat"
+source = "boat.rs"
+
+[[injection]]
+id = "float-the-boat"
+target = "horizon_client::game::boats::Game<'_>::boat_status"
+kind = "OVERWRITE"
+helper = "hooks/boat_status.rs"
+bindings = [
+  { name = "game", ty = "&Game<'_>", value = "self" },
+  { name = "b", ty = "&mut Boat", value = "b" },
+]
+
+[[injection]]
+id = "boat-local-world"
+target = "horizon_client::game::server_packs::Game<'_>::server_packs_world_pack"
+kind = "HEAD"
+helper = "hooks/boat_local_world.rs"
+bindings = [{ name = "folder", ty = "&str", value = "folder" }]
