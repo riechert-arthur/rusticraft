@@ -337,6 +337,10 @@ fn regen(game: &mut Game<'_>, player: &NativeServerPlayer, radius: i32) {
     let data = horizon_client::save::terraforged_regen::delete_chunk_data(&game.save, &keys);
     // The save no longer has the area: memory follows, whatever happened to its entities' records.
     horizon_client::streaming::terraforged_regen::discard(&mut game.streaming, &set);
+    // Entities read with a column that loaded since the last tick wait in `loaded_entities`: theirs go too.
+    game.world
+        .loaded_entities
+        .retain(|(key, _)| !set.contains(key));
     let _ = game.entity_chunks(&set, true);
     for &(x, z) in &keys {
         game.world.modified.remove(&(x, z));

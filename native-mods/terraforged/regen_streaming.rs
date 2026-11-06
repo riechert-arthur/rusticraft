@@ -99,3 +99,129 @@ pub fn discard(streaming: &mut Streaming, keys: &HashSet<(i32, i32)>) {
     }
     streaming.generation_scan.exhausted = false;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::{Chunk, ChunkGenerator, Job, Proto, Streaming, WorkerContext};
+    use super::{discard, settle};
+    use std::collections::HashSet;
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::time::Duration;
+
+    /// Loads that answer an empty column once `open`; each records its key when it starts.
+    #[derive(Default)]
+    struct Gated {
+        state: Mutex<(bool, Vec<(i32, i32)>)>,
+        changed: Condvar,
+    }
+    impl Gated {
+        fn wait_started(&self, count: usize) -> Vec<(i32, i32)> {
+            let state = self.state.lock().unwrap();
+            let (state, timeout) = self
+                .changed
+                .wait_timeout_while(state, Duration::from_secs(10), |s| s.1.len() < count)
+                .unwrap();
+            assert!(!timeout.timed_out(), "started: {:?}", state.1);
+            state.1.clone()
+        }
+        fn open(&self) {
+            self.state.lock().unwrap().0 = true;
+            self.changed.notify_all();
+        }
+    }
+    impl ChunkGenerator for Gated {
+        type Worker = ();
+        fn worker(&self) {}
+        fn load(&self, x: i32, z: i32) -> Option<Chunk> {
+            let mut state = self.state.lock().unwrap();
+            state.1.push((x, z));
+            self.changed.notify_all();
+            while !state.0 {
+                state = self.changed.wait(state).unwrap();
+            }
+            Some(Chunk::empty(x, z))
+        }
+        fn proto(&self, _: &mut (), _: i32, _: i32) -> Proto {
+            Box::new(())
+        }
+        fn finish(&self, _: Proto) -> Chunk {
+            unreachable!("nothing is decorated")
+        }
+    }
+
+    fn context() -> crate::Result<Arc<WorkerContext>> {
+        use crate::{
+            assets::Assets, biome::Biomes, blocks::BlockFacts, light::LightTables,
+            mesher::MeshTables,
+        };
+        let root = std::path::PathBuf::from(
+            std::env::var_os("HORIZON_TEST_RESOURCES").expect("HORIZON_TEST_RESOURCES"),
+        );
+        let assets = Arc::new(Assets::load(&root)?);
+        let render = Arc::new(assets.reload(&root)?);
+        let facts = BlockFacts::load(&root, assets.registry)?;
+        let tables = Arc::new(MeshTables::new(
+            &assets,
+            &render,
+            &facts,
+            crate::models::load_visibility(&root, assets.registry)?,
+        )?);
+        Ok(Arc::new(WorkerContext {
+            light: Arc::new(LightTables::load(&root, assets.registry, &facts)?),
+            tables,
+            assets,
+            render,
+            biomes: Arc::new(Biomes::load(&root)?),
+        }))
+    }
+
+    /// A load of the area that read the save before the delete must not bring the old column
+    /// back: a running one is waited for and its column dropped, a queued one never runs, and
+    /// loads elsewhere go on.
+    #[test]
+    #[ignore = "requires prepared models/textures in HORIZON_TEST_RESOURCES"]
+    fn settle_drops_the_areas_loads_and_keeps_the_others() -> crate::Result<()> {
+        let generator = Arc::new(Gated::default());
+        let mut streaming = Streaming::new(generator.clone(), context()?, 1);
+        let (running, queued, elsewhere) = ((0, 0), (1, 0), (5, 5));
+        streaming.generating.insert(running);
+        streaming.submit(Some(running), 0, Job::Generate(running.0, running.1));
+        assert_eq!(generator.wait_started(1), [running]);
+        for key in [queued, elsewhere] {
+            streaming.generating.insert(key);
+            streaming.submit(Some(key), 0, Job::Generate(key.0, key.1));
+        }
+        let gate = generator.clone();
+        let opener = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            gate.open();
+        });
+        let area: HashSet<(i32, i32)> = [running, queued].into_iter().collect();
+        assert!(settle(&mut streaming, &area));
+        opener.join().unwrap();
+        assert!(!streaming.generating.contains(&running));
+        assert!(!streaming.generating.contains(&queued));
+        assert!(streaming.generating.contains(&elsewhere));
+        // Only the load outside the area runs after the one that was running.
+        assert_eq!(generator.wait_started(2), [running, elsewhere]);
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(generator.state.lock().unwrap().1, [running, elsewhere]);
+        discard(&mut streaming, &area);
+        assert!(!streaming.generation_scan.exhausted);
+        Ok(())
+    }
+
+    /// Work `Streaming::save` waited for and did not see finish: nothing may be deleted.
+    #[test]
+    #[ignore = "requires prepared models/textures in HORIZON_TEST_RESOURCES"]
+    fn settle_refuses_while_a_decoration_is_out() -> crate::Result<()> {
+        let generator = Arc::new(Gated::default());
+        generator.open();
+        let mut streaming = Streaming::new(generator, context()?, 1);
+        streaming.decorating = 1;
+        assert!(!settle(&mut streaming, &HashSet::from([(0, 0)])));
+        streaming.decorating = 0;
+        assert!(settle(&mut streaming, &HashSet::from([(0, 0)])));
+        Ok(())
+    }
+}
