@@ -46,11 +46,13 @@ use super::{
     terraforged_eroded_noise_generator::ErodedNoiseGenerator,
     terraforged_noise_generator::NoiseGenerator,
     terraforged_structure_terrain::StructureTerrain,
+    terraforged_surface_height_cache,
     terraforged_terrain_cache::{TerrainCache, TerrainDataHandle, TerrainTask},
     terraforged_terrain_levels::TerrainLevels,
 };
 use crate::registry::BlockStateId;
 use horizon_core::position::ChunkPos;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicI64, Ordering};
 
@@ -324,6 +326,29 @@ impl TerraForgedGenerator {
             base_temperature,
             override_biome,
         )
+    }
+
+    /// TerraForged 6dd607eb's `NoiseChunkUtil.getNoiseChunk` → `initChunk` → `initSurfaceCache` for `chunk`: asks
+    /// for the chunk's terrain task with the captured [`Self::seed`] (Java's `getChunkDataAsync(Seeds.get(state),
+    /// pos)`, which starts the generation even when the cache turns out to be filled), then, only if `cache` is empty,
+    /// waits for it and fills `cache` from the entry's current heights
+    /// ([`terraforged_surface_height_cache::initialize`]). A filled cache is left as it is, as in Java.
+    ///
+    /// The heights are whatever the shared entry holds when this runs: after
+    /// [`Self::fill_from_noise_with_structures`] they include the structure edits, as Java's surface stage reads the
+    /// `TerrainData` its `fillFromNoise` edited; run it after the chunk's terrain stage, never alongside a different
+    /// stage kind on the same entry. They count in TerraForged's levels and are not clipped to the chunk's build range
+    /// (edited columns carry the clipped OCEAN_FLOOR_WG heights `modify_chunk` wrote), so mapping them to 26.3's
+    /// world height is the registering layer's job, with the open world-height decision. No guard of the entry may
+    /// be held on the calling thread while the stage that writes it runs. Panics as [`Self::chunk_data`] does.
+    pub fn initialize_surface_cache(&self, chunk: ChunkPos, cache: &mut BTreeMap<i64, i32>) {
+        let task = self.chunk_data_async(self.seed(), chunk.x, chunk.z);
+        if !cache.is_empty() {
+            return;
+        }
+        let terrain = task.join();
+        let data = terrain.read();
+        terraforged_surface_height_cache::initialize(cache, chunk, |x, z| data.height_at(x, z));
     }
 
     /// `terrainCache().drop(seed, pos)`, as `applyBiomeDecoration` calls it with `Seeds.get(region.getSeed())`.
@@ -799,6 +824,45 @@ q 3 -770 1240 3eafbae6 3f060470 135 135 134 134 134 0
         assert!(!first.ptr_eq(&g.chunk_data(seed.wrapping_add(1), -2, 3)));
         g.drop_chunk(seed, -2, 3);
         assert!(!first.ptr_eq(&g.chunk_data(seed, -2, 3)));
+    }
+
+    /// The surface cache reads the shared entry's current heights (structure edits included) with the captured seed,
+    /// pads the 3x3 chunk area with their minimum, and leaves a filled cache alone.
+    #[test]
+    fn surface_cache_reads_the_shared_edited_heights() {
+        use super::super::terraforged_surface_height_cache::column_key;
+        let g = facade(0, 0, 0, 25, 0);
+        g.capture_seed((5_i64 << 32) | 7);
+        let data = g.chunk_data(7, -1, 2);
+        {
+            let mut terrain = data.write();
+            for z in 0..16 {
+                for x in 0..16 {
+                    terrain.set_height_at(x, z, 70 + x - z * 2);
+                }
+            }
+        }
+        let mut cache = BTreeMap::new();
+        g.initialize_surface_cache(ChunkPos::new(-1, 2), &mut cache);
+        assert_eq!(cache.len(), 144);
+        assert_eq!(cache[&column_key(-16, 32)], 70);
+        assert_eq!(cache[&column_key(-4, 44)], 70 + 12 - 24);
+        assert_eq!(cache[&column_key(-32, 32)], 46);
+        assert_eq!(cache[&column_key(12, 60)], 46);
+        assert_eq!(cache[&column_key(-32, 16)], 46);
+        assert!(!cache.contains_key(&column_key(16, 32)));
+        data.write().set_height_at(0, 0, 200);
+        g.initialize_surface_cache(ChunkPos::new(-1, 2), &mut cache);
+        assert_eq!(cache[&column_key(-16, 32)], 70);
+        // A newly captured seed reads its own entry, not the edited one.
+        let mut other = BTreeMap::new();
+        g.capture_seed(8);
+        g.initialize_surface_cache(ChunkPos::new(-1, 2), &mut other);
+        let own = g.chunk_data(8, -1, 2).read().height_at(0, 0);
+        assert_ne!(own, 200);
+        assert_eq!(other[&column_key(-16, 32)], own);
+        g.drop_chunk(7, -1, 2);
+        g.drop_chunk(8, -1, 2);
     }
 
     /// A custom module has no seed-first form: both queries return the noise's `Err`, never a made-up height.
