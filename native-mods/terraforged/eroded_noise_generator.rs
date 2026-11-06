@@ -74,6 +74,12 @@ impl ErodedNoiseGenerator {
         }
     }
 
+    /// How many eroded regions are cached.
+    #[cfg(test)]
+    pub(crate) fn cached_regions(&self) -> usize {
+        self.regions.len()
+    }
+
     /// The wrapped, un-eroded generator (Java's `generator` field).
     pub fn generator(&self) -> &NoiseGenerator {
         &self.generator

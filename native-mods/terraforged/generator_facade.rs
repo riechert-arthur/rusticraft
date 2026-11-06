@@ -388,6 +388,12 @@ impl TerraForgedGenerator {
         self.terrain.len()
     }
 
+    /// How many eroded regions the generator's erosion holds.
+    #[cfg(test)]
+    pub(crate) fn cached_regions(&self) -> usize {
+        self.terrain.noise_generator().cached_regions()
+    }
+
     /// `terrainCache().drop(seed, pos)`, as `applyBiomeDecoration` calls it with `Seeds.get(region.getSeed())`.
     pub fn drop_chunk(&self, seed: i32, chunk_x: i32, chunk_z: i32) {
         self.terrain.remove(seed, chunk_x, chunk_z);

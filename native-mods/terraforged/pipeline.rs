@@ -968,6 +968,7 @@ impl SeededPipeline for TerraForgedPipeline {
 
 #[cfg(test)]
 mod tests {
+    use super::super::terraforged_generator_facade::TerraHeightmap;
     use super::*;
     use std::path::{Path, PathBuf};
 
@@ -1028,22 +1029,6 @@ mod tests {
             }
         }
         assert!(cave_air > 0);
-        // Far samples follow TerraForged's terrain and paint its surface.
-        let near = worker.generate_proto(ChunkPos::new(3, -2)).unwrap();
-        let mut grass = 0;
-        for (x, z) in [(48, -32), (52, -28), (56, -24), (60, -20)] {
-            let far = worker.surface_sample(x, z).unwrap();
-            let real = near.surface_height(x & 15, z & 15);
-            assert!(
-                (far.height - real).abs() <= 12,
-                "{x} {z}: far {} real {real}",
-                far.height
-            );
-            grass += usize::from(
-                near.block_name(x & 15, far.height - 1, z & 15) == "minecraft:grass_block",
-            );
-        }
-        let _ = grass;
         // Villages place on TerraForged's terrain and biomes.
         let villages = [
             "minecraft:village_plains",
@@ -1769,5 +1754,104 @@ mod tests {
         let nether = |name: &str| name == "minecraft:nether_wastes";
         assert_eq!(worker.find_closest_biome(&search(&nether, origin)), None);
         assert_eq!(pipeline.generator.cached_chunks(), 0);
+    }
+    /// Distant tiles show the chunks' ground: the biome the chunk stores at the surface, the un-eroded height (within
+    /// erosion's few blocks of the filled ground), the surface rule's top block, and the level's clipping; sampling
+    /// them creates no terrain-cache entry and builds no erosion region.
+    #[test]
+    fn far_terrain_follows_the_chunks() {
+        let Some(data) = data() else { return };
+        let (pipeline, overworld) = terraforged(&data, 7, false);
+        let generator = &pipeline.generator;
+        let mut worker = overworld.worker();
+        let far = worker.lod_grid(4104, -2040, 16, 16, false).unwrap();
+        assert_eq!(far.len(), 256);
+        assert!(
+            far.iter()
+                .all(|(sample, spans)| sample.is_some() && !spans.is_empty())
+        );
+        assert_eq!(
+            (generator.cached_chunks(), generator.cached_regions()),
+            (0, 0)
+        );
+        // One block per column over chunk (3, -2), then the chunk itself.
+        let columns = worker.lod_grid(48, -32, 1, 16, false).unwrap();
+        assert_eq!(
+            (generator.cached_chunks(), generator.cached_regions()),
+            (0, 0)
+        );
+        let chunk = worker.generate_proto(ChunkPos::new(3, -2)).unwrap();
+        let zoom = horizon_core::biome::BiomeZoom::new(obfuscate_seed(7));
+        let (mut off, mut worst, mut level, mut same, mut painted) = (0, 0, 0, 0, 0);
+        for (index, (sample, spans)) in columns.iter().enumerate() {
+            let (lx, lz) = ((index % 16) as i32, (index / 16) as i32);
+            let (x, z) = (48 + lx, -32 + lz);
+            let sample = sample.unwrap();
+            let raw = generator.far_heights(x, z).unwrap();
+            assert_eq!(sample.height, raw.0 + 1);
+            assert_eq!(spans.last().unwrap().0, -64);
+            let eroded = generator
+                .base_height(x, z, TerraHeightmap::OceanFloorWorldgen)
+                .unwrap();
+            let difference = (sample.height - eroded).abs();
+            off += difference;
+            worst = worst.max(difference);
+            if (2..14).contains(&lx) && (2..14).contains(&lz) {
+                let quart = zoom.quart_at_block(BlockPos::new(x, sample.height - 1, z));
+                assert_eq!(sample.biome, *chunk.biomes().noise_biome(quart), "{x} {z}");
+            }
+            painted += usize::from(sample.state != pipeline.stone);
+            if sample.height == eroded && sample.water.is_none() {
+                level += 1;
+                same += usize::from(chunk.block(lx, sample.height - 1, lz) == sample.state);
+            }
+        }
+        eprintln!("off {off} worst {worst} level {level} same {same} painted {painted}");
+        assert!(
+            worst <= 12 && off <= 3 * 256,
+            "erosion moved the ground by {off} ({worst})"
+        );
+        assert!(painted > 200, "{painted} columns painted");
+        assert!(
+            level > 32 && same * 10 >= level * 8,
+            "{same} of {level} tops match"
+        );
+    }
+
+    /// Far terrain is clipped to the level as the fill clips it: flat at y 319 in a 26.3-high overworld, above it in
+    /// the taller one.
+    #[test]
+    fn far_terrain_is_clipped_to_the_level() {
+        let Some(normal) = data() else { return };
+        let mut ov = crate::worldgen::overrides::WorldgenOverrides::default();
+        ov.set(
+            crate::worldgen::overrides::DIMENSION_TYPES,
+            "minecraft:overworld",
+            super::super::terraforged_world_preset::overworld_type_json().to_owned(),
+        );
+        let Some(tall) = data_with(&ov) else { return };
+        // Seed 1234's peak near x -14848, z -32256 (see the taller overworld's test).
+        let (pipeline, _) = terraforged(&normal, 1234, false);
+        let peak = (0..64 * 64)
+            .map(|i| (-14848 + (i % 64 - 32) * 16, -32256 + (i / 64 - 32) * 16))
+            .max_by_key(|&(x, z)| pipeline.generator.far_heights(x, z).unwrap().0)
+            .unwrap();
+        assert!(pipeline.generator.far_heights(peak.0, peak.1).unwrap().0 > 340);
+        for (data, expected) in [(&normal, Some(320)), (&tall, None)] {
+            let (pipeline, overworld) = terraforged(data, 1234, false);
+            let (sample, spans) = overworld
+                .worker()
+                .lod_grid(peak.0, peak.1, 1, 1, false)
+                .unwrap()
+                .pop()
+                .unwrap();
+            let height = sample.unwrap().height;
+            match expected {
+                Some(top) => assert_eq!(height, top),
+                None => assert!(height > 340, "{height}"),
+            }
+            assert_eq!(spans.first().unwrap().1, height);
+            assert_eq!(pipeline.generator.cached_regions(), 0);
+        }
     }
 }
