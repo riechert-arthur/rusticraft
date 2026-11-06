@@ -285,4 +285,40 @@ mod tests {
             normal.spawn_position().unwrap()
         );
     }
+
+    #[test]
+    fn every_stage_still_generates_the_normal_overworld() {
+        let Some(data) = data() else { return };
+        let seed = -4_172_144_997_902_289_642;
+        let terraforged = OverworldGenerator::for_dimension(
+            Arc::clone(&data),
+            seed,
+            PRESET,
+            "minecraft:overworld",
+        )
+        .unwrap();
+        let normal = OverworldGenerator::for_dimension(
+            Arc::clone(&data),
+            seed,
+            "minecraft:normal",
+            "minecraft:overworld",
+        )
+        .unwrap();
+        assert_eq!(terraforged.level(), normal.level());
+        assert_eq!(terraforged.sea_level(), normal.sea_level());
+        let pos = ChunkPos::new(3, -2);
+        let a = terraforged.worker().generate_proto(pos).unwrap();
+        let b = normal.worker().generate_proto(pos).unwrap();
+        let (min_y, height) = normal.level();
+        for y in min_y..min_y + height {
+            for z in 0..16 {
+                for x in 0..16 {
+                    assert_eq!(a.block(x, y, z), b.block(x, y, z), "block {x} {y} {z}");
+                    if (x | y | z) & 3 == 0 {
+                        assert_eq!(a.biome_id_at(x, y, z), b.biome_id_at(x, y, z));
+                    }
+                }
+            }
+        }
+    }
 }
