@@ -48,7 +48,7 @@ use super::{
     terraforged_cave_biome_sampler::CaveBiomeSampler,
     terraforged_cave_carver::{CarverChunk, NoiseCaveGenerator},
     terraforged_current_surface_biomes::CurrentSurfaceBiomeSampler,
-    terraforged_generator_facade::TerraForgedGenerator,
+    terraforged_generator_facade::{TerraForgedGenerator, register_live},
     terraforged_generator_preset::{build as build_noise, terrain_levels},
     terraforged_live_biomes::LiveBiomeBindings,
     terraforged_structure_queries::TfQueries,
@@ -73,7 +73,8 @@ pub(super) struct TerraForgedPipeline {
     /// the vanilla overworld's biome source. It runs without structures: TerraForged's own placement
     /// ([`StructureState`] over TerraForged's heights and biomes) replaces them.
     pub(super) vanilla: Pipeline<XoroshiroRandom>,
-    pub(super) generator: TerraForgedGenerator,
+    /// Also in `terraforged_generator_facade::live_generator`'s registry (for `/locateterrain`).
+    pub(super) generator: Arc<TerraForgedGenerator>,
     biomes: LiveBiomeBindings,
     surface: SurfaceBindings,
     /// `ChunkUtil.FILLER` and the water `fillChunk` places.
@@ -108,13 +109,10 @@ pub(super) fn build(
     let Some(stem) = stem else {
         return OverworldGenerator::build(data, seed, preset, dimension, with_structures);
     };
+    let pipeline = TerraForgedPipeline::new(&data, seed, &stem, with_structures)?;
+    register_live(seed, dimension, &pipeline.generator);
     Ok(OverworldGenerator {
-        pipeline: Arc::new(TerraForgedPipeline::new(
-            &data,
-            seed,
-            &stem,
-            with_structures,
-        )?),
+        pipeline: Arc::new(pipeline),
         noise_clamped: None,
     })
 }
@@ -165,7 +163,7 @@ impl TerraForgedPipeline {
         with_structures: bool,
     ) -> Result<Self, GeneratorError> {
         let levels = terrain_levels(stem["generator"].get("levels")).map_err(resource)?;
-        let generator = build_noise(levels).map_err(resource)?;
+        let generator = Arc::new(build_noise(levels).map_err(resource)?);
         generator.capture_seed(seed);
         let biomes = LiveBiomeBindings::from_generator_data(data, &[])
             .map_err(|error| resource(error.to_string()))?;

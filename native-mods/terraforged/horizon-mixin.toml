@@ -625,3 +625,38 @@ target = "horizon_client::game::server_packs::Game<'_>::server_packs_world_pack"
 kind = "HEAD"
 helper = "hooks/boat_local_world.rs"
 bindings = [{ name = "folder", ty = "&str", value = "folder" }]
+
+[[module]]
+id = "commands"
+file = "crates/horizon-client/src/game/native_hooks.rs"
+name = "terraforged_commands"
+source = "commands.rs"
+
+[[injection]]
+id = "register-commands"
+target = "horizon_client::game::native_hooks::Game<'_>::native_register_commands"
+kind = "HEAD"
+helper = "hooks/register_commands.rs"
+bindings = [
+  { name = "game", ty = "&Game<'_>", value = "&*self" },
+  { name = "commands", ty = "&mut Vec<NativeCommand>", value = "&mut *commands" },
+]
+
+[[injection]]
+id = "perform-command"
+target = "horizon_client::game::native_hooks::Game<'_>::native_perform_command"
+kind = "HEAD"
+helper = "hooks/perform_command.rs"
+bindings = [
+  { name = "game", ty = "&mut Game<'_>", value = "&mut *self" },
+  { name = "player", ty = "&NativeServerPlayer", value = "player" },
+  { name = "command", ty = "&str", value = "command" },
+  { name = "ran", ty = "&mut bool", value = "&mut *ran" },
+]
+
+[[injection]]
+id = "deliver-commands"
+target = "horizon_client::game::native_hooks::Game<'_>::native_server_tick"
+kind = "HEAD"
+helper = "hooks/deliver_commands.rs"
+bindings = [{ name = "game", ty = "&mut Game<'_>", value = "&mut *self" }]

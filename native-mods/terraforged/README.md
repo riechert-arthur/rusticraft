@@ -47,8 +47,11 @@ Differences and gaps:
 - Far terrain (Horizon's distant tiles) still samples the vanilla generator.
 - The boat hook (boats float up small water steps) works only in TerraForged worlds (Arthur's
   choice); TerraForged's mixin works in every world.
-- Not ported: the world preview screen, the `/tf` and `/locateterrain` commands, TerraForged's
-  dimension effects and the unregistered test volcano feature.
+- `/locateterrain` and `/tf export structures` exist only in TerraForged worlds (TerraForged registers
+  them everywhere); `/locateterrain`'s answer comes a moment later, and a radius above 100 answers
+  "Unable to locate" where TerraForged's search never ends.
+- Not ported: the world preview screen, `/tf regen`, TerraForged's dimension effects and the
+  unregistered test volcano feature.
 
 ## Layers
 
@@ -2918,12 +2921,28 @@ server. A server never moves a player's boat itself. TerraForged's server also f
 overwrites that position. Boats nobody rides, or that only mobs ride, are unchanged. The tests compare against a Java
 transcription in `.local/terraforged/oracles/boat_hook/` (out of Git).
 
+Commands (`commands.rs`, on Horizon's native command hooks) follow 6dd607eb's `TFCommands`, for operators (level 2):
+`/locateterrain <terrain> [radius]` and `/tf export structures`. Both are registered only when the open world is a
+TerraForged one (its saved overworld generator), so other worlds keep vanilla's command tree; TerraForged registers them
+in every world. `/locateterrain` finds the player's level's generator as `GeneratorPreset.getGenerator` does: each
+TerraForged pipeline records its generator by level seed and dimension (`live_generator`), so the Nether and the End
+answer nothing, as in Java. The terrain is looked up with `TerrainType.get` (ignoring case), then `NoiseGenerator.find`
+searches from the player's block with the radius and `min(100, radius + 50)`; the answer (`Found terrain: … Distance: ….
+Teleport`, `Invalid terrain: …`, `Unable to locate terrain: …`) uses TerraForged's literal texts and colours, and the
+teleport link runs `/tp x y z` at `getFirstFreeHeight` (the eroded base height, Reimagined's choice taken for
+structures). Differences: the search runs on the server thread, but that height builds an erosion region (0.25–1.2 s
+optimized), so it runs on its own thread and the answer reaches the player at a later server tick; a radius above 100
+makes Java's spiral stick on its first cell and never end (unless that cell matches), and here it answers "Unable to
+locate"; Horizon's native commands have no quotable `string` argument or suggestions, so the terrain is a `word` and
+nothing is suggested; the radius' minimum is checked when the command runs. `/tf export structures` writes nothing
+(TerraForged's export is commented out) and only answers "Exported structure settings". `/tf regen` is not ported.
+
 ## Status: development only
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives, the biome climate types, the climate settings, the climate module, the climate stage, the continent factory, the generator context, the heightmap, the world generator factory, TerraForged's terrain levels, its terrain data, its terrain generator, its terrain-blend utilities, its terrain blender with its nearest-terrain search (and the newer source's seed-first blender), noise-graph reseeding, the cave noise primitives, the biome viability rules, the biome overrides, the continent control points, the continent cell primitives, the continent configuration, the continent shape blending, the continent cell generator with its spawn-offset search, the continent river nodes, the continent river carver's arithmetic, the continent river networks with their nearest-node sampling and their warped, carved river sampling, the newer source's seed-first noise sources, scalar noise graphs, domain warps, selectors, graph caches, terraces, legacy terraces, advanced terraces, curves, transforms (steps, frequency, gradient and modulation), special sources (boost, cell, cell edge and sine) and lines, and its bounded concurrent lossy cache with the continent's cell and
 river-piece caches on it, the continent noise module that joins the continent layers, the newer source's terrain height sampler with its bordered chunk generation and its nearest-terrain search, its biome chunk fill, cave biome sampler, initial biome selection, surface biome sampler, chunk biome hook and biome registry pools, the erosion tile geometry, and TerraForged Reimagined's heightmap smoothing, erosion brushes, hydraulic erosion filter, eroded-region cache, eroded region build, eroded chunk generation, terrain cache, generator queries, chunk fill, the terrain stage hand-off to it, the current climate noise, the biome sampler bridge, the live biome bindings, the terrain asset decoder, the terrain-type and terrain-noise registries, the bundled terrain types and all 14 bundled terrain noises, the bundled noise caves and their reseeded cave array, and 6dd607eb's structure terrain columns with their
 chunk adapter, piece selection and structure-aware terrain stage, 6dd607eb's surface erosion and water edge smoothing passes, and its preliminary surface-height cache, and the `terraforged:normal` world preset, whose pipeline generates
-TerraForged's terrain, biomes, surfaces, noise caves and structures (placed on Reimagined's eroded heights), and the Create World screen's TerraForged world type with TerraForged's taller overworld. A game built with the bundle offers it, with TerraForged's vegetation, but it is still for development (distant terrain is not wired yet); install instructions come once it is.
+TerraForged's terrain, biomes, surfaces, noise caves and structures (placed on Reimagined's eroded heights), and the Create World screen's TerraForged world type with TerraForged's taller overworld, and its `/locateterrain` and `/tf export structures` commands. A game built with the bundle offers it, with TerraForged's vegetation, but it is still for development (distant terrain is not wired yet); install instructions come once it is.
 
 ## Development
 
