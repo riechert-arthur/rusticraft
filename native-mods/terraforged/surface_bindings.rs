@@ -14,7 +14,8 @@ use std::{
 /// `#minecraft:snow`. This deliberately departs from TerraForged 6dd607eb (and the 1.18.2-0.3.1 jar), whose
 /// `isErodible` reads `#minecraft:dirt` or `#minecraft:snow`: 26.x shrank `#minecraft:dirt` to dirt, coarse dirt and
 /// rooted dirt and moved grass, podzol, mycelium, moss and mud into `#minecraft:substrate_overworld`, so the literal
-/// tag would leave grassy slopes uneroded. `substrate_overworld` holds what 1.18.2's `#minecraft:dirt` held.
+/// tag would leave grassy slopes uneroded. In 26.3, `substrate_overworld` is dirt, coarse dirt, rooted dirt, mud,
+/// muddy mangrove roots, moss block, pale moss block, grass block, podzol and mycelium.
 pub const ERODIBLE_TAGS: [&str; 2] = ["minecraft:substrate_overworld", "minecraft:snow"];
 
 /// 6dd607eb's literal `isErodible` tags (`#minecraft:dirt` or `#minecraft:snow`), for parity checks against its Java;

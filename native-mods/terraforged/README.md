@@ -2191,8 +2191,9 @@ chunk's own registry inside the passes. By default (`SurfaceBindings::new`) a st
 `#minecraft:substrate_overworld` or `#minecraft:snow`, TerraForged Reimagined a24d450's `isErodible` (MIT, as
 above). That departs on purpose from 6dd607eb's literal `#minecraft:dirt` or `#minecraft:snow`: 26.x shrank
 `#minecraft:dirt` to dirt, coarse dirt and rooted dirt and moved grass, podzol, mycelium, moss and mud into
-`#minecraft:substrate_overworld`, so the literal tag would leave grassy slopes uneroded. `substrate_overworld` holds
-what 1.18.2's `#minecraft:dirt` held. `SurfaceBindings::with_erodible_tags` takes any tag list (`JAVA_ERODIBLE_TAGS`
+`#minecraft:substrate_overworld`, so the literal tag would leave grassy slopes uneroded. 26.3's `substrate_overworld`
+is dirt, coarse dirt, rooted dirt, mud, muddy mangrove roots, moss block, pale moss block, grass block, podzol and
+mycelium. `SurfaceBindings::with_erodible_tags` takes any tag list (`JAVA_ERODIBLE_TAGS`
 gives 6dd607eb's); the passes themselves still take the predicate, and their oracles test Java's literal tags. A
 missing tag, water block or water level is an error when the bindings are built. The call from the surface decorator
 and the region lookup for water smoothing are a later layer.
