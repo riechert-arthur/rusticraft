@@ -2687,7 +2687,13 @@ TerraForged's 62 and `Source.getNoiseBiome` answers biome queries. Structures ar
 over TerraForged's queries (`structure_queries.rs`: `getBaseHeight`, `getBaseColumn` and `Source.getNoiseBiome` over
 the overworld biome list, `possibleBiomes`), and the terrain stage is `fill_from_noise_with_structures` over
 `StructureTerrain::from_starts` of the chunk's references (the beardifier's list); the vanilla half runs without
-structures. Not wired yet: biome search (#211), TerraForged's
+structures. `/locate biome` is 26.3's `BiomeSource.findClosestBiome3d` (TerraForged's `Source` does not override
+it) over `possibleBiomes` (the overworld biome list) and `getNoiseBiome`: the same spiral, step and radius, and since
+TerraForged's noise biome ignores `y`, a column answers at the first sample height (Java samples the other heights in
+vain, with the same result). It reads only the continent, river and climate noise, so a search adds no terrain-cache
+entry and evicts no erosion region. A column whose pool has no biome matches nothing; Java's `Set.contains(null)`
+throws out of the command there instead. Structures' own biome searches (`findBiomeHorizontal` for strongholds,
+biome checks) already go through `Source.getNoiseBiome` in `structure_queries.rs`. Not wired yet: TerraForged's
 decoration (#213), distant terrain (#221) and the taller overworld (#215). Until then TerraForged's levels are not
 mapped onto 26.3's build range: the fill clips terrain to the chunk (cut flat at y 319, which the default levels
 seldom reach), and the preliminary surface heights are clipped the same way. The preliminary heights hold per 4x4
