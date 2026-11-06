@@ -72,7 +72,9 @@ pub fn current_cave_documents() -> [(&'static str, &'static str); 5] {
 }
 
 /// The caves `NoiseCaveGenerator` carves, in carving order: the bundled caves decoded in registry order, then
-/// [`cave_array`]. An `Err` names the cave that failed to decode.
+/// [`cave_array`]. An `Err` names the cave that failed to decode. Each call decodes and reseeds the graphs again
+/// (fresh caches), so build the array once per world, as `NoiseCaveGenerator`'s constructor does, and share it
+/// (`NoiseCave` is `Send + Sync`).
 pub fn current_caves() -> Result<Vec<NoiseCave>, String> {
     let mut caves = Vec::new();
     for (key, json) in current_cave_documents() {
@@ -369,6 +371,13 @@ case wrapping_range ok 0 global 2147483647 -2147483648 2147483647 42bf317dae0692
                 Unique, Unique, Global, Global, Global, Global, Global, Global
             ]
         );
+    }
+
+    #[test]
+    fn caves_can_be_shared_across_generation_threads() {
+        fn shared<T: Send + Sync>() {}
+        shared::<NoiseCave>();
+        shared::<Vec<NoiseCave>>();
     }
 
     #[test]
