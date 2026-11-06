@@ -181,33 +181,39 @@ pub(crate) mod tests {
     /// real `IBiomeSampler.Sampler` and `ClimateNoise` with its pre-increment `Seed`, until #204), interpreted and
     /// with `-Xcomp`. Per levels variant, terrain set and pool configuration ([`pools`]): the column count and an
     /// FNV-1a fold of the biome names over the six runtime seeds in order; then every name's count (oceans,
-    /// beaches, rivers, the plains fallback and every pool biome appear).
+    /// beaches, rivers, the plains fallback, every pool biome and Java's null result, `null`, appear).
     const EXPECTED: &str = "\
 biomes 0 0 0 1212 2be3af0478eb5fd7\n\
 biomes 0 0 1 1212 ce6a0ab291a45032\n\
 biomes 0 0 2 1212 d5bf17e88f226501\n\
 biomes 0 0 3 1212 a985d09029644256\n\
+biomes 0 0 4 1212 94078cb91d8fbd9b\n\
 biomes 0 1 0 1212 2be3af0478eb5fd7\n\
 biomes 0 1 1 1212 ce6a0ab291a45032\n\
 biomes 0 1 2 1212 d5bf17e88f226501\n\
 biomes 0 1 3 1212 a985d09029644256\n\
+biomes 0 1 4 1212 94078cb91d8fbd9b\n\
 biomes 1 0 0 1212 2be3af0478eb5fd7\n\
 biomes 1 0 1 1212 ce6a0ab291a45032\n\
 biomes 1 0 2 1212 d5bf17e88f226501\n\
 biomes 1 0 3 1212 a985d09029644256\n\
+biomes 1 0 4 1212 94078cb91d8fbd9b\n\
 biomes 1 1 0 1212 2be3af0478eb5fd7\n\
 biomes 1 1 1 1212 ce6a0ab291a45032\n\
 biomes 1 1 2 1212 d5bf17e88f226501\n\
 biomes 1 1 3 1212 a985d09029644256\n\
+biomes 1 1 4 1212 94078cb91d8fbd9b\n\
 biomes 2 0 0 1212 c6a9511476a0719d\n\
 biomes 2 0 1 1212 397763c1b9540141\n\
 biomes 2 0 2 1212 4bd839e25f70c36a\n\
 biomes 2 0 3 1212 8cc9e6510673b642\n\
+biomes 2 0 4 1212 107b7da5bd4447c8\n\
 biomes 2 1 0 1212 c6a9511476a0719d\n\
 biomes 2 1 1 1212 397763c1b9540141\n\
 biomes 2 1 2 1212 4bd839e25f70c36a\n\
 biomes 2 1 3 1212 8cc9e6510673b642\n\
-names birch_forest=944 desert=788 forest=718 grove=742 jungle=1116 meadow=658 minecraft:beach=80 minecraft:cold_ocean=96 minecraft:deep_cold_ocean=1928 minecraft:deep_frozen_ocean=2664 minecraft:deep_lukewarm_ocean=5120 minecraft:deep_ocean=6808 minecraft:frozen_ocean=160 minecraft:frozen_river=200 minecraft:ocean=168 minecraft:river=1952 minecraft:snowy_beach=32 minecraft:warm_ocean=120 plains=1026 snowy_plains=842 swamp=984 taiga=922 windswept_hills=1020\n";
+biomes 2 1 4 1212 107b7da5bd4447c8\n\
+names birch_forest=1068 desert=998 forest=958 grove=1064 jungle=1170 meadow=924 minecraft:beach=100 minecraft:cold_ocean=120 minecraft:deep_cold_ocean=2410 minecraft:deep_frozen_ocean=3330 minecraft:deep_lukewarm_ocean=6400 minecraft:deep_ocean=8510 minecraft:frozen_ocean=200 minecraft:frozen_river=250 minecraft:ocean=210 minecraft:river=2440 minecraft:snowy_beach=40 minecraft:warm_ocean=150 null=254 plains=1026 snowy_plains=984 swamp=1278 taiga=1128 windswept_hills=1348\n";
 
     pub(crate) const NAMES: [&str; 10] = [
         "forest",
@@ -224,15 +230,19 @@ names birch_forest=944 desert=788 forest=718 grove=742 jungle=1116 meadow=658 mi
     const SEEDS: [i32; 6] = [0, 42, -17, i32::MAX, i32::MIN, -8_763_214];
 
     /// The oracle's `pools(manager, k)`: per climate type `c`, a pool of two biomes (weights 1 and 2; empty for
-    /// `k == 3` and `c % 4 == 1`, so those climates take plains), over one shared `Arc` per biome.
+    /// `k == 3` and `c % 4 == 1`, so those climates take plains; weights 0 and 0 for `k == 4` and `c % 4 == 2`, so
+    /// `getValue` is null), over one shared `Arc` per biome. The chunk-biome oracle uses `k` 0 to 3.
     pub(crate) fn pools<T>(palette: &[Arc<T>], k: usize) -> BiomePools<T> {
         let mut pools = BiomePools::default();
         for climate in BiomeType::VALUES {
             let c = climate as usize;
+            let pair = vec![(c + k) % 10, (c + 2 * k + 3) % 10];
             let (weights, index): (&[f32], Vec<usize>) = if k == 3 && c % 4 == 1 {
                 (&[], Vec::new())
+            } else if k == 4 && c % 4 == 2 {
+                (&[0.0, 0.0], pair)
             } else {
-                (&[1.0, 2.0], vec![(c + k) % 10, (c + 2 * k + 3) % 10])
+                (&[1.0, 2.0], pair)
             };
             let values = index.iter().map(|&i| Arc::clone(&palette[i])).collect();
             pools.insert(climate, Arc::new(WeightMap::new(values, weights)));
@@ -247,19 +257,24 @@ names birch_forest=944 desert=788 forest=718 grove=742 jungle=1116 meadow=658 mi
             .collect();
         let plains = Arc::new("plains".to_string());
         let replace = |replacement: BiomeOverride| Arc::new(replacement.key().unwrap().to_string());
-        let configs: Vec<_> = (0..4).map(|k| pools(&palette, k)).collect();
+        let configs: Vec<_> = (0..5).map(|k| pools(&palette, k)).collect();
         let mut counts = BTreeMap::new();
         let mut lines = Vec::new();
         for variant in 0..3 {
             for set in 0..2 {
-                let mut folds = [(0, 0xcbf2_9ce4_8422_2325_u64); 4];
+                let mut folds = [(0, 0xcbf2_9ce4_8422_2325_u64); 5];
                 for seed in SEEDS {
                     let generator = generator(variant, set);
                     for (k, pools) in configs.iter().enumerate() {
                         let sampler = CurrentSurfaceBiomeSampler::new(&generator, pools, &plains);
                         let (columns, hash) = &mut folds[k];
                         for (x, z) in points() {
-                            let biome = sampler.sample_biome(seed, x, z, replace).unwrap();
+                            // Java's null result (`k == 4`) prints as "null".
+                            let biome = match sampler.sample_biome(seed, x, z, replace) {
+                                Ok(biome) => biome,
+                                Err(NO_POOL_BIOME) => Arc::new("null".to_string()),
+                                Err(error) => panic!("{error}"),
+                            };
                             for byte in biome.bytes().chain([0xff]) {
                                 *hash = (*hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
                             }

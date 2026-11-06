@@ -2452,8 +2452,8 @@ per-column cache is not ported; `create_biomes` (below) fills chunks with it.
 from the real `Sampler` and newer-source `NoiseGenerator` (the continent and rivers of 7,272 columns: three levels
 variants, two terrain sets, six runtime seeds, `int`-edge and grid positions), then runs 6dd607eb's real
 `BiomeSampler`, over Reimagined's real `Sampler` and `ClimateNoise` (the port's climate at this layer), on that
-record, interpreted and with `-Xcomp`, for four pool configurations (some climates with empty pools, so plains
-appears); any height-noise read fails the run. The test matches every biome name, in debug and release builds.
+record, interpreted and with `-Xcomp`, for five pool configurations (some climates with empty pools, so plains
+appears, or with all-zero weights, so Java returns null and the port an `Err`); any height-noise read fails the run. The test matches every biome name, in debug and release builds.
 
 The chunk biome hook (`TerraForgedGenerator::create_biomes`, `generator_facade.rs`) is TerraForged 6dd607eb's
 `Generator.createBiomes` (MIT; Reimagined's is the same apart from its cave layer): it hints the chunk to the terrain
