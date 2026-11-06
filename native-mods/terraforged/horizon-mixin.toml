@@ -660,3 +660,17 @@ target = "horizon_client::game::native_hooks::Game<'_>::native_server_tick"
 kind = "HEAD"
 helper = "hooks/deliver_commands.rs"
 bindings = [{ name = "game", ty = "&mut Game<'_>", value = "&mut *self" }]
+
+[[module]]
+id = "regen_save"
+file = "crates/horizon-client/src/save.rs"
+name = "terraforged_regen"
+source = "regen_save.rs"
+visibility = "pub"
+
+[[module]]
+id = "regen_streaming"
+file = "crates/horizon-client-render/src/streaming.rs"
+name = "terraforged_regen"
+source = "regen_streaming.rs"
+visibility = "pub"

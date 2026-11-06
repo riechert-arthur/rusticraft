@@ -24,8 +24,8 @@
 
 // TerraForged 6dd607eb's `TFCommands`
 // (https://github.com/TerraForged/TerraForged/blob/6dd607ebfd41a3b7274e090b1f2cf565d53d1d44/src/main/java/com/terraforged/mod/command/TFCommands.java):
-// `/locateterrain <terrain> [radius]` and `/tf export structures`, for operators (level 2), on the native command
-// hooks. `/tf regen <radius>` (which regenerates chunks under a live server) is not ported.
+// `/locateterrain <terrain> [radius]`, `/tf export structures` and `/tf regen <radius>` (with its `Regenerator`), for
+// operators (level 2), on the native command hooks.
 
 use super::super::Game;
 use super::super::native_server::{NativeCommand, NativeServerPlayer};
@@ -35,14 +35,16 @@ use horizon_world::worldgen::generator::{
     terraforged_generator_facade::{TerraForgedGenerator, TerraHeightmap, live_generator},
     terraforged_util::{unpack_left, unpack_right},
 };
+use std::collections::HashSet;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex, PoisonError};
 
-/// `TFCommands.register`'s two roots, `requires(hasPermission(2))`. TerraForged registers them in every world (its
-/// `/locateterrain` then answers nothing where the level's generator is not TerraForged's); here only a TerraForged
-/// world has them, so other worlds keep vanilla's command tree (Arthur's choice for the pack and the boats).
+/// `TFCommands.register`'s two roots (`/tf` has `export structures` and `regen`), `requires(hasPermission(2))`.
+/// TerraForged registers them in every world (its `/locateterrain` then answers nothing where the level's generator
+/// is not TerraForged's); here only a TerraForged world has them, so other worlds keep vanilla's command tree
+/// (Arthur's choice for the pack and the boats).
 /// Horizon's native commands have no quotable `string` argument and no suggestions: the terrain is a `word`
-/// (TerraForged's terrain names are all words), and the radius' minimum of 1 is checked when it runs.
+/// (TerraForged's terrain names are all words), and the radii's minimum of 1 is checked when they run.
 pub(in crate::game) fn register(game: &Game<'_>, commands: &mut Vec<NativeCommand>) {
     if !game
         .native_world_dir()
@@ -55,6 +57,7 @@ pub(in crate::game) fn register(game: &Game<'_>, commands: &mut Vec<NativeComman
         2,
     ));
     commands.push(NativeCommand::op("tf export structures", 2));
+    commands.push(NativeCommand::op("tf regen <radius:integer>", 2));
 }
 
 /// A TerraForged command: answers and returns true, or leaves the line to others.
@@ -69,6 +72,22 @@ pub(in crate::game) fn perform(
             // `export`: its structure export is commented out in TerraForged, so it writes nothing and only answers
             // (`sendSuccess(.., false)`).
             game.feedback_unbroadcast(Text::colored("Exported structure settings", text::GREEN));
+            true
+        }
+        ["tf", "regen", word] => {
+            // `IntegerArgumentType.integer(1)`, checked here as for `/locateterrain`, with a maximum the Java
+            // argument lacks (`MAX_REGEN_RADIUS`).
+            let message = match word.parse::<i32>() {
+                Ok(radius) if (1..=MAX_REGEN_RADIUS).contains(&radius) => {
+                    regen(game, player, radius);
+                    return true;
+                }
+                Ok(found) if found < 1 => Text::tr("argument.integer.low", &[&1, &found]),
+                Ok(found) => Text::tr("argument.integer.big", &[&MAX_REGEN_RADIUS, &found]),
+                Err(_) => Text::tr("parsing.int.invalid", &[word]),
+            };
+            let cursor = command.trim_end().len() - word.len();
+            syntax_failure(game, command, cursor, message);
             true
         }
         ["locateterrain", terrain, rest @ ..] if rest.len() <= 1 => {
@@ -254,4 +273,116 @@ fn syntax_failure(game: &mut Game<'_>, input: &str, cursor: usize, message: Text
         ..Style::default()
     };
     game.command_failure(context.with_color(text::GRAY).with_style(&suggest));
+}
+
+/// The largest `/tf regen` radius: 32 chunks (65x65 chunks), vanilla's largest view distance. TerraForged's
+/// `integer(1)` has no maximum: a large radius there holds the server thread for as long as it takes to queue
+/// the deletes (a watchdog crash past a minute), and here it would allocate the whole area's keys at once.
+const MAX_REGEN_RADIUS: i32 = 32;
+
+/// `TFCommands.regen` + `Regenerator.regenerateChunks`: the chunks within `radius` of the player's chunk
+/// (`(int) pos.x >> 4`, Java's truncating cast) are deleted from the save and from memory and generated again
+/// by the level's own generator, as the streaming reaches them. Players in the level forget them and are sent
+/// the new ones. The three answers are `sendSuccess(.., true)`: operators see them too.
+///
+/// Departures from Java, where Horizon's server differs:
+/// - Java keeps the entities and POIs: only `region/` records are written as null, and the loaded entities stay
+///   in the entity manager. Horizon loads entities only with a chunk read from the save and ticks them by ticket
+///   (a missing chunk reads as air), so kept entities would fall through the area until it is generated again,
+///   and those of unloaded chunks would be orphaned. The area's entities are deleted with it instead (memory,
+///   `entities/` and `poi/`), players excepted.
+/// - Java's `save(true)` writes every chunk first. Here the deletes are queued behind every earlier write, which
+///   is what the flush is for; unsaved changes in the area are dropped with it.
+/// - Nothing is deleted while a load or generation of the area is still running (`settle`): its result would
+///   bring the old chunk back. It answers `Regen failed` instead.
+/// - The ring at the radius comes back without features (ores, trees, plants): Horizon's streaming does not
+///   decorate a proto chunk next to a finished one (it can't write into it), while Java's decoration writes into
+///   the neighbours. The ring inside it lacks what those features would have spread into it.
+fn regen(game: &mut Game<'_>, player: &NativeServerPlayer, radius: i32) {
+    let italic = |text: &str| {
+        Text::styled(
+            text,
+            Style {
+                italic: Some(true),
+                ..Style::default()
+            },
+        )
+    };
+    let centre = (
+        (player.position[0] as i32) >> 4,
+        (player.position[2] as i32) >> 4,
+    );
+    // Java's loops: dz outer, dx inner, int arithmetic.
+    let keys: Vec<(i32, i32)> = (-radius..=radius)
+        .flat_map(|dz| {
+            (-radius..=radius).map(move |dx| (centre.0.wrapping_add(dx), centre.1.wrapping_add(dz)))
+        })
+        .collect();
+    let set: HashSet<(i32, i32)> = keys.iter().copied().collect();
+    game.feedback(italic("Deleting chunks"));
+    // `chunkSource.save(true)` + `flushWorker()`: the decorations and saves in flight finish first.
+    game.streaming.save(&mut game.world, true);
+    let failed = |game: &mut Game<'_>, error: &str| {
+        game.command_failure(Text::literal(format!("Regen failed: {error}")));
+    };
+    if !horizon_client::streaming::terraforged_regen::settle(&mut game.streaming, &set) {
+        failed(game, "chunk generation is busy, try again");
+        return;
+    }
+    if let Err(error) = horizon_client::save::terraforged_regen::delete_chunks(&game.save, &keys) {
+        // Nothing was deleted: the area stays as it is.
+        failed(game, &error.to_string());
+        return;
+    }
+    let data = horizon_client::save::terraforged_regen::delete_chunk_data(&game.save, &keys);
+    // The save no longer has the area: memory follows, whatever happened to its entities' records.
+    horizon_client::streaming::terraforged_regen::discard(&mut game.streaming, &set);
+    // Entities read with a column that loaded since the last tick wait in `loaded_entities`: theirs go too.
+    game.world
+        .loaded_entities
+        .retain(|(key, _)| !set.contains(key));
+    let _ = game.entity_chunks(&set, true);
+    for &(x, z) in &keys {
+        game.world.modified.remove(&(x, z));
+        game.world.inhabited.remove(&(x, z));
+        game.streaming.forget(&mut game.world, x, z);
+    }
+    game.world
+        .block_entities
+        .retain(|p, _| !set.contains(&(p.0 >> 4, p.2 >> 4)));
+    game.world
+        .block_names
+        .retain(|p, _| !set.contains(&(p.0 >> 4, p.2 >> 4)));
+    if let Err(error) = data {
+        failed(game, &error.to_string());
+    }
+    game.feedback(italic("Regenerating chunks"));
+    if let Some(host) = &mut game.lan {
+        let hub = &mut host.hub;
+        for index in 0..hub.guests.len() {
+            if !hub.here(&hub.guests[index]) {
+                continue;
+            }
+            let guest = &mut hub.guests[index];
+            for key in &keys {
+                if guest.sent_chunks.remove(key) {
+                    guest.send(
+                        &horizon_protocol::packets::play::Clientbound::ForgetLevelChunk(
+                            horizon_protocol::packets::play::ForgetLevelChunk {
+                                pos: [key.0, key.1],
+                            },
+                        ),
+                    );
+                }
+            }
+            // The view is computed again: the area's chunks are queued as they come back.
+            guest.center = None;
+        }
+        if let Some(far) = hub.far.as_mut() {
+            for &(x, z) in &keys {
+                far.changed(x, z);
+            }
+        }
+    }
+    game.feedback(Text::colored("Regen complete!", text::GREEN));
 }
