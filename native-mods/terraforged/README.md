@@ -1343,7 +1343,8 @@ and a `Sum` with fewer `amounts` than `rules` is an error (Java throws on its fi
 decodes them in registry order (by id), and `config_for` is `BiomeVegetationManager.getConfig`: the first config
 whose tag holds the biome, so taiga (in `trees/hardy` and `trees/hardy_slopes`) takes `trees_hardy`.
 `VegetationFeatures::create` splits a biome's vegetal feature ids by path keyword into trees, grass and the rest
-(6dd607eb's keywords: Reimagined's added `pale_garden_vegetation` is not followed, so pale oaks fall in the rest).
+(6dd607eb's keywords plus TerraForged Reimagined's `pale_garden_vegetation`, so 26.3's pale oaks are placed as trees:
+a departure from 6dd607eb, by Arthur's decision).
 26.3 drops a whole tag that names a missing biome, and `trees/patchy` names `terraforged:oak_forest`, which only
 the bundled biome (#226) provides; binding the tags to a world's registry is the decoration layer's job (#213).
 `VegetationOracle.java` (`.local/terraforged/oracles/vegetation/`, `run.sh`) checks the bundled files against

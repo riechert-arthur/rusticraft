@@ -34,6 +34,7 @@
 // (`structure_queries.rs`). Stages TerraForged does not replace yet run on the vanilla overworld pipeline it wraps
 // (`VanillaGen`).
 
+use super::super::generator_decoration::terraforged_decorator::TerraForgedFeatures;
 use super::super::generator_structures::{Starts, StructureState};
 use super::{
     BiomeChunk, BiomeId, BiomeRegion, BiomeSearch, Biomes, DecorateStats, GeneratorData,
@@ -44,7 +45,7 @@ use super::{
     terraforged_biome_registry::identifier_order,
     terraforged_cave_assets::current_caves,
     terraforged_cave_biome_sampler::CaveBiomeSampler,
-    terraforged_cave_carver::NoiseCaveGenerator,
+    terraforged_cave_carver::{CarverChunk, NoiseCaveGenerator},
     terraforged_current_surface_biomes::CurrentSurfaceBiomeSampler,
     terraforged_generator_facade::TerraForgedGenerator,
     terraforged_generator_preset::{build as build_noise, terrain_levels},
@@ -80,6 +81,11 @@ pub(super) struct TerraForgedPipeline {
     /// The air `NoiseCaveCarver.carve` places.
     air: BlockStateId,
     caves: NoiseCaveGenerator<BiomeId>,
+    /// `NoiseCaveGenerator.cache`: each carved chunk's `CarverChunk` (its caves' biome lists), until the chunk is
+    /// decorated. Like the terrain cache, an entry lives from the chunk's terrain stage to its decoration.
+    carvers: std::sync::Mutex<std::collections::HashMap<ChunkPos, CarverChunk<BiomeId>>>,
+    /// Every biome's features, for TerraForged's decoration (`None` without feature resources).
+    features: Option<TerraForgedFeatures>,
     /// `ChunkGenerator`'s structure placement, when the world generates structures.
     structures: Option<StructureState>,
 }
@@ -113,9 +119,9 @@ pub(super) fn build(
 }
 
 /// `GeneratorData::prepare_decoration` (the world screens' preload) for TerraForged's preset: its overworld stem has
-/// no `biome_source`, and a TerraForged overworld decorates as its vanilla half does, with the `minecraft:normal`
-/// overworld's biome source ([`vanilla_overworld`]), so that decoration is the one prepared. Other presets and
-/// dimensions, and a data pack's own overworld, go to Horizon's body.
+/// no `biome_source`, so the decorations a TerraForged overworld builds are the ones prepared: its vanilla half's
+/// (the `minecraft:normal` overworld's biome source, [`vanilla_overworld`]) and TerraForged's own over every biome
+/// ([`TerraForgedFeatures`]). Other presets and dimensions, and a data pack's own overworld, go to Horizon's body.
 pub(super) fn prepare_decoration(
     data: &Arc<GeneratorData>,
     preset: &str,
@@ -123,7 +129,8 @@ pub(super) fn prepare_decoration(
 ) -> std::ops::ControlFlow<Result<(), GeneratorError>> {
     if preset == PRESET && terraforged_stem(data, preset, dimension).is_some() {
         std::ops::ControlFlow::Break(
-            data.prepare_decoration("minecraft:normal", "minecraft:overworld"),
+            data.prepare_decoration("minecraft:normal", "minecraft:overworld")
+                .and_then(|()| TerraForgedFeatures::new(data).map(drop)),
         )
     } else {
         std::ops::ControlFlow::Continue(())
@@ -207,6 +214,8 @@ impl TerraForgedPipeline {
             water: block("minecraft:water")?,
             air: block("minecraft:air")?,
             caves,
+            carvers: std::sync::Mutex::new(std::collections::HashMap::new()),
+            features: TerraForgedFeatures::new(data)?,
             structures,
         })
     }
@@ -493,9 +502,10 @@ impl SeededPipeline for TerraForgedPipeline {
             .map_err(stage("surface"))?;
 
         // applyCarvers: TerraForged's noise caves with `(int)` of the level seed; no vanilla carvers run (6dd607eb's
-        // `applyCarvers` replaces them). The CarverChunk (the biomes each cave passed through, which
-        // `NoiseCaveDecorator` reads) is not kept: TerraForged's decoration is not wired yet.
-        self.caves
+        // `applyCarvers` replaces them). The CarverChunk (the biomes each cave passed through) is kept for the
+        // chunk's decoration (`NoiseCaveDecorator`), as `getPreCarveChunk` caches it.
+        let carver = self
+            .caves
             .carve(
                 self.generator.level_seed() as i32,
                 &mut chunk,
@@ -507,6 +517,10 @@ impl SeededPipeline for TerraForgedPipeline {
                 true,
             )
             .map_err(stage("carvers"))?;
+        self.carvers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(pos, carver);
 
         chunk
             .prime_heightmaps(&[
@@ -528,34 +542,53 @@ impl SeededPipeline for TerraForgedPipeline {
             entities: Vec::new(),
         })
     }
-    /// The vanilla decoration, then `applyBiomeDecoration`'s `terrainCache.drop(Seeds.get(region.getSeed()), pos)`
-    /// for the decorated chunk, so the cache holds only chunks still being generated (Java drops it here too).
+    /// `applyBiomeDecoration`: `BiomeGenerator.decorate` (`decorator.rs`: TerraForged's feature decoration, the noise
+    /// caves' biome features, water smoothing and the snow pass, all while the chunk's terrain-cache entry is still
+    /// held), then `terrainCache.drop(Seeds.get(region.getSeed()), pos)`, so the cache holds only chunks still being
+    /// generated. The decoration context is TerraForged's (sea level 62), as `placeWithBiomeCheck` builds it from the
+    /// generator.
     fn decorate(
         &self,
         worker: &mut WorkerState,
         region: &mut [ProtoChunk; 9],
     ) -> Result<DecorateStats, GeneratorError> {
-        let vanilla = &self.vanilla;
-        let decoration = vanilla
-            .decoration
+        let features = self
+            .features
             .as_ref()
             .ok_or_else(|| resource("decoration resources were not loaded"))?;
-        let mut random = vanilla.region_random_at(region[4].position());
-        super::super::generator_decoration::terraforged_decorator::decorate(
-            decoration,
-            &vanilla.data,
-            vanilla.seed,
-            vanilla.generation(),
+        let center = region[4].position();
+        // NoiseCaveGenerator.getPostCarveChunk: the CarverChunk the chunk's carving left, taken out of the cache
+        // (`cache.remove(pos)`); a chunk carved by an earlier run has none, and its caves are replayed instead.
+        let carver = if region[4].is_decorated() {
+            None
+        } else {
+            self.carvers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&center)
+        };
+        let mut random = self.vanilla.region_random_at(center);
+        let stats = super::super::generator_decoration::terraforged_decorator::decorate(
+            &self.vanilla.data,
+            self.vanilla.seed,
+            self.generation(),
             worker,
             region,
             &mut random,
             self.structures.as_ref(),
-            &super::super::generator_decoration::terraforged_decorator::TerraForgedDecoration {
+            super::super::generator_decoration::terraforged_decorator::TerraForgedDecoration {
+                features,
                 generator: &self.generator,
                 caves: &self.caves,
                 surface: &self.surface,
+                air: self.air,
+                carver,
             },
-        )
+        )?;
+        // terrainCache.drop(Seeds.get(region.getSeed()), pos).
+        self.generator
+            .drop_chunk(self.vanilla.seed as i32, center.x, center.z);
+        Ok(stats)
     }
     fn data(&self) -> &Arc<GeneratorData> {
         self.vanilla.data()
@@ -897,7 +930,11 @@ mod tests {
         };
         assert!(
             prepared(&source),
-            "the vanilla overworld's decoration, which the pipeline reuses"
+            "the vanilla overworld's decoration, which the pipeline's vanilla half builds"
+        );
+        assert!(
+            prepared("terraforged:every_biome"),
+            "TerraForged's decoration over every biome"
         );
         // The preset's nether is vanilla's: Horizon's body prepares it.
         assert!(prepare_decoration(&data, PRESET, "minecraft:the_nether").is_continue());
@@ -1212,6 +1249,148 @@ mod tests {
             .generate_proto(ChunkPos::new(center.x + 1, center.z))
             .unwrap();
         assert_eq!(pipeline.generator.cached_chunks(), 8);
+    }
+
+    /// A TerraForged pipeline, shared with the generator that runs it.
+    fn terraforged(
+        data: &Arc<GeneratorData>,
+        seed: i64,
+        structures: bool,
+    ) -> (Arc<TerraForgedPipeline>, OverworldGenerator) {
+        let stem = terraforged_stem(data, PRESET, "minecraft:overworld").unwrap();
+        let pipeline = Arc::new(TerraForgedPipeline::new(data, seed, &stem, structures).unwrap());
+        let overworld = OverworldGenerator {
+            pipeline: Arc::clone(&pipeline) as Arc<dyn SeededPipeline>,
+            noise_clamped: None,
+        };
+        (pipeline, overworld)
+    }
+
+    /// The 3x3 chunks around `center`, generated now.
+    fn region_around(
+        worker: &mut super::super::GeneratorWorker,
+        center: ChunkPos,
+    ) -> [ProtoChunk; 9] {
+        std::array::from_fn(|i| {
+            worker
+                .generate_proto(ChunkPos::new(
+                    center.x + i as i32 % 3 - 1,
+                    center.z + i as i32 / 3 - 1,
+                ))
+                .unwrap()
+        })
+    }
+
+    /// Every block, biome, block-entity position and entity count of the region's chunks.
+    fn digest(region: &[ProtoChunk; 9], (min_y, height): (i32, i32)) -> Vec<u32> {
+        let mut out = Vec::new();
+        for chunk in region {
+            for y in min_y..min_y + height {
+                for z in 0..16 {
+                    for x in 0..16 {
+                        out.push(chunk.block(x, y, z).0 as u32);
+                    }
+                }
+            }
+            for y in (min_y..min_y + height).step_by(4) {
+                for z in (0..16).step_by(4) {
+                    for x in (0..16).step_by(4) {
+                        out.push(chunk.biome_id_at(x, y, z).0);
+                    }
+                }
+            }
+            let mut positions: Vec<_> = chunk.block_entities.iter().map(|(at, _)| *at).collect();
+            positions.sort_unstable();
+            out.extend(positions.into_iter().flatten().map(|v| v as u32));
+            out.push(chunk.entities.len() as u32);
+        }
+        out
+    }
+
+    /// TerraForged's decoration of a chunk with unique caves gives the same region when its chunks are generated and
+    /// decorated again in the same world and in a second world. The chunk's `CarverChunk` is kept from its carving to
+    /// its decoration, which takes it out; a chunk carved by an earlier run (no CarverChunk) replays its caves and
+    /// still decorates.
+    #[test]
+    fn terraforged_decoration_is_repeatable() {
+        let Some(data) = data() else { return };
+        let seed = 7;
+        // The first chunk where unique caves form, as in `noise_caves_carve_the_same_chunk_the_same_way`.
+        let unique = super::super::terraforged_cave_noise::unique_cave_noise();
+        let center = (0i32..)
+            .map(|k| {
+                let cx = k.wrapping_mul(7919).rem_euclid(4001) - 2000;
+                let cz = k.wrapping_mul(104_729).rem_euclid(4001) - 2000;
+                ChunkPos::new(cx, cz)
+            })
+            .find(|pos| {
+                let (x, z) = ((pos.x * 16 + 8) as f32, (pos.z * 16 + 8) as f32);
+                unique.try_value_seed_first(seed as i32, x, z).unwrap() > 0.3
+            })
+            .unwrap();
+        let (pipeline, first) = terraforged(&data, seed, false);
+        let (_, second) = terraforged(&data, seed, false);
+        let level = first.level();
+        let decorated = |overworld: &OverworldGenerator| {
+            let mut worker = overworld.worker();
+            let mut region = region_around(&mut worker, center);
+            let undecorated = digest(&region, level);
+            let stats = worker.decorate(&mut region).unwrap();
+            assert!(stats.placed > 0);
+            let after = digest(&region, level);
+            assert_ne!(after, undecorated, "the decoration changed nothing");
+            (after, region)
+        };
+        let (a, region) = decorated(&first);
+        assert!(region[4].is_decorated());
+        let carvers = |pipeline: &TerraForgedPipeline| {
+            let carvers = pipeline.carvers.lock().unwrap();
+            (carvers.contains_key(&center), carvers.len())
+        };
+        // The centre's CarverChunk was taken; its 8 neighbours' wait for their own decoration.
+        assert_eq!(carvers(&pipeline), (false, 8));
+        let (again, _) = decorated(&first);
+        assert_eq!(again, a, "the same world");
+        let (b, _) = decorated(&second);
+        assert_eq!(b, a, "a second world");
+        // getPostCarveChunk's replay, for a chunk without its CarverChunk.
+        let mut worker = first.worker();
+        let mut region = region_around(&mut worker, center);
+        pipeline.carvers.lock().unwrap().remove(&center);
+        worker.decorate(&mut region).unwrap();
+        assert!(region[4].is_decorated());
+    }
+
+    /// TerraForged's decoration knows every registered biome's features, the nether's and the end's included (the
+    /// unique noise caves give quarts any biome, and `NoiseCaveDecorator` places that biome's features there), and
+    /// offsets each step's feature seeds by the structures registered for it, structures on or off.
+    #[test]
+    fn terraforged_decoration_covers_every_biome() {
+        let Some(data) = data() else { return };
+        let (with, _) = terraforged(&data, 3, true);
+        let (without, _) = terraforged(&data, 3, false);
+        let features = with.features.as_ref().unwrap();
+        for name in [
+            "minecraft:basalt_deltas",
+            "minecraft:end_highlands",
+            "minecraft:plains",
+        ] {
+            let biome = data.biome_id(name).unwrap();
+            assert!(features.knows_every_feature_of(biome), "{name}");
+        }
+        let by_step: Vec<usize> = with
+            .structures
+            .as_ref()
+            .unwrap()
+            .by_step
+            .iter()
+            .map(Vec::len)
+            .collect();
+        assert_eq!(features.structures_per_step(), by_step.as_slice());
+        let off = without.features.as_ref().unwrap();
+        assert!(without.structures.is_none());
+        assert_eq!(off.structures_per_step(), by_step.as_slice());
+        assert!(by_step.iter().sum::<usize>() > 0);
     }
 
     /// `/locate biome` (`findClosestBiome3d`) follows the spiral over TerraForged's noise biomes: it answers with the
