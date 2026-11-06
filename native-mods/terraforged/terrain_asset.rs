@@ -98,11 +98,9 @@ pub fn decode_terrain_asset(
         return error(format!("invalid identifier {name:?}"));
     };
     // Gson's `LazilyParsedNumber.floatValue`: `Float.parseFloat` on the text, one rounding.
-    let weight = field("weight")?;
-    if !weight.starts_with(|c: char| c == '-' || c.is_ascii_digit()) {
+    let Some(weight) = codec_float(field("weight")?) else {
         return error("field \"weight\" must be a number");
-    }
-    let weight: f32 = weight.parse().unwrap_or(0.0);
+    };
     let noise = decode_noise(field("noise")?)?;
     let terrain =
         resolve(&id).ok_or_else(|| TerrainAssetError(format!("unknown terrain type {id:?}")))?;
@@ -132,8 +130,9 @@ pub fn decode_noise(json: &str) -> Result<Module, TerrainAssetError> {
     }
 }
 
-/// Cereal's `DataValue` tree of a JSON value (`DataUtil.toData` after `JsonOps.convertTo`).
-enum Data {
+/// Cereal's `DataValue` tree of a JSON value (`DataUtil.toData` after `JsonOps.convertTo`); `vegetation.rs` reads
+/// its viability specs from it.
+pub(super) enum Data {
     Obj(Obj),
     List(Vec<Data>),
     Num(Number),
@@ -142,12 +141,12 @@ enum Data {
 }
 
 /// A `DataObject`: its spec name (the `type` key, `""` without one) and its other fields.
-struct Obj {
-    kind: String,
+pub(super) struct Obj {
+    pub(super) kind: String,
     fields: HashMap<String, Data>,
 }
 
-fn data_of(json: &str) -> Result<Data, TerrainAssetError> {
+pub(super) fn data_of(json: &str) -> Result<Data, TerrainAssetError> {
     data(serde_json::from_str(json)?)
 }
 
@@ -194,6 +193,13 @@ fn type_name(raw: &RawValue) -> Result<String, TerrainAssetError> {
     }
 }
 
+/// `Codec.FLOAT` over Minecraft's strict JSON: a JSON number (not a string or a boolean) read with Gson's
+/// `LazilyParsedNumber.floatValue`, `Float.parseFloat` on its text (one rounding). `None` for anything else.
+pub(super) fn codec_float(raw: &str) -> Option<f32> {
+    raw.starts_with(|c: char| c == '-' || c.is_ascii_digit())
+        .then(|| raw.parse().unwrap_or(0.0))
+}
+
 /// `Identifier.read` (26.3): `namespace:path` split at the first `:`; no `:`, or a leading one, means `minecraft`.
 /// The namespace allows `a-z0-9_.-`, the path also `/`; either may be empty.
 pub(super) fn identifier(name: &str) -> Option<String> {
@@ -214,7 +220,7 @@ pub(super) fn identifier(name: &str) -> Option<String> {
 /// more either way), then a `long` when the value is a whole number in range (`longValueExact`), else its `double`,
 /// kept as a `float` when that narrows exactly.
 #[derive(Clone, Copy)]
-enum Number {
+pub(super) enum Number {
     Long(i64),
     Float(f32),
     Double(f64),
@@ -296,19 +302,25 @@ impl Number {
     }
 }
 
+impl Data {
+    /// `DataValue.asFloat()`: a number's `floatValue`, anything else 0.
+    pub(super) fn as_float(&self) -> f32 {
+        match self {
+            Self::Num(number) => number.float(),
+            _ => 0.0,
+        }
+    }
+}
+
 impl Obj {
     /// `DataSpec.getValue`: the field, or the spec's default when it is absent.
-    fn scalar(&self, key: &str) -> Option<&Data> {
+    pub(super) fn scalar(&self, key: &str) -> Option<&Data> {
         self.fields.get(key)
     }
 
     /// `spec.get(key, data, DataValue::asFloat)`.
-    fn float(&self, key: &str, default: f32) -> f32 {
-        match self.scalar(key) {
-            None => default,
-            Some(Data::Num(number)) => number.float(),
-            Some(_) => 0.0,
-        }
+    pub(super) fn float(&self, key: &str, default: f32) -> f32 {
+        self.scalar(key).map_or(default, Data::as_float)
     }
 
     /// `spec.get(key, data, DataValue::asDouble)` narrowed to `float`.
@@ -349,7 +361,7 @@ impl Obj {
 
     /// `spec.get(key, data, Module.class, context)`: a missing or non-object field reads as `NULL_OBJ`, which no
     /// spec decodes.
-    fn child(&self, key: &str) -> Result<Module, TerrainAssetError> {
+    pub(super) fn child(&self, key: &str) -> Result<Module, TerrainAssetError> {
         match self.fields.get(key) {
             Some(Data::Obj(object)) => module(object),
             _ => error(format!("no spec registered for field {key:?}")),

@@ -1,6 +1,4 @@
 {
   "replace": false,
-  "values": [
-    "minecraft:sparse_jungle"
-  ]
+  "values": ["minecraft:sparse_jungle"]
 }

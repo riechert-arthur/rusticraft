@@ -1,7 +1,4 @@
 {
   "replace": false,
-  "values": [
-    "minecraft:jungle",
-    "minecraft:bamboo_jungle"
-  ]
+  "values": ["minecraft:jungle", "minecraft:bamboo_jungle"]
 }
