@@ -25,13 +25,14 @@
 // Adapted from TerraForged Reimagined (https://github.com/Romoslayer/TerraForged-Reimagined, a24d450):
 // `src/main/java/com/terraforged/mod/worldgen/Generator.java` (`createState`'s seed capture, `getSeed`,
 // `getChunkData`, `getChunkDataAsync`, `getMinY`, `getSeaLevel`, `getGenDepth`, the terrain-cache hints and drop,
-// `getBaseColumn` and `buildTerrain`'s hand-off to `fillFromNoise`) and `Seeds.java`. MIT License,
+// `getBaseHeight` (its fix for floating structures: the eroded height, `getErodedHeightNoise`, where 6dd607eb reads
+// the raw sample's), `getBaseColumn` and `buildTerrain`'s hand-off to `fillFromNoise`) and `Seeds.java`. MIT License,
 // Copyright (c) 2020 TerraForged, Copyright (c) 2026 Romoslayer; see `LICENSE-TERRAFORGED-REIMAGINED`.
-// `create_biomes` and `base_height` follow TerraForged 6dd607eb
+// `base_column` extends that fix: it reads the same eroded height (Reimagined and 6dd607eb read the raw one there).
+// `create_biomes` follows TerraForged 6dd607eb
 // (https://github.com/TerraForged/TerraForged/tree/6dd607ebfd41a3b7274e090b1f2cf565d53d1d44, MIT License,
 // Copyright (c) 2021 TerraForged): `Generator.createBiomes` (terrain-cache hint, then `ChunkUtil.fillNoiseBiomes`),
-// `worldgen/biome/Source.java` (`withSeed`, `getNoiseBiome`, `compute`) and `Generator.getBaseHeight` (the raw
-// sample's height; Reimagined reads the eroded height there instead); `fill_from_noise_with_structures` is
+// `worldgen/biome/Source.java` (`withSeed`, `getNoiseBiome`, `compute`); `fill_from_noise_with_structures` is
 // 6dd607eb's `Generator.fillFromNoise` continuation (`fillChunk`, `primeHeightmaps`, `buildStructureTerrain`;
 // Reimagined's `fillFromNoise` starts the same way).
 
@@ -360,46 +361,58 @@ impl TerraForgedGenerator {
         self.terrain.remove(seed, chunk_x, chunk_z);
     }
 
-    /// TerraForged 6dd607eb's `getBaseHeight(x, z, type, ..)` at block `(x, z)` with the captured seed (Java's
-    /// `Seeds.get(state)`, the same narrowed level seed): ONE un-eroded sample (`terrainCache.getSample`), its base
-    /// (water) level and its raw height, each floored to a block; the surface types return the higher of the two plus
-    /// one, the ocean-floor types the height plus one (Java `int` math). The height is not the eroded height the
-    /// chunk is built to ([`Self::fill_from_noise`]), so on eroded ground it can differ from the filled surface, as in
-    /// 6dd607eb (Reimagined reads `getErodedHeightNoise` here instead, so structures stand on the eroded ground; not
-    /// followed). The result counts in TerraForged's levels (from block 0 up to `levels.max_y`) and is never clipped,
-    /// unlike [`Self::fill_from_noise`], which clips the terrain to the chunk's build range: with the default levels
-    /// it can name a height above 26.3's overworld top (320). Mapping it is the registering layer's job, together with
-    /// the open world-height decision (widen, scale or clip). `Err` where the noise has no seed-first form (a custom
-    /// module; see [`ErodedNoiseGenerator::noise_sample`]): the error is passed on rather than replaced by a height,
-    /// and the caller decides (Java has no such failure).
+    /// TerraForged Reimagined's `getBaseHeight(x, z, type, ..)` at block `(x, z)` with the captured seed (Java's
+    /// `Seeds.get(state)`, the same narrowed level seed): the un-eroded sample's base (water) level
+    /// (`terrainCache.getSample`) and the ERODED height (`getErodedHeightNoise`: erosion and rivers, the height the
+    /// chunk is filled to by [`Self::fill_from_noise`]), each floored to a block; the surface types return the higher
+    /// of the two plus one, the ocean-floor types the height plus one (Java `int` math). This is Reimagined's fix for
+    /// floating structures, a departure from 6dd607eb, whose `getBaseHeight` reads the raw sample's height, so its
+    /// structures float or sink wherever erosion moved the ground.
+    ///
+    /// The result counts in TerraForged's levels and is not clipped here; the fill clips the terrain to the chunk's
+    /// build range, so a caller placing structures in a level clips it the same way (see `TfQueries::base_height`).
+    /// `Err` where the noise has no seed-first form (a custom module; see [`ErodedNoiseGenerator::noise_sample`]) or
+    /// the erosion region fails to build: the error is passed on rather than replaced by a height, and the caller
+    /// decides (Java has no such failure).
     pub fn base_height(
         &self,
         x: i32,
         z: i32,
         heightmap: TerraHeightmap,
     ) -> Result<i32, &'static str> {
-        let sample = self.terrain.noise_sample(self.seed(), x, z)?;
+        let (base_noise, height_noise) = self.base_noises(x, z)?;
         Ok(base_height_from_noise(
             self.levels,
-            sample.base_noise,
-            sample.height_noise,
+            base_noise,
+            height_noise,
             heightmap,
         ))
     }
 
-    /// `getBaseColumn(x, z, ..)` at block `(x, z)` with the captured seed, from the same un-eroded sample as
-    /// [`Self::base_height`] (base level and raw height; 6dd607eb and Reimagined agree here). `Err` as
-    /// [`Self::base_height`]. Panics
-    /// where Java throws: a negative surface (`NegativeArraySizeException`) or height (`IllegalArgumentException`
-    /// from `Arrays.fill`). Java allocates a surface-long array, so a surface near 2^31 fails with
-    /// `OutOfMemoryError` there; the port allocates it.
+    /// `getBaseColumn(x, z, ..)` at block `(x, z)` with the captured seed, from the same two reads as
+    /// [`Self::base_height`]: the un-eroded base level and the ERODED height. Reimagined and 6dd607eb both read the
+    /// raw height here; the port extends Reimagined's `getBaseHeight` fix to the column so the structures placed by
+    /// column (ruined portals, nether fossils, land checks) and those placed by height see one ground, the one the
+    /// chunk is filled to. The column keeps Java's shape: `min_y` is the height itself (Java's `new
+    /// NoiseColumn(height, states)`), so the states start at the height, not at the bottom of the world.
+    ///
+    /// `Err` as [`Self::base_height`]. Panics where Java throws: a negative surface (`NegativeArraySizeException`) or
+    /// height (`IllegalArgumentException` from `Arrays.fill`). Java allocates a surface-long array, so a surface near
+    /// 2^31 fails with `OutOfMemoryError` there; the port allocates it.
     pub fn base_column(&self, x: i32, z: i32) -> Result<BaseColumn, &'static str> {
-        let sample = self.terrain.noise_sample(self.seed(), x, z)?;
+        let (base_noise, height_noise) = self.base_noises(x, z)?;
         Ok(base_column_from_noise(
             self.levels,
-            sample.base_noise,
-            sample.height_noise,
+            base_noise,
+            height_noise,
         ))
+    }
+
+    /// The base noise of the un-eroded sample, then the eroded height noise, in Reimagined's `getBaseHeight` order.
+    fn base_noises(&self, x: i32, z: i32) -> Result<(f32, f32), &'static str> {
+        let seed = self.seed();
+        let base_noise = self.terrain.noise_sample(seed, x, z)?.base_noise;
+        Ok((base_noise, self.terrain.eroded_height_noise(seed, x, z)?))
     }
 }
 
@@ -718,36 +731,49 @@ m 2 324 650bb712eb81e13c
             &[(300, 300), (-777, 1234), (-770, 1240)],
         ),
     ];
-    /// `oracles/generator_facade/6dd607eb/out.txt` `q` lines (`run.sh`; interpreted and JIT-compiled alike):
-    /// TerraForged 6dd607eb's `getBaseHeight`/`getBaseColumn`, copied verbatim, with its real `Seeds.get(RandomState)`
-    /// over the newer source's real `NoiseGenerator.getNoiseSample` (what 6dd607eb's `TerrainCache.getSample` reaches
-    /// through `ErodedNoiseGenerator.getNoiseSample`); every query reads that sample once. Columns: case, x, z, base and
-    /// height bits, surface and ocean-floor heights, `<column>`. The raw samples equal Reimagined's oracle
-    /// (`../out.txt`), whose heights differ because it reads the eroded height.
+    /// `oracles/generator_facade/eroded_column/out.txt` (`run.sh`; interpreted and JIT-compiled alike). The `q` lines
+    /// are `../out.txt`'s: TerraForged Reimagined's `getBaseHeight`/`getBaseColumn` over its real
+    /// `ErodedNoiseGenerator.getNoiseSample` and `erodedHeightNoise`. Columns: case, x, z, base, raw-height and
+    /// eroded-height bits, surface and ocean-floor heights (from the eroded height), Reimagined's `<column>` (from
+    /// the raw height). Each `c` line is the same query's column from the eroded height (`baseColumn(base, eroded)`),
+    /// which is the port's `base_column`. 6dd607eb's `getBaseHeight` reads the raw height instead
+    /// (`oracles/generator_facade/6dd607eb/`); the port follows Reimagined (Arthur's decision for #210).
     const JAVA_QUERIES: &str = "\
-q 0 0 0 3df5fc22 3e339f1c 85 85 84 84 84 0
-q 0 5 77 3e0dc23c 3f2c6fd0 324 324 323 323 323 0
-q 0 -1 -1 3df5fc22 3e489a6e 95 95 94 94 94 0
-q 0 -123 -51 3dc97019 3f57f5c3 405 405 404 404 404 0
-q 1 2147483647 -2147483648 00000000 3d9c28f6 63 37 36 62 36 26
-q 1 2147483638 -2147483645 00000000 3d9c28f6 63 37 36 62 36 26
-q 1 -2147483648 2147483647 00000000 3d9c28f6 63 37 36 62 36 26
-q 2 1000 -1000 3ece3552 3e612d81 114 106 105 113 105 8
-q 2 -30000000 29999999 3ee64c34 3e9ab620 146 146 145 145 145 0
-q 2 -29999990 29999950 3ee50bda 3e813107 122 122 121 121 121 0
-q 3 300 300 3e9f02ef 3f0ee7e3 143 143 142 142 142 0
-q 3 -777 1234 3eae8d03 3f0d3be1 142 142 141 141 141 0
-q 3 -770 1240 3eafbae6 3f060470 135 135 134 134 134 0
+q 0 0 0 3df5fc22 3e339f1c 3e7e455f 120 120 84 84 84 0
+c 0 0 0 119 119 119 0
+q 0 5 77 3e0dc23c 3f2c6fd0 3f29702c 318 318 323 323 323 0
+c 0 5 77 317 317 317 0
+q 0 -1 -1 3df5fc22 3e489a6e 3e7e7eab 120 120 94 94 94 0
+c 0 -1 -1 119 119 119 0
+q 0 -123 -51 3dc97019 3f57f5c3 3f54c608 399 399 404 404 404 0
+c 0 -123 -51 398 398 398 0
+q 1 2147483647 -2147483648 00000000 3d9c28f6 3e616516 106 106 36 62 36 26
+c 1 2147483647 -2147483648 105 105 105 0
+q 1 2147483638 -2147483645 00000000 3d9c28f6 3d96ded8 63 36 36 62 36 26
+c 1 2147483638 -2147483645 35 62 35 27
+q 1 -2147483648 2147483647 00000000 3d9c28f6 3e7979da 117 117 36 62 36 26
+c 1 -2147483648 2147483647 116 116 116 0
+q 2 1000 -1000 3ece3552 3e612d81 3e612d81 114 106 105 113 105 8
+c 2 1000 -1000 105 113 105 8
+q 2 -30000000 29999999 3ee64c34 3e9ab620 3e9ab052 146 146 145 145 145 0
+c 2 -30000000 29999999 145 145 145 0
+q 2 -29999990 29999950 3ee50bda 3e813107 3e813107 122 122 121 121 121 0
+c 2 -29999990 29999950 121 121 121 0
+q 3 300 300 3e9f02ef 3f0ee7e3 3f0cebc6 141 141 142 142 142 0
+c 3 300 300 140 140 140 0
+q 3 -777 1234 3eae8d03 3f0d3be1 3f0be924 140 140 141 141 141 0
+c 3 -777 1234 139 139 139 0
+q 3 -770 1240 3eafbae6 3f060470 3f0530fb 134 134 134 134 134 0
+c 3 -770 1240 133 133 133 0
 ";
 
-    /// End to end against 6dd607eb's Java (`q` lines): the facade's `base_height`/`base_column` through its terrain
-    /// cache, with the seed captured from a level seed whose low 32 bits are the case's seed. All six heightmap types
-    /// are asked. The cases include eroded ground where the eroded height (what the chunk is filled to) would give a
-    /// different answer, so reading it instead of the raw sample fails here.
+    /// End to end against Reimagined's Java (`q` and `c` lines): the facade's `base_height`/`base_column` through its
+    /// terrain cache, with the seed captured from a level seed whose low 32 bits are the case's seed. All six
+    /// heightmap types are asked. The cases include eroded ground, where the raw height would give another answer.
     #[test]
-    fn queries_match_6dd607eb_java() {
+    fn queries_match_reimagined_java() {
         let mut out = Vec::new();
-        let mut eroded_differs = false;
+        let mut raw_differs = false;
         for (case, &(variant, set, seed, droplets, lifetime, smoothing, positions)) in
             CASES.iter().enumerate()
         {
@@ -771,31 +797,78 @@ q 3 -770 1240 3eafbae6 3f060470 135 135 134 134 134 0
                         .unwrap(),
                     ocean
                 );
-                eroded_differs |= ocean
+                raw_differs |= ocean
                     != base_height_from_noise(
                         g.levels(),
                         sample.base_noise,
-                        eroded,
+                        sample.height_noise,
                         TerraHeightmap::OceanFloor,
                     );
-                let col = g.base_column(x, z).unwrap();
                 assert_eq!(
-                    col,
-                    base_column_from_noise(g.levels(), sample.base_noise, sample.height_noise)
+                    g.base_column(x, z).unwrap(),
+                    base_column_from_noise(g.levels(), sample.base_noise, eroded)
                 );
                 out.push(format!(
-                    "q {case} {x} {z} {} {} {surface} {ocean} {}",
+                    "q {case} {x} {z} {} {} {} {surface} {ocean} {}",
                     h(sample.base_noise),
                     h(sample.height_noise),
+                    h(eroded),
                     column(g.levels(), sample.base_noise, sample.height_noise)
+                ));
+                out.push(format!(
+                    "c {case} {x} {z} {}",
+                    column(g.levels(), sample.base_noise, eroded)
                 ));
             }
         }
         assert_eq!(out, JAVA_QUERIES.lines().collect::<Vec<_>>());
         assert!(
-            eroded_differs,
-            "the cases must separate the raw height from the eroded one"
+            raw_differs,
+            "the cases must separate the eroded height from the raw one"
         );
+    }
+
+    /// Reimagined's fix for floating structures: away from structures and inside the build range, `base_height`
+    /// names the block above the ground the chunk is filled to (ocean floor: the stone top; surface: the water or
+    /// stone top), and `base_column` holds stone from that height, so structures stand on the filled terrain.
+    #[test]
+    fn base_queries_stand_on_the_filled_ground() {
+        let g = facade(0, 0, 0, 25, 0);
+        g.capture_seed((5_i64 << 32) | 7);
+        let blocks = registry();
+        for pos in [
+            ChunkPos::new(-2, 3),
+            ChunkPos::new(0, 0),
+            ChunkPos::new(7, -9),
+        ] {
+            let mut chunk = TerrainChunk::new(pos, -64, 544, &blocks, Properties).unwrap();
+            let terrain = g.fill_from_noise(&mut chunk, STONE, WATER).unwrap();
+            let data = terrain.read();
+            for z in 0..16 {
+                for x in 0..16 {
+                    let (wx, wz) = (pos.x * 16 + x, pos.z * 16 + z);
+                    let height = data.height_at(x, z);
+                    let top = height.max(TerrainLevels::water_level(x, z, g.sea_level(), &data));
+                    assert_eq!(chunk.block(x, height, z), STONE);
+                    assert_eq!(
+                        chunk.block(x, height + 1, z),
+                        if top > height { WATER } else { AIR }
+                    );
+                    let floor = g
+                        .base_height(wx, wz, TerraHeightmap::OceanFloorWorldgen)
+                        .unwrap();
+                    let surface = g
+                        .base_height(wx, wz, TerraHeightmap::WorldSurfaceWorldgen)
+                        .unwrap();
+                    assert_eq!((floor, surface), (height + 1, top + 1), "{pos:?} {x} {z}");
+                    let column = g.base_column(wx, wz).unwrap();
+                    assert_eq!(column.min_y, height);
+                    assert_eq!(column.states.len() as i32, top);
+                }
+            }
+            drop(data);
+            g.drop_chunk(7, pos.x, pos.z);
+        }
     }
 
     /// The seed is captured from the level seed; chunk queries go to one shared cache entry per seed and chunk,

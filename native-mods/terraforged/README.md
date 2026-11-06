@@ -2098,27 +2098,30 @@ entry keeps a copy of its generated heights, which `write_generated()` puts back
 The generator queries (`generator_facade.rs`, `TerraForgedGenerator`) are TerraForged Reimagined's
 `worldgen.Generator` (a24d450, MIT, as above) over its terrain cache: `createState`'s seed capture (`Seeds.get`, the
 level seed's low 32 bits, kept beside the raw level seed), `getChunkData`/`getChunkDataAsync`, the cache hints and
-drop (each with the seed its Java hook passes), `getMinY`, `getSeaLevel`, `getGenDepth` and `getBaseColumn`, plus
-TerraForged 6dd607eb's `getBaseHeight` (see below). Heights count from block 0, as TerraForged's levels do; `getGenDepth` is `levels.maxY` (480 by
+drop (each with the seed its Java hook passes), `getMinY`, `getSeaLevel`, `getGenDepth`, `getBaseHeight` and
+`getBaseColumn` (see below). Heights count from block 0, as TerraForged's levels do; `getGenDepth` is `levels.maxY` (480 by
 default, the exclusive top, not `maxY - minY`), and Reimagined fits that by widening the overworld dimension type to
 `-64..960`. Mapping the levels onto Horizon's 26.3 build range (`-64..320`) is the job of the layer that registers the
-generator. `getBaseHeight` (the structure height query) follows 6dd607eb: it reads ONE un-eroded sample, its base
-(water) level and its raw height, the surface heightmaps returning the higher plus one, the ocean-floor ones the height
-plus one. Reimagined reads the eroded height there instead, so its structures stand on the eroded ground; the port
-does not follow that change, so on eroded ground a structure's height can differ from the filled terrain's, as in
-6dd607eb. `getBaseColumn` reads the same un-eroded sample (stone up to the raw height, water up to the surface; both
-trees agree) and, as Java, reports the height as the column's `minY`. A sample that fails (a custom module has no seed-first form) is an `Err` the caller gets, never a
+generator. `getBaseHeight` (the structure height query) follows Reimagined, Arthur's choice for #210: it reads the
+un-eroded sample's base (water) level and the ERODED height (`getErodedHeightNoise`, erosion and rivers: the height the
+chunk is filled to), the surface heightmaps returning the higher plus one, the ocean-floor ones the height plus one.
+That is Reimagined's fix for floating structures; TerraForged 6dd607eb reads the raw sample's height there, so its
+structures float or sink wherever erosion moved the ground. `getBaseColumn` reads the raw height in both trees; the
+port reads the eroded one there too (a departure from both), so structures placed by column (ruined portals, nether
+fossils, land checks) and by height see the same ground, the filled one. As in Java, the column reports the height as its
+`minY` (`new NoiseColumn(height, states)`), so its states start at the height, not at the bottom of the world.
+A sample that fails (a custom module has no seed-first form) is an `Err` the caller gets, never a
 made-up height; a negative column height panics where Java throws. `GeneratorQueryOracle.java`
 (`.local/terraforged/oracles/generator_facade/`, `run.sh`, after `oracles/erosion_region/e2e/run.sh`) runs the query
 bodies (copied, since `Generator` needs Minecraft's `ChunkGenerator`) on Reimagined's own `TerrainLevels`,
 `NoiseLevels` and `ErodedNoiseGenerator` over the newer source's `NoiseGenerator`, interpreted and JIT-compiled alike:
 the query math over signed zeros, subnormals, huge values, infinities and NaN for three level sets, `Seeds.get`, and
 thirteen end-to-end positions (four seeds, negative blocks, `int` limits, the world border); the tests match them bit
-for bit in debug and release. That oracle's end-to-end heights are Reimagined's eroded ones, so the tests take those from
-`oracles/generator_facade/6dd607eb/` (`run.sh`, after the same e2e setup) instead: `extract.py` copies 6dd607eb's
-`getBaseHeight` and `getBaseColumn` verbatim and runs them with 6dd607eb's real `Seeds.get(RandomState)`, `TerrainLevels`
-and `NoiseLevels` over the newer source's `NoiseGenerator.getNoiseSample`, for all six heightmap types, at the same
-positions; the query math and `Seeds.get` lines equal Reimagined's.
+for bit in debug and release. `oracles/generator_facade/eroded_column/` (`run.sh`, after `../run.sh`) reruns the
+end-to-end positions and adds each one's column from the eroded height (the port's `base_column`). A test fills chunks
+and checks that both queries name the filled ground in every column. 6dd607eb's raw-height queries stay checkable with
+`oracles/generator_facade/6dd607eb/` (`extract.py` copies its `getBaseHeight` and `getBaseColumn` verbatim); the query
+math and `Seeds.get` lines equal Reimagined's.
 
 The chunk fill (`chunk_fill.rs`, `fill_chunk`) is `ChunkUtil.fillChunk` then `ChunkUtil.primeHeightmaps`, as
 TerraForged Reimagined's `Generator.fillFromNoise` calls them (a24d450, MIT, as above; the fill logic is the same in
@@ -2674,13 +2677,18 @@ hint), `fillFromNoise` (stone and water from the terrain cache, `primeHeightmaps
 heights from `NoiseChunkUtil.initSurfaceCache` and 26.3's `WorldGenerationContext(generator, level)` (sea level 62),
 then `Surface.apply` (gen depth 480, `#minecraft:substrate_overworld` and `#minecraft:snow` erodible, as Reimagined chose). Decoration is still the vanilla overworld's;
 after it the chunk's terrain-cache entry is dropped, as `applyBiomeDecoration` does. `getSeaLevel()` is
-TerraForged's 62 and `Source.getNoiseBiome` answers biome queries. Not wired yet: structures and their terrain
-(#210; the vanilla half runs without structures), biome search (#211), TerraForged's
+TerraForged's 62 and `Source.getNoiseBiome` answers biome queries. Structures are placed by 26.3's structure placement
+over TerraForged's queries (`structure_queries.rs`: `getBaseHeight`, `getBaseColumn` and `Source.getNoiseBiome` over
+the overworld biome list, `possibleBiomes`), and the terrain stage is `fill_from_noise_with_structures` over
+`StructureTerrain::from_starts` of the chunk's references (the beardifier's list); the vanilla half runs without
+structures. Not wired yet: biome search (#211), TerraForged's
 decoration (#213), distant terrain (#221) and the taller overworld (#215). Until then TerraForged's levels are not
 mapped onto 26.3's build range: the fill clips terrain to the chunk (cut flat at y 319, which the default levels
 seldom reach), and the preliminary surface heights are clipped the same way. The preliminary heights hold per 4x4
-column cell, as the cache stores them; 26.3's surface context reads one value per column. `base_height` is not
-used yet, so the structure height question (Reimagined's eroded height) waits for #210. A test generates a chunk
+column cell, as the cache stores them; 26.3's surface context reads one value per column. `getBaseHeight` is clipped
+the same way (to the level's `min_y ..= min_y + height`, where the clipped fill's heightmaps end), so a structure is
+placed where the filled chunk has its ground; the column needs no clipping, as the structure code reads it only inside
+the noise range. A test generates a chunk
 twice in one world and once in a second world, checks the blocks and biomes are equal, the blocks differ from the
 normal overworld, and every quart's biome is `getNoiseBiome`'s except where a noise cave carved it.
 
@@ -2732,7 +2740,7 @@ and generates new chunks with vanilla terrain. With the bundle applied, Horizon'
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives, the biome climate types, the climate settings, the climate module, the climate stage, the continent factory, the generator context, the heightmap, the world generator factory, TerraForged's terrain levels, its terrain data, its terrain generator, its terrain-blend utilities, its terrain blender with its nearest-terrain search (and the newer source's seed-first blender), noise-graph reseeding, the cave noise primitives, the biome viability rules, the biome overrides, the continent control points, the continent cell primitives, the continent configuration, the continent shape blending, the continent cell generator with its spawn-offset search, the continent river nodes, the continent river carver's arithmetic, the continent river networks with their nearest-node sampling and their warped, carved river sampling, the newer source's seed-first noise sources, scalar noise graphs, domain warps, selectors, graph caches, terraces, legacy terraces, advanced terraces, curves, transforms (steps, frequency, gradient and modulation), special sources (boost, cell, cell edge and sine) and lines, and its bounded concurrent lossy cache with the continent's cell and
 river-piece caches on it, the continent noise module that joins the continent layers, the newer source's terrain height sampler with its bordered chunk generation and its nearest-terrain search, its biome chunk fill, cave biome sampler, initial biome selection, surface biome sampler, chunk biome hook and biome registry pools, the erosion tile geometry, and TerraForged Reimagined's heightmap smoothing, erosion brushes, hydraulic erosion filter, eroded-region cache, eroded region build, eroded chunk generation, terrain cache, generator queries, chunk fill, the terrain stage hand-off to it, the current climate noise, the biome sampler bridge, the live biome bindings, the terrain asset decoder, the terrain-type and terrain-noise registries, the bundled terrain types and all 14 bundled terrain noises, the bundled noise caves and their reseeded cave array, and 6dd607eb's structure terrain columns with their
 chunk adapter, piece selection and structure-aware terrain stage, 6dd607eb's surface erosion and water edge smoothing passes, and its preliminary surface-height cache, and the `terraforged:normal` world preset, whose pipeline generates
-TerraForged's terrain, biomes, surfaces and noise caves, and the Create World screen's TerraForged world type. A game built with the bundle offers it, but structures and TerraForged's own decoration are not wired yet (see above), so it is still for development; install instructions come once they are.
+TerraForged's terrain, biomes, surfaces, noise caves and structures (placed on Reimagined's eroded heights), and the Create World screen's TerraForged world type. A game built with the bundle offers it, but TerraForged's own decoration is not wired yet (see above), so it is still for development; install instructions come once it is.
 
 ## Development
 
