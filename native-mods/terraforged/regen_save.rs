@@ -23,14 +23,23 @@
  * SOFTWARE.
  */
 
-// `/tf regen`'s storage half: `chunkMap.write(pos, null)` for each chunk, and its
-// entities and POIs.
+// `/tf regen`'s storage half: `chunkMap.write(pos, null)` for each chunk. The deletes go
+// through the region writer's queue like every other write, after the writes queued before
+// them, and loads see them at once.
 
 use super::{Result, SaveDir};
 
+/// The chunks' records in `region/`: what makes them generate again.
 pub fn delete_chunks(save: &SaveDir, keys: &[(i32, i32)]) -> Result<()> {
-    let none = |key: &(i32, i32)| (*key, None);
-    save.write_records("region", keys.iter().map(none).collect(), false)?;
-    save.write_records("poi", keys.iter().map(none).collect(), false)?;
+    save.write_records(
+        "region",
+        keys.iter().map(|key| (*key, None)).collect(),
+        false,
+    )
+}
+
+/// Their entities and POIs too, which Java keeps (see `/tf regen` in commands.rs).
+pub fn delete_chunk_data(save: &SaveDir, keys: &[(i32, i32)]) -> Result<()> {
+    save.write_records("poi", keys.iter().map(|key| (*key, None)).collect(), false)?;
     save.save_entities_later(keys.iter().map(|key| (*key, Vec::new())).collect())
 }
