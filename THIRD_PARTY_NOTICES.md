@@ -44,6 +44,7 @@ features), then `Surface.smoothWater` and `Surface.applyPost`.
 The world type in `native-mods/terraforged/client_world_type.rs` follows TerraForged's own `DatapackHook.injectDatapack`
 and `DataPackExporter.createWorldDatapack` for TerraForged worlds: each gets a copy of TerraForged's built-in pack.
 The boat hook in `native-mods/terraforged/boat.rs` follows TerraForged's own `MixinBoat` and `BoatHook.floatTheBoat`.
+The commands in `native-mods/terraforged/commands.rs` follow TerraForged's own `TFCommands` and `Arg.terrainType`.
 The vegetation decoder in `native-mods/terraforged/vegetation.rs` follows TerraForged's own `VegetationConfig.CODEC`,
 `ViabilityCodec` and its viability specs, `BiomeVegetationManager.getConfig` and `VegetationFeatures.create`. The
 vegetal step in `native-mods/terraforged/decorator.rs` follows TerraForged's own `PositionSampler` (with
