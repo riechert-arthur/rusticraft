@@ -40,7 +40,6 @@ use super::{
 };
 use crate::heightmap::{HeightmapState, HeightmapType};
 use crate::registry::BlockStateId;
-use std::collections::HashMap;
 
 pub struct NoiseCaveGenerator<T> {
     caves: Vec<NoiseCave>,
@@ -104,7 +103,8 @@ impl<T: Clone + PartialEq> NoiseCaveGenerator<T> {
         carve: bool,
     ) -> Result<CarverChunk<T>, TerrainError> {
         let mut carver = CarverChunk::new(self.caves.len());
-        let mut writes = HashMap::new();
+        // The cave biome of each of the chunk's quarts the caves reached (16 per quart row).
+        let mut writes: Vec<Option<T>> = vec![None; 16 * (chunk.height() >> 2).max(0) as usize];
         // ChunkAccess.getHeight primes a missing OCEAN_FLOOR_WG on the first read, before
         // any write; ProtoChunk.setBlockState then updates the persisted status's maps.
         if chunk.heightmap(HeightmapType::OceanFloorWg).is_none() {
@@ -143,12 +143,22 @@ impl<T: Clone + PartialEq> NoiseCaveGenerator<T> {
                 }
             }
         }
-        if !writes.is_empty() {
-            let old = biomes.clone();
+        if writes.iter().any(Option::is_some) {
+            // The quart origin as BiomeChunk.fill computes it (QuartPos.fromBlock of the minimum block).
+            let (base_x, base_z) = (
+                position.x.wrapping_shl(4) >> 2,
+                position.z.wrapping_shl(4) >> 2,
+            );
             let (min, max) = (chunk.min_y(), chunk.min_y() + chunk.height() - 1);
+            let old = biomes.clone();
             biomes
                 .fill(min, max, |quart| {
-                    Ok::<_, std::convert::Infallible>(match writes.get(&quart) {
+                    let slot = quart_slot(
+                        quart[0].wrapping_sub(base_x),
+                        quart[1] - (min >> 2),
+                        quart[2].wrapping_sub(base_z),
+                    );
+                    Ok::<_, std::convert::Infallible>(match &writes[slot] {
                         Some(biome) => biome.clone(),
                         None => old.noise_biome(quart).clone(),
                     })
@@ -223,13 +233,21 @@ impl<T: Clone + PartialEq> NoiseCaveGenerator<T> {
     }
 }
 
+/// The `writes` slot of the quart at chunk-local quart `x`, `y` (from the chunk's bottom) and `z`.
+fn quart_slot(x: i32, y: i32, z: i32) -> usize {
+    (y * 16 + z * 4 + x) as usize
+}
+
 /// `NoiseCaveCarver.carve` for one column: air through `bottom..=top` except fluids, and
 /// the cave biome in carved quarts more than 16 blocks below the surface. Without a cave
-/// biome (the pool is empty) the quarts keep theirs.
+/// biome (the pool is empty; Java writes null) the quarts keep theirs. Blocks outside the
+/// build range are skipped, as ProtoChunk skips them; so are their quarts (Java's section
+/// lookup would throw below the range, where only a generator `min_y` under the chunk's
+/// reaches).
 #[allow(clippy::too_many_arguments)]
 fn carve_column<B: TerrainBlockStates, T: Clone>(
     chunk: &mut TerrainChunk<'_, B>,
-    writes: &mut HashMap<[i32; 3], T>,
+    writes: &mut [Option<T>],
     biome: Option<T>,
     dx: i32,
     dz: i32,
@@ -238,8 +256,8 @@ fn carve_column<B: TerrainBlockStates, T: Clone>(
     surface: i32,
     air: BlockStateId,
 ) -> Result<(), TerrainError> {
-    let position = chunk.position();
     let max_biome_y = surface.wrapping_sub(16) >> 2;
+    let (min_y, max_y) = (chunk.min_y(), chunk.min_y() + chunk.height());
     for y in bottom..=top {
         if chunk.block_properties(chunk.block(dx, y, dz)).has_fluid() {
             continue;
@@ -248,13 +266,10 @@ fn carve_column<B: TerrainBlockStates, T: Clone>(
         if (y >> 2) >= max_biome_y {
             continue;
         }
-        if let Some(biome) = &biome {
-            let quart = [
-                position.x.wrapping_shl(2).wrapping_add(dx >> 2),
-                y >> 2,
-                position.z.wrapping_shl(2).wrapping_add(dz >> 2),
-            ];
-            writes.insert(quart, biome.clone());
+        if let Some(biome) = &biome
+            && (min_y..max_y).contains(&y)
+        {
+            writes[quart_slot(dx >> 2, (y - min_y) >> 2, dz >> 2)] = Some(biome.clone());
         }
     }
     Ok(())
