@@ -2159,6 +2159,9 @@ supplies the water and level-2 water state ids; the region wiring is a later lay
 region proxy over the eight neighbouring ProtoChunks): 128 generated 3x3 chunk grids over three build ranges, four
 persisted statuses and three priming states, with flowing water, leaves over water, kelp, cave air and signed-zero, NaN
 and non-zero river values, comparing every block, all six heightmaps (absent ones too) and every region read in order.
+The oracle lives outside Git, next to the erosion one, in the local TerraForged oracle folder
+(`.local/terraforged/oracles/surface_erosion/`, whose `run.sh` builds both). A separate test covers block coordinates
+that wrap past `i32::MAX` at the far chunk edge, as Java's int arithmetic does.
 
 The structure terrain columns (`structure_terrain.rs`, `StructureTerrain`) are TerraForged 6dd607eb's
 `worldgen.terrain.StructureTerrain.modify` and its helpers (MIT, as above), the per-column part of `fillFromNoise`'s
