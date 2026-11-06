@@ -38,7 +38,7 @@ use std::collections::BTreeMap;
 /// the `int` range wraps around to the other side, as in Java.
 ///
 /// The 1.18.2-0.3.1 jar differs: it reads all 256 columns, keys by QUART coordinates (`ChunkPos.asLong(fromBlock(x),
-/// fromBlock(z))`, 1.18.2's key), keeps the last height read in each quart and pads the other quarts of the 3x3 area with
+/// fromBlock(z))`), keeps the last height read in each quart and pads the other quarts of the 3x3 area with
 /// the minimum of all 256. TerraForged Reimagined (26.3) drops the cache: 26.3's `NoiseChunk` has none and its surface
 /// rules sample `chunk_surface_level`. This follows 6dd607eb, whose block-column keys match the block positions
 /// Horizon's preliminary-surface sampler receives.

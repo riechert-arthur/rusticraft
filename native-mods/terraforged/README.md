@@ -2127,7 +2127,7 @@ that a plain fill after a structure stage gives the plain blocks and heights aga
 oracle and `ChunkAdapterOracle`, below); the composition is Java's three calls in order, so it has no oracle of its
 own. Heights the structure edits write come from the clipped chunk (its OCEAN_FLOOR_WG), while unedited columns
 keep TerraForged's unclipped heights; with terrain above the build range the two differ, which the world-height
-decision (below) has to settle. Not yet ported: Deep Caves, Strata, the surface step (apart from its erosion, water smoothing and snow passes, below), the carver step, and the
+decision (below) has to settle. Not yet ported: Deep Caves, Strata, the surface step (apart from its erosion, water smoothing and snow passes and its preliminary surface-height cache, below), the carver step, and the
 registration that would let Horizon call the stage.
 
 The surface erosion pass (`surface.rs`, `apply`) is TerraForged 6dd607eb's `worldgen.biome.surface.Surface.apply`
@@ -2200,14 +2200,14 @@ and the region lookup for water smoothing are a later layer.
 
 The preliminary surface-height cache (`surface_height_cache.rs`, `initialize`, and the facade's
 `initialize_surface_cache`) is TerraForged 6dd607eb's `NoiseChunkUtil.initChunk` and `initSurfaceCache` (MIT, as
-above), which the surface decorator runs before 1.18's vanilla surface rules. If the cache is empty, it stores the
+above), which its surface decorator runs before the vanilla surface rules. If the cache is empty, it stores the
 chunk's height at each of its 16 quart columns (`TerrainData.getHeight`, read dz before dx) under its block column
 (`ColumnPos.asLong`), then stores the lowest of the 16 at every other quart column of the surrounding 3x3 chunk area.
 The facade asks for the chunk's terrain with the captured seed, as Java's `getChunkDataAsync(Seeds.get(state), ..)`
 does. It reads the shared entry's current heights, so after the structure-aware terrain stage it sees the structure
 edits, as Java's surface stage reads the `TerrainData` its `fillFromNoise` edited. A cache that is already filled is
 left alone. The heights are TerraForged levels and are not clipped to the build range, so the world-height decision
-covers them too. The 1.18.2-0.3.1 jar differs: it reads all 256 columns, keys by quart coordinates (1.18.2's key),
+covers them too. The 1.18.2-0.3.1 jar differs: it reads all 256 columns, keys by quart coordinates (`ChunkPos.asLong` of the quart position),
 and pads the area with the minimum of all 256. TerraForged Reimagined drops the cache, because 26.3's `NoiseChunk`
 has none. The port keeps 6dd607eb's block-column keys, which match the block positions Horizon's preliminary-surface
 sampler receives. Wiring it into Horizon's surface rules is a later layer. The oracle runs 6dd607eb's own methods
