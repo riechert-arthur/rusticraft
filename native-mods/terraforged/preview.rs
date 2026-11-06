@@ -148,7 +148,7 @@ fn shade_rgb(r: u8, g: u8, b: u8, brightness: f32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::super::{
-        terraforged_engine::BiomeType,
+        terraforged_engine::{BiomeType, TerrainRegistry},
         terraforged_generator_preset::{build, terrain_levels},
     };
     use super::*;
@@ -214,8 +214,8 @@ render -2147483648 16 16 3f400000 c1080000 40400000 5d3612e4c3b7ce25 12x12
 
     #[test]
     fn colors_match_6dd607eb_java() {
-        let generator = generator();
-        let terrains = &generator.noise_generator().continent().context().terrain;
+        // The colours read no terrain: any registry does.
+        let terrains = TerrainRegistry::new();
         let mut lines = Vec::new();
         for strength in [0.2f32, 1.0] {
             let mut colors = Vec::new();
@@ -223,7 +223,7 @@ render -2147483648 16 16 3f400000 c1080000 40400000 5d3612e4c3b7ce25 12x12
                 for continent in CONTINENT {
                     for river in RIVER {
                         for biome in BIOME {
-                            let mut sample = ClimateSample::new(terrains);
+                            let mut sample = ClimateSample::new(&terrains);
                             sample.climate_type = climate_type;
                             sample.noise.continent_noise = continent;
                             sample.noise.river_noise = river;
