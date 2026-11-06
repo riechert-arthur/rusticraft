@@ -455,6 +455,22 @@ impl TerraForgedGenerator {
         ))
     }
 
+    /// Horizon's distant terrain (no Java counterpart): `getBaseColumn`'s two heights at block `(x, z)` with the
+    /// captured seed, the terrain height (the top stone block) and the surface (the higher of the height and the base
+    /// level), in TerraForged's levels and unclipped, from ONE un-eroded sample (rivers included). Unlike
+    /// [`Self::base_column`] it skips the eroded height: that needs the block's erosion region, whose build takes a
+    /// fraction of a second and would push the regions the chunks being generated read out of the 16-region cache. So
+    /// this creates no terrain-cache entry and builds no region; erosion is the only difference from the fill.
+    /// `Err` as [`Self::base_height`].
+    pub fn far_heights(&self, x: i32, z: i32) -> Result<(i32, i32), &'static str> {
+        let sample = self.terrain.noise_sample(self.seed(), x, z)?;
+        Ok(column_heights(
+            self.levels,
+            sample.base_noise,
+            sample.height_noise,
+        ))
+    }
+
     /// The base noise of the un-eroded sample, then the eroded height noise, in Reimagined's `getBaseHeight` order.
     fn base_noises(&self, x: i32, z: i32) -> Result<(f32, f32), &'static str> {
         let seed = self.seed();

@@ -49,7 +49,7 @@ use super::{
     terraforged_cave_biome_sampler::CaveBiomeSampler,
     terraforged_cave_carver::{CarverChunk, NoiseCaveGenerator},
     terraforged_current_surface_biomes::CurrentSurfaceBiomeSampler,
-    terraforged_generator_facade::{TerraForgedGenerator, TerraHeightmap, register_live},
+    terraforged_generator_facade::{TerraForgedGenerator, register_live},
     terraforged_generator_preset::{build as build_noise, terrain_levels},
     terraforged_live_biomes::LiveBiomeBindings,
     terraforged_structure_queries::TfQueries,
@@ -288,8 +288,14 @@ impl TerraForgedPipeline {
     }
 
     /// Horizon's far terrain (`SeededPipeline::lod_grid`; vanilla has no counterpart): each column is TerraForged's
-    /// ground as the fill builds it (`getBaseColumn`'s shape: stone from the level bottom to the terrain height,
-    /// water above it to the surface, clipped to the level as the fill clips it), and its top eight blocks are
+    /// ground in `getBaseColumn`'s shape (stone from the level bottom to the terrain height, water above it to the
+    /// surface, clipped to the level as the fill clips it), from the UN-ERODED height
+    /// ([`TerraForgedGenerator::far_heights`]): the eroded one needs the column's erosion region, about 0.25 s to
+    /// build per 256x256 blocks (a 16x16 tile of 64-block cells spans 64 regions: about 20 s), and the 16-region
+    /// cache would then evict the regions the chunks being generated read. Erosion moves the ground by about 2 blocks
+    /// on average (6 at the 90th percentile, at most about 10), so distant ground can sit that much off the real
+    /// chunks'. Far sampling creates no terrain-cache entry and builds no region; it only shares the continent's
+    /// lossy cell caches with the chunks, as `/locate biome` does. Its top eight blocks are
     /// painted by the vanilla surface rule as `buildSurface` paints a chunk: TerraForged's generation context (sea
     /// level 62), its preliminary height at the column, and the column's TerraForged biome (the one the chunk stores
     /// at the surface block's zoomed quart). Like vanilla's far sampling it skips the surface rule's slope reads and
@@ -311,15 +317,10 @@ impl TerraForgedPipeline {
         let mut heights = BTreeMap::new();
         let mut quarts: BTreeMap<(i32, i32), BiomeId> = BTreeMap::new();
         for &(x, z) in columns {
-            let floor = self
+            let (height, surface) = self
                 .generator
-                .base_height(x, z, TerraHeightmap::OceanFloorWorldgen)
+                .far_heights(x, z)
                 .map_err(stage("far terrain"))?;
-            let surface = self
-                .generator
-                .base_height(x, z, TerraHeightmap::WorldSurfaceWorldgen)
-                .map_err(stage("far terrain"))?;
-            let (height, surface) = (floor.wrapping_sub(1), surface.wrapping_sub(1));
             heights.entry(column_key(x & !3, z & !3)).or_insert(height);
             // The stone and water tops, clipped as the fill clips them (cut flat at the top block).
             let stone = height.min(top);
