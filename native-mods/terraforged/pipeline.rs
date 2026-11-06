@@ -869,7 +869,16 @@ mod tests {
             .generate_proto(ChunkPos::new(at[0] >> 4, at[2] >> 4))
             .unwrap();
         assert!(!start.own_starts().is_empty());
-        // TerraForged's decoration runs over a wooded biome near the origin.
+        // TerraForged's decoration plants trees in a wooded biome near the origin.
+        let forest = wooded_chunk(&mut worker);
+        let mut region = region_around(&mut worker, forest);
+        let stats = worker.decorate(&mut region).unwrap();
+        assert!(stats.placed > 0);
+        assert!(logs(&region[4]) > 0, "no tree logs in the decorated chunk");
+    }
+
+    /// The first chunk (on a 4-chunk grid near the origin) whose centre column is in a wooded biome.
+    fn wooded_chunk(worker: &mut super::super::GeneratorWorker) -> ChunkPos {
         let wooded = [
             "minecraft:forest",
             "minecraft:birch_forest",
@@ -880,24 +889,45 @@ mod tests {
             "minecraft:old_growth_spruce_taiga",
             "minecraft:jungle",
         ];
-        let forest = (-12..12)
+        (-12..12)
             .flat_map(|cx| (-12..12).map(move |cz| ChunkPos::new(cx * 4, cz * 4)))
             .find(|&at| {
                 let chunk = worker.generate_proto(at).unwrap();
                 let top = chunk.surface_height(8, 8);
                 wooded.contains(&chunk.biome_at(8, top, 8))
             })
-            .expect("a wooded chunk near the origin");
-        let mut region: [ProtoChunk; 9] = std::array::from_fn(|i| {
-            worker
-                .generate_proto(ChunkPos::new(
-                    forest.x + i as i32 % 3 - 1,
-                    forest.z + i as i32 / 3 - 1,
-                ))
-                .unwrap()
-        });
-        let stats = worker.decorate(&mut region).unwrap();
-        assert!(stats.placed > 0);
+            .expect("a wooded chunk near the origin")
+    }
+
+    /// Log blocks in the chunk's whole build range.
+    fn logs(chunk: &ProtoChunk) -> usize {
+        let (min_y, height) = (chunk.terrain.min_y(), chunk.terrain.height());
+        (0..16)
+            .flat_map(|x| (0..16).map(move |z| (x, z)))
+            .flat_map(|(x, z)| (min_y..min_y + height).map(move |y| (x, y, z)))
+            .filter(|&(x, y, z)| chunk.block_name(x, y, z).ends_with("_log"))
+            .count()
+    }
+
+    /// The vegetal step (PositionSampler's tree grid, grass passes and other features) plants the same wooded region
+    /// in the same world twice and in a second world.
+    #[test]
+    fn terraforged_vegetation_is_repeatable() {
+        let Some(data) = data() else { return };
+        let (_, first) = terraforged(&data, 7, false);
+        let (_, second) = terraforged(&data, 7, false);
+        let level = first.level();
+        let forest = wooded_chunk(&mut first.worker());
+        let decorated = |overworld: &OverworldGenerator| {
+            let mut worker = overworld.worker();
+            let mut region = region_around(&mut worker, forest);
+            worker.decorate(&mut region).unwrap();
+            assert!(logs(&region[4]) > 0, "no tree logs in the decorated chunk");
+            digest(&region, level)
+        };
+        let a = decorated(&first);
+        assert_eq!(decorated(&first), a, "the same world");
+        assert_eq!(decorated(&second), a, "a second world");
     }
 
     #[test]
@@ -1382,6 +1412,40 @@ mod tests {
         assert!(without.structures.is_none());
         assert_eq!(off.structures_per_step(), by_step.as_slice());
         assert!(by_step.iter().sum::<usize>() > 0);
+    }
+
+    /// The vegetation is bound to the world's biomes once: the first config whose tag holds the biome (a tag naming an
+    /// unregistered biome dropped whole, so `trees/patchy` holds nothing without `terraforged:oak_forest`), rivers by
+    /// `#minecraft:is_river`, and the vegetal features split into trees (unwrapped when configured), grass and the rest.
+    #[test]
+    fn terraforged_vegetation_binds_to_the_registry() {
+        let Some(data) = data() else { return };
+        let stem = terraforged_stem(&data, PRESET, "minecraft:overworld").unwrap();
+        let pipeline = TerraForgedPipeline::new(&data, 7, &stem, false).unwrap();
+        let features = pipeline.features.as_ref().unwrap();
+        let of = |name: &str| features.vegetation_of(data.biome_id(name).unwrap());
+        let (tag, river, [trees, grass, other], unwrapped) = of("minecraft:birch_forest");
+        assert_eq!(tag, Some("terraforged:trees/temperate"));
+        assert!(!river && unwrapped);
+        assert!(
+            trees.contains(&"minecraft:trees_birch")
+                && grass.contains(&"minecraft:patch_grass_forest")
+        );
+        assert!(other.contains(&"minecraft:flower_default"), "{other:?}");
+        assert_eq!(of("minecraft:taiga").0, Some("terraforged:trees/hardy"));
+        assert_eq!(of("minecraft:pale_garden").0, None);
+        assert!(of("minecraft:pale_garden").2[0].contains(&"minecraft:pale_garden_vegetation"));
+        // Without terraforged:oak_forest (#226) trees/patchy is dropped: wooded badlands has no config.
+        assert!(data.biome_id("terraforged:oak_forest").is_none());
+        assert_eq!(of("minecraft:wooded_badlands").0, None);
+        for river in ["minecraft:river", "minecraft:frozen_river"] {
+            assert!(of(river).1, "{river}");
+        }
+        assert!(!of("minecraft:plains").1);
+        for id in 0..data.biome_names().len() as u32 {
+            let (_, _, _, unwrapped) = features.vegetation_of(BiomeId(id));
+            assert!(unwrapped, "{}", data.biome_name(BiomeId(id)));
+        }
     }
 
     /// `/locate biome` (`findClosestBiome3d`) follows the spiral over TerraForged's noise biomes: it answers with the

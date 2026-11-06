@@ -32,10 +32,9 @@ use super::{
 /// `normalized_gradient` is `getTerrain().getGradient(x, z, norm)`, `river` is `getTerrain().getRiver().get(x, z)`
 /// and `climate_shape` is `getClimateSampler().getShape(x, z)`.
 ///
-/// `seed` (and `climate_shape`'s seed argument) come from the newer TerraForged source, whose context carries the
-/// world seed and whose `IBiomeSampler.getShape` takes it. The jar has neither. The seed is kept because the
-/// decoration layer (#213) implements this trait with it, but no rule depends on it: jar parity means
-/// `climate_shape` implementations ignore it.
+/// `seed` (and `climate_shape`'s seed argument) come from TerraForged 6dd607eb, whose context has a `seed` field
+/// and whose `IBiomeSampler.getShape` takes it; the jar has neither. [`Viability::try_fitness`] (6dd607eb) samples
+/// `NoiseViability` with it; [`Viability::fitness`] (the jar) and `climate_shape` implementations ignore it.
 pub trait ViabilityContext {
     fn seed(&self) -> i32;
     fn edge(&self) -> bool;
@@ -47,10 +46,11 @@ pub trait ViabilityContext {
     fn climate_shape(&self, seed: i32, x: i32, z: i32) -> f32;
 }
 
-/// The jar's `ViabilityContext` class over one chunk's [`TerrainData`] (its `terrainData` future, already
+/// The jar's (and 6dd607eb's) `ViabilityContext` class over one chunk's [`TerrainData`] (its `terrainData` future, already
 /// joined): no biome edges, levels from the terrain data. Its biome sampler is only read by `BiomeEdgeViability`
 /// when `edge()` is true, which it never is here, so it is not held (`IBiomeSampler` is not ported yet) and
-/// `climate_shape` returns 0. The seed is 0 (the jar's class has none).
+/// `climate_shape` returns 0. The seed is 0: the jar's class has none, and 6dd607eb's `ViabilityContext.seed` is
+/// never assigned (`PositionSampler` sets only `terrainData` and `biomeSampler`), so its noise rules sample seed 0.
 pub struct TerrainViabilityContext<'a>(pub &'a TerrainData);
 
 impl ViabilityContext for TerrainViabilityContext<'_> {
@@ -122,13 +122,43 @@ pub enum Viability {
 }
 
 impl Viability {
-    /// `getFitness(x, z, context)`.
+    /// The jar's `getFitness(x, z, context)`: `NoiseViability` samples its noise seedless (`getValue(x, z)`).
     pub fn fitness(&self, x: i32, z: i32, context: &impl ViabilityContext) -> f32 {
-        match self {
+        let mut noise =
+            |noise: &Module| Ok::<_, std::convert::Infallible>(noise.value(x as f32, z as f32));
+        match self.fitness_with(x, z, context, &mut noise) {
+            Ok(value) => value,
+            Err(never) => match never {},
+        }
+    }
+
+    /// TerraForged 6dd607eb's `getFitness(x, z, context)`, which the vegetation step samples: the rules are the
+    /// jar's, except that `NoiseViability` samples its noise seed-first, `noise.getValue(context.seed(), x, z)`
+    /// ([`Module::try_value_seed_first`]; a node with no seed-first form is an `Err`).
+    pub fn try_fitness(
+        &self,
+        x: i32,
+        z: i32,
+        context: &impl ViabilityContext,
+    ) -> Result<f32, &'static str> {
+        let seed = context.seed();
+        let mut noise = |noise: &Module| noise.try_value_seed_first(seed, x as f32, z as f32);
+        self.fitness_with(x, z, context, &mut noise)
+    }
+
+    /// Both `getFitness` forms, with `noise` sampling a `NoiseViability`'s module at `(x, z)`.
+    fn fitness_with<E>(
+        &self,
+        x: i32,
+        z: i32,
+        context: &impl ViabilityContext,
+        noise: &mut impl FnMut(&Module) -> Result<f32, E>,
+    ) -> Result<f32, E> {
+        Ok(match self {
             Self::None => 1.0,
             Self::BiomeEdge { distance } => {
                 if !context.edge() {
-                    return 0.0;
+                    return Ok(0.0);
                 }
                 let edge = context.climate_shape(context.seed(), x, z);
                 if edge > *distance {
@@ -157,10 +187,14 @@ impl Viability {
                     (height - midpoint) / (maximum - midpoint)
                 }
             }
-            Self::Multiply(rules) => rules
-                .iter()
-                .fold(1.0, |value, rule| value * rule.fitness(x, z, context)),
-            Self::Noise(noise) => noise.value(x as f32, z as f32),
+            Self::Multiply(rules) => {
+                let mut value = 1.0;
+                for rule in rules {
+                    value *= rule.fitness_with(x, z, context, noise)?;
+                }
+                value
+            }
+            Self::Noise(module) => noise(module)?,
             Self::Saturation { min, max } => {
                 let saturation = 1.0 - context.river(x, z);
                 if saturation < *min {
@@ -187,11 +221,12 @@ impl Viability {
             } => {
                 let mut sum = *initial;
                 for (i, rule) in rules.iter().enumerate() {
-                    sum += rule.fitness(x, z, context) * amounts[i];
+                    let value = rule.fitness_with(x, z, context, noise)?;
+                    sum += value * amounts[i];
                 }
                 clamp(sum, 0.0, 1.0)
             }
-        }
+        })
     }
 
     /// `mult(others...)`: a `MultViability` over `others` followed by `self`.
