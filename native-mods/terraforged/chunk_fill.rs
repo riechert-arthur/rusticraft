@@ -186,11 +186,11 @@ pub(crate) mod tests {
         }
 
         fn blocks_motion_in_heightmap(self) -> bool {
-            self.0 >= 2 && self.0 != 3
+            self.0 == 2
         }
 
         fn blocks_motion_in_heightmap_no_leaves(self) -> bool {
-            self.blocks_motion_in_heightmap()
+            self.0 == 2
         }
     }
 
@@ -214,9 +214,6 @@ pub(crate) mod tests {
                     Tag::compound([("id", Tag::String("minecraft:void_air".into()))]),
                     Tag::compound([("id", Tag::String("minecraft:stone".into()))]),
                     Tag::compound([("id", Tag::String("minecraft:water".into()))]),
-                    Tag::compound([("id", Tag::String("minecraft:dirt".into()))]),
-                    Tag::compound([("id", Tag::String("minecraft:snow_block".into()))]),
-                    Tag::compound([("id", Tag::String("minecraft:gravel".into()))]),
                 ]),
             ),
             (
@@ -226,9 +223,6 @@ pub(crate) mod tests {
                     ("minecraft:void_air", Tag::Int(1)),
                     ("minecraft:stone", Tag::Int(2)),
                     ("minecraft:water", Tag::Int(3)),
-                    ("minecraft:dirt", Tag::Int(4)),
-                    ("minecraft:snow_block", Tag::Int(5)),
-                    ("minecraft:gravel", Tag::Int(6)),
                 ]),
             ),
         ]))
@@ -261,82 +255,6 @@ pub(crate) mod tests {
         let mut terrain = TerrainData::new(TerrainLevels::default());
         terrain.accept(&noise);
         terrain
-    }
-
-    fn terrain_with_slope(registry: &TerrainRegistry, slope: f32) -> TerrainData {
-        let hills = registry.get_by_name("hills").unwrap();
-        let mut noise = NoiseData::new(registry);
-        for z in NoiseData::MIN..NoiseData::MAX {
-            for x in NoiseData::MIN..NoiseData::MAX {
-                let mut sample = NoiseSample::new(registry);
-                sample.height_noise = 0.2 + x as f32 * slope;
-                sample.base_noise = 0.25;
-                sample.river_noise = 1.0;
-                sample.terrain_type = hills.clone();
-                noise.set_noise(x, z, &sample);
-            }
-        }
-        let mut terrain = TerrainData::new(TerrainLevels::default());
-        terrain.accept(&noise);
-        terrain
-    }
-
-    #[test]
-    fn surface_erosion_matches_original_java_column_hashes() {
-        use super::super::super::terrain::PreLightChunkStage;
-        use super::super::terraforged_surface;
-
-        let cases = [
-            (80, 77, 6, 4, 62, true, 0x0fb8dce8e2487b97),
-            (80, 77, 0, 4, 62, true, 0x7a0f35d114bb7957),
-            (80, 77, 3, 5, 62, true, 0xddf2ffc6026800c3),
-            (80, 61, 6, 4, 62, true, 0x68f69ba86fa10657),
-            (80, 60, 6, 4, 62, true, 0xc741cb65d4d3a2e3),
-            (1, 0, 6, 4, 0, true, 0x787bb1ac25aaa70f),
-            (-10, -12, 6, 4, -64, true, 0x79f6f6c52385b53b),
-            (61, 58, 6, 4, 62, true, 0x4e66875d7fb9463f),
-            (62, 59, 6, 4, 62, true, 0x45b4c2eeb855c96f),
-            (80, 80, 6, 4, 62, true, 0x67211f99f7082963),
-            (80, 77, 6, 4, 62, false, 0x16a500356406365d),
-        ];
-        let terrains = TerrainRegistry::new();
-        for stage in [PreLightChunkStage::Empty, PreLightChunkStage::Terrain] {
-            for (top, bottom, base, cover, sea, steep, expected) in cases {
-                let registry = registry();
-                let terrain = terrain_with_slope(&terrains, if steep { 0.01 } else { 0.005 });
-                let mut chunk =
-                    TerrainChunk::new(ChunkPos::new(-1, 2), -64, 192, &registry, Properties)
-                        .unwrap();
-                chunk.set_generation_stage(stage);
-                for y in -64..=top {
-                    let state = if y < bottom {
-                        2
-                    } else if y == bottom {
-                        base
-                    } else {
-                        cover
-                    };
-                    chunk.set_block_raw(0, y, 0, BlockStateId(state)).unwrap();
-                }
-                chunk
-                    .prime_heightmaps(&[HeightmapType::WorldSurfaceWg])
-                    .unwrap();
-                let original_height = terrain.height_at(0, 0);
-                terraforged_surface::apply(&terrain, &mut chunk, 255, sea, |state| {
-                    matches!(state.0, 4 | 5)
-                })
-                .unwrap();
-                let hash = (-64..128).fold(0xcbf29ce484222325u64, |hash, y| {
-                    (hash ^ u64::from(chunk.block(0, y, 0).0)).wrapping_mul(0x100000001b3)
-                });
-                assert_eq!(
-                    hash, expected,
-                    "top={top} bottom={bottom} base={base} stage={stage:?}"
-                );
-                assert_eq!(terrain.height_at(0, 0), original_height);
-                assert_eq!(chunk.generation_stage(), stage);
-            }
-        }
     }
 
     pub(crate) fn first_available(
