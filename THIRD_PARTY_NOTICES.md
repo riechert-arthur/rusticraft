@@ -37,6 +37,10 @@ The generator in `native-mods/terraforged/generator_preset.rs` and `pipeline.rs`
 `Generator`'s `createBiomes`, `fillFromNoise`, `buildSurface` (`SurfaceDecorator`, `NoiseChunkUtil`), the terrain-cache
 drop in `applyBiomeDecoration`, `getSeaLevel` and `Source.getNoiseBiome`, over Engine 0.3.0's terrain-type registry as
 TerraForged links it.
+The decoration in `native-mods/terraforged/decorator.rs` follows TerraForged's own `BiomeGenerator.decorate`:
+`FeatureDecorator` and `VanillaDecorator` (the per-biome feature steps, their seeding order and the structure pieces
+around the vegetal step), and `NoiseCaveGenerator.decorate` with `NoiseCaveDecorator` (each noise cave's biomes'
+features), then `Surface.smoothWater` and `Surface.applyPost`.
 The vegetation decoder in `native-mods/terraforged/vegetation.rs` follows TerraForged's own `VegetationConfig.CODEC`,
 `ViabilityCodec` and its viability specs, `BiomeVegetationManager.getConfig` and `VegetationFeatures.create`. The
 vegetal step in `native-mods/terraforged/decorator.rs` follows TerraForged's own `PositionSampler` (with
