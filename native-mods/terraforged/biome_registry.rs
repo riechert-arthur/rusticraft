@@ -214,6 +214,10 @@ fn open_hash_order(hashes: &[i32]) -> Vec<usize> {
 /// codec does). Pass a file's entries in file order, one per JSON key; where two keys name one biome (`plains` and
 /// `minecraft:plains`), the later key's weight wins. The pool takes each file's biomes in `ClimateType`'s hash-map
 /// order, not file order (see [`RegistryBiomeMap::build`]). TerraForged's own climate files are all empty (`{}`).
+///
+/// Not represented: keys `Identifier.parse` rejects (the codec throws; whoever decodes the files must refuse them),
+/// and files named after no climate type (`terraforged:foo`): Java adds their biomes to the overworld list (and throws
+/// on an unknown one) but gives them no pool.
 #[derive(Clone)]
 pub struct ClimateWeight {
     pub climate: BiomeType,

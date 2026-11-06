@@ -2487,7 +2487,9 @@ The registry's iteration order does not change the result: the overworld list is
 "It snows" needs a 26.3 stand-in: 1.18's biomes stored their precipitation, 26.3's keep only `has_precipitation` and
 decide snow per position, so the port takes TerraForged Reimagined a24d450's position-free `BiomeUtil.getPrecipitation`
 (MIT, as above): precipitation and a base temperature below 0.15, vanilla's own threshold. Every list and pool holds
-the same `Arc` per biome. Reimagined's version of the manager (its `terraforged:non_surface`/`wetland`/`highland` tags,
+the same `Arc` per biome. Not ported: climate files named after no climate type (Java adds their biomes to the
+overworld list, and throws on an unknown one, but gives them no pool), and the codec's own checks (an invalid key or a
+non-number weight throws in Java; nothing decodes climate files yet). Reimagined's version of the manager (its `terraforged:non_surface`/`wetland`/`highland` tags,
 cave and water filters, climate lookup for untagged biomes, `fillEmptyClimates` borrowing and dry and highland pools)
 is not followed; 6dd607eb's sampler reads none of it.
 
