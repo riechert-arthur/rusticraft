@@ -2582,10 +2582,9 @@ after TerraForged Reimagined a24d450's asset `TerrainType` (`DIRECT`, `forName`,
 `getOrCreate`) and `RegistryKey.entries`. Keys are read as 26.3 `Identifier`s (no namespace means
 `minecraft`); an invalid or repeated key is an error. Entries are decoded in registry order, `Identifier.compareTo`
 (path, then namespace), so the terrain ids they get do not depend on the input order, and the noises come back in
-that order. A terrain type's
-`parent` names a registered terrain by its exact name, else `none` (not an error, as in Java); its `name` returns
-the terrain already registered under it (keeping that terrain's own parent) or registers a new one delegating to
-`parent`. A terrain noise whose `type` is not in the loaded types is an error. Differences from Java:
+that order. A terrain type's `parent` names a registered terrain by its exact name, else `none` (not an error, as in
+Java); its `name` returns the terrain already registered under it (keeping that terrain's own parent) or registers a
+new one delegating to `parent`. A terrain noise whose `type` is not in the loaded types is an error. Differences from Java:
 
 - Minecraft 26.3 decodes a registry's files in parallel, so in Java a parent that is itself a terrain-type asset
   resolves only if its file happened to be decoded first. Here a parent must sort before the types naming it.
@@ -2602,7 +2601,8 @@ the terrain already registered under it (keeping that terrain's own parent) or r
 Reimagined's asset and engine `TerrainType` from source against Minecraft 26.3's server jar (strict JSON, DFU,
 `Identifier`) and runs 31 terrain-type cases in one registry (built-in, custom, unknown and case-variant parents,
 existing names, duplicate JSON keys, wrong field types) and 4 key-order cases, interpreted and JIT-compiled; the
-tests match every line except the two case-variant names, which are errors here.
+tests match every line except the two case-variant names, which are errors here (the key-order lines also print
+Reimagined's `entryIds`, which nothing here uses, so the tests compare only the order).
 
 `current_terrain_resources.rs` bundles TerraForged Reimagined a24d450's 18 `terrain_type` files
 (`src/main/resources/default/data/terraforged/worldgen/terrain_type/`, MIT) byte for byte in `data/worldgen/terrain_type/`;
