@@ -45,8 +45,8 @@ Differences and gaps:
   missing: global caves keep the biomes above them, and `oak_forest` never generates.
 - TerraForged's pack makes every overworld taller; here only TerraForged worlds get it.
 - Far terrain (Horizon's distant tiles) still samples the vanilla generator.
-- The boat hook (boats float up small water steps) works in every world while the bundle is
-  installed, as TerraForged's mixin does, not only in TerraForged worlds.
+- The boat hook (boats float up small water steps) works only in TerraForged worlds (Arthur's
+  choice); TerraForged's mixin works in every world.
 - Not ported: the world preview screen, the `/tf` and `/locateterrain` commands, TerraForged's
   dimension effects and the unregistered test volcano feature.
 
@@ -2904,8 +2904,15 @@ way once within 0.01), and the status checks go on as if it were not under water
 stepped water instead of sinking. The arithmetic is Java's: the water level and the subtraction are floats, the rest
 doubles. `getWaterLevelAbove` is the hook's own copy of vanilla's bytecode, because Horizon's copy returns a double and
 ignores `lastYd`. The copy reads the boat's vertical motion as `lastYd`; vanilla keeps the motion from before the last
-move's collisions, so the two differ only right after a vertical collision. Like TerraForged's mixin, the hook works in
-every world while the bundle is installed. It runs where a ridden boat's physics run: on the rider's client (single
+move's collisions, so the two differ only right after a vertical collision. TerraForged's mixin works in every world; here the hook works only in
+TerraForged worlds (Arthur's choice), and other worlds keep vanilla's boats exactly. A window playing its own world on
+its server thread (single player, or a LAN host) checks the world's saved overworld generator
+(`terraforged:generator`) once, when it joins the world (a HEAD hook on `server_packs_world_pack`). A client of another
+server (a LAN guest, a dedicated server) isn't told the generator. It uses the synced overworld dimension type: TerraForged's
+pack gives it min y −64, height 1024 and logical height 1024, and a Horizon server syncs only that shape over vanilla's
+type (TerraForged's cloud height and colours never reach the client). So any other server whose packs give the
+overworld exactly that shape also floats boats, and a TerraForged world without the pack (made before it existed,
+or with it disabled) does not. The deprecated in-frame path keeps vanilla boats. The hook runs where a ridden boat's physics run: on the rider's client (single
 player on its server thread, LAN guests and dedicated-server players alike), which sends the boat's position to the
 server. A server never moves a player's boat itself. TerraForged's server also floats it, but the client's next move
 overwrites that position. Boats nobody rides, or that only mobs ride, are unchanged. The tests compare against a Java

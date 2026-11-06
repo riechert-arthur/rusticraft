@@ -25,17 +25,67 @@
 
 // `BoatHook.floatTheBoat` (TerraForged 6dd607eb, `MixinBoat` on `isUnderwater`'s RETURN): a
 // player's boat under a slightly higher water surface (a river's stepped levels) rises toward
-// it instead of sinking.
+// it instead of sinking. Here only in TerraForged worlds (Arthur's decision; the mixin works in
+// every world).
 
 use super::{Aabb, Boat, Game, HEIGHT};
+use horizon_client::save::terraforged_world_type::is_terraforged;
+use horizon_protocol::registry::Dynamic;
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Whether the boat floated; then its underwater status is cleared.
+/// Whether the world this window plays on its own server thread (single player, or a LAN host)
+/// is TerraForged's: its saved overworld generator is `terraforged:generator`. Set each time
+/// the window joins its own world ([`join_local_world`]), read only while that world is open.
+static LOCAL_WORLD: AtomicBool = AtomicBool::new(false);
+
+/// `server_packs_world_pack`: the window joins the world in `dir` on its server thread.
+pub(crate) fn join_local_world(dir: &Path) {
+    LOCAL_WORLD.store(is_terraforged(dir), Ordering::Relaxed);
+}
+
+/// TerraForged's overworld shape (its built-in pack's `dimension_type/overworld.json`):
+/// `min_y`, `height`, `logical_height`.
+pub(super) const TERRAFORGED_OVERWORLD: (i32, i32, i32) = (-64, 1024, 1024);
+
+/// Whether a server's synced registries come from a TerraForged world. A client isn't told the
+/// world's generator. A TerraForged world's pack gives its overworld TerraForged's shape, and a
+/// Horizon server syncs only that shape over vanilla's dimension type (TerraForged's other
+/// fields, such as its cloud height, never reach the client), so the shape is the signal.
+/// False positives: any other server whose packs give the overworld exactly that shape.
+/// False negatives: a TerraForged world without the pack (made before it existed, or with
+/// it disabled).
+pub(super) fn synced_terraforged(registries: &Dynamic) -> bool {
+    registries
+        .id("minecraft:dimension_type", "minecraft:overworld")
+        .is_some_and(|id| {
+            let d = registries.dimension(id);
+            (d.min_y, d.height, d.logical_height) == TERRAFORGED_OVERWORLD
+        })
+}
+
+/// Whether the boat hook works here: only in TerraForged worlds (Arthur's decision; TerraForged's
+/// mixin works in every world). A window on its own server thread asks its world's generator;
+/// a client of another server asks the synced overworld shape. The deprecated in-frame path
+/// keeps vanilla boats.
+fn in_terraforged_world(game: &Game<'_>) -> bool {
+    if game.integrated.is_some() {
+        LOCAL_WORLD.load(Ordering::Relaxed)
+    } else {
+        game.remote
+            .as_ref()
+            .is_some_and(|r| synced_terraforged(&r.registries))
+    }
+}
+
+/// Whether the boat floated; then its underwater status is cleared. Outside TerraForged
+/// worlds it never does, so `getStatus` stays vanilla's.
 pub(super) fn float_the_boat(game: &Game<'_>, b: &mut Boat) -> bool {
     // Ignore if not being ridden by a player. Horizon seats the window's player first in its
     // boat, and physics run only for the boat it rides or for boats nobody rides (a server
     // leaves a guest's boat to that guest's client), so this is `getFirstPassenger()
     // instanceof Player` wherever the boat moves.
-    if game.riding != Some(b.id) {
+    if game.riding != Some(b.id) || !in_terraforged_world(game) {
         return false;
     }
     let water = water_level_above(b.bounds(), b.velocity.y, |x, y, z| {
@@ -204,5 +254,93 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("terraforged-boat-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn the_hook_works_only_in_terraforged_worlds() {
+        use horizon_client::save::{
+            WorldGen, WorldPreset, terraforged_world_type as world_type, write_world_gen_settings,
+        };
+        // A vanilla world: the hook stays off.
+        let vanilla = scratch("vanilla");
+        write_world_gen_settings(&vanilla, 1, WorldGen::default()).unwrap();
+        LOCAL_WORLD.store(true, Ordering::Relaxed);
+        join_local_world(&vanilla);
+        assert!(!LOCAL_WORLD.load(Ordering::Relaxed));
+        // A world the Create screen makes as TerraForged: on.
+        let terraforged = scratch("terraforged");
+        let mut preset = WorldPreset::SingleBiomeSurface;
+        assert!(world_type::press(&mut preset, 25).is_break());
+        world_type::arm();
+        write_world_gen_settings(&terraforged, 1, WorldGen::default()).unwrap();
+        assert!(world_type::press(&mut preset, 25).is_break());
+        assert!(!world_type::chosen());
+        join_local_world(&terraforged);
+        assert!(LOCAL_WORLD.load(Ordering::Relaxed));
+        // Joining a vanilla world again turns it off.
+        join_local_world(&vanilla);
+        assert!(!LOCAL_WORLD.load(Ordering::Relaxed));
+        // A missing save is not TerraForged's.
+        join_local_world(&vanilla.join("missing"));
+        assert!(!LOCAL_WORLD.load(Ordering::Relaxed));
+        std::fs::remove_dir_all(&vanilla).unwrap();
+        std::fs::remove_dir_all(&terraforged).unwrap();
+    }
+
+    /// Registries as a server syncs them, with `overworld` as the overworld type's data
+    /// (None: a known pack's entry, sent without data).
+    fn synced(overworld: Option<&str>) -> Dynamic {
+        let data = overworld.map(|json| {
+            horizon_client::lan::data::json_to_nbt(&serde_json::from_str(json).unwrap())
+        });
+        let mut registries = Dynamic::default();
+        registries.registries.insert(
+            "minecraft:dimension_type".to_owned(),
+            vec![
+                ("minecraft:overworld".to_owned(), data),
+                ("minecraft:overworld_caves".to_owned(), None),
+                ("minecraft:the_end".to_owned(), None),
+                ("minecraft:the_nether".to_owned(), None),
+            ],
+        );
+        registries
+    }
+
+    #[test]
+    fn remote_clients_detect_terraforged_worlds_by_the_synced_overworld() {
+        use horizon_world::worldgen::generator::terraforged_world_preset::overworld_type_json;
+        // TerraForged's own type (a Java TerraForged server sends the whole file).
+        assert!(synced_terraforged(&synced(Some(overworld_type_json()))));
+        let file: serde_json::Value = serde_json::from_str(overworld_type_json()).unwrap();
+        let shape = |k: &str| file[k].as_i64().unwrap() as i32;
+        assert_eq!(
+            (shape("min_y"), shape("height"), shape("logical_height")),
+            TERRAFORGED_OVERWORLD
+        );
+        // A Horizon server: vanilla's type with the world's shape.
+        let horizon = r#"{"min_y":-64,"height":1024,"logical_height":1024,"has_skylight":true}"#;
+        assert!(synced_terraforged(&synced(Some(horizon))));
+        // Vanilla worlds: no data (the known vanilla pack), or vanilla's shape.
+        assert!(!synced_terraforged(&synced(None)));
+        let vanilla = r#"{"min_y":-64,"height":384,"logical_height":384,"has_skylight":true}"#;
+        assert!(!synced_terraforged(&synced(Some(vanilla))));
+        // Other tall packs: only TerraForged's exact shape counts.
+        for other in [
+            r#"{"min_y":0,"height":1024,"logical_height":1024}"#,
+            r#"{"min_y":-64,"height":1024,"logical_height":384}"#,
+            r#"{"min_y":-128,"height":1024,"logical_height":1024}"#,
+        ] {
+            assert!(!synced_terraforged(&synced(Some(other))), "{other}");
+        }
+        // No dimension types at all (not configured yet).
+        assert!(!synced_terraforged(&Dynamic::default()));
     }
 }

@@ -512,6 +512,7 @@ id = "client_world_type"
 file = "crates/horizon-client/src/save.rs"
 name = "terraforged_world_type"
 source = "client_world_type.rs"
+visibility = "pub"
 
 [[injection]]
 id = "cycle-world-type"
@@ -617,3 +618,10 @@ bindings = [
   { name = "game", ty = "&Game<'_>", value = "self" },
   { name = "b", ty = "&mut Boat", value = "b" },
 ]
+
+[[injection]]
+id = "boat-local-world"
+target = "horizon_client::game::server_packs::Game<'_>::server_packs_world_pack"
+kind = "HEAD"
+helper = "hooks/boat_local_world.rs"
+bindings = [{ name = "folder", ty = "&str", value = "folder" }]
