@@ -35,7 +35,8 @@ pub fn preset_json() -> &'static str {
     .expect("TerraForged world preset JSON is UTF-8")
 }
 
-/// The `world_presets` bundle with TerraForged's preset; other bundles pass through.
+/// The `world_presets` bundle with TerraForged's preset; other bundles pass through. An
+/// entry already there is kept (Horizon reads no data-pack world presets today).
 pub fn with_preset(
     bundle: &str,
     mut entries: std::collections::BTreeMap<String, String>,
@@ -46,4 +47,30 @@ pub fn with_preset(
             .or_insert_with(|| preset_json().to_owned());
     }
     entries
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn only_the_world_presets_bundle_gains_the_preset() {
+        let base = BTreeMap::from([("minecraft:normal".to_owned(), "{}".to_owned())]);
+        let presets = with_preset("world_presets", base.clone());
+        assert_eq!(presets.len(), 2);
+        assert_eq!(presets[PRESET], preset_json());
+        assert_eq!(presets["minecraft:normal"], "{}");
+        assert_eq!(with_preset("dimensions", base.clone()), base);
+        let kept = BTreeMap::from([(PRESET.to_owned(), "kept".to_owned())]);
+        assert_eq!(with_preset("world_presets", kept)[PRESET], "kept");
+        let preset: serde_json::Value = serde_json::from_str(preset_json()).unwrap();
+        let generator = &preset["dimensions"]["minecraft:overworld"]["generator"];
+        assert_eq!(generator["type"], GENERATOR_TYPE);
+        assert_eq!(generator["levels"]["max_y"], 480);
+        assert_eq!(
+            preset["dimensions"]["minecraft:the_nether"]["generator"]["settings"],
+            "minecraft:nether"
+        );
+    }
 }
