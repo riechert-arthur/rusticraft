@@ -37,13 +37,12 @@ use super::super::biome_source::CheckerboardBiomeSource;
 use super::super::placement::PlacementModifier;
 use super::*;
 use crate::worldgen::generator::{
-    terraforged::{floor, hash_2d},
+    terraforged::{floor, hash, hash_2d},
     terraforged_biome_viability::TerrainViabilityContext,
     terraforged_cave_carver::{CarverChunk, NoiseCaveGenerator},
     terraforged_generator_facade::TerraForgedGenerator,
     terraforged_surface_bindings::SurfaceBindings,
     terraforged_terrain_blend_util::{X_PRIME, Y_PRIME, random as rand},
-    terraforged_terrain_data::TerrainData,
     terraforged_vegetation::{
         VegetationConfig, VegetationFeatures, bind_tags, config_for, current_vegetation,
     },
@@ -277,11 +276,6 @@ impl TerraForgedFeatures {
         &self.structures_per_step
     }
 
-    /// `getVegetation(biome)`.
-    fn vegetation(&self, biome: BiomeId) -> &BiomeVegetation {
-        &self.vegetation[biome.0 as usize]
-    }
-
     /// Biome `biome`'s feature lists, step by step (`getGenerationSettings().features()`).
     fn biome_steps(&self, biome: BiomeId) -> &[Vec<FeatureIdentity>] {
         self.steps.get(biome.0 as usize).map_or(&[], Vec::as_slice)
@@ -452,22 +446,21 @@ pub(in crate::worldgen) fn decorate(
             biome,
         )?;
         // decorateVegetation: PositionSampler.placeVegetation.
-        let offset = decorator.trees_and_grass(
-            &mut world,
-            &mut random,
-            decoration_seed,
-            center,
-            &terrain,
-            tf.generator.sea_level(),
-        )?;
-        decorator.other(
-            &mut world,
-            &mut random,
-            decoration_seed,
-            offset,
-            origin,
-            biome,
-        );
+        PositionSampler {
+            planting: RegionPlanting {
+                decorator: &mut decorator,
+                world: &mut world,
+                context: TerrainViabilityContext(&terrain),
+            },
+            random: &mut random,
+            seed: decoration_seed,
+            chunk: center,
+            vegetation: &features.vegetation,
+            configs: &features.configs,
+            sea_level: tf.generator.sea_level(),
+            centre: (terrain.river().get(8, 8), terrain.height_at(8, 8)),
+        }
+        .place_vegetation(origin, biome)?;
         decorator.vanilla(
             &mut world,
             &mut random,
@@ -708,38 +701,108 @@ impl Decorator<'_> {
         }
         Ok(())
     }
+}
 
-    /// `PositionSampler.placeTreesAndGrass` over the centre chunk; returns the feature-seed offset it reached.
-    /// `populate` first: every column's fitness under its biome's config (`Viability.NONE`, 1, without one) and the
-    /// biomes met, in first-met order; then, per biome but rivers, a config-less biome's trees and grass at the
-    /// chunk's corner, or the jittered tree grid and the grass passes. `offset` is Java's `int` (it wraps).
-    fn trees_and_grass(
+/// What `PositionSampler` reads from and does to the region, so tests can drive the sampler over stubs.
+trait Planting {
+    /// `chunk.getHeight(OCEAN_FLOOR_WG, x, z)`.
+    fn top(&mut self, x: i32, z: i32) -> Result<i32, GeneratorError>;
+    /// `region.getBiome(pos)`.
+    fn biome(&mut self, pos: [i32; 3]) -> Result<BiomeId, GeneratorError>;
+    /// `configs[config].viability().getFitness(x, z, viabilityContext)`.
+    fn fitness(&mut self, config: usize, x: i32, z: i32) -> Result<f32, GeneratorError>;
+    /// `feature.placeWithBiomeCheck(region, generator, random, pos)`, with `placement` in place of the feature's own
+    /// when it is `Some` (an unwrapped tree).
+    fn place(
         &mut self,
-        world: &mut World<'_>,
         random: &mut Random,
-        seed: i64,
-        chunk: ChunkPos,
-        terrain: &TerrainData,
-        sea_level: i32,
-    ) -> Result<i32, GeneratorError> {
-        let features = self.features;
-        let (start_x, start_z) = (chunk.x.wrapping_shl(4), chunk.z.wrapping_shl(4));
-        let context = TerrainViabilityContext(terrain);
+        feature: FeatureIdentity,
+        placement: Option<&[PlacementModifier]>,
+        pos: [i32; 3],
+    ) -> bool;
+}
+
+/// The decoration's region as [`Planting`]: the centre chunk's heights and the region's biomes through the
+/// [`World`], fitness over the chunk's terrain data, placement through the [`Decorator`].
+struct RegionPlanting<'d, 'w, 'a> {
+    decorator: &'d mut Decorator<'a>,
+    world: &'d mut World<'w>,
+    context: TerrainViabilityContext<'d>,
+}
+
+impl Planting for RegionPlanting<'_, '_, '_> {
+    /// `ChunkAccess.getHeight`: one under the region's first free block (`WorldGenRegion.getHeight` adds 1).
+    fn top(&mut self, x: i32, z: i32) -> Result<i32, GeneratorError> {
+        self.world
+            .height(HeightmapType::OceanFloorWg, x, z)
+            .map(|first_free| first_free.wrapping_sub(1))
+            .map_err(query_error)
+    }
+
+    fn biome(&mut self, pos: [i32; 3]) -> Result<BiomeId, GeneratorError> {
+        self.world.biome_identity(pos).map_err(query_error)
+    }
+
+    fn fitness(&mut self, config: usize, x: i32, z: i32) -> Result<f32, GeneratorError> {
+        self.decorator.features.configs[config]
+            .viability
+            .try_fitness(x, z, &self.context)
+            .map_err(|e| GeneratorError::Stage("features", e.to_owned()))
+    }
+
+    fn place(
+        &mut self,
+        random: &mut Random,
+        feature: FeatureIdentity,
+        placement: Option<&[PlacementModifier]>,
+        pos: [i32; 3],
+    ) -> bool {
+        self.decorator
+            .place_with(self.world, random, feature, placement, pos)
+    }
+}
+
+/// `PositionSampler.placeVegetation` for one chunk: its `SamplerContext`, less the per-biome fields (passed along).
+struct PositionSampler<'v, P> {
+    planting: P,
+    random: &'v mut Random,
+    /// The decoration seed (`setDecorationSeed`'s).
+    seed: i64,
+    chunk: ChunkPos,
+    /// `getVegetation`, by `BiomeId`.
+    vegetation: &'v [BiomeVegetation],
+    configs: &'v [VegetationConfig],
+    sea_level: i32,
+    /// The terrain data's `getRiver().get(8, 8)` and `getHeight(8, 8)`, for the grass passes.
+    centre: (f32, i32),
+}
+
+impl<P: Planting> PositionSampler<'_, P> {
+    /// `placeVegetation`: `placeTreesAndGrass`, then `placeOther` from the offset it reached.
+    fn place_vegetation(&mut self, origin: [i32; 3], biome: BiomeId) -> Result<(), GeneratorError> {
+        let offset = self.trees_and_grass()?;
+        self.other(offset, origin, biome);
+        Ok(())
+    }
+
+    /// `placeTreesAndGrass`: `populate` (every column's fitness under its biome's config, `Viability.NONE`'s 1
+    /// without one, and the biomes met, in first-met order), then per biome but rivers a config-less biome's trees
+    /// and grass at the chunk's corner, or the jittered tree grid and the grass passes. Returns the feature-seed
+    /// offset reached, Java's `int` (it wraps).
+    fn trees_and_grass(&mut self) -> Result<i32, GeneratorError> {
+        let (start_x, start_z) = (self.chunk.x.wrapping_shl(4), self.chunk.z.wrapping_shl(4));
         let mut viability = [0.0_f32; 256];
         let mut biomes: Vec<BiomeId> = Vec::new();
         for dz in 0..16 {
             for dx in 0..16 {
                 let (x, z) = (start_x.wrapping_add(dx), start_z.wrapping_add(dz));
-                let y = top(world, x, z)?;
-                let biome = world.biome_identity([x, y, z]).map_err(query_error)?;
-                let value = match features.vegetation(biome).config {
-                    Some(index) => features.configs[index]
-                        .viability
-                        .try_fitness(x, z, &context)
-                        .map_err(|e| GeneratorError::Stage("features", e.to_owned()))?,
+                let y = self.planting.top(x, z)?;
+                let biome = self.planting.biome([x, y, z])?;
+                viability[(dz * 16 + dx) as usize] = match self.vegetation[biome.0 as usize].config
+                {
+                    Some(config) => self.planting.fitness(config, x, z)?,
                     None => 1.0,
                 };
-                viability[(dz * 16 + dx) as usize] = value;
                 if !biomes.contains(&biome) {
                     biomes.push(biome);
                 }
@@ -747,35 +810,25 @@ impl Decorator<'_> {
         }
         let mut offset = 0_i32;
         for (i, &biome) in biomes.iter().enumerate() {
-            let vegetation = features.vegetation(biome);
+            let i = i as i32;
+            let vegetation = &self.vegetation[biome.0 as usize];
             // "Remove annoying river trees!"
             if vegetation.river {
                 continue;
             }
-            let at = offset.wrapping_add(i as i32);
             offset = match vegetation.config {
-                None => self.place_at_corner(
-                    world, random, seed, at, start_x, start_z, sea_level, vegetation,
-                )?,
-                Some(index) => {
-                    let grid = Grid {
-                        chunk,
+                None => {
+                    self.place_at_corner(offset.wrapping_add(i), [start_x, start_z], vegetation)?
+                }
+                Some(config) => {
+                    let offset = self.sample(
+                        offset.wrapping_add(i),
+                        config,
                         biome,
-                        config: &features.configs[index],
                         vegetation,
-                        viability: &viability,
-                        sea_level,
-                    };
-                    let offset = self.sample(world, random, seed, at, &grid)?;
-                    self.grass(
-                        world,
-                        random,
-                        seed,
-                        offset.wrapping_add(i as i32),
-                        [start_x, start_z],
-                        terrain,
-                        vegetation,
-                    )
+                        &viability,
+                    )?;
+                    self.grass(offset.wrapping_add(i), [start_x, start_z], vegetation)
                 }
             };
         }
@@ -784,72 +837,75 @@ impl Decorator<'_> {
 
     /// `placeAt(seed, offset, x, z, context)`: a config-less biome's trees, then its grass, with their own
     /// placements, at the chunk's corner (unless it is at or under the sea level).
-    #[allow(clippy::too_many_arguments)]
     fn place_at_corner(
         &mut self,
-        world: &mut World<'_>,
-        random: &mut Random,
-        seed: i64,
         mut offset: i32,
-        x: i32,
-        z: i32,
-        sea_level: i32,
+        [x, z]: [i32; 2],
         vegetation: &BiomeVegetation,
     ) -> Result<i32, GeneratorError> {
-        let y = top(world, x, z)?;
-        if y <= sea_level {
+        let y = self.planting.top(x, z)?;
+        if y <= self.sea_level {
             return Ok(offset);
         }
-        let ids = vegetation.trees.iter().map(|tree| tree.id);
-        for id in ids.chain(vegetation.grass.iter().copied()) {
-            random.set_feature_seed(seed, offset, VEGETAL as i32);
-            if self.place(world, random, id, [x, y, z]) {
+        let trees = vegetation.trees.iter().map(|tree| tree.id);
+        for id in trees.chain(vegetation.grass.iter().copied()) {
+            self.random
+                .set_feature_seed(self.seed, offset, VEGETAL as i32);
+            if self.planting.place(self.random, id, None, [x, y, z]) {
                 offset = offset.wrapping_add(1);
             }
         }
         Ok(offset)
     }
 
-    /// `PositionSampler.sample` with the jittered `placeAt`: a grid of `frequency` cells (rows squashed by
-    /// `SQUASH_FACTOR` and every odd row shifted half a cell), each jittered by its hash; a point in the chunk,
-    /// above the sea level, in this biome and whose column's fitness is not under `(1 - density) * rand(hash)`
-    /// places every tree.
+    /// `sample(seed, offset, x, z, frequency, jitter, context, PositionSampler::placeAt)` with the jittered
+    /// `placeAt`: a grid of `frequency` cells (rows squashed by `SQUASH_FACTOR`, odd rows shifted half a cell), each
+    /// point jittered by its cell's hash; a point in the chunk, above the sea level, in this biome and whose column's
+    /// fitness is not under `(1 - density) * rand(hash)` places every tree there.
     fn sample(
         &mut self,
-        world: &mut World<'_>,
-        random: &mut Random,
-        seed: i64,
         mut offset: i32,
-        grid: &Grid<'_>,
+        config: usize,
+        biome: BiomeId,
+        vegetation: &BiomeVegetation,
+        viability: &[f32; 256],
     ) -> Result<i32, GeneratorError> {
-        let (x, z) = (grid.chunk.x.wrapping_shl(4), grid.chunk.z.wrapping_shl(4));
-        let config = grid.config;
-        let (min_x, min_z, max_x, max_z) = grid_bounds(x, z, config.frequency);
+        let chunk = self.chunk;
+        let config = &self.configs[config];
         let (freq_x, freq_z) = (config.frequency, config.frequency * squash_factor());
-        let cell_seed = seed as i32;
+        let (min_x, min_z, max_x, max_z) = grid_bounds(
+            chunk.x.wrapping_shl(4),
+            chunk.z.wrapping_shl(4),
+            config.frequency,
+        );
+        let cell_seed = self.seed as i32;
         for pz in min_z..=max_z {
             for px in min_x..=max_x {
-                let (hash, pos_x, pos_z) =
-                    grid_point(cell_seed, px, pz, freq_x, freq_z, config.jitter);
-                if pos_x >> 4 != grid.chunk.x || pos_z >> 4 != grid.chunk.z {
+                let (hash, x, z) = grid_point(cell_seed, px, pz, freq_x, freq_z, config.jitter);
+                // isFeatureChunk
+                if x >> 4 != chunk.x || z >> 4 != chunk.z {
                     continue;
                 }
-                let y = top(world, pos_x, pos_z)?;
-                if y <= grid.sea_level {
+                let y = self.planting.top(x, z)?;
+                if y <= self.sea_level {
                     continue;
                 }
-                let pos = [pos_x, y, pos_z];
-                if world.biome_identity(pos).map_err(query_error)? != grid.biome {
+                let pos = [x, y, z];
+                if self.planting.biome(pos)? != biome {
                     continue;
                 }
-                let fitness = grid.viability[((pos_z & 15) * 16 + (pos_x & 15)) as usize];
+                let fitness = viability[((z & 15) * 16 + (x & 15)) as usize];
                 let noise = (1.0 - config.density) * rand(hash);
                 if fitness < noise {
                     continue;
                 }
-                for tree in &grid.vegetation.trees {
-                    random.set_feature_seed(seed, offset, VEGETAL as i32);
-                    if self.place_with(world, random, tree.id, tree.placement.as_deref(), pos) {
+                for tree in &vegetation.trees {
+                    self.random
+                        .set_feature_seed(self.seed, offset, VEGETAL as i32);
+                    if self
+                        .planting
+                        .place(self.random, tree.id, tree.placement.as_deref(), pos)
+                    {
                         offset = offset.wrapping_add(1);
                     }
                 }
@@ -858,25 +914,15 @@ impl Decorator<'_> {
         Ok(offset)
     }
 
-    /// `placeGrassAt`: at least two passes of the grass features from the chunk's corner at y 0. The context's
-    /// `maxViability` is reset to 0 by `push` and never raised, so its term is always 2; the terrain height read is
-    /// in blocks (`getHeight(8, 8)`), so above y 0 the passes come to 2.
-    #[allow(clippy::too_many_arguments)]
-    fn grass(
-        &mut self,
-        world: &mut World<'_>,
-        random: &mut Random,
-        seed: i64,
-        mut offset: i32,
-        [x, z]: [i32; 2],
-        terrain: &TerrainData,
-        vegetation: &BiomeVegetation,
-    ) -> i32 {
-        let passes = grass_passes(terrain.river().get(8, 8), terrain.height_at(8, 8));
+    /// `placeGrassAt`: [`grass_passes`] passes of the grass features from the chunk's corner at y 0, each pass's
+    /// features seeded from `offset + pass` (with the successes so far).
+    fn grass(&mut self, mut offset: i32, [x, z]: [i32; 2], vegetation: &BiomeVegetation) -> i32 {
+        let passes = grass_passes(self.centre.0, self.centre.1);
         for i in 0..passes {
             for &id in &vegetation.grass {
-                random.set_feature_seed(seed, offset.wrapping_add(i), VEGETAL as i32);
-                if self.place(world, random, id, [x, 0, z]) {
+                self.random
+                    .set_feature_seed(self.seed, offset.wrapping_add(i), VEGETAL as i32);
+                if self.planting.place(self.random, id, None, [x, 0, z]) {
                     offset = offset.wrapping_add(1);
                 }
             }
@@ -884,34 +930,17 @@ impl Decorator<'_> {
         offset
     }
 
-    /// `PositionSampler.placeOther`: the origin biome's other vegetal features at the origin.
-    fn other(
-        &mut self,
-        world: &mut World<'_>,
-        random: &mut Random,
-        seed: i64,
-        mut offset: i32,
-        origin: [i32; 3],
-        biome: BiomeId,
-    ) {
-        let features = self.features;
-        for &id in &features.vegetation(biome).other {
-            random.set_feature_seed(seed, offset, VEGETAL as i32);
-            if self.place(world, random, id, origin) {
+    /// `placeOther`: the origin biome's other vegetal features at the origin (`VegetationFeatures.create` never
+    /// returns `NONE`, so Java's early return never happens).
+    fn other(&mut self, mut offset: i32, origin: [i32; 3], biome: BiomeId) {
+        for &id in &self.vegetation[biome.0 as usize].other {
+            self.random
+                .set_feature_seed(self.seed, offset, VEGETAL as i32);
+            if self.planting.place(self.random, id, None, origin) {
                 offset = offset.wrapping_add(1);
             }
         }
     }
-}
-
-/// What the jittered `placeAt` reads from `SamplerContext` for one biome.
-struct Grid<'a> {
-    chunk: ChunkPos,
-    biome: BiomeId,
-    config: &'a VegetationConfig,
-    vegetation: &'a BiomeVegetation,
-    viability: &'a [f32; 256],
-    sea_level: i32,
 }
 
 /// `PositionSampler.SQUASH_FACTOR`: `2F / NoiseUtil.sqrt(3)` (`(float) Math.sqrt`, which `f32::sqrt` matches: both
@@ -943,12 +972,12 @@ fn grid_point(
     jitter: f32,
 ) -> (i32, i32, i32) {
     let ox = (pz & 1) as f32 * 0.5;
-    let hash = hash_2d(cell_seed, px, pz);
-    let dx = rand(crate::worldgen::generator::terraforged::hash(hash, X_PRIME));
-    let dz = rand(crate::worldgen::generator::terraforged::hash(hash, Y_PRIME));
+    let cell = hash_2d(cell_seed, px, pz);
+    let dx = rand(hash(cell, X_PRIME));
+    let dz = rand(hash(cell, Y_PRIME));
     let sx = px as f32 + ox + dx * jitter * 0.65;
     let sz = pz as f32 + dz * jitter;
-    (hash, floor(sx / freq_x), floor(sz / freq_z))
+    (cell, floor(sx / freq_x), floor(sz / freq_z))
 }
 
 /// `placeGrassAt`'s pass count: `2 + floor(2 * (1 - maxViability)) + floor(4 * river) - floor(5 * height)`, at
@@ -959,15 +988,6 @@ fn grass_passes(river: f32, height: i32) -> i32 {
     passes = passes.wrapping_add(floor(4.0 * river));
     passes = passes.wrapping_sub(floor(5_i32.wrapping_mul(height) as f32));
     passes.max(2)
-}
-
-/// `chunk.getHeight(OCEAN_FLOOR_WG, x, z)`: the top block, one under the region's first free one
-/// (`WorldGenRegion.getHeight` adds the 1 back).
-fn top(world: &mut World<'_>, x: i32, z: i32) -> Result<i32, GeneratorError> {
-    world
-        .height(HeightmapType::OceanFloorWg, x, z)
-        .map(|first_free| first_free.wrapping_sub(1))
-        .map_err(query_error)
 }
 
 /// One `setFeatureSeed(seed, index, stage)` of `VanillaDecorator.decorate`.
@@ -1271,5 +1291,282 @@ mod tests {
             }
         }
         assert_eq!(lines.next(), None);
+    }
+
+    /// `PositionSamplerOracle.java` (`.local/terraforged/oracles/position_sampler/`, `run.sh`): 6dd607eb's own
+    /// `PositionSampler`, `SamplerContext` and `BiomeList`, compiled over stub worlds, on 26.3's `WorldgenRandom`. `P`
+    /// lines: per seed and chunk, the placements of `placeVegetation` over four biomes (no config; config A; a river
+    /// with config A; config B, one of [`GRID_CONFIGS`]) and four terrain centres, and a fold of each placement's
+    /// feature, unwrapping, position and two draws. `G` lines: the cells (hash and point) of `sample`'s grid for each
+    /// config.
+    const JAVA_VEGETATION: &str = "\
+P 0 0 0 1014 -7824645947807395381\n\
+P 0 3 -2 1046 -3869755918850437142\n\
+P 0 -7 4 750 1710284815390465178\n\
+P 0 1875000 -1875000 1246 -2569214469645208999\n\
+P 0 134217727 -134217728 558 9001433799512573109\n\
+P 0 -1 -1 982 -3935649146532020042\n\
+P 7 0 0 1318 4518252628030312556\n\
+P 7 3 -2 1278 5937033624461309741\n\
+P 7 -7 4 866 7828589533538317727\n\
+P 7 1875000 -1875000 1146 6418870736470320395\n\
+P 7 134217727 -134217728 558 -4012886488193598316\n\
+P 7 -1 -1 1054 1615616775035044733\n\
+P -4172144997902289642 0 0 1174 -1782629333388028419\n\
+P -4172144997902289642 3 -2 998 7740323252981822052\n\
+P -4172144997902289642 -7 4 866 4734710214459629574\n\
+P -4172144997902289642 1875000 -1875000 1234 3051150899061939389\n\
+P -4172144997902289642 134217727 -134217728 558 6479053801473790690\n\
+P -4172144997902289642 -1 -1 914 -1442960748111000480\n\
+P -9223372036854775808 0 0 1014 -7824645947807395381\n\
+P -9223372036854775808 3 -2 1046 -3869755918850437142\n\
+P -9223372036854775808 -7 4 750 1710284815390465178\n\
+P -9223372036854775808 1875000 -1875000 1246 -2569214469645208999\n\
+P -9223372036854775808 134217727 -134217728 558 9001433799512573109\n\
+P -9223372036854775808 -1 -1 982 -3935649146532020042\n\
+P 9223372036854775807 0 0 1146 -4745633643961142130\n\
+P 9223372036854775807 3 -2 1178 -1903102337649952436\n\
+P 9223372036854775807 -7 4 998 -2758851159177341288\n\
+P 9223372036854775807 1875000 -1875000 1310 -4663784590082957892\n\
+P 9223372036854775807 134217727 -134217728 558 -412412491611821423\n\
+P 9223372036854775807 -1 -1 930 6964717499533469478\n\
+P 123456789012345 0 0 982 -6100181328469900797\n\
+P 123456789012345 3 -2 1006 -1543596993396307456\n\
+P 123456789012345 -7 4 922 5895283090055492243\n\
+P 123456789012345 1875000 -1875000 1378 7528485731507164264\n\
+P 123456789012345 134217727 -134217728 558 8763757097191631043\n\
+P 123456789012345 -1 -1 938 4919914697760528874\n\
+G 0 0 0 3300 847937686874229593\n\
+G 0 3 -2 3162 -2835965235355760722\n\
+G 0 -7 4 3259 -8438176476420211023\n\
+G 0 1875000 -1875000 3316 155653574403403975\n\
+G 0 134217727 -134217728 9 -8039755307983892340\n\
+G 0 -1 -1 3292 -8712869352202709176\n\
+G 7 0 0 3300 4204939772180822938\n\
+G 7 3 -2 3162 8288703493095732005\n\
+G 7 -7 4 3259 7978997956930818544\n\
+G 7 1875000 -1875000 3316 -4921097991689895810\n\
+G 7 134217727 -134217728 9 1900122104232702106\n\
+G 7 -1 -1 3292 -7778877044908744430\n\
+G -4172144997902289642 0 0 3300 5056805913034277411\n\
+G -4172144997902289642 3 -2 3162 7473341095950493239\n\
+G -4172144997902289642 -7 4 3259 -5367574249768170629\n\
+G -4172144997902289642 1875000 -1875000 3316 -5505200081247028975\n\
+G -4172144997902289642 134217727 -134217728 9 -3455049682260732096\n\
+G -4172144997902289642 -1 -1 3292 4878292620917612799\n\
+G -9223372036854775808 0 0 3300 847937686874229593\n\
+G -9223372036854775808 3 -2 3162 -2835965235355760722\n\
+G -9223372036854775808 -7 4 3259 -8438176476420211023\n\
+G -9223372036854775808 1875000 -1875000 3316 155653574403403975\n\
+G -9223372036854775808 134217727 -134217728 9 -8039755307983892340\n\
+G -9223372036854775808 -1 -1 3292 -8712869352202709176\n\
+G 9223372036854775807 0 0 3300 3422705114750334516\n\
+G 9223372036854775807 3 -2 3162 -1854709904146424179\n\
+G 9223372036854775807 -7 4 3259 5564000000370240274\n\
+G 9223372036854775807 1875000 -1875000 3316 -4083763934215314854\n\
+G 9223372036854775807 134217727 -134217728 9 1122241109656609825\n\
+G 9223372036854775807 -1 -1 3292 -4801647018637383876\n\
+G 123456789012345 0 0 3300 -2628198402422011777\n\
+G 123456789012345 3 -2 3162 -7369022319576744684\n\
+G 123456789012345 -7 4 3259 256032975198899179\n\
+G 123456789012345 1875000 -1875000 3316 -2586999637569324817\n\
+G 123456789012345 134217727 -134217728 9 2482080171667295833\n\
+G 123456789012345 -1 -1 3292 846005903824255357\n\
+";
+
+    /// Frequency, jitter and density: the eight bundled configs' (one shared by two), then edges.
+    #[rustfmt::skip]
+    const GRID_CONFIGS: [[f32; 3]; 11] = [
+        [0.2, 0.8, 0.6], [0.22, 0.8, 0.7], [0.2, 0.75, 0.5], [0.35, 0.75, 0.7], [0.15, 0.75, 0.35],
+        [0.15, 0.8, 0.45], [1.0, 1.0, 1.0], [0.0, 1.0, 1.0], [-0.2, 0.8, 0.6], [1.5, 2.0, -1.0], [0.05, 0.0, 0.0],
+    ];
+    /// The terrain centres (`getRiver().get(8, 8)`, `getHeight(8, 8)`) for the grass passes.
+    const CENTRES: [(f32, i32); 4] = [(0.0, 70), (0.9, 0), (0.75, -1), (1.0, -3)];
+
+    /// At chunk `i32::MAX >> 4` a frequency of 1 or more saturates both grid bounds to `i32::MAX`, where Java's
+    /// `px <= maxX; px++` never ends (the port's loop stops): the oracle skips those cases.
+    fn hangs(cx: i32, frequency: f32) -> bool {
+        cx == i32::MAX >> 4 && frequency >= 1.0
+    }
+
+    /// The oracle's stub world: tops 40..103 around sea level 62, biomes by 8×8 patches and height, hashed fitness,
+    /// and features that fold what they are given and succeed on `nextInt(4) == 0`.
+    struct StubPlanting {
+        h: i64,
+        placed: usize,
+    }
+
+    impl Planting for StubPlanting {
+        fn top(&mut self, x: i32, z: i32) -> Result<i32, GeneratorError> {
+            Ok(40 + (hash_2d(11, x, z) & 63))
+        }
+
+        fn biome(&mut self, [x, y, z]: [i32; 3]) -> Result<BiomeId, GeneratorError> {
+            Ok(BiomeId((hash_2d(12 ^ y, x >> 3, z >> 3) & 3) as u32))
+        }
+
+        fn fitness(&mut self, config: usize, x: i32, z: i32) -> Result<f32, GeneratorError> {
+            Ok(rand(hash_2d(20 + config as i32, x, z)))
+        }
+
+        fn place(
+            &mut self,
+            random: &mut Random,
+            feature: FeatureIdentity,
+            placement: Option<&[PlacementModifier]>,
+            [x, y, z]: [i32; 3],
+        ) -> bool {
+            let h = &mut self.h;
+            for v in [
+                feature.0 as i64,
+                placement.is_some() as i64,
+                x as i64,
+                y as i64,
+                z as i64,
+            ] {
+                fold(h, v);
+            }
+            let d = random.next_int_bound(4).unwrap();
+            fold(h, d as i64);
+            fold(h, random.next_long());
+            self.placed += 1;
+            d == 0
+        }
+    }
+
+    fn stub_vegetation() -> Vec<BiomeVegetation> {
+        let trees = |ids: &[u32], unwrapped: bool| {
+            ids.iter()
+                .map(|&id| VegetationTree {
+                    id: FeatureIdentity(id),
+                    placement: unwrapped.then(Vec::new),
+                })
+                .collect()
+        };
+        let ids = |ids: &[u32]| ids.iter().map(|&id| FeatureIdentity(id)).collect();
+        vec![
+            BiomeVegetation {
+                config: None,
+                river: false,
+                trees: trees(&[100], false),
+                grass: ids(&[101, 102]),
+                other: ids(&[103]),
+            },
+            BiomeVegetation {
+                config: Some(0),
+                river: false,
+                trees: trees(&[110, 111], true),
+                grass: ids(&[112]),
+                other: ids(&[113, 114]),
+            },
+            BiomeVegetation {
+                config: Some(0),
+                river: true,
+                trees: trees(&[120], true),
+                grass: ids(&[121]),
+                other: ids(&[122]),
+            },
+            BiomeVegetation {
+                config: Some(1),
+                river: false,
+                trees: trees(&[130], true),
+                grass: ids(&[]),
+                other: ids(&[]),
+            },
+        ]
+    }
+
+    fn stub_config([frequency, jitter, density]: [f32; 3]) -> VegetationConfig {
+        VegetationConfig {
+            frequency,
+            jitter,
+            density,
+            tag: String::new(),
+            biomes: Default::default(),
+            viability: crate::worldgen::generator::terraforged_biome_viability::Viability::None,
+        }
+    }
+
+    /// The vegetal step (populate, the corner, the jittered grid with its density roll, the grass passes and the
+    /// other features, rivers skipped) seeds and places like 6dd607eb's `PositionSampler` on 26.3's random, and its
+    /// grid's cells match `sample`'s, bit for bit.
+    #[test]
+    fn vegetation_matches_6dd607eb_position_sampler_on_26_3_random() {
+        let vegetation = stub_vegetation();
+        let mut lines = JAVA_VEGETATION.lines();
+        for seed in SEEDS {
+            for [cx, cz] in CHUNKS {
+                let mut planting = StubPlanting { h: 0, placed: 0 };
+                for config in GRID_CONFIGS {
+                    if hangs(cx, config[0]) {
+                        continue;
+                    }
+                    let configs = [stub_config([0.2, 0.8, 0.6]), stub_config(config)];
+                    for centre in CENTRES {
+                        let origin = [cx << 4, -64, cz << 4];
+                        let biome = planting.biome(origin).unwrap();
+                        let mut random = Random::new(LegacyRandom::new(seed));
+                        let mut sampler = PositionSampler {
+                            planting,
+                            random: &mut random,
+                            seed,
+                            chunk: ChunkPos::new(cx, cz),
+                            vegetation: &vegetation,
+                            configs: &configs,
+                            sea_level: 62,
+                            centre,
+                        };
+                        sampler.place_vegetation(origin, biome).unwrap();
+                        planting = sampler.planting;
+                    }
+                }
+                let line = format!("P {seed} {cx} {cz} {} {}", planting.placed, planting.h);
+                assert_eq!(Some(line.as_str()), lines.next());
+            }
+        }
+        for seed in SEEDS {
+            for [cx, cz] in CHUNKS {
+                let (mut h, mut cells) = (0_i64, 0);
+                for [frequency, jitter, _] in GRID_CONFIGS {
+                    if hangs(cx, frequency) {
+                        continue;
+                    }
+                    let (min_x, min_z, max_x, max_z) = grid_bounds(cx << 4, cz << 4, frequency);
+                    for pz in min_z..=max_z {
+                        for px in min_x..=max_x {
+                            let (hash, x, z) = grid_point(
+                                seed as i32,
+                                px,
+                                pz,
+                                frequency,
+                                frequency * squash_factor(),
+                                jitter,
+                            );
+                            for v in [hash, x, z] {
+                                fold(&mut h, v as i64);
+                            }
+                            cells += 1;
+                        }
+                    }
+                }
+                let line = format!("G {seed} {cx} {cz} {cells} {h}");
+                assert_eq!(Some(line.as_str()), lines.next());
+            }
+        }
+        assert_eq!(lines.next(), None);
+    }
+
+    /// `placeGrassAt`'s pass count: 2 + 2 (`maxViability` stays 0) + `floor(4 * river)` - `5 * height`, at least 2.
+    #[test]
+    fn grass_passes_follow_place_grass_at() {
+        assert_eq!(grass_passes(0.0, 0), 4);
+        assert_eq!(grass_passes(0.75, 0), 7);
+        // NoiseUtil.floor takes 1 off a negative whole number too: floor(-15F) is -16.
+        assert_eq!(grass_passes(1.0, -3), 24);
+        assert_eq!(grass_passes(0.5, 70), 2);
+        assert_eq!(grass_passes(f32::NAN, 0), 3);
+        // 5 * height wraps in Java int math.
+        assert_eq!(grass_passes(0.0, i32::MAX / 5 + 1), 2);
+        assert_eq!(grass_passes(0.0, i32::MIN / 5 - 1), 2);
     }
 }

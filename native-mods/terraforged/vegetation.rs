@@ -353,6 +353,7 @@ impl VegetationFeatures {
 
 #[cfg(test)]
 mod tests {
+    use super::super::terraforged::{clamp, hash_2d};
     use super::super::terraforged_biome_registry::identifier_order;
     use super::super::terraforged_terrain_asset::tests::{bits, sample_hash};
     use super::*;
@@ -703,5 +704,99 @@ case noise_unknown err
         );
         let plain = VegetationFeatures::create(["minecraft:trees_plains"], false);
         assert_eq!(plain.trees, [("minecraft:trees_plains".to_owned(), false)]);
+    }
+
+    /// `VegetationFitnessOracle.java` (`.local/terraforged/oracles/vegetation/fitness/`, `run.sh`): each bundled
+    /// config's 6dd607eb `getFitness` through 6dd607eb's real `ViabilityContext` (its seed never set: 0) over
+    /// [`StubTerrain`]: per maxY and config, the samples strictly inside 0..1 and an FNV-1a fold of all 80.
+    const JAVA_FITNESS: &str = "\
+F 255 trees_copse 1 367dd6fbafa15045\n\
+F 255 trees_hardy 12 5cfeb00a8a6fe63c\n\
+F 255 trees_hardy_slopes 57 91ab603a87ab1b26\n\
+F 255 trees_patchy 17 b54f189e8c713d11\n\
+F 255 trees_rainforest 40 f42c153765cc7b49\n\
+F 255 trees_sparse 3 27d43a844b772401\n\
+F 255 trees_sparse_rainforest 16 a96eecd158128484\n\
+F 255 trees_temperate 27 623bd3fe13617e56\n\
+F 480 trees_copse 2 b4588bfe70dccfdd\n\
+F 480 trees_hardy 14 82250c99c56be8b5\n\
+F 480 trees_hardy_slopes 63 2b45a3ee6ce9f6b8\n\
+F 480 trees_patchy 13 c093a18977632ede\n\
+F 480 trees_rainforest 21 3583381a3b9891ba\n\
+F 480 trees_sparse 3 217c96459345ec69\n\
+F 480 trees_sparse_rainforest 14 dc3f44d47bb187d7\n\
+F 480 trees_temperate 17 b7afa17f2cd1d2b1\n\
+";
+
+    /// The oracle's hash-defined terrain: base 60..91, height base - 32 ..= base + 95, gradient 0..0.02 (scaled and
+    /// clamped as `TerrainData.getGradient`), river 0..0.25, no edges, seed 0.
+    struct StubTerrain {
+        max_y: i32,
+    }
+
+    impl super::super::terraforged_biome_viability::ViabilityContext for StubTerrain {
+        fn seed(&self) -> i32 {
+            0
+        }
+        fn edge(&self) -> bool {
+            false
+        }
+        fn max_y(&self) -> i32 {
+            self.max_y
+        }
+        fn base_height(&self, x: i32, z: i32) -> i32 {
+            60 + (hash_2d(31, x, z) & 31)
+        }
+        fn height(&self, x: i32, z: i32) -> i32 {
+            self.base_height(x, z) + (hash_2d(32, x, z) & 127) - 32
+        }
+        fn normalized_gradient(&self, x: i32, z: i32, norm: f32) -> f32 {
+            let gradient = (hash_2d(33, x, z) & 1023) as f32 / 51_200.0;
+            clamp(gradient * norm, 0.0, 1.0)
+        }
+        fn river(&self, x: i32, z: i32) -> f32 {
+            (hash_2d(34, x, z) & 1023) as f32 / 4092.0
+        }
+        fn climate_shape(&self, _seed: i32, _x: i32, _z: i32) -> f32 {
+            0.0
+        }
+    }
+
+    /// The bundled configs' fitness (the rules with the noise sampled seed-first at the context's seed) matches
+    /// 6dd607eb's `getFitness`, bit for bit.
+    #[test]
+    fn bundled_fitness_matches_6dd607eb_java() {
+        let configs = current_vegetation().unwrap();
+        let mut lines = JAVA_FITNESS.lines();
+        for max_y in [255, 480] {
+            let context = StubTerrain { max_y };
+            for ((file, _), config) in CONFIGS.iter().zip(&configs) {
+                let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+                let mut inside = 0;
+                for i in 0..80_i32 {
+                    let (x, z) = if i < 76 {
+                        (
+                            ((i * 7919) % 4001 - 2000) * 37 + i,
+                            ((i * 104_729) % 3989 - 1994) * 41 - i,
+                        )
+                    } else {
+                        [
+                            (i32::MAX, i32::MIN),
+                            (i32::MIN, i32::MAX),
+                            (30_000_000, -29_999_999),
+                            (-30_000_000, 29_999_999),
+                        ][(i - 76) as usize]
+                    };
+                    let value = config.viability.try_fitness(x, z, &context).unwrap();
+                    hash = (hash ^ u64::from(bits(value))).wrapping_mul(0x100_0000_01b3);
+                    if value > 0.0 && value < 1.0 {
+                        inside += 1;
+                    }
+                }
+                let line = format!("F {max_y} {file} {inside} {hash:x}");
+                assert_eq!(Some(line.as_str()), lines.next());
+            }
+        }
+        assert_eq!(lines.next(), None);
     }
 }
