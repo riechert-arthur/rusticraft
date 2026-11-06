@@ -270,7 +270,9 @@ impl SeededPipeline for TerraForgedPipeline {
         let vanilla = &self.vanilla;
         let data = &vanilla.data;
         let (min, height) = (vanilla.settings.level_min_y, vanilla.settings.level_height);
-        // createBiomes, and the neighbours' biomes the surface rules look into.
+        // createBiomes, and the neighbours' biomes the surface rules look into. The sampler holds the pools and the
+        // climate noise's few modules: a few microseconds to build, so one per chunk. Sampling the 8 neighbours
+        // again (Java reads the biomes their own createBiomes stored) costs about 2% of the chunk.
         let sampler = self.biomes.surface_sampler(&self.generator);
         let mut neighbors = Vec::with_capacity(9);
         let mut seen = BTreeSet::new();
@@ -701,5 +703,43 @@ mod tests {
             }
         }
         assert!(differs, "the chunk is still the vanilla overworld's");
+    }
+
+    #[test]
+    fn only_undecorated_chunks_stay_in_the_terrain_cache() {
+        // `createBiomes` hints only its own chunk (the surface stage's neighbours are sampled without a hint), and
+        // decorating a chunk drops its entry, as `applyBiomeDecoration` does.
+        let Some(data) = data() else { return };
+        let stem = terraforged_stem(&data, PRESET, "minecraft:overworld").unwrap();
+        let pipeline = Arc::new(TerraForgedPipeline::new(&data, 11, &stem).unwrap());
+        let overworld = OverworldGenerator {
+            pipeline: Arc::clone(&pipeline) as Arc<dyn SeededPipeline>,
+            noise_clamped: None,
+        };
+        let mut worker = overworld.worker();
+        let center = ChunkPos::new(-7, 4);
+        let first = worker.generate_proto(center).unwrap();
+        assert_eq!(pipeline.generator.cached_chunks(), 1);
+        let mut slots: Vec<Option<ProtoChunk>> = (0..9).map(|_| None).collect();
+        slots[4] = Some(first);
+        for (i, slot) in slots.iter_mut().enumerate() {
+            if i != 4 {
+                let (dx, dz) = (i as i32 % 3 - 1, i as i32 / 3 - 1);
+                *slot = Some(
+                    worker
+                        .generate_proto(ChunkPos::new(center.x + dx, center.z + dz))
+                        .unwrap(),
+                );
+            }
+        }
+        let mut region: [ProtoChunk; 9] = std::array::from_fn(|i| slots[i].take().unwrap());
+        assert_eq!(pipeline.generator.cached_chunks(), 9);
+        worker.decorate(&mut region).unwrap();
+        assert_eq!(pipeline.generator.cached_chunks(), 8);
+        // A neighbour generated again does not bring the decorated chunk back.
+        worker
+            .generate_proto(ChunkPos::new(center.x + 1, center.z))
+            .unwrap();
+        assert_eq!(pipeline.generator.cached_chunks(), 8);
     }
 }

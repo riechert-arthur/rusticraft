@@ -349,6 +349,12 @@ impl TerraForgedGenerator {
         terraforged_surface_height_cache::initialize(cache, chunk, |x, z| data.height_at(x, z));
     }
 
+    /// How many chunks the terrain cache holds (generated, generating or hinted).
+    #[cfg(test)]
+    pub(crate) fn cached_chunks(&self) -> usize {
+        self.terrain.len()
+    }
+
     /// `terrainCache().drop(seed, pos)`, as `applyBiomeDecoration` calls it with `Seeds.get(region.getSeed())`.
     pub fn drop_chunk(&self, seed: i32, chunk_x: i32, chunk_z: i32) {
         self.terrain.remove(seed, chunk_x, chunk_z);
