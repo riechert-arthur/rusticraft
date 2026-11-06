@@ -38,7 +38,11 @@ The generator in `native-mods/terraforged/generator_preset.rs` and `pipeline.rs`
 drop in `applyBiomeDecoration`, `getSeaLevel` and `Source.getNoiseBiome`, over Engine 0.3.0's terrain-type registry as
 TerraForged links it.
 The vegetation decoder in `native-mods/terraforged/vegetation.rs` follows TerraForged's own `VegetationConfig.CODEC`,
-`ViabilityCodec` and its viability specs, `BiomeVegetationManager.getConfig` and `VegetationFeatures.create`.
+`ViabilityCodec` and its viability specs, `BiomeVegetationManager.getConfig` and `VegetationFeatures.create`. The
+vegetal step in `native-mods/terraforged/decorator.rs` follows TerraForged's own `PositionSampler` (with
+`SamplerContext` and `BiomeList`), `BiomeVegetationManager.getVegetation` and `VegetationFeatures.unwrap`, and the
+viability rules' seed-first noise sampling in `biome_viability.rs` follows its `NoiseViability` and
+`ViabilityContext`.
 TerraForged's generated vegetation data file `trees_temperate.json`
 (`generated/resources/default/data/terraforged/worldgen/vegetation/`; TerraForged Reimagined's copy differs) is bundled
 unchanged in `native-mods/terraforged/data/worldgen/vegetation/`, and the eight `trees/*` biome tags `copses.json`,

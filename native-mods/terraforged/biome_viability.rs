@@ -46,7 +46,7 @@ pub trait ViabilityContext {
     fn climate_shape(&self, seed: i32, x: i32, z: i32) -> f32;
 }
 
-/// The jar's `ViabilityContext` class over one chunk's [`TerrainData`] (its `terrainData` future, already
+/// The jar's (and 6dd607eb's) `ViabilityContext` class over one chunk's [`TerrainData`] (its `terrainData` future, already
 /// joined): no biome edges, levels from the terrain data. Its biome sampler is only read by `BiomeEdgeViability`
 /// when `edge()` is true, which it never is here, so it is not held (`IBiomeSampler` is not ported yet) and
 /// `climate_shape` returns 0. The seed is 0: the jar's class has none, and 6dd607eb's `ViabilityContext.seed` is
