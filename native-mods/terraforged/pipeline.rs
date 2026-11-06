@@ -954,6 +954,65 @@ mod tests {
         assert!(differs, "the chunk is still the vanilla overworld's");
     }
 
+    /// With structures on, a village's chunk gets the same starts, references and blocks when it is generated again
+    /// in the same world and in a second world (the starts are built per chunk from the level seed and TerraForged's
+    /// heights and biomes, whichever worker asks first), and its terrain is adapted to the village's rigid pieces:
+    /// some column differs from the same chunk without structures.
+    #[test]
+    fn structure_chunks_are_repeatable_and_adapted() {
+        let Some(data) = data() else { return };
+        let seed = 7;
+        let overworld = |structures| {
+            OverworldGenerator::for_world(
+                Arc::clone(&data),
+                seed,
+                PRESET,
+                "minecraft:overworld",
+                structures,
+            )
+            .unwrap()
+        };
+        let (first, second) = (overworld(true), overworld(true));
+        let villages = [
+            "minecraft:village_plains",
+            "minecraft:village_desert",
+            "minecraft:village_savanna",
+            "minecraft:village_snowy",
+            "minecraft:village_taiga",
+        ]
+        .map(String::from);
+        let (_, at) = first.worker().locate(&villages, [0, 64, 0], 100).unwrap();
+        let pos = ChunkPos::new(at[0] >> 4, at[2] >> 4);
+        // The second world is asked from another neighbour first, so its starts are built in another order.
+        second
+            .worker()
+            .generate_proto(ChunkPos::new(pos.x + 3, pos.z - 2))
+            .unwrap();
+        let a = first.worker().generate_proto(pos).unwrap();
+        let again = first.worker().generate_proto(pos).unwrap();
+        let b = second.worker().generate_proto(pos).unwrap();
+        let plain = overworld(false).worker().generate_proto(pos).unwrap();
+        assert!(!a.own_starts().is_empty());
+        assert!(plain.own_starts().is_empty());
+        let starts =
+            |chunk: &ProtoChunk| format!("{:?} {:?}", chunk.own_starts(), chunk.structure_starts);
+        assert_eq!(starts(&a), starts(&again));
+        assert_eq!(starts(&a), starts(&b));
+        let (min_y, height) = first.level();
+        let mut adapted = false;
+        for y in min_y..min_y + height {
+            for z in 0..16 {
+                for x in 0..16 {
+                    let block = a.block(x, y, z);
+                    assert_eq!(block, again.block(x, y, z), "rerun {x} {y} {z}");
+                    assert_eq!(block, b.block(x, y, z), "second world {x} {y} {z}");
+                    adapted |= block != plain.block(x, y, z);
+                }
+            }
+        }
+        assert!(adapted, "the village's rigid pieces adapt no column");
+    }
+
     /// Whether the quart at block `x y z` holds air (the noise caves carve with plain air).
     fn carved_quart(chunk: &ProtoChunk, x: i32, y: i32, z: i32) -> bool {
         (0..64).any(|i| chunk.block_name(x + i % 4, y + i / 16, z + i / 4 % 4) == "minecraft:air")
