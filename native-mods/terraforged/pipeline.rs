@@ -94,6 +94,24 @@ pub(super) fn build(
     })
 }
 
+/// `GeneratorData::prepare_decoration` (the world screens' preload) for TerraForged's preset: its overworld stem has
+/// no `biome_source`, and a TerraForged overworld decorates as its vanilla half does, with the `minecraft:normal`
+/// overworld's biome source ([`vanilla_overworld`]), so that decoration is the one prepared. Other presets and
+/// dimensions, and a data pack's own overworld, go to Horizon's body.
+pub(super) fn prepare_decoration(
+    data: &Arc<GeneratorData>,
+    preset: &str,
+    dimension: &str,
+) -> std::ops::ControlFlow<Result<(), GeneratorError>> {
+    if preset == PRESET && terraforged_stem(data, preset, dimension).is_some() {
+        std::ops::ControlFlow::Break(
+            data.prepare_decoration("minecraft:normal", "minecraft:overworld"),
+        )
+    } else {
+        std::ops::ControlFlow::Continue(())
+    }
+}
+
 /// `dimension`'s level stem, when it uses TerraForged's generator. A data pack's stem
 /// replaces the preset's, as `OverworldGenerator::build` and 26.3's
 /// `WorldDimensions.bake` pick it, so a pack's own overworld keeps its generator, and a
@@ -576,6 +594,36 @@ mod tests {
         let mut worker = overworld.worker();
         let chunk = worker.generate_proto(ChunkPos::new(0, 0)).unwrap();
         assert_eq!(chunk.position(), ChunkPos::new(0, 0));
+    }
+
+    #[test]
+    fn the_preload_prepares_the_decoration_a_terraforged_overworld_uses() {
+        let Some(data) = data() else { return };
+        // Horizon's own body finds no biome source in the preset's overworld.
+        assert!(
+            prepare_decoration(&data, PRESET, "minecraft:overworld").is_break(),
+            "the TerraForged overworld is handled"
+        );
+        data.prepare_decoration(PRESET, "minecraft:overworld")
+            .unwrap();
+        let normal: Value = serde_json::from_str(&data.world_presets["minecraft:normal"]).unwrap();
+        let source =
+            normal["dimensions"]["minecraft:overworld"]["generator"]["biome_source"].to_string();
+        let prepared = |key: &str| {
+            let cache = data.decorations.lock().unwrap();
+            cache
+                .iter()
+                .any(|(json, slot)| json == key && slot.get().is_some_and(Result::is_ok))
+        };
+        assert!(
+            prepared(&source),
+            "the vanilla overworld's decoration, which the pipeline reuses"
+        );
+        // The preset's nether is vanilla's: Horizon's body prepares it.
+        assert!(prepare_decoration(&data, PRESET, "minecraft:the_nether").is_continue());
+        data.prepare_decoration(PRESET, "minecraft:the_nether")
+            .unwrap();
+        assert!(prepare_decoration(&data, "minecraft:normal", "minecraft:overworld").is_continue());
     }
 
     #[test]

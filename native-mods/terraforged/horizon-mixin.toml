@@ -494,3 +494,84 @@ bindings = [
   { name = "preset", ty = "&str", value = "preset" },
   { name = "dimension", ty = "&str", value = "dimension" },
 ]
+
+[[injection]]
+id = "terraforged-decoration-preload"
+target = "horizon_world::worldgen::generator::GeneratorData::prepare_decoration"
+kind = "HEAD"
+cancellable = true
+helper = "hooks/prepare_decoration.rs"
+bindings = [
+  { name = "data", ty = "&Arc<GeneratorData>", value = "self" },
+  { name = "preset", ty = "&str", value = "preset" },
+  { name = "dimension", ty = "&str", value = "dimension" },
+]
+
+[[module]]
+id = "client_world_type"
+file = "crates/horizon-client/src/save.rs"
+name = "terraforged_world_type"
+source = "client_world_type.rs"
+
+[[injection]]
+id = "cycle-world-type"
+target = "horizon_client::title::create_world::WorldOptions::press"
+kind = "HEAD"
+cancellable = true
+helper = "hooks/press_world_type.rs"
+bindings = [
+  { name = "options", ty = "&mut WorldOptions", value = "&mut *self" },
+  { name = "id", ty = "u8", value = "id" },
+]
+
+[[injection]]
+id = "label-world-type"
+target = "horizon_client::title::create_world::buttons"
+kind = "RETURN"
+helper = "hooks/label_world_type.rs"
+bindings = [
+  { name = "options", ty = "&WorldOptions", value = "o" },
+  { name = "buttons", ty = "Vec<Button>", value = "$value" },
+]
+
+[[injection]]
+id = "reset-world-type"
+target = "horizon_client::title::create_world::<WorldOptions as Default>::default"
+kind = "HEAD"
+helper = "hooks/reset_world_type.rs"
+bindings = []
+
+[[injection]]
+id = "recreate-world-type"
+target = "horizon_client::title::create_world::WorldOptions::of_world"
+kind = "HEAD"
+helper = "hooks/recreate_world_type.rs"
+bindings = [{ name = "dir", ty = "&std::path::Path", value = "dir" }]
+
+[[injection]]
+id = "arm-world-type"
+target = "horizon_client::title::create_world::WorldOptions::world_gen"
+kind = "HEAD"
+helper = "hooks/arm_world_type.rs"
+bindings = []
+
+[[injection]]
+id = "write-world-type"
+target = "horizon_client::save::write_world_gen_settings_with"
+kind = "HEAD"
+cancellable = true
+helper = "hooks/write_world_type.rs"
+bindings = [
+  { name = "dir", ty = "&Path", value = "dir" },
+  { name = "seed", ty = "i64", value = "seed" },
+  { name = "options", ty = "WorldGen", value = "options" },
+  { name = "flat_settings", ty = "&Option<Tag>", value = "&flat_settings" },
+]
+
+[[injection]]
+id = "read-world-type"
+target = "horizon_client::save::WorldGen::preset"
+kind = "HEAD"
+cancellable = true
+helper = "hooks/world_preset.rs"
+bindings = [{ name = "world", ty = "&Path", value = "world" }]
