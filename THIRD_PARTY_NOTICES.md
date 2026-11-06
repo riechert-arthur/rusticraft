@@ -41,6 +41,8 @@ The decoration in `native-mods/terraforged/decorator.rs` follows TerraForged's o
 `FeatureDecorator` and `VanillaDecorator` (the per-biome feature steps, their seeding order and the structure pieces
 around the vegetal step), and `NoiseCaveGenerator.decorate` with `NoiseCaveDecorator` (each noise cave's biomes'
 features), then `Surface.smoothWater` and `Surface.applyPost`.
+The world type in `native-mods/terraforged/client_world_type.rs` follows TerraForged's own `DatapackHook.injectDatapack`
+and `DataPackExporter.createWorldDatapack` for TerraForged worlds: each gets a copy of TerraForged's built-in pack.
 The vegetation decoder in `native-mods/terraforged/vegetation.rs` follows TerraForged's own `VegetationConfig.CODEC`,
 `ViabilityCodec` and its viability specs, `BiomeVegetationManager.getConfig` and `VegetationFeatures.create`. The
 vegetal step in `native-mods/terraforged/decorator.rs` follows TerraForged's own `PositionSampler` (with
