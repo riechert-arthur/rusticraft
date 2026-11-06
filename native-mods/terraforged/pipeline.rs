@@ -28,7 +28,8 @@
 // (https://github.com/TerraForged/TerraForged/tree/6dd607ebfd41a3b7274e090b1f2cf565d53d1d44, MIT License,
 // Copyright (c) 2021 TerraForged): `createBiomes`, `fillFromNoise`, `buildSurface` (`SurfaceDecorator.decorate`
 // over `NoiseChunkUtil.getNoiseChunk`, then `decoratePost`'s `Surface.apply`), `applyCarvers`
-// (`NoiseCaveGenerator.carve`), the `drop` at the end of `applyBiomeDecoration`, `getSeaLevel` and
+// (`NoiseCaveGenerator.carve`), `applyBiomeDecoration` (`BiomeGenerator.decorate`, in `decorator.rs`, then the
+// terrain-cache `drop`), `getSeaLevel` and
 // `Source.getNoiseBiome` and `possibleBiomes` (which 26.3's `findClosestBiome3d`, `/locate biome`, searches), and
 // `ChunkGenerator`'s structure placement over `getBaseHeight`/`getBaseColumn`
 // (`structure_queries.rs`). Stages TerraForged does not replace yet run on the vanilla overworld pipeline it wraps
