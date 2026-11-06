@@ -170,7 +170,8 @@ impl LiveBiomeBindings {
         generator.surface_biome_sampler(&self.map.wet, &self.fallback)
     }
 
-    /// [`TerraForgedGenerator::create_biomes`] with this registry's override biomes. `surface` must come from [`Self::surface_sampler`] on the same bindings and generator.
+    /// [`TerraForgedGenerator::create_biomes`] with this registry's override biomes. `surface` must come from
+    /// [`Self::surface_sampler`] on the same bindings and generator.
     pub fn create_biomes(
         &self,
         generator: &TerraForgedGenerator,

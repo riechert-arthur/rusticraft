@@ -288,9 +288,9 @@ impl TerraForgedGenerator {
     /// `override_biome` is as in [`CurrentSurfaceBiomeSampler::sample_biome`] (6dd607eb's `sampleBiome`).
     ///
     /// `Err` with the surface sampler's first error (a column whose pool has no biome for its noise, where Java's
-    /// `sampleBiome` returns null) before any section is written; the hint has happened by then, as in Java. Not ported: `Source`'s
-    /// per-column `LossyCache` of biomes (a cache of the same values: `createBiomes` asks each quart column once, so
-    /// only repeated queries would hit it).
+    /// `sampleBiome` returns null and fails later) before any section is written; the hint has happened by then. Not
+    /// ported: `Source`'s per-column `LossyCache` of biomes (a cache of the same values: `createBiomes` asks each quart
+    /// column once, so only repeated queries would hit it).
     pub fn create_biomes<T: Clone>(
         &self,
         chunk: &mut BiomeChunk<T>,
