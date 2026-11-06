@@ -1414,6 +1414,40 @@ mod tests {
         assert!(by_step.iter().sum::<usize>() > 0);
     }
 
+    /// The vegetation is bound to the world's biomes once: the first config whose tag holds the biome (a tag naming an
+    /// unregistered biome dropped whole, so `trees/patchy` holds nothing without `terraforged:oak_forest`), rivers by
+    /// `#minecraft:is_river`, and the vegetal features split into trees (unwrapped when configured), grass and the rest.
+    #[test]
+    fn terraforged_vegetation_binds_to_the_registry() {
+        let Some(data) = data() else { return };
+        let stem = terraforged_stem(&data, PRESET, "minecraft:overworld").unwrap();
+        let pipeline = TerraForgedPipeline::new(&data, 7, &stem, false).unwrap();
+        let features = pipeline.features.as_ref().unwrap();
+        let of = |name: &str| features.vegetation_of(data.biome_id(name).unwrap());
+        let (tag, river, [trees, grass, other], unwrapped) = of("minecraft:birch_forest");
+        assert_eq!(tag, Some("terraforged:trees/temperate"));
+        assert!(!river && unwrapped);
+        assert!(
+            trees.contains(&"minecraft:trees_birch")
+                && grass.contains(&"minecraft:patch_grass_forest")
+        );
+        assert!(other.contains(&"minecraft:flower_default"), "{other:?}");
+        assert_eq!(of("minecraft:taiga").0, Some("terraforged:trees/hardy"));
+        assert_eq!(of("minecraft:pale_garden").0, None);
+        assert!(of("minecraft:pale_garden").2[0].contains(&"minecraft:pale_garden_vegetation"));
+        // Without terraforged:oak_forest (#226) trees/patchy is dropped: wooded badlands has no config.
+        assert!(data.biome_id("terraforged:oak_forest").is_none());
+        assert_eq!(of("minecraft:wooded_badlands").0, None);
+        for river in ["minecraft:river", "minecraft:frozen_river"] {
+            assert!(of(river).1, "{river}");
+        }
+        assert!(!of("minecraft:plains").1);
+        for id in 0..data.biome_names().len() as u32 {
+            let (_, _, _, unwrapped) = features.vegetation_of(BiomeId(id));
+            assert!(unwrapped, "{}", data.biome_name(BiomeId(id)));
+        }
+    }
+
     /// `/locate biome` (`findClosestBiome3d`) follows the spiral over TerraForged's noise biomes: it answers with the
     /// first sampled column whose biome is allowed, at the first sample height, and finds no biome outside
     /// `possibleBiomes`. Searching adds no terrain-cache entry.

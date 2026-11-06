@@ -271,6 +271,47 @@ impl TerraForgedFeatures {
             && steps.iter().flatten().all(|id| allowed.contains(id))
     }
 
+    /// Biome `biome`'s vegetation: its config's tag, whether it is a river, its tree, grass and other feature names,
+    /// and whether every tree's placement dropped the biome, count and square modifiers (or kept its own).
+    #[cfg(test)]
+    pub(in crate::worldgen) fn vegetation_of(
+        &self,
+        biome: BiomeId,
+    ) -> (Option<&str>, bool, [Vec<&str>; 3], bool) {
+        let vegetation = &self.vegetation[biome.0 as usize];
+        let name = |id: &FeatureIdentity| self.decoration.names[id.0 as usize].as_str();
+        let unwrapped = vegetation.trees.iter().all(|tree| {
+            let own = self.decoration.features[tree.id.0 as usize].as_ref().ok();
+            match (&tree.placement, own) {
+                (Some(placement), Some(own)) => {
+                    placement.len() < own.placement.len()
+                        && placement.iter().all(|modifier| {
+                            !matches!(
+                                modifier,
+                                PlacementModifier::Biome
+                                    | PlacementModifier::Count(_)
+                                    | PlacementModifier::InSquare
+                            )
+                        })
+                }
+                (None, own) => vegetation.config.is_none() || own.is_none(),
+                (Some(_), None) => false,
+            }
+        });
+        (
+            vegetation
+                .config
+                .map(|config| self.configs[config].tag.as_str()),
+            vegetation.river,
+            [
+                vegetation.trees.iter().map(|tree| name(&tree.id)).collect(),
+                vegetation.grass.iter().map(name).collect(),
+                vegetation.other.iter().map(name).collect(),
+            ],
+            unwrapped,
+        )
+    }
+
     #[cfg(test)]
     pub(in crate::worldgen) fn structures_per_step(&self) -> &[usize] {
         &self.structures_per_step
