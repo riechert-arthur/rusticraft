@@ -2589,7 +2589,8 @@ new one delegating to `parent`. A terrain noise whose `type` is not in the loade
 - Minecraft 26.3 decodes a registry's files in parallel, so in Java a parent that is itself a terrain-type asset
   resolves only if its file happened to be decoded first. Here a parent must sort before the types naming it.
   Reimagined's own assets only name built-in parents.
-- The registry is Engine 0.3.0's, not Reimagined's rewritten engine. Engine's names compare ignoring case, so a
+- The registry is Engine 0.3.0's (the engine TerraForged 6dd607eb links, so the port follows it), not Reimagined's
+  rewritten engine. Engine's names compare ignoring case, so a
   name that differs only in case from a registered terrain (Reimagined registers `Hills` beside `hills`) is an
   error. Its built-ins differ from Reimagined's: Engine has `ocean` (Reimagined: `shallow_ocean`) and
   `mountain_chain`, `volcano` and `volcano_pipe`, which Reimagined lacks (so its `ocean`, `mountain_chain`, `volcano`
@@ -2630,7 +2631,7 @@ follows the newer source. `decode_current_terrain_noises(&types)` decodes them w
 `decode_current_terrain_types` returned (so the terrains are the world registry's), into a `TerrainNoiseAssets` in
 registry order (`badlands`, `dales`, `dolomites`, `hills_1`, `hills_2`, `mountains_1`, `mountains_2`,
 `mountains_3`, `mountains_ridge_1`, `mountains_ridge_2`, `plains`, `plateau`, `steppe`, `torridonian`), the order the
-noise generator's blender takes them in. Nothing calls `decode_current_terrain_noises` yet.
+noise generator's blender takes them in. The generator decodes them (`generator_preset.rs`).
 `CurrentTerrainNoisesOracle.java` (same oracle folder, `run.sh`) decodes each bundled file from the tree it comes from
 (6dd607eb's three mountains, Reimagined's copies of the rest) with Reimagined's real `NoiseCodec`, plus Engine 0.3.0's
 `Valley` registered as 6dd607eb does, and `TerrainNoise` into its terrain-type registry, and checks each bundled file
@@ -2640,9 +2641,10 @@ two terrain columns (the registry difference above): `plateau`'s terrain is Engi
 Reimagined's highland there, and `badlands`' is Engine's flatland here and Reimagined's lowland there. Lowland and
 highland have the same predicates in both engines (overground only). Flatland adds `isFlat`, and Engine's `badlands` also
 has an erosion modifier of 0.3 (Reimagined's: 1). Of the ported code only Engine's composite terrains read `isFlat` and
-only Engine's erosion filters' `Modifier` reads the modifier, and only on the Engine 0.3.0 tile path. Reimagined's
-generator path (terrain blender, eroded noise, chunk fill, biomes) reads neither, so the bundled noises generate the same
-heights either way. The noise, weight and bounds match, so the test pins the two terrain columns as known differences.
+only Engine's erosion filters' `Modifier` reads the modifier, and only on the Engine 0.3.0 tile path. The generator
+path (terrain blender, eroded noise, chunk fill, biomes) reads neither, so the bundled noises generate the same
+heights either way. The noise, weight and bounds match, so the test pins the two terrain columns as known
+Reimagined-vs-Engine differences: the port keeps Engine 0.3.0's registry, as 6dd607eb links it.
 
 `world_preset.rs` adds TerraForged's `terraforged:normal` world preset to the generator's `world_presets` bundle (a
 RETURN hook on `WorldgenOverrides::apply`; Horizon reads no data-pack world presets, so the bundled one is used). Its file,

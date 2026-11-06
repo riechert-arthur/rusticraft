@@ -144,8 +144,8 @@ fn json_int(value: &Value) -> Option<i32> {
 /// `GeneratorPreset.build`'s noise: `new NoiseGenerator(levels, terrain).withErosion()` over the bundled terrain
 /// noises in registry order (`TERRAINS.entries`, sorted by location), with `createLandTerrain`'s blender
 /// (`TerrainBlender(TERRAIN_OFFSET, 800, 0.8F, 0.4F, terrain)`) and `createContinentNoise`'s continent. The terrain
-/// types, the continent and the blender's terrains share one registry, so every identity test sees the same
-/// built-ins. `Err` where a bundled resource does not decode.
+/// types, the continent and the blender's terrains share one registry, Engine 0.3.0's built-ins
+/// ([`TerrainRegistry::new`], as 6dd607eb links Engine 0.3.0), so every identity test sees the same built-ins. `Err` where a bundled resource does not decode.
 pub fn build(levels: TerrainLevels) -> Result<TerraForgedGenerator, String> {
     let mut registry = TerrainRegistry::new();
     let types = decode_current_terrain_types(&mut registry).map_err(|error| error.to_string())?;

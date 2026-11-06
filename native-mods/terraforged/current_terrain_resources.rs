@@ -287,10 +287,11 @@ terraforged:volcano|volcano|none/category:NONE|volcano/terrain:none|NONE|false|t
 terraforged:volcano_pipe|volcano_pipe|none/category:NONE|volcano_pipe/terrain:none|NONE|false|true
 terraforged:wetland|wetland|wetland/category:WETLAND|wetland/category:WETLAND|WETLAND|true|false"##;
 
-    /// Where the port differs from Reimagined, and why: the registry is Engine 0.3.0's (#186's open issue), not
-    /// Reimagined's rewritten engine. Engine registers `ocean`, `mountain_chain`, `volcano` and `volcano_pipe` as
-    /// built-ins (Reimagined does not, so their files there create children of `none`), makes `badlands` a flatland
-    /// (Reimagined: lowland) and `plateau` a lowland (Reimagined: highland). These are the port's lines today.
+    /// Where the port differs from Reimagined (Reimagined vs Engine), and why: the registry is Engine 0.3.0's, the one
+    /// TerraForged 6dd607eb links and generated these files from, not Reimagined's rewritten engine. Engine registers
+    /// `ocean`, `mountain_chain`, `volcano` and `volcano_pipe` as built-ins (Reimagined does not, so their files there
+    /// create children of `none`), makes `badlands` a flatland (Reimagined: lowland) and `plateau` a lowland
+    /// (Reimagined: highland). The port keeps these lines on purpose.
     const ENGINE_REGISTRY_LINES: [&str; 6] = [
         "terraforged:badlands|badlands|badlands/category:FLATLAND|badlands/category:FLATLAND|FLATLAND|true|false",
         "terraforged:mountain_chain|mountain_chain|mountain_chain/category:HIGHLAND|mountain_chain/category:HIGHLAND|HIGHLAND|true|false",
@@ -408,7 +409,7 @@ terraforged:torridonian|torridonian/terrain:hills|true|weight=40200000|min=00000
     /// built-in `plateau` a lowland, Reimagined a highland. Lowland and highland have the same predicates in both
     /// engines (only `isOverground`); flatland adds `isFlat`, and Engine's `badlands` also erodes with a modifier of
     /// 0.3 (Reimagined: 1), see [`badlands_keeps_engine_flatland_predicates`]. The noise, weight and bounds are
-    /// unchanged. These are the port's lines today; the test fails once the registry follows Reimagined (#206).
+    /// unchanged. The port keeps Engine 0.3.0's registry, as 6dd607eb runs it, so these stay pinned.
     const ENGINE_NOISE_LINES: [&str; 2] = [
         "terraforged:badlands|badlands/category:FLATLAND|true|weight=3fe00000|min=00000000|max=3f800000|hash=884a7a1eddc2613a",
         "terraforged:plateau|plateau/category:LOWLAND|true|weight=40000000|min=00000000|max=3f800000|hash=5a96e6ffb27bc660",
@@ -467,8 +468,8 @@ terraforged:torridonian|torridonian/terrain:hills|true|weight=40200000|min=00000
     fn badlands_keeps_engine_flatland_predicates() {
         // Engine 0.3.0's `registerBadlands("badlands", FLATLAND)` is a `ConfiguredTerrain` with an erosion modifier of
         // 0.3; Reimagined's `register("badlands", LOWLAND)` is a plain terrain (`isFlat` false, erosion 1). The bundled
-        // noise's terrain is the port's (Engine's) built-in. Only Engine's composite terrains read `isFlat` and only
-        // Engine's filter `Modifier` reads the erosion modifier; Reimagined's generator path reads neither.
+        // noise's terrain is the port's (Engine's, as 6dd607eb links it) built-in. Only Engine's composite terrains read
+        // `isFlat` and only Engine's filter `Modifier` reads the erosion modifier; the generator path reads neither.
         let mut registry = TerrainRegistry::new();
         let types = decode_current_terrain_types(&mut registry).unwrap();
         let noises = decode_current_terrain_noises(&types).unwrap();
