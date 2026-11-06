@@ -22,9 +22,26 @@
  * SOFTWARE.
  */
 
+// Translated from TerraForged 6dd607eb
+// (https://github.com/TerraForged/TerraForged/tree/6dd607ebfd41a3b7274e090b1f2cf565d53d1d44, MIT License,
+// Copyright (c) 2021 TerraForged): `src/main/java/com/terraforged/mod/worldgen/util/NoiseChunkUtil.java`
+// (`initChunk`'s empty-cache check and `initSurfaceCache`).
+
 use horizon_core::position::ChunkPos;
 use std::collections::BTreeMap;
 
+/// TerraForged 6dd607eb's `NoiseChunkUtil.initChunk` + `initSurfaceCache` over a preliminary-surface cache (Java's
+/// `NoiseChunk` `Long2IntMap`, keyed by [`column_key`]). Does nothing when `cache` is not empty. Otherwise reads
+/// `height(dx, dz)` (chunk-local, `TerrainData.getHeight`) at the 16 quart columns of the chunk, dz before dx in steps
+/// of 4, stores each at its block column, and stores the lowest of the 16 at every other quart column of the 3x3
+/// chunk area around it (block offsets -16..32). Origins use Java `int` wrap, so the padding of a chunk at the edge of
+/// the `int` range wraps around to the other side, as in Java.
+///
+/// The 1.18.2-0.3.1 jar differs: it reads all 256 columns, keys by QUART coordinates (`ChunkPos.asLong(fromBlock(x),
+/// fromBlock(z))`, 1.18.2's key), keeps the last height read in each quart and pads the other quarts of the 3x3 area with
+/// the minimum of all 256. TerraForged Reimagined (26.3) drops the cache: 26.3's `NoiseChunk` has none and its surface
+/// rules sample `chunk_surface_level`. This follows 6dd607eb, whose block-column keys match the block positions
+/// Horizon's preliminary-surface sampler receives.
 pub fn initialize(
     cache: &mut BTreeMap<i64, i32>,
     chunk: ChunkPos,
@@ -59,6 +76,7 @@ pub fn initialize(
     }
 }
 
+/// `ColumnPos.asLong(x, z)`: `x`'s 32 bits low, `z`'s high.
 pub fn column_key(x: i32, z: i32) -> i64 {
     i64::from(x as u32) | (i64::from(z) << 32)
 }
@@ -67,6 +85,9 @@ pub fn column_key(x: i32, z: i32) -> i64 {
 mod tests {
     use super::*;
 
+    /// Whole-cache FNV hashes from 6dd607eb's own `initChunk`/`initSurfaceCache` (oracle outside Git:
+    /// `.local/terraforged/oracles/surface_height_cache/`, `ColumnPos`/`QuartPos` as in 26.3), heights `70 + dx - 2dz`,
+    /// at the origin, a negative chunk and the `int` corners; the 16 reads come in Java's order.
     #[test]
     fn cache_entries_match_original_java_initializer() {
         for (x, z, expected) in [
@@ -102,6 +123,7 @@ mod tests {
         }
     }
 
+    /// A filled cache is left alone, without reading a height (Java prints `{17=-31}`).
     #[test]
     fn preserves_existing_cache_without_requesting_terrain() {
         let mut cache = BTreeMap::from([(17, -31)]);
