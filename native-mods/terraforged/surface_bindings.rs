@@ -76,7 +76,9 @@ impl SurfaceBindings {
 
     /// The bindings with `erodible_tags` as `isErodible`: a state erodes when any of these tags holds it (pass
     /// [`JAVA_ERODIBLE_TAGS`] for 6dd607eb's literal tags). Every tag, `#minecraft:snow` and the water states
-    /// `smoothWater` uses must exist, or this is an `Err` (Java would throw when the pass first reads them).
+    /// `smoothWater` uses must exist, or this is an `Err`. In Java they always do (a missing tag would only make
+    /// `state.is(tag)` false); here a missing one means the world's data is incomplete, which an empty set would
+    /// hide.
     pub fn with_erodible_tags(
         registry: &BlockRegistry,
         tags: &BTreeMap<String, Arc<BTreeSet<BlockStateId>>>,
