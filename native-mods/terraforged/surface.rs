@@ -24,6 +24,7 @@
 
 use super::{
     super::terrain::{TerrainBlockStates, TerrainChunk, TerrainError},
+    terraforged::floor,
     terraforged_engine::TerrainProperties,
     terraforged_terrain_data::TerrainData,
 };
@@ -128,6 +129,136 @@ pub fn smooth_water<B: TerrainBlockStates>(
                 chunk.set_block_worldgen(dx, y, dz, level_two_water)?;
             }
         }
+    }
+    Ok(())
+}
+
+/// TerraForged 6dd607eb's `Surface.applyPost` with `smoothSnow` and `erodeSnow` (the 1.18.2-0.3.1 jar's bytecode
+/// is the same; TerraForged Reimagined 26.3 adds two switches, both on by default), which `BiomeGenerator.decorate`
+/// runs right after [`smooth_water`]. For each column (`dz`, then `dx`), `y` is one above the MOTION_BLOCKING_NO_LEAVES
+/// height and the gradient is normalised by `70 * gen_depth / 255`:
+///
+/// - gradient `< 0.625`: a snow layer at `y` (`getBlock() instanceof SnowLayerBlock`, in 26.3 only
+///   `minecraft:snow`) gets `1 + floor(7.9999 * (height - floor(height)))` layers, `height` being the column's
+///   TerraForged height (`TerrainData.getHeight()`, before any clipping);
+/// - otherwise (NaN too, as Java's `<` test): if `y` is air (`BlockState.isAir`, the chunk's own block properties),
+///   `y` moves one down; if that block is in `#minecraft:snow` (`is_snow`), it becomes air and the blocks below it,
+///   strictly above `max(y - 15, 0)` (absolute 0, not the build range's bottom), become stone down to the first block
+///   that `is_erodible` (Java's `isErodible`, the same predicate as [`apply`]'s) rejects.
+///
+/// The snow-layer test and the `layers` value go through the chunk's own block registry; air and stone are the
+/// registry's `minecraft:air` and `minecraft:stone` defaults (`Blocks.AIR/STONE.defaultBlockState()`). A layer count
+/// outside 1..=8 (only for NaN, infinite or huge heights) returns `TerrainError::InvalidState` where Java's `setValue`
+/// throws, leaving the earlier columns' writes in place, as Java's exception does. 26.3's `#minecraft:snow` is snow,
+/// snow block and powder snow, as in 1.18.2.
+///
+/// Writes go through `set_block_worldgen` (26.3's `ProtoChunk.setBlockState`), so only the chunk stage's heightmaps
+/// follow them; nothing updates heightmaps by hand. A missing MOTION_BLOCKING_NO_LEAVES is primed when the first
+/// column reads it, as `ChunkAccess.getHeight` does. `terrain` is the chunk's cached data, only read (see [`apply`]).
+pub fn apply_post<B: TerrainBlockStates>(
+    terrain: &TerrainData,
+    chunk: &mut TerrainChunk<'_, B>,
+    gen_depth: i32,
+    mut is_snow: impl FnMut(BlockStateId) -> bool,
+    mut is_erodible: impl FnMut(BlockStateId) -> bool,
+) -> Result<(), TerrainError> {
+    let kind = HeightmapType::MotionBlockingNoLeaves;
+    let norm = 70.0 * (gen_depth as f32 / 255.0);
+    let air = chunk
+        .registry()
+        .default_state("minecraft:air")
+        .ok_or(TerrainError::MissingAir)?;
+    let stone = chunk
+        .registry()
+        .default_state("minecraft:stone")
+        .ok_or(TerrainError::InvalidState)?;
+    for dz in 0..16 {
+        for dx in 0..16 {
+            if chunk.heightmap(kind).is_none() {
+                chunk.prime_heightmaps(&[kind])?;
+            }
+            let mut y = chunk
+                .heightmap(kind)
+                .expect("MOTION_BLOCKING_NO_LEAVES primed above")
+                .highest_taken(dx, dz)?
+                .wrapping_add(1);
+            let mut state = chunk.block(dx, y, dz);
+            let gradient = terrain.normalized_gradient(dx, dz, norm);
+            if gradient < 0.625 {
+                if is_snow_layer(chunk, state) {
+                    smooth_snow(terrain, chunk, dx, y, dz, state)?;
+                }
+            } else {
+                if chunk.block_properties(state).is_air() {
+                    y = y.wrapping_sub(1);
+                    state = chunk.block(dx, y, dz);
+                }
+                if is_snow(state) {
+                    erode_snow(chunk, dx, y, dz, air, stone, &mut is_erodible)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `state.getBlock() instanceof SnowLayerBlock`: 26.3 registers one SnowLayerBlock, `minecraft:snow`.
+fn is_snow_layer<B: TerrainBlockStates>(chunk: &TerrainChunk<'_, B>, state: BlockStateId) -> bool {
+    chunk
+        .registry()
+        .state(state)
+        .is_some_and(|state| state.name == "minecraft:snow")
+}
+
+/// `smoothSnow`: `state.setValue(SnowLayerBlock.LAYERS, 1 + NoiseUtil.floor(delta * 7.9999F))` with Java's int
+/// wrap; a value the registry has no state for is Java's `IllegalArgumentException`.
+fn smooth_snow<B: TerrainBlockStates>(
+    terrain: &TerrainData,
+    chunk: &mut TerrainChunk<'_, B>,
+    x: i32,
+    y: i32,
+    z: i32,
+    state: BlockStateId,
+) -> Result<(), TerrainError> {
+    let height = terrain.height().get(x, z);
+    let delta = height - terrain.levels().height(height) as f32;
+    let layers = 1i32.wrapping_add(floor(delta * 7.9999));
+    let mut snow = chunk
+        .registry()
+        .state(state)
+        .ok_or(TerrainError::InvalidState)?
+        .clone();
+    match snow.properties.get_mut("layers") {
+        Some(value) => *value = layers.to_string(),
+        None => return Err(TerrainError::InvalidState),
+    }
+    let snow = chunk
+        .registry()
+        .id(&snow)
+        .ok_or(TerrainError::InvalidState)?;
+    chunk.set_block_worldgen(x, y, z, snow)?;
+    Ok(())
+}
+
+/// `erodeSnow`: air at `y`, then stone strictly above `Math.max(y - 15, 0)` while `isErodible` holds.
+fn erode_snow<B: TerrainBlockStates>(
+    chunk: &mut TerrainChunk<'_, B>,
+    x: i32,
+    y: i32,
+    z: i32,
+    air: BlockStateId,
+    stone: BlockStateId,
+    is_erodible: &mut impl FnMut(BlockStateId) -> bool,
+) -> Result<(), TerrainError> {
+    chunk.set_block_worldgen(x, y, z, air)?;
+    let bottom = y.wrapping_sub(15).max(0);
+    let mut scan_y = y.wrapping_sub(1);
+    while scan_y > bottom {
+        if !is_erodible(chunk.block(x, scan_y, z)) {
+            return Ok(());
+        }
+        chunk.set_block_worldgen(x, scan_y, z, stone)?;
+        scan_y -= 1;
     }
     Ok(())
 }
@@ -638,6 +769,555 @@ p 9 minecraft:sand false true true true
             total += changed;
         }
         assert_eq!((scenarios, eroding, total), (160, 91, 34659));
+    }
+
+    /// The snow oracle's palette: air, void air, stone, water, dirt, snow block, powder snow, grass block, coarse dirt,
+    /// gravel, oak leaves, cave air, then snow with 1 to 8 layers (`minecraft:snow`'s default is 1 layer, id 12).
+    const SNOW_NAMES: [&str; 12] = [
+        "minecraft:air",
+        "minecraft:void_air",
+        "minecraft:stone",
+        "minecraft:water",
+        "minecraft:dirt",
+        "minecraft:snow_block",
+        "minecraft:powder_snow",
+        "minecraft:grass_block",
+        "minecraft:coarse_dirt",
+        "minecraft:gravel",
+        "minecraft:oak_leaves",
+        "minecraft:cave_air",
+    ];
+
+    /// Heightmap facts of the snow palette (checked against the oracle's palette lines): in 26.3 neither powder snow
+    /// nor any snow layer blocks motion, so MOTION_BLOCKING_NO_LEAVES sits below them and `y` lands on them.
+    #[derive(Clone, Copy)]
+    struct SnowState(u32);
+
+    impl HeightmapState for SnowState {
+        fn is_air(self) -> bool {
+            matches!(self.0, 0 | 1 | 11)
+        }
+
+        fn is_air_block(self) -> bool {
+            self.0 == 0
+        }
+
+        fn has_fluid(self) -> bool {
+            self.0 == 3
+        }
+
+        fn blocks_motion_in_heightmap(self) -> bool {
+            matches!(self.0, 2 | 4 | 5 | 7..=10)
+        }
+
+        fn blocks_motion_in_heightmap_no_leaves(self) -> bool {
+            matches!(self.0, 2 | 4 | 5 | 7..=9)
+        }
+    }
+
+    struct SnowProperties;
+
+    impl TerrainBlockStates for SnowProperties {
+        type State = SnowState;
+
+        fn heightmap_state(&self, id: BlockStateId) -> Self::State {
+            SnowState(id.0)
+        }
+    }
+
+    fn snow_registry() -> BlockRegistry {
+        let mut states: Vec<_> = SNOW_NAMES
+            .iter()
+            .map(|name| Tag::compound([("id", Tag::String((*name).into()))]))
+            .collect();
+        states.extend((1..=8).map(|layers: i32| {
+            Tag::compound([
+                ("id", Tag::String("minecraft:snow".into())),
+                (
+                    "properties",
+                    Tag::compound([("layers", Tag::String(layers.to_string().as_str().into()))]),
+                ),
+            ])
+        }));
+        let mut defaults: Vec<_> = SNOW_NAMES
+            .iter()
+            .enumerate()
+            .map(|(i, name)| (*name, Tag::Int(i as i32)))
+            .collect();
+        defaults.push(("minecraft:snow", Tag::Int(12)));
+        BlockRegistry::from_nbt(&Tag::compound([
+            ("DataVersion", Tag::Int(DATA_VERSION)),
+            ("states", Tag::List(states)),
+            ("defaults", Tag::compound(defaults)),
+        ]))
+        .unwrap()
+    }
+
+    /// `SnowPostOracle` (`.local/terraforged/oracles/surface_erosion/run.sh`, `snow.txt`): 6dd607eb's
+    /// `Surface.applyPost`, `smoothSnow`, `erodeSnow` and `isErodible` over real 26.3 ProtoChunks, heightmaps and block
+    /// tags, with TerrainData's verbatim height and gradient maps and `TerrainLevels.getHeight`.
+    const JAVA_SNOW: &str = r"p 0 minecraft:air - true false false false false false false false
+p 1 minecraft:void_air - true false false false false false false false
+p 2 minecraft:stone - false false false false true true true true
+p 3 minecraft:water - false false false false false true true true
+p 4 minecraft:dirt - false false false true true true true true
+p 5 minecraft:snow_block - false false true true true true true true
+p 6 minecraft:powder_snow - false false true true false false false true
+p 7 minecraft:grass_block - false false false false true true true true
+p 8 minecraft:coarse_dirt - false false false true true true true true
+p 9 minecraft:gravel - false false false false true true true true
+p 10 minecraft:oak_leaves - false false false false true true false true
+p 11 minecraft:cave_air - true false false false false false false false
+p 12 minecraft:snow 1 false true true true false false false true
+p 13 minecraft:snow 2 false true true true false false false true
+p 14 minecraft:snow 3 false true true true false false false true
+p 15 minecraft:snow 4 false true true true false false false true
+p 16 minecraft:snow 5 false true true true false false false true
+p 17 minecraft:snow 6 false true true true false false false true
+p 18 minecraft:snow 7 false true true true false false false true
+p 19 minecraft:snow 8 false true true true false false false true
+l minecraft:snow
+t minecraft:snow minecraft:snow minecraft:snow_block minecraft:powder_snow
+t minecraft:dirt minecraft:dirt minecraft:coarse_dirt minecraft:rooted_dirt
+0 ok 0x629834c539de5664 0x15fce05582fb26ab 378
+1 ok 0x49b12a2f23026796 0xcf07383165938e9d 377
+2 ok 0xf965cab1355a9594 0x41b73b11a9e13f61 96
+3 ok 0xe24ab048cc6300ae 0x2a10fa6e42ecf019 768
+4 ok 0x52c1ecd0498698eb 0x6317c283587bfab5 397
+5 ok 0xa2d57d1274d889a0 0xea9b371f289b0194 360
+6 ok 0xe630e40b2d7bc27e 0xb7ec7c05e2fdf31f 277
+7 ok 0xb6f0145c989db114 0xb189e52324ba2608 86
+8 ok 0x46e96fd902e7f287 0xf9468da4c2095aa8 253
+9 ok 0xe90093f299956cf8 0x189ed44a056db4ac 437
+10 ok 0x29caa22c7e6a0b80 0x5d7fc86f064bac5c 71
+11 ok 0x0e2988f64d1e2707 0x6af521f2de763ecf 208
+12 ok 0x47a1b3bd86d48b82 0xb70f94f2d23ba5df 451
+13 ok 0xa38454801ba55b61 0x796a9b12822c6779 369
+14 ok 0x4ea35ad49f5b81b0 0x75fca8babe69e34c 471
+15 ok 0xaaa90f50f44f17ea 0x1208f79d440a2f49 96
+16 ok 0xf419749be348c8bc 0xbc09f350a136789f 132
+17 ok 0x18814e26d22bd9cf 0xa19938e4b0cd7307 453
+18 ok 0x2e41cd4d1ce8d618 0x8b8827f8eb5fc978 76
+19 ok 0x186055a17671f67c 0x053af30f2b69281f 58
+20 ok 0x3c18ee63b34927f7 0x3164c68b3e592365 234
+21 ok 0xe6b3c96b9c943125 0xf95fb0f42b274740 375
+22 ok 0x3473a6e73b4c129b 0x98d185847cc36b65 439
+23 ok 0xb77b3e1b80adbc41 0x6318f0b8c4f3d96d 72
+24 ok 0xd99ada59945eb9b3 0x372bb3eb7614c437 352
+25 ok 0x8cc17ece0637a1e4 0x1bf2437d976dbb53 133
+26 ok 0x4246f7f43aaf136f 0xdb47db1968484f1d 437
+27 ok 0x2b695ae05852c40f 0x3d3dc0d47ce538c2 59
+28 ok 0xba51bb99f498e7ac 0xcb0d58a0d213c925 73
+29 ok 0x56f6fcee6e3dadad 0x03f3075d7fb836fd 378
+30 ok 0x3e3dc69dce32f78c 0x329f667add122656 438
+31 ok 0x2b04674e0298e748 0xa96cdca73cefd331 416
+32 ok 0xcc8d27f0c5daa094 0xe6356a88ea4be0fa 72
+33 ok 0x50682c8b91d5a8ba 0x8088fb3cd957f7ba 133
+34 ok 0x338bae401b28bdd4 0x53360b10636a041f 432
+35 ok 0x06ff66eb9603892a 0x1237c61b969b76fa 54
+36 ok 0xd5e13ec6437cf687 0x3361f09407409226 250
+37 ok 0x815d9700689eda0c 0x4d0143adde099964 190
+38 ok 0x6240ccc30481639c 0x755eb86fe3bf4e72 311
+39 ok 0x6f62e75f103ce7b5 0x02e04556a6d827c7 440
+40 ok 0x3155a9be426a1d5f 0xc91178ee211338f3 72
+41 ok 0x850593e327658db3 0x6245e36d90e45b44 320
+42 ok 0x9f37e7aeafbe6100 0x14dc2e128cc2acfc 463
+43 ok 0xafd0678bcf3e6638 0xb02d5ea4e2d6966d 614
+44 ok 0xf43403819d0b8a01 0xf08dd03bc3e22307 52
+45 ok 0xf7dd369c4a8e5742 0x3b73a3a0db44b454 81
+46 ok 0x286ca7fca4fbae36 0x9af9de349c83c01b 474
+47 ok 0x712d708ab1a7e8da 0x0ff02182799b2ac9 450
+48 ok 0x6af0c073ebd030fb 0x3d537af9e9413935 58
+49 ok 0x3f1cd9bba0818318 0x0e1dcdbcd5d6e321 72
+50 ok 0x54f0e52683ccf90d 0x1c0e3e450d1da44d 418
+51 ok 0x9f78447cee3db329 0x5313579395295efc 1401
+52 ok 0x0fec8a6f8f173dd3 0xbd828d6af824f166 78
+53 ok 0x42a99c3c1b48f47a 0xeca733ad109c2fe8 256
+54 ok 0xf2d70e3321aab65d 0x62cf8e4ebf09bea1 366
+55 ok 0x895e11fd82e1c773 0x3248a9de79bfbfb1 385
+56 ok 0x5b1832b47260d3d7 0x11781f9e52077833 448
+57 ok 0x66b8a150f54a888c 0x4b665057b8203812 64
+58 ok 0x0866bb889529c683 0xb25b686e9287598e 359
+59 ok 0x64c68e5cf856a99d 0xf1bc6d0736f98157 762
+60 ok 0xae2f1c3dc6ab195d 0xbfac0f2886761cd6 61
+61 ok 0xf34172f6fc61e4ec 0xd4486204786743ff 473
+62 ok 0x617383167b0c2298 0xe1774cded0c424ee 64
+63 throw 0xcfee441f15cd3167 0x5f861b38f1f55499 96
+64 ok 0x8f3f3c714cf3fc08 0xad890c37bab7c87e 455
+65 ok 0x287031bc13bba4ec 0x10f6ab8b3b1e9b3d 71
+66 ok 0x5114bd0f7d88e84b 0x1f1bf48ebb8fc763 131
+67 ok 0xb38ede31c57f0ff3 0x072dab4d8685c7c2 736
+68 ok 0x110e7ae51a6bf7d1 0xf6c49ec99a6a0989 452
+69 ok 0x9cf32a5131412a72 0xdfd3912df9a9f32c 352
+70 ok 0xf3e66c53fbd96287 0x4e02725a9179bf76 197
+71 ok 0x3710173741ea5c67 0xde7e9bf239a1a091 407
+72 ok 0x37af4ad76d8a4140 0x44de7dabd0dd3ba5 458
+73 ok 0x7304ad894cccaeb3 0x1bffd5626750dc3d 500
+74 ok 0xab458d61f411acca 0x90e7dd31e8772031 74
+75 ok 0xc79815907056bccf 0x394cff972b35ce89 411
+76 ok 0x95093e3359b30984 0x47d351cdfe12ba23 417
+77 ok 0x3a725104fc73b529 0x18bf06cd21dd7d59 59
+78 ok 0x300bed91dfeee152 0xacb28dc56c83e481 70
+79 ok 0xe9b21946530b254d 0xe053bdb16e33961b 101
+80 ok 0xf0ea1a7199a24409 0x30b6dfc6ebc4d123 156
+81 ok 0x6f765f2aeb6fcb88 0xb874ac3965255022 524
+82 ok 0x3f48d1295098a8c5 0x374bf1ebf87c093e 81
+83 ok 0xcfba204857e974a4 0xdced7a2861e5daea 1529
+84 ok 0x0a3bac2ec37bf72e 0x0b0bfa7299d9b88e 386
+85 ok 0x9feb1a6c5b1360ed 0x7c09c331a95deee9 341
+86 ok 0xdf49471bc94a53ad 0x67fccb59f81bf84a 380
+87 ok 0x4024310a142eace9 0x7ddc874aec563c41 212
+88 ok 0xa670c08fa9c7553f 0x0b9cffd8f4aad52c 319
+89 ok 0xf7f2804ef7629456 0x3e48faf170074f5c 421
+90 ok 0xad1d862a1eef865b 0x4b5cc57d2fa653ac 51
+91 ok 0x2d8ee210d08a98b1 0xa0eb1dffbe3877d7 63
+92 ok 0x41df5c9b5a1386e5 0xa257fd37a4f24dfb 71
+93 ok 0x26ee2f464d30738d 0xde87fca019692a2e 434
+94 ok 0x6195e9a1c384956f 0xd05d359dbf343847 420
+95 ok 0xc1d36e3f691bbcba 0x8511cb6e4f6118a3 91
+96 ok 0x020a690eb7d25820 0x859dd77fc894b73e 133
+97 ok 0xa4fd88dfd3858361 0xa0622a1b698b0bab 93
+98 ok 0x35a2bfe8445d8d79 0x486c6e75724570f9 395
+99 ok 0x7504ebec88fd2f80 0x858f8662b1dca0c6 57
+100 ok 0x90c8b463295cbb5f 0xb34004667463e8d7 247
+101 ok 0x09e1e385f8bd8268 0x32c6e12c7eb1e300 356
+102 ok 0x8a90b69166428af8 0x16f9cfc1c82cbd30 69
+103 ok 0x6a50b2fc1994cee1 0x407826888ce13bf2 428
+104 ok 0x16e5cf93a31fb62a 0x81b8149b1581bebf 75
+105 ok 0xa8ceec0b2144f425 0x5b0b06101c50474b 423
+106 ok 0xcda849a99be383bb 0xabe2f38524939216 467
+107 ok 0x6eb689aad8e362ca 0x1a00d800b91bde70 59
+108 ok 0x9e3a250d90700d60 0x7648b78b68eeec5e 242
+109 ok 0xd2f2bd52c283d5ee 0x6cf39ed52059abad 76
+110 ok 0x38891d276dd1ae93 0x0a9ff68b0971ff0d 406
+111 throw 0x9537b139540e5450 0x33df9e555e59b960 0
+112 ok 0x206b3bd059cf07e3 0x85fad16ae889bdeb 68
+113 ok 0x53a3e4fa9e36fe00 0x2dba8ba1db8336fc 174
+114 ok 0xc69338736c1f8e49 0x57114829cd1f02e9 485
+115 ok 0xa0fcb25369549eea 0x6bb8286a79f9ea6e 1519
+116 ok 0xf43f1a9b2079ee6b 0x532ef9309e3368ca 79
+117 ok 0x16a5012a02b4da1a 0xafda7dde31ab4e25 174
+118 ok 0xe2907ce0ab4abc7b 0x18d001a14c1e8176 156
+119 ok 0xfc78aa5e8c94b806 0x1ee0565768b1e2e1 436
+120 ok 0x27b5bd848a9fbc40 0xba0deb3a9d004c25 242
+121 ok 0x0bb9807c6ee007c5 0x1ec865337a8df117 88
+122 ok 0xd905b423951921ef 0xa189a83f8e1453cc 345
+123 ok 0x9ac235452fbbbbe8 0x36e83fc197331e4d 1489
+124 ok 0x4cbc36fac324ec6d 0x9ebab5da72061804 73
+125 ok 0xb23ab3a1e9e3018e 0xf210dc0905efd463 63
+126 ok 0x7ad6a07521cb51bb 0x26d3a4963c57e61d 433
+127 throw 0x4f517a84907b8a1e 0xc39a9c1f5aae86cf 133
+128 ok 0x3c98ce37d2797095 0x2c73df3f82123541 478
+129 ok 0xf1ee362c9a4125ac 0x05798b8cc1e7610c 66
+130 ok 0x0469559b9b30bc15 0xbc01ec86b0457696 160
+131 ok 0x77e7d40fd3e9ecc8 0xbd7f235e52b38b3b 1685
+132 ok 0x5b36a138bcaab1be 0xb6781e2f80bfd2fc 50
+133 ok 0xecf90ef68f25a4a3 0x57057af536f94231 51
+134 ok 0x2aa446cc5cd44bca 0x88f1c4b4dc9f204a 236
+135 ok 0xe6ed4fb9dde51fd2 0x8ffde54ca96d34b4 452
+136 ok 0x1f8e9605dc06ec78 0xc64e2eaf6a0d4a99 397
+137 ok 0x6db2c0bc56548b2b 0x82cb9fa734d0eb05 72
+138 ok 0xe5319ac26cf7e796 0x60c7089ad40115a3 438
+139 ok 0x4cfb21a2edd1a5bd 0x08974f07d8fb989a 595
+140 ok 0x37aac50eaa051afc 0xb31483bf4d075cd4 492
+141 ok 0x5b2704921bc39b4b 0xd4fa65d19037c5b7 67
+142 ok 0x16161c421a63bcd2 0x1b995c3d5e867b3d 58
+143 throw 0xca89b06debcbb274 0xc6a78169f74ef9d4 231
+144 ok 0xe83703ad4504d6b3 0x9759e6affd8fdd50 440
+145 ok 0x582cd966d8493b90 0xc8a18e4c1d575814 385
+146 ok 0x74f0366678f589b2 0x8d22f97272033c3a 76
+147 ok 0xf6991a7baa8752e0 0x3e925a0722d787c3 438
+148 ok 0x110935d02516a88f 0x5d3b538ea20e2122 473
+149 ok 0xeaceba5cf66941b7 0xd813883a80529070 68
+150 ok 0xdce3ee03f9131053 0x055d7c4c0d07c0b2 249
+151 ok 0xb080315dad3d23b2 0xb7c3ddb78961e0a2 208
+152 ok 0xf64534616f4160c3 0xf97923a7ed4e1849 427
+153 ok 0x9a1e63454128ce55 0x638322c82e8716bd 154
+154 ok 0xea8478d722e31276 0x20f5f8c2d21dc171 88
+155 ok 0x8f065d353eda388f 0xd7bb8e9fcb263ad0 947
+156 ok 0x9f186d5017d4a6ad 0x9a99c0552ff0bf12 359
+157 ok 0x31e3e2d8805bdcc3 0x211aedc1c1b53bc4 459
+158 ok 0x056323f55f78b3a2 0x60b4cf270044ee84 447
+159 throw 0xb3cccf08714c32b3 0x9e57d1197b46cc6e 29
+160 ok 0xbd797edcec5bfccb 0x8b156cb53f4ddbdb 132
+161 ok 0x26845e98fccb8aed 0xc45509af02d51c6e 425
+162 ok 0x3924faa64a4bbf6a 0xd209eb44e0c5209b 79
+163 ok 0xe49d19ee129b1527 0x6c79b663e60c24e1 48
+164 ok 0xe033247cc2c12ac0 0x0f808f5fd1477570 165
+165 ok 0xbabb01d43bd3c950 0xe48ac940da821f6b 399
+166 ok 0x12ad66046f0d88e5 0x20b7fc6878ba0976 71
+167 throw 0x10671a2874787bd3 0x54b005f62105fa06 73
+168 ok 0x29b3e6b720221404 0xbc91a5154ff990a3 366
+169 ok 0x1ba07e9b9a7421c9 0xabcedb9d19c07c3b 420
+170 ok 0x3d8379db0963ee9d 0x1d15b5bb33e38075 440
+171 ok 0x01b719cb40646de1 0x7876a79bb720855e 56
+172 ok 0x3f8725d6f521827d 0xfd01292bc11866c7 366
+173 ok 0x8fe68f5bfbebda7b 0xa855cefe825ec35a 427
+174 ok 0x36b38e10c16ec156 0x4778de24b68e37b0 79
+175 ok 0xef2c47ccc4bb762d 0xd49b73fff0497276 421
+176 ok 0x896d87142db647e3 0xc440814e76f15856 86
+177 ok 0xb2ad49c6bb1665ea 0x81e897ed6a3800fc 87
+178 ok 0xc23ee8838b5ea95d 0xcc286f2c2c7f87fe 418
+179 ok 0x9e252cf26b889441 0x3ef3f001b6f95b8c 63
+180 ok 0x109ca3917c967bbf 0xd74c69663bc3c0bf 159
+181 ok 0xdec6000160d55e46 0x6d2fb41019511377 235
+182 ok 0x60edfb7cf37d03cd 0x9870474a40d8f000 346
+183 ok 0x2078860b9addfd66 0xa26482de74a276f8 412
+184 ok 0xc4432ff2fc1c157b 0x419fe9425ced7006 224
+185 ok 0x55088eb675199580 0xc7a6819941ff5d45 356
+186 ok 0x4cab62b5fc96f9a0 0x6e8f1e3a5124a714 391
+187 ok 0x4654cd729caa014b 0xcd77a9cd8d94efeb 420
+188 ok 0x3b34a2716cbffaa0 0x1d002ae2990b5b59 56
+189 ok 0x6cbea6dd57729a6a 0x7be8dd88b407451f 83
+190 ok 0x4f047221a37f95ba 0x905109fbdfa581c2 469
+191 ok 0x9d9967222963a9b5 0x49e1ee0a2d286356 434";
+
+    /// 192 generated chunks (build ranges -64..320, 0..256 and 16..80, the persisted statuses TERRAIN, FEATURES, EMPTY
+    /// and BIOMES, no / MOTION_BLOCKING_NO_LEAVES / WG heightmaps primed, gen depths 255/480/1024, TerraForged heights
+    /// from -48 to 528 with fractions, NaN and infinite cells) whose columns are stone under a soil run capped by snow
+    /// layers, snow or powder snow, leaves (with or without snow on them), cave air, water or air. Every 8th uses
+    /// erodible soil only (the 15-block limit), every 16th from 5 has full columns (y reads void air above the build
+    /// range), every 16th from 11 sits near y 0 or the range bottom (`max(y - 15, 0)`). Java's blocks and all six
+    /// heightmaps match, and where `setValue` throws (NaN or infinite heights under a snow layer) Rust returns
+    /// `InvalidState` with the same blocks written before it (6 scenarios). 191 scenarios change 57823 blocks.
+    #[test]
+    fn snow_postprocessing_matches_6dd607eb_java_on_26_3_chunks() {
+        let mut lines = JAVA_SNOW.lines();
+        let mut snow_tag = [false; 20];
+        let mut erodible = [false; 20];
+        let blocks = snow_registry();
+        for (i, line) in lines.by_ref().take(20).enumerate() {
+            let fields: Vec<_> = line.split(' ').collect();
+            let state = blocks.state(BlockStateId(i as u32)).unwrap();
+            let layers = state.properties.get("layers").map_or("-", String::as_str);
+            assert_eq!(
+                fields[..4],
+                ["p", i.to_string().as_str(), state.name.as_str(), layers]
+            );
+            let flag = |k: usize| fields[k] == "true";
+            let properties = SnowState(i as u32);
+            assert_eq!(flag(4), properties.is_air(), "{line}");
+            assert_eq!(flag(5), state.name == "minecraft:snow", "{line}");
+            snow_tag[i] = flag(6);
+            erodible[i] = flag(7);
+            for (k, kind) in [
+                HeightmapType::OceanFloorWg,
+                HeightmapType::MotionBlocking,
+                HeightmapType::MotionBlockingNoLeaves,
+                HeightmapType::WorldSurface,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                assert_eq!(flag(8 + k), kind.is_opaque(properties), "{line} {kind:?}");
+            }
+        }
+        // 26.3 registers one SnowLayerBlock; its #minecraft:snow is 1.18.2's, while #minecraft:dirt lost grass,
+        // podzol, mycelium and moss (see `apply`).
+        assert_eq!(lines.next(), Some("l minecraft:snow"));
+        assert_eq!(
+            lines.next(),
+            Some("t minecraft:snow minecraft:snow minecraft:snow_block minecraft:powder_snow")
+        );
+        assert_eq!(
+            lines.next(),
+            Some("t minecraft:dirt minecraft:dirt minecraft:coarse_dirt minecraft:rooted_dirt")
+        );
+
+        let terrains = TerrainRegistry::new();
+        let ranges = [(-64, 384), (0, 256), (16, 64)];
+        let stages = [
+            PreLightChunkStage::Terrain,
+            PreLightChunkStage::Features,
+            PreLightChunkStage::Empty,
+            PreLightChunkStage::Biomes,
+        ];
+        let depths = [255, 480, 1024];
+        let amps = [0.0f32, 0.002, 0.006, 0.02, 0.1];
+        let soil = [4, 4, 5, 5, 6, 8, 7, 9, 2, 13];
+        let (mut scenarios, mut throws, mut changing, mut total) = (0, 0, 0, 0);
+        for (s, line) in lines.enumerate() {
+            let mut rng = Lcg((s as u64)
+                .wrapping_mul(0x9E3779B97F4A7C15)
+                .wrapping_add(179));
+            let (min_y, height) = ranges[rng.next(3) as usize];
+            let max_y = min_y + height;
+            let stage = stages[rng.next(4) as usize];
+            let prime = rng.next(3);
+            let gen_depth = depths[rng.next(3) as usize];
+            let amp = amps[rng.next(5) as usize];
+            let level = (rng.next(1201) - 100) as f32 / 1000.0;
+            let pure = s % 8 == 3;
+            let mut base = min_y + 4 + rng.next(height - 8);
+            if s % 16 == 5 {
+                base = max_y - 2;
+            }
+            if s % 16 == 11 {
+                base = if min_y < 0 {
+                    2 + rng.next(12)
+                } else {
+                    min_y + 1 + rng.next(6)
+                };
+            }
+            let mut heights = [0.0f32; 18 * 18];
+            for h in &mut heights {
+                *h = level + (rng.next(2001) - 1000) as f32 / 1000.0 * amp;
+            }
+            if s % 16 == 15 {
+                for _ in 0..6 {
+                    heights[rng.next(18 * 18) as usize] = f32::NAN;
+                }
+            }
+            if s % 32 == 7 {
+                heights[rng.next(18 * 18) as usize] = f32::INFINITY;
+            }
+            let mut noise = NoiseData::new(&terrains);
+            for z in NoiseData::MIN..NoiseData::MAX {
+                for x in NoiseData::MIN..NoiseData::MAX {
+                    let mut sample = NoiseSample::new(&terrains);
+                    sample.height_noise = heights[((z + 1) * 18 + x + 1) as usize];
+                    noise.set_noise(x, z, &sample);
+                }
+            }
+            let mut terrain = TerrainData::new(TerrainLevels::default());
+            terrain.accept(&noise);
+            let pos = ChunkPos::new(rng.next(9) - 5, rng.next(9) - 5);
+            let mut chunk = TerrainChunk::new(pos, min_y, height, &blocks, SnowProperties).unwrap();
+            for z in 0..16 {
+                for x in 0..16 {
+                    let top = base + rng.next(9) - 4;
+                    let depth = rng.next(24);
+                    let cap = rng.next(10);
+                    let layers = 12 + rng.next(8) as u32;
+                    for y in min_y..max_y {
+                        let id = if y <= top - depth {
+                            2
+                        } else if y <= top {
+                            soil[rng.next(if pure { 5 } else { 10 }) as usize]
+                        } else if y == top + 1 {
+                            match cap {
+                                0..=2 => layers,
+                                3 => 5,
+                                4 => 6,
+                                5 | 6 => 10,
+                                7 => 11,
+                                8 => 3,
+                                _ => 0,
+                            }
+                        } else if y == top + 2 && cap == 6 {
+                            layers
+                        } else {
+                            0
+                        };
+                        if id != 0 {
+                            chunk.set_block_raw(x, y, z, BlockStateId(id)).unwrap();
+                        }
+                    }
+                }
+            }
+            chunk.set_generation_stage(stage);
+            match prime {
+                1 => chunk
+                    .prime_heightmaps(&[HeightmapType::MotionBlockingNoLeaves])
+                    .unwrap(),
+                2 => chunk
+                    .prime_heightmaps(&[HeightmapType::WorldSurfaceWg, HeightmapType::OceanFloorWg])
+                    .unwrap(),
+                _ => {}
+            }
+            let mut before = Vec::new();
+            for z in 0..16 {
+                for x in 0..16 {
+                    before.extend((min_y..max_y).map(|y| chunk.block(x, y, z)));
+                }
+            }
+            let result = match apply_post(
+                &terrain,
+                &mut chunk,
+                gen_depth,
+                |state| snow_tag[state.0 as usize],
+                |state| erodible[state.0 as usize],
+            ) {
+                Ok(()) => "ok",
+                Err(TerrainError::InvalidState) => "throw",
+                Err(error) => panic!("scenario {s}: {error}"),
+            };
+
+            let mut block_hash = 0xcbf29ce484222325u64;
+            let mut changed = 0;
+            let mut index = 0;
+            for z in 0..16 {
+                for x in 0..16 {
+                    for y in min_y..max_y {
+                        let state = chunk.block(x, y, z);
+                        changed += i32::from(state != before[index]);
+                        index += 1;
+                        block_hash = fold(block_hash, state.0);
+                    }
+                }
+            }
+            let mut maps = 0xcbf29ce484222325u64;
+            for kind in HeightmapType::ALL {
+                let Some(map) = chunk.heightmap(kind) else {
+                    maps = fold(maps, u32::MAX);
+                    continue;
+                };
+                for z in 0..16 {
+                    for x in 0..16 {
+                        maps = fold(maps, map.first_available(x, z).unwrap() as u32);
+                    }
+                }
+            }
+            let rust = format!("{s} {result} 0x{block_hash:016x} 0x{maps:016x} {changed}");
+            assert_eq!(rust, line, "scenario {s} ({stage:?}, {min_y}..{max_y})");
+            assert_eq!(chunk.generation_stage(), stage);
+            scenarios += 1;
+            throws += i32::from(result == "throw");
+            changing += i32::from(changed > 0);
+            total += changed;
+        }
+        assert_eq!((scenarios, throws, changing, total), (192, 6, 191, 57823));
+    }
+
+    /// Exact heights, flat ground (gradient 0): `NoiseUtil.floor` takes 1 off a negative whole number, so a height of
+    /// -60.0 has `delta` 1 and gets 8 layers while +60.0 gets 1, and -61.875 (floor -62, delta 0.125) gets 1. The
+    /// original PR's Java fixture had the same quirk at -1.0 (8 layers).
+    #[test]
+    fn snow_layers_follow_noise_util_floor_on_whole_negative_heights() {
+        let blocks = snow_registry();
+        let terrains = TerrainRegistry::new();
+        for (noise_height, layers) in [
+            (-0.125f32, 8),
+            (0.125, 1),
+            (-0.128_906_25, 1),
+            (0.2, 1),
+            (0.201, 4),
+        ] {
+            let mut noise = NoiseData::new(&terrains);
+            for z in NoiseData::MIN..NoiseData::MAX {
+                for x in NoiseData::MIN..NoiseData::MAX {
+                    let mut sample = NoiseSample::new(&terrains);
+                    sample.height_noise = noise_height;
+                    noise.set_noise(x, z, &sample);
+                }
+            }
+            let mut terrain = TerrainData::new(TerrainLevels::default());
+            terrain.accept(&noise);
+            let mut chunk =
+                TerrainChunk::new(ChunkPos::new(-1, 2), -64, 128, &blocks, SnowProperties).unwrap();
+            for z in 0..16 {
+                for x in 0..16 {
+                    chunk.set_block_raw(x, 10, z, BlockStateId(2)).unwrap();
+                    chunk.set_block_raw(x, 11, z, BlockStateId(19)).unwrap();
+                }
+            }
+            apply_post(&terrain, &mut chunk, 480, |_| false, |_| false).unwrap();
+            assert_eq!(
+                chunk.block(5, 11, 7),
+                BlockStateId(11 + layers),
+                "{noise_height}"
+            );
+        }
     }
 
     /// The water oracle's palette: air, void air, stone, water (level 0, 1, 2), oak leaves, kelp plant, sand, cave air.

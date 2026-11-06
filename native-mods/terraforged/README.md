@@ -2127,7 +2127,7 @@ that a plain fill after a structure stage gives the plain blocks and heights aga
 oracle and `ChunkAdapterOracle`, below); the composition is Java's three calls in order, so it has no oracle of its
 own. Heights the structure edits write come from the clipped chunk (its OCEAN_FLOOR_WG), while unedited columns
 keep TerraForged's unclipped heights; with terrain above the build range the two differ, which the world-height
-decision (below) has to settle. Not yet ported: Deep Caves, Strata, the surface step (apart from its erosion and water smoothing passes, below), the carver step, and the
+decision (below) has to settle. Not yet ported: Deep Caves, Strata, the surface step (apart from its erosion, water smoothing and snow passes, below), the carver step, and the
 registration that would let Horizon call the stage.
 
 The surface erosion pass (`surface.rs`, `apply`) is TerraForged 6dd607eb's `worldgen.biome.surface.Surface.apply`
@@ -2139,8 +2139,8 @@ Writes go through `set_block_worldgen`, so only the chunk stage's heightmaps fol
 The caller supplies which states are erodible (Java's `isErodible`: `#minecraft:dirt` or `#minecraft:snow`). With
 26.3's tags that leaves grass, podzol, mycelium, moss and mud uneroded (`#minecraft:dirt` held them before 26.x);
 TerraForged Reimagined switches to `#minecraft:substrate_overworld` to keep them, which this port doesn't follow (the
-binding layer decides). The cached terrain data is only read. Snow postprocessing (`applyPost`) and the call from the
-surface decorator are later layers. The test runs `SurfaceErosionOracle`
+binding layer decides). The cached terrain data is only read. Snow postprocessing (`applyPost`, below) is ported; the
+call from the surface decorator is a later layer. The test runs `SurfaceErosionOracle`
 (6dd607eb's three methods, copied verbatim, over real 26.3 ProtoChunks, heightmaps and block tags): 160 generated
 chunks over three build ranges, four persisted statuses, primed and unprimed heightmaps, three gen depths and NaN
 gradients, comparing gradients, every block and all six heightmaps. Some of them put steep, all-erodible soil at the
@@ -2162,6 +2162,27 @@ and non-zero river values, comparing every block, all six heightmaps (absent one
 The oracle lives outside Git, next to the erosion one, in the local TerraForged oracle folder
 (`.local/terraforged/oracles/surface_erosion/`, whose `run.sh` builds both). A separate test covers block coordinates
 that wrap past `i32::MAX` at the far chunk edge, as Java's int arithmetic does.
+
+The snow pass (`surface.rs`, `apply_post`) is TerraForged 6dd607eb's `Surface.applyPost` with `smoothSnow` and
+`erodeSnow` (MIT, as above; the 1.18.2-0.3.1 jar has the same bytecode, and TerraForged Reimagined 26.3 only adds two
+switches that default to on). `BiomeGenerator.decorate` runs it right after water smoothing. For each column, `y` is one
+above the MOTION_BLOCKING_NO_LEAVES height, and the gradient is normalised by `70 * genDepth / 255`. On gentle slopes
+(below 0.625), a snow layer at `y` gets `1 + floor(7.9999 * (height - floor(height)))` layers from TerraForged's
+unclipped height. `NoiseUtil.floor` takes 1 off a negative whole number, so -60.0 gets 8 layers where +60.0 gets 1, as
+in Java. On steeper slopes (and NaN), an air block at `y` moves the test one block down. A `#minecraft:snow` block there
+becomes air, and the erodible blocks under it, strictly above `max(y - 15, 0)` (absolute 0, not the build range's
+bottom), become stone. The snow-layer test (`instanceof SnowLayerBlock`, in 26.3 only `minecraft:snow`), the `layers`
+value, air and stone come from the chunk's own block registry. The caller supplies `#minecraft:snow` and `isErodible`
+(the same predicate as erosion's). 26.3's `#minecraft:snow` is snow, snow block and powder snow, unchanged from 1.18.2.
+In 26.3 neither snow layers nor powder snow block motion, so `y` lands on them. A layer count outside 1..8 (NaN,
+infinite or huge heights) returns `InvalidState` where Java's `setValue` throws (an `IllegalArgumentException`, or an
+`ArrayIndexOutOfBoundsException` for a wrapped `Integer.MIN_VALUE`); the columns already written stay written. Writes
+go through `set_block_worldgen`, and MOTION_BLOCKING_NO_LEAVES is primed when the first column reads it. The test runs
+`SnowPostOracle` (the methods copied verbatim, with the TerrainData stub's height map and `TerrainLevels.getHeight`,
+over real 26.3 ProtoChunks, heightmaps and block tags; same folder and `run.sh`): 192 generated chunks over three build
+ranges, four persisted statuses, three priming states and three gen depths, with snow layers, snow and powder snow,
+snow on leaves, cave air and water caps, full columns, columns near y 0 and NaN or infinite heights (6 of them throw).
+It compares every block and all six heightmaps, and also checks Java's SnowLayerBlocks and tag contents.
 
 The structure terrain columns (`structure_terrain.rs`, `StructureTerrain`) are TerraForged 6dd607eb's
 `worldgen.terrain.StructureTerrain.modify` and its helpers (MIT, as above), the per-column part of `fillFromNoise`'s
