@@ -674,3 +674,10 @@ file = "crates/horizon-client-render/src/streaming.rs"
 name = "terraforged_regen"
 source = "regen_streaming.rs"
 visibility = "pub"
+
+[[module]]
+id = "preview"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_preview"
+source = "preview.rs"
+visibility = "pub"
