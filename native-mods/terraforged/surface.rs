@@ -1279,6 +1279,47 @@ t minecraft:dirt minecraft:dirt minecraft:coarse_dirt minecraft:rooted_dirt
         assert_eq!((scenarios, throws, changing, total), (192, 6, 191, 57823));
     }
 
+    /// Exact heights, flat ground (gradient 0): `NoiseUtil.floor` takes 1 off a negative whole number, so a height of
+    /// -60.0 has `delta` 1 and gets 8 layers while +60.0 gets 1, and -61.875 (floor -62, delta 0.125) gets 1. The
+    /// original PR's Java fixture had the same quirk at -1.0 (8 layers).
+    #[test]
+    fn snow_layers_follow_noise_util_floor_on_whole_negative_heights() {
+        let blocks = snow_registry();
+        let terrains = TerrainRegistry::new();
+        for (noise_height, layers) in [
+            (-0.125f32, 8),
+            (0.125, 1),
+            (-0.128_906_25, 1),
+            (0.2, 1),
+            (0.201, 4),
+        ] {
+            let mut noise = NoiseData::new(&terrains);
+            for z in NoiseData::MIN..NoiseData::MAX {
+                for x in NoiseData::MIN..NoiseData::MAX {
+                    let mut sample = NoiseSample::new(&terrains);
+                    sample.height_noise = noise_height;
+                    noise.set_noise(x, z, &sample);
+                }
+            }
+            let mut terrain = TerrainData::new(TerrainLevels::default());
+            terrain.accept(&noise);
+            let mut chunk =
+                TerrainChunk::new(ChunkPos::new(-1, 2), -64, 128, &blocks, SnowProperties).unwrap();
+            for z in 0..16 {
+                for x in 0..16 {
+                    chunk.set_block_raw(x, 10, z, BlockStateId(2)).unwrap();
+                    chunk.set_block_raw(x, 11, z, BlockStateId(19)).unwrap();
+                }
+            }
+            apply_post(&terrain, &mut chunk, 480, |_| false, |_| false).unwrap();
+            assert_eq!(
+                chunk.block(5, 11, 7),
+                BlockStateId(11 + layers),
+                "{noise_height}"
+            );
+        }
+    }
+
     /// The water oracle's palette: air, void air, stone, water (level 0, 1, 2), oak leaves, kelp plant, sand, cave air.
     const WATER_NAMES: [(&str, Option<&str>); 10] = [
         ("minecraft:air", None),
