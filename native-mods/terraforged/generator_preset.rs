@@ -205,6 +205,7 @@ pub fn continent_settings(levels: TerrainLevels) -> GeneratorSettings {
 
 #[cfg(test)]
 mod tests {
+    use super::super::terraforged_generator_facade::{ColumnBlock, TerraHeightmap};
     use super::*;
     use serde_json::json;
 
@@ -317,7 +318,13 @@ mod tests {
                 );
             }
         }
-        let column = generator.base_column(100, -200).unwrap();
-        assert!(column.min_y > 0 && column.min_y < 480);
+        let column = generator.base_column(100, -200, -64, 384).unwrap();
+        let height = generator
+            .base_height(100, -200, TerraHeightmap::OceanFloorWorldgen)
+            .unwrap();
+        assert_eq!(column.min_y, -64);
+        assert!(height > 0 && height < 320);
+        assert_eq!(column.block(height - 1), Some(ColumnBlock::Stone));
+        assert_ne!(column.block(height), Some(ColumnBlock::Stone));
     }
 }

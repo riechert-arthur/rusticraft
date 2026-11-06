@@ -93,12 +93,20 @@ pub enum ColumnBlock {
     Water,
 }
 
-/// `getBaseColumn`'s `NoiseColumn(minY, states)`. Java passes the terrain height as `minY` while `states[0]` is block
-/// Y 0 (stone from index 0 up to the height, water up to the surface); the port keeps both as Java has them.
+/// A base column in the shape of 26.3's `NoiseColumn(minY, states)`: `states[i]` is block Y `min_y + i`, and every
+/// block above the states is air. See [`TerraForgedGenerator::base_column`] for how it departs from Java's.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BaseColumn {
     pub min_y: i32,
     pub states: Vec<ColumnBlock>,
+}
+
+impl BaseColumn {
+    /// `NoiseColumn.getBlock(y)`: the state at block Y `y`, `None` (air) outside the states.
+    pub fn block(&self, y: i32) -> Option<ColumnBlock> {
+        let index = usize::try_from(i64::from(y) - i64::from(self.min_y)).ok()?;
+        self.states.get(index).copied()
+    }
 }
 
 /// The queries Minecraft's `ChunkGenerator` asks Reimagined's `Generator` (6dd607eb's for [`Self::base_height`]), over
@@ -389,22 +397,37 @@ impl TerraForgedGenerator {
         ))
     }
 
-    /// `getBaseColumn(x, z, ..)` at block `(x, z)` with the captured seed, from the same two reads as
-    /// [`Self::base_height`]: the un-eroded base level and the ERODED height. Reimagined and 6dd607eb both read the
-    /// raw height here; the port extends Reimagined's `getBaseHeight` fix to the column so the structures placed by
-    /// column (ruined portals, nether fossils, land checks) and those placed by height see one ground, the one the
-    /// chunk is filled to. The column keeps Java's shape: `min_y` is the height itself (Java's `new
-    /// NoiseColumn(height, states)`), so the states start at the height, not at the bottom of the world.
+    /// `getBaseColumn(x, z, ..)` at block `(x, z)` with the captured seed, for a level of `level_height` blocks from
+    /// `level_min_y`, from the same two reads as [`Self::base_height`]: the un-eroded base level and the ERODED
+    /// height. The column is the ground the chunk is filled to ([`Self::fill_from_noise`]): stone from the level's
+    /// bottom up to the height, water above it up to the surface (the higher of the height and the base level), air
+    /// above, all clipped to the level as the fill clips the terrain (a column above the top is cut flat at
+    /// `top - 1`). So structures placed by column (ruined portals, nether fossils, land checks) and by height
+    /// ([`Self::base_height`], one block above the same ground) stand on the filled terrain.
     ///
-    /// `Err` as [`Self::base_height`]. Panics where Java throws: a negative surface (`NegativeArraySizeException`) or
-    /// height (`IllegalArgumentException` from `Arrays.fill`). Java allocates a surface-long array, so a surface near
-    /// 2^31 fails with `OutOfMemoryError` there; the port allocates it.
-    pub fn base_column(&self, x: i32, z: i32) -> Result<BaseColumn, &'static str> {
+    /// This departs from both trees, by Arthur's decision (#211): Reimagined and 6dd607eb read the raw height here,
+    /// and both build `new NoiseColumn(height, states)` with stone in `states[0..height]` and water up to the surface,
+    /// so the column starts at the height instead of the bottom of the world: its stone runs from the height up to
+    /// about twice the height and column-placed structures float. The port keeps their heights (the eroded one, as
+    /// Reimagined's `getBaseHeight`) and gives the column 26.3's `NoiseColumn` shape, as vanilla's
+    /// `NoiseBasedChunkGenerator.getBaseColumn` builds it from the level's minimum Y. There is no Java failure left
+    /// to mirror (Java throws on a negative height or surface; the port's column is empty below the level).
+    ///
+    /// `Err` as [`Self::base_height`].
+    pub fn base_column(
+        &self,
+        x: i32,
+        z: i32,
+        level_min_y: i32,
+        level_height: i32,
+    ) -> Result<BaseColumn, &'static str> {
         let (base_noise, height_noise) = self.base_noises(x, z)?;
         Ok(base_column_from_noise(
             self.levels,
             base_noise,
             height_noise,
+            level_min_y,
+            level_height,
         ))
     }
 
@@ -446,20 +469,30 @@ fn base_height_from_noise(
     }
 }
 
-fn base_column_from_noise(levels: TerrainLevels, base_noise: f32, height_noise: f32) -> BaseColumn {
+/// `getBaseColumn`'s two heights: the terrain height (the top stone block) and the surface, the higher of the height
+/// and the base (water) level (the top water block).
+fn column_heights(levels: TerrainLevels, base_noise: f32, height_noise: f32) -> (i32, i32) {
     let base = levels.height(levels.scaled_base_level(base_noise));
     let height = levels.height(levels.scaled_height(height_noise));
-    let surface = base.max(height);
-    let length = usize::try_from(surface)
-        .expect("Generator.getBaseColumn: negative surface (Java: NegativeArraySizeException)");
-    let stone = usize::try_from(height)
-        .expect("Generator.getBaseColumn: negative height (Java: IllegalArgumentException)");
+    (height, base.max(height))
+}
+
+/// [`TerraForgedGenerator::base_column`] from the two noises: stone up to the height and water up to the surface,
+/// from `min_y`, clipped below `min_y + level_height` (in `i64`, so no level bound wraps).
+fn base_column_from_noise(
+    levels: TerrainLevels,
+    base_noise: f32,
+    height_noise: f32,
+    min_y: i32,
+    level_height: i32,
+) -> BaseColumn {
+    let (height, surface) = column_heights(levels, base_noise, height_noise);
+    let top = i64::from(min_y) + i64::from(level_height.max(0)) - 1;
+    let count = |to: i32| (i64::from(to).min(top) - i64::from(min_y) + 1).max(0) as usize;
+    let (stone, length) = (count(height), count(surface));
     let mut states = vec![ColumnBlock::Stone; length];
     states[stone..].fill(ColumnBlock::Water);
-    BaseColumn {
-        min_y: height,
-        states,
-    }
+    BaseColumn { min_y, states }
 }
 
 #[cfg(test)]
@@ -536,30 +569,42 @@ mod tests {
         )
     }
 
-    /// The oracle's `<column>`: the column, the panic where Java throws, or `skip` past 2^20 blocks.
+    /// The oracle's `<column>` from the port's [`column_heights`]: Java's `NoiseColumn(height, states)` (`minY`,
+    /// length, stone and water counts: stone in `states[0..height]`, water up to the surface), the exception Java
+    /// throws, or `skip` past 2^20 blocks. The port's own column keeps these heights in 26.3's shape
+    /// ([`java_column_line`] reads them back from it).
     fn column(levels: TerrainLevels, base_noise: f32, height_noise: f32) -> String {
-        let base = levels.height(levels.scaled_base_level(base_noise));
-        let height = levels.height(levels.scaled_height(height_noise));
-        if base.max(height) > 1 << 20 {
-            return "skip".into();
+        let (height, surface) = column_heights(levels, base_noise, height_noise);
+        if surface > 1 << 20 {
+            "skip".into()
+        } else if surface < 0 {
+            "throw NegativeArraySizeException".into()
+        } else if height < 0 {
+            "throw IllegalArgumentException".into()
+        } else {
+            format!("{height} {surface} {height} {}", surface - height)
         }
-        match catch_unwind(|| base_column_from_noise(levels, base_noise, height_noise)) {
-            Ok(c) => {
-                let stone = c
-                    .states
-                    .iter()
-                    .filter(|s| **s == ColumnBlock::Stone)
-                    .count();
-                format!(
-                    "{} {} {stone} {}",
-                    c.min_y,
-                    c.states.len(),
-                    c.states.len() - stone
-                )
-            }
-            Err(_) if base.max(height) < 0 => "throw NegativeArraySizeException".into(),
-            Err(_) => "throw IllegalArgumentException".into(),
-        }
+    }
+
+    /// The `<column>` Java's quirky column would print for the heights the port's `column` holds (its top stone and
+    /// top water blocks), when the column starts at the bottom of a level holding both and no water lies below the
+    /// stone: the same height and surface.
+    fn java_column_line(column: &BaseColumn) -> String {
+        assert!(column.block(column.min_y - 1).is_none());
+        let top = |kind| {
+            (column.states.iter())
+                .rposition(|s| *s == kind)
+                .map(|i| column.min_y + i as i32)
+        };
+        let height = top(ColumnBlock::Stone).expect("a column with stone");
+        let surface = top(ColumnBlock::Water).unwrap_or(height);
+        assert!(
+            column.states[..=(height - column.min_y) as usize]
+                .iter()
+                .all(|s| *s == ColumnBlock::Stone)
+        );
+        assert_eq!(column.states.len() as i32, surface - column.min_y + 1);
+        format!("{height} {surface} {height} {}", surface - height)
     }
 
     const NOISE: [f32; 18] = [
@@ -735,8 +780,10 @@ m 2 324 650bb712eb81e13c
     /// are `../out.txt`'s: TerraForged Reimagined's `getBaseHeight`/`getBaseColumn` over its real
     /// `ErodedNoiseGenerator.getNoiseSample` and `erodedHeightNoise`. Columns: case, x, z, base, raw-height and
     /// eroded-height bits, surface and ocean-floor heights (from the eroded height), Reimagined's `<column>` (from
-    /// the raw height). Each `c` line is the same query's column from the eroded height (`baseColumn(base, eroded)`),
-    /// which is the port's `base_column`. 6dd607eb's `getBaseHeight` reads the raw height instead
+    /// the raw height). Each `c` line is the same query's column from the eroded height (`baseColumn(base, eroded)`)
+    /// in Java's shape (`minY` = the height); the port's `base_column` holds the same height and surface in 26.3's
+    /// `NoiseColumn` shape (Arthur's decision for #211), and the test prints its line back in Java's form
+    /// (`java_column_line`). 6dd607eb's `getBaseHeight` reads the raw height instead
     /// (`oracles/generator_facade/6dd607eb/`); the port follows Reimagined (Arthur's decision for #210).
     const JAVA_QUERIES: &str = "\
 q 0 0 0 3df5fc22 3e339f1c 3e7e455f 120 120 84 84 84 0
@@ -804,9 +851,11 @@ c 3 -770 1240 133 133 133 0
                         sample.height_noise,
                         TerraHeightmap::OceanFloor,
                     );
+                // A level taller than any of these columns, so nothing is clipped.
+                let base_column = g.base_column(x, z, -64, 2048).unwrap();
                 assert_eq!(
-                    g.base_column(x, z).unwrap(),
-                    base_column_from_noise(g.levels(), sample.base_noise, eroded)
+                    base_column,
+                    base_column_from_noise(g.levels(), sample.base_noise, eroded, -64, 2048)
                 );
                 out.push(format!(
                     "q {case} {x} {z} {} {} {} {surface} {ocean} {}",
@@ -817,7 +866,7 @@ c 3 -770 1240 133 133 133 0
                 ));
                 out.push(format!(
                     "c {case} {x} {z} {}",
-                    column(g.levels(), sample.base_noise, eroded)
+                    java_column_line(&base_column)
                 ));
             }
         }
@@ -830,7 +879,8 @@ c 3 -770 1240 133 133 133 0
 
     /// Reimagined's fix for floating structures: away from structures and inside the build range, `base_height`
     /// names the block above the ground the chunk is filled to (ocean floor: the stone top; surface: the water or
-    /// stone top), and `base_column` holds stone from that height, so structures stand on the filled terrain.
+    /// stone top), and `base_column` is that ground block for block (stone from the level's bottom to the height,
+    /// water to the surface, air above), so structures stand on the filled terrain.
     #[test]
     fn base_queries_stand_on_the_filled_ground() {
         let g = facade(0, 0, 0, 25, 0);
@@ -861,9 +911,20 @@ c 3 -770 1240 133 133 133 0
                         .base_height(wx, wz, TerraHeightmap::WorldSurfaceWorldgen)
                         .unwrap();
                     assert_eq!((floor, surface), (height + 1, top + 1), "{pos:?} {x} {z}");
-                    let column = g.base_column(wx, wz).unwrap();
-                    assert_eq!(column.min_y, height);
-                    assert_eq!(column.states.len() as i32, top);
+                    // The column is the filled chunk's: stone from the bottom to the height, water to the
+                    // surface, air above (not Java's column, which starts at the height).
+                    let column = g.base_column(wx, wz, -64, 544).unwrap();
+                    assert_eq!(column.min_y, -64);
+                    assert_eq!(column.states.len() as i32, top + 65);
+                    for y in -65..481 {
+                        let expected = match chunk.block(x, y, z) {
+                            _ if y < -64 || y >= 480 => None,
+                            STONE => Some(ColumnBlock::Stone),
+                            WATER => Some(ColumnBlock::Water),
+                            _ => None,
+                        };
+                        assert_eq!(column.block(y), expected, "{pos:?} {x} {y} {z}");
+                    }
                 }
             }
             drop(data);
@@ -958,15 +1019,48 @@ c 3 -770 1240 133 133 133 0
         for kind in [TerraHeightmap::WorldSurface, TerraHeightmap::OceanFloor] {
             assert!(g.base_height(3, -4, kind).is_err());
         }
-        assert!(g.base_column(3, -4).is_err());
+        assert!(g.base_column(3, -4, -64, 384).is_err());
     }
 
-    /// Negative heights panic where Java's `getBaseColumn` throws.
+    /// Every column, for every query-math noise pair (negative, huge, infinite and NaN heights, where Java's column
+    /// throws or allocates billions of states) and several build ranges: stone from the level's bottom to the height,
+    /// water to the surface, air above and outside the level.
     #[test]
-    fn negative_columns_panic() {
-        let l = levels(0);
-        assert!(catch_unwind(AssertUnwindSafe(|| base_column_from_noise(l, -1.0, -1.0))).is_err());
-        assert!(catch_unwind(AssertUnwindSafe(|| base_column_from_noise(l, 0.25, -0.5))).is_err());
+    fn columns_are_the_ground_clipped_to_the_level() {
+        for variant in 0..3 {
+            let l = levels(variant);
+            for b in NOISE {
+                for n in NOISE {
+                    let (height, surface) = column_heights(l, b, n);
+                    for (min_y, level_height) in [
+                        (-64, 384),
+                        (0, 64),
+                        (100, 10),
+                        (-64, 0),
+                        (i32::MIN, 3),
+                        (i32::MAX - 1, 5),
+                    ] {
+                        let column = base_column_from_noise(l, b, n, min_y, level_height);
+                        assert_eq!(column.min_y, min_y);
+                        let top = i64::from(min_y) + i64::from(level_height);
+                        for y in i64::from(min_y) - 2..top + 2 {
+                            let Ok(y) = i32::try_from(y) else { continue };
+                            let expected = if i64::from(y) < i64::from(min_y) || i64::from(y) >= top
+                            {
+                                None
+                            } else if y <= height {
+                                Some(ColumnBlock::Stone)
+                            } else if y <= surface {
+                                Some(ColumnBlock::Water)
+                            } else {
+                                None
+                            };
+                            assert_eq!(column.block(y), expected, "{variant} {b} {n} {min_y} {y}");
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// The stage fills the chunk at its own position from the cache entry of the captured seed (`Seeds.get`, not the

@@ -2108,18 +2108,24 @@ chunk is filled to), the surface heightmaps returning the higher plus one, the o
 That is Reimagined's fix for floating structures; TerraForged 6dd607eb reads the raw sample's height there, so its
 structures float or sink wherever erosion moved the ground. `getBaseColumn` reads the raw height in both trees; the
 port reads the eroded one there too (a departure from both), so structures placed by column (ruined portals, nether
-fossils, land checks) and by height see the same ground, the filled one. As in Java, the column reports the height as its
-`minY` (`new NoiseColumn(height, states)`), so its states start at the height, not at the bottom of the world.
-A sample that fails (a custom module has no seed-first form) is an `Err` the caller gets, never a
-made-up height; a negative column height panics where Java throws. `GeneratorQueryOracle.java`
+fossils, land checks) and by height see the same ground, the filled one. Both trees also build the column as
+`new NoiseColumn(height, states)` with stone in `states[0..height]`, so it starts at the height instead of the bottom of
+the world: its stone runs from the height up to about twice the height, and column-placed structures float. The port
+departs from both there too (Arthur's decision for #211): `base_column(x, z, level_min_y, level_height)` has 26.3's
+`NoiseColumn` shape, as vanilla's `NoiseBasedChunkGenerator.getBaseColumn` builds it: stone from the level's bottom up
+to the eroded height, water above it up to the surface (the higher of the height and the base level), air above, all
+clipped to the level as the fill clips the terrain, so it is exactly the filled ground. A sample that fails (a custom
+module has no seed-first form) is an `Err` the caller gets, never a made-up height; Java's throws on negative column
+heights have no counterpart (the column is simply empty below the level). `GeneratorQueryOracle.java`
 (`.local/terraforged/oracles/generator_facade/`, `run.sh`, after `oracles/erosion_region/e2e/run.sh`) runs the query
 bodies (copied, since `Generator` needs Minecraft's `ChunkGenerator`) on Reimagined's own `TerrainLevels`,
 `NoiseLevels` and `ErodedNoiseGenerator` over the newer source's `NoiseGenerator`, interpreted and JIT-compiled alike:
 the query math over signed zeros, subnormals, huge values, infinities and NaN for three level sets, `Seeds.get`, and
 thirteen end-to-end positions (four seeds, negative blocks, `int` limits, the world border); the tests match them bit
 for bit in debug and release. `oracles/generator_facade/eroded_column/` (`run.sh`, after `../run.sh`) reruns the
-end-to-end positions and adds each one's column from the eroded height (the port's `base_column`). A test fills chunks
-and checks that both queries name the filled ground in every column. 6dd607eb's raw-height queries stay checkable with
+end-to-end positions and adds each one's column from the eroded height, in Java's shape; the test reads the same height
+and surface back from the port's `base_column`. A test fills chunks and checks that both queries name the filled ground
+in every column, the column block for block; another checks the column's clipping over the query-math noises. 6dd607eb's raw-height queries stay checkable with
 `oracles/generator_facade/6dd607eb/` (`extract.py` copies its `getBaseHeight` and `getBaseColumn` verbatim); the query
 math and `Seeds.get` lines equal Reimagined's.
 
@@ -2687,8 +2693,7 @@ mapped onto 26.3's build range: the fill clips terrain to the chunk (cut flat at
 seldom reach), and the preliminary surface heights are clipped the same way. The preliminary heights hold per 4x4
 column cell, as the cache stores them; 26.3's surface context reads one value per column. `getBaseHeight` is clipped
 the same way (to the level's `min_y ..= min_y + height`, where the clipped fill's heightmaps end), so a structure is
-placed where the filled chunk has its ground; the column needs no clipping, as the structure code reads it only inside
-the noise range. A test generates a chunk
+placed where the filled chunk has its ground; `getBaseColumn` is clipped to the same range, from the level's bottom. A test generates a chunk
 twice in one world and once in a second world, checks the blocks and biomes are equal, the blocks differ from the
 normal overworld, and every quart's biome is `getNoiseBiome`'s except where a noise cave carved it.
 
