@@ -1278,7 +1278,8 @@ their occupancy with its own seed (the parameter shadows the field). At seed 0 t
 seedless results wherever seed-first and seedless sampling agree (not at zero or infinite source ranges, see the
 seed-first sources), and the distributor's seedless sample is the jar's (its own seed for both).
 `SeededCaveNoiseOracle.java` (`.local/terraforged/oracles/noise_cave_seeded/`) runs 6dd607eb's own classes on Noise2D
-2cb4843: the 8 distributors and 6 caves below at 8 runtime seeds (caves also after `withSeed`), and both modifiers
+2cb4843: the 8 distributors and 6 caves below at 8 runtime seeds (caves also after 6dd607eb's `withSeed`, which
+reseeds these graphs as the jar's does), and both modifiers
 over a 20,000-point scan; the test matches it bit for bit, in debug and release. `unique_cave_noise`
 and `cave_breach_noise` are 6dd607eb's `NoiseCaveGenerator.createUniqueNoise(500, 0.05)` and
 `createBreachNoise(300, 0.7)`, with fixed seeds; the jar derives them from the context seed instead.
@@ -1533,7 +1534,7 @@ range`), so a zero range (0 octaves) or an infinite one (a huge gain) gives 1 in
 path uses that `map` (`map_current`), and `Source::value`/`value_seeded` keep the jar's. Reseeding (`Module::with_seed`,
 above) stays the jar's mechanism: a reseeded source gives the seed-first bits for the same seed where the two maps
 agree, except for Perlin and Perlin2 (reseeding changes their seed; seed-first sampling does not). The eight octave sources,
-the scalar graph nodes, the domain warps, the five selectors, `Cache`, `Terrace`, `LegacyTerrace`, `AdvancedTerrace`, the curves, `Steps`/`Freq`/`Grad`/`Modulate`, `Boost`, the cell, cell-edge and sine sources, `Line` and Engine's erosion `Ridge` (below) are seed-first; only custom modules are not (their closure has no seed parameter). `SeedFirstOracle.java` and `JarSeedOracle.java`
+the scalar graph nodes, the domain warps, the five selectors, `Cache`, `Terrace`, `LegacyTerrace`, `AdvancedTerrace`, the curves, `Steps`/`Freq`/`Grad`/`Modulate`, `Boost`, the cell, cell-edge and sine sources, `Line` and Engine's erosion `Ridge` (below) are seed-first; only custom modules are not (their closure has no seed parameter), unless built with `Module::seeded_custom` (the cave distributor). `SeedFirstOracle.java` and `JarSeedOracle.java`
 (`.local/terraforged/oracles/seed_first/`, outside Git; `run.sh` compiles Noise2D 2cb4843 from source) fold every
 kind over seven configs (0 octaves, negative gain and lacunarity, an infinite range), five config seeds, eight runtime
 seeds (both `int` extremes) and ten points (NaN, infinity, -0); the tests match both tables bit for bit in debug and
@@ -1756,7 +1757,7 @@ one ulp beside and past 0 and 1 on and off the segment, NaN, ±inf, ±0, `Float.
 the same `run-graphs.sh`; the tests match both bit for bit in debug and release.
 
 Engine's erosion `Ridge` (`Valley`, `ErosionRidge::wrap`) is seed-first too, and with it every node but custom modules
-(a custom module's closure has no seed parameter, so it still returns an error). There is no Java reference for this
+(a custom module's closure has no seed parameter, so it still returns an error, unless it is a `Module::seeded_custom`). There is no Java reference for this
 one: Engine 0.3.0's `Ridge.Noise` implements only the jar's `getValue(x, y)` (on the 2cb4843 classes it fails at run time),
 and no seed-first Engine is public. The port follows Noise2D 2cb4843's convention for seeded nodes: the
 cell lattice (`NoiseUtil.cell`) uses the ridge's own seed plus the call's seed (`int` wrap), and the source is read
