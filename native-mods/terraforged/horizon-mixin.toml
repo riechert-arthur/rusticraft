@@ -425,3 +425,10 @@ file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_structure_terrain"
 source = "structure_terrain.rs"
 visibility = "pub"
+
+[[module]]
+id = "surface"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_surface"
+source = "surface.rs"
+visibility = "pub"
