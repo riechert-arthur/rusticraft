@@ -22,7 +22,8 @@
  * SOFTWARE.
  */
 
-// Ported from TerraForged 6dd607eb (https://github.com/TerraForged/TerraForged, 6dd607ebfd41a3b7274e090b1f2cf565d53d1d44):
+// Ported from TerraForged 6dd607eb
+// (https://github.com/TerraForged/TerraForged/tree/6dd607ebfd41a3b7274e090b1f2cf565d53d1d44):
 // `src/main/java/com/terraforged/mod/worldgen/noise/climate/ClimateNoise.java`, over Engine 0.3.0's `Seed` and
 // `ClimateSettings` and the climate settings of `NoiseGenerator.createContinentNoise`. MIT License, Copyright (c) 2021
 // TerraForged (above).

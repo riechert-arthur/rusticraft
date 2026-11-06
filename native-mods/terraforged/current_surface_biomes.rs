@@ -36,8 +36,9 @@ use super::{
 use std::sync::Arc;
 
 /// 6dd607eb's `BiomeSampler` as `Source.compute` uses it: the surface biome of a block column. It joins the
-/// climate sample ([`CurrentBiomeSampler`], with 6dd607eb's climate noise), the climate type's pool ([`initial_biome`]) and the surface override ([`biome_override`], which wins). It reads no
-/// height noise. Not ported: `Source`'s per-column cache.
+/// climate sample ([`CurrentBiomeSampler`], with 6dd607eb's climate noise), the climate type's pool
+/// ([`initial_biome`]) and the surface override ([`biome_override`], which wins). It reads no height noise. Not
+/// ported: `Source`'s per-column cache.
 pub struct CurrentSurfaceBiomeSampler<'a, T> {
     climate: CurrentBiomeSampler<'a>,
     noise: &'a NoiseGenerator,

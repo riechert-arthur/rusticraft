@@ -1223,8 +1223,9 @@ f 3 -1875000 1874999 128 64 3bed1c90e336aeb8 same
     /// `../noise_generator/run.sh`): `../run.sh`'s half A records what `sampleBiome` reads at every quart column of
     /// [`CHUNKS`] from 6dd607eb's real `Sampler` and the newer source's `NoiseGenerator`; `6dd607eb/run.sh` runs
     /// TerraForged 6dd607eb's `ChunkUtil.fillNoiseBiomes` and `Source` members (verbatim) with its real `BiomeBuffer2D`
-    /// over 6dd607eb's real `BiomeSampler`, `IBiomeSampler.Sampler` and `ClimateNoise` (from `../../climate_noise`'s
-    /// Engine 0.3.0 class path) on that record, into a stub of 1.19's chunk sections, interpreted and with `-Xcomp`. Per levels variant, terrain set and configuration `k`
+    /// over 6dd607eb's real `BiomeSampler`, `IBiomeSampler.Sampler` and `ClimateNoise` (on the Engine 0.3.0 class
+    /// path of `.local/terraforged/oracles/climate_noise/`) on that record, into a stub of 1.19's chunk sections,
+    /// interpreted and with `-Xcomp`. Per levels variant, terrain set and configuration `k`
     /// (`current_surface_biomes`' pools): the chunk count and a fold of every cell's biome name of every
     /// chunk in each of [`RANGES`], over the six runtime seeds (level seeds `0x5eed << 32 | seed`); then every name's
     /// cell count. The chunks go through [`fill_biomes`] at the captured seed: `create_biomes` without its hint, which
