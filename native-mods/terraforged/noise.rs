@@ -4167,6 +4167,29 @@ mod tests {
         assert_eq!((count, acc), (9216, 0x79cb_944a));
     }
 
+    #[test]
+    fn seeded_custom_modules_sample_with_the_call_seed() {
+        let custom = Module::seeded_custom(0.0, 1.0, |x, _| x, |seed, x, _| seed as f32 + x);
+        assert_eq!(custom.value(0.5, 0.0), 0.5);
+        assert_eq!(custom.try_value_seed_first(7, 0.5, 0.0), Ok(7.5));
+        // The runtime seed passes through the graph unchanged, and a cache hit needs the same seed.
+        let cached = custom
+            .clone()
+            .clamp(Module::constant(-10.0), Module::constant(10.0))
+            .cache();
+        assert_eq!(cached.try_value_seed_first(3, 0.25, 0.0), Ok(3.25));
+        assert_eq!(cached.try_value_seed_first(4, 0.25, 0.0), Ok(4.25));
+        assert_eq!(cached.try_value_seed_first(3, 0.25, 0.0), Ok(3.25));
+        assert_eq!(cached.value(0.25, 0.0), 0.25);
+        assert_eq!((custom.min_value(), custom.max_value()), (0.0, 1.0));
+    }
+
+    #[test]
+    #[should_panic(expected = "no spec registered for a custom module")]
+    fn seeded_custom_modules_cannot_be_reseeded() {
+        Module::seeded_custom(0.0, 1.0, |_, _| 0.0, |_, _, _| 0.0).with_seed(1);
+    }
+
     /// A node `try_value_seed_first` rejects: a custom module (a Java class implementing `Module`) built without a
     /// seed-first sample, which has no seed parameter to pass the runtime seed to.
     fn unsupported_seeded_node(value: f32) -> Module {
