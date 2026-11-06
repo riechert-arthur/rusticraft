@@ -246,13 +246,6 @@ impl BiomeType {
         Self::get_curve(temperature, moisture)
     }
 
-    /// TerraForged Reimagined a24d450's `BiomeType.get` (`getCurve`): Engine's curved lookup on the same table, but
-    /// with each index clamped to `0..=255` (`getType`), where Engine's throws and [`Self::at_climate`] panics.
-    pub fn at_climate_clamped(temperature: f32, moisture: f32) -> Self {
-        let (x, y) = curve_index(temperature, moisture);
-        type_at(x.clamp(0, 255), y.clamp(0, 255))
-    }
-
     /// `getLinear`. Panics where Engine throws `ArrayIndexOutOfBoundsException`: a temperature or
     /// moisture index outside 0..=255.
     pub fn get_linear(temperature: f32, moisture: f32) -> Self {

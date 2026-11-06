@@ -2366,49 +2366,51 @@ mountain-usage roll, slope gate and snow check are not followed. Where Java's `g
 last band, NaN, or a pool whose weights are all zero) it gives `None`; Java hands that null on as the sampled biome
 unless `getBiomeOverride` (below) replaces it, and fails later on it.
 
-The current climate noise (`CurrentClimateNoise`, `current_climate.rs`) ports TerraForged Reimagined a24d450's
-`ClimateNoise` (MIT, as above), the climate sampler of the newer biome sampler; 6dd607eb's has no biome-edge warp and
-no macro noise grouping. It is separate from Engine's `ClimateModule` (the jar's climate stage: continent mask, macro
-cell noise, a 3x3 search), but reuses its `Moisture` and `Temperature` (their newer seed-first forms, with Noise2D
-2cb4843's `NoiseUtil.map`), the climate settings and the warp builder. The constructor takes Reimagined's own Engine
-`Seed`, whose `next()` pre-increments (Engine 0.3.0's post-increments): the module seed, the moisture noise and two
-warps from the moisture offset, two temperature warps from the temperature offset, then the two biome-warp seeds. A
-sample warps the point by the biome warp (simplex2, 3 octaves, strength `biomeWarpStrength * 0.75`), then, for an
-edge strength above 0, by the edge warp (`biomeEdgeShape`, seeded from the module seed + 7919 and + 104729); finds
-the nearest and second-nearest of the 4x4 jittered square cells around it (jitter 0.8); takes `biomeNoise` from that
-cell's hash (or, with `macroNoiseSize` above 0, from the hash of its `floorDiv` macro cell), `biomeEdgeNoise = 1 -
-sqrt(d1 / d2)`, and moisture and temperature at the cell's point; and then the climate type, with Java's temporary
-cold steppe and steppe to grassland swap. Every noise gets the runtime seed. `ClimateSettings::terra_defaults()` are
-Reimagined's `TerraSettings.Climate` defaults (biome size 220, macro noise off, edge strength 24), not Engine's.
-Reimagined's `BiomeType` reads a baked table (equal to Engine's over the test grid) and clamps its indices where
-Engine's throws (`BiomeType::at_climate_clamped`): NaN climate bounds let moisture and temperature leave 0..1.
+The current climate noise (`CurrentClimateNoise`, `current_climate.rs`) ports TerraForged 6dd607eb's `ClimateNoise`
+(MIT), the climate sampler of the newer biome sampler. It is separate from Engine's `ClimateModule` (the jar's climate
+stage: continent mask, macro cell noise, a 3x3 search), but reuses its `Moisture` and `Temperature` (their seed-first
+forms, with Noise2D 2cb4843's `NoiseUtil.map`), the climate settings (with `RangeValue`'s clamped bounds) and the warp
+builder. The constructor draws from Engine 0.3.0's `Seed`, whose `next()` returns `seed++`: the module seed (never
+read), the moisture noise and two warps from the moisture offset seed, two temperature warps from the temperature
+offset seed (both `new Seed(root + offset)`), then the two biome-warp seeds, so a seed at `s` ends at `s + 3`. A sample
+warps the point by the biome warp (simplex2, 3 octaves, strength `biomeWarpStrength * 0.75`); finds the nearest and
+second-nearest of the 4x4 jittered square cells around it (jitter 0.8); takes `biomeNoise` from that cell's hash,
+`biomeEdgeNoise = 1 - sqrt(d1 / d2)`, and moisture and temperature at the cell's point; and then the climate type
+from Engine's `BiomeType.get`, with Java's temporary cold steppe and steppe to grassland swap. Every noise gets the
+runtime seed. `macroNoiseSize` and `biomeEdgeShape` are not read. `ClimateSettings::terraforged()` is the climate of
+`NoiseGenerator.createContinentNoise`: Engine's defaults (temperature scale 6, moisture scale 6 with seed offset 0)
+with biome size 220, falloffs 2 and 1 and biases 0.1 and -0.05. Engine's `BiomeType.get` throws for an index outside
+0..255, and the port panics there; only NaN climate bounds get a value out of 0..1.
+TerraForged Reimagined a24d450's `ClimateNoise` (an extra biome-edge warp, macro-cell grouping, a pre-increment `Seed`,
+its `TerraSettings.Climate` defaults and a `BiomeType` that clamps its indices) is not followed: the port used it until
+#204.
 
-`CurrentClimateOracle.java` (`.local/terraforged/oracles/current_climate/`, `run.sh`) compiles Reimagined's own
-`ClimateNoise` with its Engine `Seed`, `Settings`, `Moisture`, `Temperature`, `BiomeType` (and `biome_types.bin`) and
-vendored Noise2D from source, with one stub (the asset `TerrainType`), interpreted and with `-Xcomp`: 13 settings
-variants (TerraSettings' defaults, macro sizes 0 to 20, edge strengths 0 to 500 over all eight edge noise types,
-`int`-edge root seeds and seed offsets, swapped, out-of-range, narrow and NaN climate ranges, falloffs 0 to 10) with up to
-seven seed draws before the constructor, each sampled at 8 runtime seeds and 181 positions (zeros of both signs,
-fractions, 2^24, 1e10, infinities, NaN, subnormals and a signed grid): the seed draws and a fold of every sample's
-bits match, as does `BiomeType.get` over a 1025x1025 grid from -0.5 to 1.5, in debug and release builds.
+`ClimateNoiseOracle.java` (`.local/terraforged/oracles/climate_noise/`, `run.sh`) compiles 6dd607eb's own
+`ClimateNoise`, `ClimateSample`, `NoiseSample`, `MathUtil` and `CellShape` from source over Engine 0.3.0, Noise2D 2cb4843
+and Engine's seed-first `Moisture` and `Temperature` (its `cp.sh` class path is shared by the biome oracles below),
+interpreted and with `-Xcomp`: `createContinentNoise`'s settings with and without the continent's four seed draws,
+Engine's plain defaults, and 13 settings variants (macro sizes and edge warps set to show they are ignored, `int`-edge
+root seeds and seed offsets, swapped, out-of-range, narrow and NaN climate ranges, falloffs 0 to 10) with up to seven
+seed draws before the constructor, each sampled at 8 runtime seeds and 181 positions (zeros of both signs, fractions,
+2^24, 1e10, infinities, NaN, subnormals and a signed grid): the seed draws, the samples that throw (1,050 of the NaN
+variant) and a fold of every sample's bits match, as does `BiomeType.get` over 0..1; so do the samples of four
+degenerate biome sizes (0, whose infinite frequency gives NaN moisture of either sign, -1, -220 and 1), in debug and
+release builds.
 
-The biome sampler bridge (`CurrentBiomeSampler`, `current_biome_sampler.rs`) ports `IBiomeSampler.Sampler` (the same
-in TerraForged Reimagined a24d450 and 6dd607eb; MIT, as above): it scales block coordinates by the noise levels'
+The biome sampler bridge (`CurrentBiomeSampler`, `current_biome_sampler.rs`) ports TerraForged 6dd607eb's
+`IBiomeSampler.Sampler` (MIT; Reimagined a24d450's is the same): it scales block coordinates by the noise levels'
 frequency and fills a fresh climate sample from the continent noise, its rivers and then the current climate noise,
 all at the runtime seed; `getShape` and `sample` run the climate alone (`sample` keeps the caller's terrain fields).
-The climate is built from the continent's context, so it draws its seeds after the continent's four. The two layers
-count seeds differently: the continent noise is 6dd607eb's (Engine 0.3.0's post-increment `Seed`, root `s` gives
-`s..s+3`), the climate Reimagined's (pre-increment). Both leave the seed at `s + 4`, so the climate gets Reimagined's
-seeds, while Reimagined's own continent would draw `s+1..s+4`: the composed sampler matches 6dd607eb's continent and
-Reimagined's climate, not either tree as a whole. Java draws the climate's seeds from the context it shares with the
+The climate is built from the continent's context, so it draws its seeds after the continent's four. Both count
+with Engine 0.3.0's post-increment `Seed`: root `s` gives the continent `s..s+3` and the climate `s+4..s+6`, as
+6dd607eb does. Java draws the climate's seeds from the context it shares with the
 continent; here they come from a copy in the same state, so a second sampler over one generator gets the same climate
-(TerraForged builds one per world). Nothing calls it yet: composing the biome choice on top of it, and filling chunks
-with it, are later layers. `.local/terraforged/oracles/current_biome_sampler/` (`run.sh`) runs the real `Sampler` in
-two halves, since the two trees' Engine classes can't share a JVM: 6dd607eb's over the newer source's real
-`NoiseGenerator` for the terrain fields, and Reimagined's with its own `ClimateNoise`, `Seed` and settings (a stand-in
-continent drawing the continent's four seeds) for the climate fields, `getShape`, `sample` and the seed draws; three
-levels variants, two terrain sets, six runtime seeds and 202 block positions (`int` edges and a signed grid) match
-bit for bit in debug and release builds.
+(TerraForged builds one per world). The surface biome sampler and the chunk biome hook (below) build on it.
+`.local/terraforged/oracles/current_biome_sampler/` (`run.sh`) runs 6dd607eb's real `Sampler` and `ClimateNoise`
+over the newer source's real `NoiseGenerator` in one JVM (until #204 the climate half ran Reimagined's): the terrain
+and climate fields, `getShape`, `sample` and the context seed's next draw after the sampler; three levels variants,
+two terrain sets, six runtime seeds and 202 block positions (`int` edges and a signed grid) match bit for bit in debug
+and release builds.
 The current surface override is 6dd607eb's `getBiomeOverride`, the same `biome_override` as the jar's
 (`biome_sampler.rs`): its `beachSize` is 0.005 (`BEACH_SIZE`), so the beach band is continent noise in (0.5, 0.505]
 (`BEACH + beachSize` folds to the float 0.505f, the same `<=` in `float`), and (0.505, 0.55] keeps the input biome or
@@ -2421,8 +2423,8 @@ floats next to 0.55 and 0.5 + 0.0499 and 0.5 + 0.0501 included), every climate t
 10 river values; the test matches its 52,800 overrides and the beach size's and folded bound's bits, in debug and release.
 
 The surface biome sampler (`CurrentSurfaceBiomeSampler`, `current_surface_biomes.rs`) is TerraForged 6dd607eb's
-`BiomeSampler.sampleBiome` (MIT): the biome sampler bridge's climate sample (whose climate noise is still
-Reimagined's, see above, until it moves to 6dd607eb's), then the initial biome from one pool, then the surface
+`BiomeSampler.sampleBiome` (MIT): the biome sampler bridge's climate sample (6dd607eb's climate noise, above), then
+the initial biome from one pool, then the surface
 override (`biome_override`, with the 0.005 beach band), which wins. It takes block coordinates and the runtime seed and
 reads no height noise. A column whose pool has no biome and no override is an `Err` where Java's `sampleBiome`
 returns null. The pools and the override biomes come from the caller, sharing one `Arc` per biome; `Source`'s
@@ -2430,8 +2432,8 @@ per-column cache is not ported; `create_biomes` (below) fills chunks with it.
 `.local/terraforged/oracles/current_surface_biomes/` (`run.sh`) records, in a 6dd607eb JVM, what `sampleBiome` reads
 from the real `Sampler` and newer-source `NoiseGenerator` (the continent and rivers of 7,272 columns: three levels
 variants, two terrain sets, six runtime seeds, `int`-edge and grid positions), then runs 6dd607eb's real
-`BiomeSampler`, over Reimagined's real `Sampler` and `ClimateNoise` (the port's climate at this layer), on that
-record, interpreted and with `-Xcomp`, for five pool configurations (some climates with empty pools, so plains
+`BiomeSampler`, `Sampler` and `ClimateNoise` (on the climate oracle's Engine 0.3.0 class path; Reimagined's until
+#204), on that record, interpreted and with `-Xcomp`, for five pool configurations (some climates with empty pools, so plains
 appears, or with all-zero weights, so Java returns null and the port an `Err`); any height-noise read fails the run. The test matches every biome name, in debug and release builds.
 
 The chunk biome hook (`TerraForgedGenerator::create_biomes`, `generator_facade.rs`) is TerraForged 6dd607eb's
@@ -2451,8 +2453,8 @@ registry and the registration of the hook are later layers.
 needs `oracles/noise_generator/run.sh`) runs it end to end in two JVMs, as the surface biome oracle does: 6dd607eb's
 real `Sampler` and the newer source's `NoiseGenerator` record what the surface sampler reads at every quart column of
 17 chunks (negative, far and `int`-limit chunks); then 6dd607eb's `fillNoiseBiomes` and `Source` members, copied
-verbatim (its `LossyCache` included), with its real `BiomeBuffer2D` and Reimagined's real `BiomeSampler` (6dd607eb's
-`beachSize` swapped in, as above), fill stub
+verbatim (its `LossyCache` included), with its real `BiomeBuffer2D`, `BiomeSampler`, `Sampler` and `ClimateNoise`
+(Engine 0.3.0, as above), fill stub
 1.19 chunk sections from that record, interpreted and with `-Xcomp`: three levels variants, two terrain sets, six
 runtime seeds (the low halves of level seeds with high bits set), the four pool configurations of the surface biome
 oracle, and six build ranges from `128..192` to `-2032..2032`. The test matches every cell of every section (612

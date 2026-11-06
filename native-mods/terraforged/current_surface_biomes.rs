@@ -36,9 +36,9 @@ use super::{
 use std::sync::Arc;
 
 /// 6dd607eb's `BiomeSampler` as `Source.compute` uses it: the surface biome of a block column. It joins the
-/// climate sample ([`CurrentBiomeSampler`]; its climate noise is still TerraForged Reimagined's until #204), the
-/// climate type's pool ([`initial_biome`]) and the surface override ([`biome_override`], which wins). It reads no
-/// height noise. Not ported: `Source`'s per-column cache.
+/// climate sample ([`CurrentBiomeSampler`], with 6dd607eb's climate noise), the climate type's pool
+/// ([`initial_biome`]) and the surface override ([`biome_override`], which wins). It reads no height noise. Not
+/// ported: `Source`'s per-column cache.
 pub struct CurrentSurfaceBiomeSampler<'a, T> {
     climate: CurrentBiomeSampler<'a>,
     noise: &'a NoiseGenerator,
@@ -177,43 +177,43 @@ pub(crate) mod tests {
     /// `.local/terraforged/oracles/current_surface_biomes/` (`run.sh`, after `../noise_generator/run.sh`): half A
     /// records what `sampleBiome` reads from 6dd607eb's real `Sampler` and newer-source `NoiseGenerator` (the
     /// continent and rivers of each column); half B runs TerraForged 6dd607eb's real `BiomeSampler.sampleBiome`
-    /// over that record, with the climate of the port's [`CurrentBiomeSampler`] at this layer (Reimagined a24d450's
-    /// real `IBiomeSampler.Sampler` and `ClimateNoise` with its pre-increment `Seed`, until #204), interpreted and
-    /// with `-Xcomp`. Per levels variant, terrain set and pool configuration ([`pools`]): the column count and an
+    /// over that record, with 6dd607eb's real `IBiomeSampler.Sampler` and `ClimateNoise` (Engine 0.3.0's
+    /// post-increment `Seed`, `createContinentNoise`'s settings, from `../climate_noise`), interpreted and with
+    /// `-Xcomp`. Per levels variant, terrain set and pool configuration ([`pools`]): the column count and an
     /// FNV-1a fold of the biome names over the six runtime seeds in order; then every name's count (oceans,
     /// beaches, rivers, the plains fallback, every pool biome and Java's null result, `null`, appear).
     const EXPECTED: &str = "\
-biomes 0 0 0 1212 2be3af0478eb5fd7\n\
-biomes 0 0 1 1212 ce6a0ab291a45032\n\
-biomes 0 0 2 1212 d5bf17e88f226501\n\
-biomes 0 0 3 1212 a985d09029644256\n\
-biomes 0 0 4 1212 94078cb91d8fbd9b\n\
-biomes 0 1 0 1212 2be3af0478eb5fd7\n\
-biomes 0 1 1 1212 ce6a0ab291a45032\n\
-biomes 0 1 2 1212 d5bf17e88f226501\n\
-biomes 0 1 3 1212 a985d09029644256\n\
-biomes 0 1 4 1212 94078cb91d8fbd9b\n\
-biomes 1 0 0 1212 2be3af0478eb5fd7\n\
-biomes 1 0 1 1212 ce6a0ab291a45032\n\
-biomes 1 0 2 1212 d5bf17e88f226501\n\
-biomes 1 0 3 1212 a985d09029644256\n\
-biomes 1 0 4 1212 94078cb91d8fbd9b\n\
-biomes 1 1 0 1212 2be3af0478eb5fd7\n\
-biomes 1 1 1 1212 ce6a0ab291a45032\n\
-biomes 1 1 2 1212 d5bf17e88f226501\n\
-biomes 1 1 3 1212 a985d09029644256\n\
-biomes 1 1 4 1212 94078cb91d8fbd9b\n\
-biomes 2 0 0 1212 c6a9511476a0719d\n\
-biomes 2 0 1 1212 397763c1b9540141\n\
-biomes 2 0 2 1212 4bd839e25f70c36a\n\
-biomes 2 0 3 1212 8cc9e6510673b642\n\
-biomes 2 0 4 1212 107b7da5bd4447c8\n\
-biomes 2 1 0 1212 c6a9511476a0719d\n\
-biomes 2 1 1 1212 397763c1b9540141\n\
-biomes 2 1 2 1212 4bd839e25f70c36a\n\
-biomes 2 1 3 1212 8cc9e6510673b642\n\
-biomes 2 1 4 1212 107b7da5bd4447c8\n\
-names birch_forest=1068 desert=998 forest=958 grove=1064 jungle=1170 meadow=924 minecraft:beach=100 minecraft:cold_ocean=120 minecraft:deep_cold_ocean=2410 minecraft:deep_frozen_ocean=3330 minecraft:deep_lukewarm_ocean=6400 minecraft:deep_ocean=8510 minecraft:frozen_ocean=200 minecraft:frozen_river=250 minecraft:ocean=210 minecraft:river=2440 minecraft:snowy_beach=40 minecraft:warm_ocean=150 null=254 plains=1026 snowy_plains=984 swamp=1278 taiga=1128 windswept_hills=1348\n";
+biomes 0 0 0 1212 28bfd14e0dad82e0\n\
+biomes 0 0 1 1212 f868b88643f205e9\n\
+biomes 0 0 2 1212 a9fce8a89c381ec4\n\
+biomes 0 0 3 1212 6aa7ef4ce1e8da62\n\
+biomes 0 0 4 1212 a7e2afc134f5e814\n\
+biomes 0 1 0 1212 28bfd14e0dad82e0\n\
+biomes 0 1 1 1212 f868b88643f205e9\n\
+biomes 0 1 2 1212 a9fce8a89c381ec4\n\
+biomes 0 1 3 1212 6aa7ef4ce1e8da62\n\
+biomes 0 1 4 1212 a7e2afc134f5e814\n\
+biomes 1 0 0 1212 28bfd14e0dad82e0\n\
+biomes 1 0 1 1212 f868b88643f205e9\n\
+biomes 1 0 2 1212 a9fce8a89c381ec4\n\
+biomes 1 0 3 1212 6aa7ef4ce1e8da62\n\
+biomes 1 0 4 1212 a7e2afc134f5e814\n\
+biomes 1 1 0 1212 28bfd14e0dad82e0\n\
+biomes 1 1 1 1212 f868b88643f205e9\n\
+biomes 1 1 2 1212 a9fce8a89c381ec4\n\
+biomes 1 1 3 1212 6aa7ef4ce1e8da62\n\
+biomes 1 1 4 1212 a7e2afc134f5e814\n\
+biomes 2 0 0 1212 1f6d59d2c83fe2ba\n\
+biomes 2 0 1 1212 f0fde992bebdceda\n\
+biomes 2 0 2 1212 79f1a84934fef904\n\
+biomes 2 0 3 1212 9353e6d86ba58ab6\n\
+biomes 2 0 4 1212 ad0a230538a8b00c\n\
+biomes 2 1 0 1212 1f6d59d2c83fe2ba\n\
+biomes 2 1 1 1212 f0fde992bebdceda\n\
+biomes 2 1 2 1212 79f1a84934fef904\n\
+biomes 2 1 3 1212 9353e6d86ba58ab6\n\
+biomes 2 1 4 1212 ad0a230538a8b00c\n\
+names birch_forest=1096 desert=1004 forest=950 grove=1128 jungle=1158 meadow=850 minecraft:beach=100 minecraft:cold_ocean=100 minecraft:deep_cold_ocean=1990 minecraft:deep_frozen_ocean=3870 minecraft:deep_lukewarm_ocean=5490 minecraft:deep_ocean=9300 minecraft:frozen_ocean=130 minecraft:frozen_river=250 minecraft:ocean=250 minecraft:river=2440 minecraft:snowy_beach=40 minecraft:warm_ocean=200 null=228 plains=1092 snowy_plains=1016 swamp=1268 taiga=1112 windswept_hills=1298\n";
 
     pub(crate) const NAMES: [&str; 10] = [
         "forest",
