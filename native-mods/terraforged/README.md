@@ -1321,11 +1321,34 @@ rules, `SumViability.Builder`, the two `getFallOff` curves, and the `ViabilityCo
 NaN fails every threshold test; the sum is clamped with `NoiseUtil.clamp` (NaN passes); a sum with fewer weights
 than rules panics where Java throws. The context's seed comes from the newer TerraForged source (the jar has none)
 and is kept for the decoration layer (#213), which implements the context; no rule depends on it.
-The rules' Cereal specs and codec are not ported, and nothing uses the
+The rules' Cereal specs are decoded by `vegetation.rs` (below); nothing samples the
 rules yet. `BiomeViabilityOracle.java` (`.local/terraforged/oracles/biome_viability/`) runs the jar's own classes
 on stub contexts (every rule over signed zeros, infinities, NaN, the smallest subnormal and heights at and next
 to each threshold, for seven `maxY` values) and on real `TerrainData` chunks through the jar's `ViabilityContext`;
 the test matches its 91,275 fitness values bit for bit, in debug and release.
+
+The vegetation configs (`vegetation.rs`) are TerraForged's eight `worldgen/vegetation` files (`trees_copse`,
+`trees_hardy`, `trees_hardy_slopes`, `trees_patchy`, `trees_rainforest`, `trees_sparse`, `trees_sparse_rainforest`,
+`trees_temperate`), bundled byte for byte in `data/worldgen/vegetation/` as 6dd607eb generates them (seven are the
+same in TerraForged Reimagined a24d450; Reimagined's `trees_temperate` weighs its height rule -0.5, not -1), and the
+eight `trees/*` biome tags they select, which neither source tree ships, bundled byte for byte from TerraForged's
+0.3.1 alpha 2 jar in `data/tags/worldgen/biome/trees/`. `decode_config` is 6dd607eb's `VegetationConfig.CODEC` on
+26.3's DFU: `frequency`, `jitter` and `density` are optional `Codec.FLOAT`s (default 1, `Float.parseFloat` on the
+text, `null` counts as absent, strings and booleans are errors); `biomes` is `#` + an identifier
+(`TagKey.hashedCodec`; a tag that is not bundled has no members, as an unbound tag); `viability` goes through
+`ViabilityCodec`'s Cereal specs with their defaults, over the terrain asset decoder's data tree (below: numbers are
+rebuilt by DFU first, so `-0.0` reads as 0 there, and a non-number reads as 0). Two differences: a spec name that is
+not a viability's is an error (Cereal would try every viability spec whose fields the object has, in hash order),
+and a `Sum` with fewer `amounts` than `rules` is an error (Java throws on its first sample). `current_vegetation()`
+decodes them in registry order (by id), and `config_for` is `BiomeVegetationManager.getConfig`: the first config
+whose tag holds the biome, so taiga (in `trees/hardy` and `trees/hardy_slopes`) takes `trees_hardy`.
+`VegetationFeatures::create` splits a biome's vegetal feature ids by path keyword into trees, grass and the rest
+(6dd607eb's keywords: Reimagined's added `pale_garden_vegetation` is not followed, so pale oaks fall in the rest).
+26.3 drops a whole tag that names a missing biome, and `trees/patchy` names `terraforged:oak_forest`, which only
+the bundled biome (#226) provides; binding the tags to a world's registry is the decoration layer's job (#213).
+`VegetationOracle.java` (`.local/terraforged/oracles/vegetation/`, `run.sh`) checks the bundled files against
+6dd607eb, Reimagined and the jar, decodes them and 53 edge-case documents with 6dd607eb's own codec on Noise2D
+2cb4843 and 26.3's DFU, and folds each noise rule's seed-first samples; the test matches its output bit for bit.
 
 The biome overrides (`biome_sampler.rs`) port TerraForged 1.18.2-0.3.1's `ClimateSample` and
 `BiomeSampler.getBiomeOverride`, with `ContinentPoints`' thresholds. Continent noise at or below 0.25 gives a deep
