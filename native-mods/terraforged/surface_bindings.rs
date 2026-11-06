@@ -430,4 +430,85 @@ mod tests {
         );
         assert_eq!(run(&java), 0);
     }
+
+    /// The bindings over Horizon's real 26.3 registry and block tags (`GeneratorData`, bound as the feature bindings
+    /// bind them); skipped without the prepared resources.
+    #[test]
+    fn real_26_3_tags_bind_reimagined_and_java_erodible_sets() {
+        let root = std::env::var_os("HORIZON_TEST_RESOURCES")
+            .or_else(|| std::env::var_os("HORIZON_RESOURCES"))
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../.local/horizon-client/26.3")
+            });
+        if !root.join("worldgen/world_presets.json").exists() {
+            eprintln!("skipping: no worldgen bundle at {}", root.display());
+            return;
+        }
+        let registry: &'static BlockRegistry = Box::leak(Box::new(
+            crate::level::data::load_registry(&root).expect("registry"),
+        ));
+        let data = super::super::GeneratorData::load(&root.join("worldgen"), registry)
+            .expect("worldgen data");
+        let (_, tags) = super::super::super::block_feature::FeatureBlockBindings::bind_tags(
+            registry,
+            &data.block_tags,
+        )
+        .unwrap();
+        let reimagined = SurfaceBindings::new(registry, &tags).unwrap();
+        let java =
+            SurfaceBindings::with_erodible_tags(registry, &tags, &JAVA_ERODIBLE_TAGS).unwrap();
+        let default = |name| registry.default_state(name).unwrap();
+        for (name, erodes, erodes_in_java) in [
+            ("minecraft:dirt", true, true),
+            ("minecraft:coarse_dirt", true, true),
+            ("minecraft:rooted_dirt", true, true),
+            ("minecraft:grass_block", true, false),
+            ("minecraft:podzol", true, false),
+            ("minecraft:mycelium", true, false),
+            ("minecraft:moss_block", true, false),
+            ("minecraft:pale_moss_block", true, false),
+            ("minecraft:mud", true, false),
+            ("minecraft:muddy_mangrove_roots", true, false),
+            ("minecraft:snow", true, true),
+            ("minecraft:snow_block", true, true),
+            ("minecraft:powder_snow", true, true),
+            ("minecraft:stone", false, false),
+            ("minecraft:sand", false, false),
+            ("minecraft:gravel", false, false),
+            ("minecraft:farmland", false, false),
+            ("minecraft:dirt_path", false, false),
+        ] {
+            let state = default(name);
+            assert_eq!(reimagined.is_erodible(state), erodes, "{name}");
+            assert_eq!(java.is_erodible(state), erodes_in_java, "{name}");
+        }
+        // Every state of a tagged block, not only its default (snowy grass, eight snow layers).
+        let states = |name: &'static str| {
+            (0..registry.len() as u32)
+                .map(BlockStateId)
+                .filter(move |&id| registry.state(id).unwrap().name == name)
+        };
+        assert_eq!(
+            states("minecraft:grass_block")
+                .filter(|&s| reimagined.is_erodible(s))
+                .count(),
+            2
+        );
+        assert_eq!(
+            states("minecraft:snow")
+                .filter(|&s| reimagined.is_snow(s))
+                .count(),
+            8
+        );
+        let (source, level_two) = reimagined.water();
+        assert_eq!(source, default("minecraft:water"));
+        let level = |id| registry.state(id).unwrap().properties.get("level").cloned();
+        assert_eq!(
+            (level(source), level(level_two)),
+            (Some("0".into()), Some("2".into()))
+        );
+        assert_eq!(registry.state(level_two).unwrap().name, "minecraft:water");
+    }
 }
