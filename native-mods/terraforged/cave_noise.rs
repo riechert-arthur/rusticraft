@@ -126,6 +126,18 @@ impl NoiseCave {
         self.cave_type
     }
 
+    pub const fn size(&self) -> i32 {
+        self.size
+    }
+
+    pub const fn min_y(&self) -> i32 {
+        self.min_y
+    }
+
+    pub const fn max_y(&self) -> i32 {
+        self.max_y
+    }
+
     /// 6dd607eb's `getHeight(seed, x, z)`: `minY` plus the elevation noise scaled to `rangeY`. `Err` where the noise
     /// can't be sampled seed-first (see [`Module::try_value_seed_first`]). At seed 0 this is the jar's
     /// `getHeight(x, z)` for graphs that sample alike on both paths (no zero or infinite source ranges, where
@@ -282,7 +294,7 @@ fn scale_value(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::fmt::Write;
 
@@ -465,7 +477,7 @@ r 5 f38e08606a465985 f38e08606a465985 f38e08606a465985 f38e08606a465985 f38e0860
     const SEEDS: [i64; 6] = [99, 0x1_0000_0063, -1, i64::MIN + 5, i32::MAX as i64, 0];
     const BASIS: u64 = 0xcbf2_9ce4_8422_2325;
     /// Runtime seeds as `Seeds.get` narrows them (`(int)` of the world seed), including two wider longs.
-    const RUN_SEEDS: [i32; 8] = [
+    pub(crate) const RUN_SEEDS: [i32; 8] = [
         0,
         1,
         1337,
@@ -615,7 +627,7 @@ r 5 f38e08606a465985 f38e08606a465985 f38e08606a465985 f38e08606a465985 f38e0860
     }
 
     /// The oracles' cave fold at one runtime seed: 64 grid points, then `I_POINTS`.
-    fn fold_cave(cave: &NoiseCave, seed: i32) -> u64 {
+    pub(crate) fn fold_cave(cave: &NoiseCave, seed: i32) -> u64 {
         let mut hash = BASIS;
         for i in 0..64 + I_POINTS.len() as i32 {
             let (x, z) = cave_point(i);

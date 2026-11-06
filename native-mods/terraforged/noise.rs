@@ -3050,6 +3050,12 @@ impl Module {
 /// The Java constructors that Cereal's spec factories call (reseeding, terrain assets). Unlike `Module`'s shortcut
 /// methods (`alpha`, `bias`, `boost`, `clamp`, `map`, `pow`, `scale`), they never skip or replace the node.
 impl Module {
+    /// `new Abs(source)`, which nests absolute values (unlike `Module.abs()`); its bounds are the source's.
+    pub fn new_abs(source: Self) -> Self {
+        let bounds = source.clone();
+        Self::modifier(ModuleKind::Abs(source), &bounds)
+    }
+
     /// `new Alpha(source, alpha)`.
     pub fn new_alpha(source: Self, alpha: Self) -> Self {
         let bounds = source.clone();
@@ -3183,10 +3189,7 @@ impl Module {
                 plain(&line.fade_out),
                 line.feather_scale,
             )),
-            ModuleKind::Abs(source) => {
-                let source = r(source);
-                modifier(ModuleKind::Abs(source.clone()), &source)
-            }
+            ModuleKind::Abs(source) => Self::new_abs(r(source)),
             ModuleKind::Alpha(source, alpha) => Self::new_alpha(r(source), r(alpha)),
             // `new Bias(source, spec.get("bias", asFloat))`: the bias was written as a module, so it reads back as 0.
             ModuleKind::Bias(source, _) => Self::new_bias(r(source), 0.0),
