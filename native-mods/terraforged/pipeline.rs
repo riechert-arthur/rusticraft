@@ -27,8 +27,9 @@
 // `NoiseBasedChunkGenerator`'s: TerraForged 6dd607eb's `Generator`
 // (https://github.com/TerraForged/TerraForged/tree/6dd607ebfd41a3b7274e090b1f2cf565d53d1d44, MIT License,
 // Copyright (c) 2021 TerraForged): `createBiomes`, `fillFromNoise`, `buildSurface` (`SurfaceDecorator.decorate`
-// over `NoiseChunkUtil.getNoiseChunk`, then `decoratePost`'s `Surface.apply`), the `drop` at the end of
-// `applyBiomeDecoration`, `getSeaLevel` and `Source.getNoiseBiome`. Stages TerraForged does not replace yet run on
+// over `NoiseChunkUtil.getNoiseChunk`, then `decoratePost`'s `Surface.apply`), `applyCarvers`
+// (`NoiseCaveGenerator.carve`), the `drop` at the end of `applyBiomeDecoration`, `getSeaLevel` and
+// `Source.getNoiseBiome`. Stages TerraForged does not replace yet run on
 // the vanilla overworld pipeline it wraps (`VanillaGen`).
 
 use super::{
@@ -37,6 +38,10 @@ use super::{
     Pipeline, PreLightChunkStage, ProtoChunk, SeededPipeline, SurfaceInputs, SurfaceQueries,
     SurfaceSample, TerrainChunk, UniformSurfaceBiomes, WorkerState, WorldGenerationContext,
     build_surface, overrides, resource, stage,
+    terraforged_biome_registry::identifier_order,
+    terraforged_cave_assets::current_caves,
+    terraforged_cave_biome_sampler::CaveBiomeSampler,
+    terraforged_cave_carver::NoiseCaveGenerator,
     terraforged_current_surface_biomes::CurrentSurfaceBiomeSampler,
     terraforged_generator_facade::TerraForgedGenerator,
     terraforged_generator_preset::{build as build_noise, terrain_levels},
@@ -67,6 +72,9 @@ pub(super) struct TerraForgedPipeline {
     /// `ChunkUtil.FILLER` and the water `fillChunk` places.
     stone: BlockStateId,
     water: BlockStateId,
+    /// The air `NoiseCaveCarver.carve` places.
+    air: BlockStateId,
+    caves: NoiseCaveGenerator<BiomeId>,
 }
 
 /// `OverworldGenerator::for_world` and `for_dimension`, overwritten: a TerraForged
@@ -151,6 +159,22 @@ impl TerraForgedPipeline {
         };
         let level = overrides::LevelHeight::of_type(&stem["type"], &data.dimension_types)
             .map(|height| (height.min_y, height.height));
+        // CaveBiomeSampler(800, biomeMapManager): GLOBAL caves use terraforged:cave (not registered in Horizon yet, so
+        // they keep their biomes); UNIQUE caves draw from every registered biome (6dd607eb's UNDERGROUND filter is
+        // commented out), in 26.3's registry order: path, then namespace.
+        let global = data
+            .biome_id("terraforged:cave")
+            .map(Arc::new)
+            .into_iter()
+            .collect();
+        let mut special: Vec<_> = (0..data.biome_names().len() as u32).map(BiomeId).collect();
+        special.sort_by(|a, b| identifier_order(data.biome_name(*a), data.biome_name(*b)));
+        let special = special.into_iter().map(Arc::new).collect();
+        let caves = NoiseCaveGenerator::new(
+            current_caves().map_err(resource)?,
+            CaveBiomeSampler::new(800, global, special),
+            seed,
+        );
         Ok(Self {
             vanilla: vanilla_overworld(data, seed, level)?,
             generator,
@@ -158,6 +182,8 @@ impl TerraForgedPipeline {
             surface,
             stone: block("minecraft:stone")?,
             water: block("minecraft:water")?,
+            air: block("minecraft:air")?,
+            caves,
         })
     }
 
@@ -279,9 +305,10 @@ impl DensitySampler for PreliminarySurface {
 }
 
 impl SeededPipeline for TerraForgedPipeline {
-    /// TerraForged's stages up to `buildSurface`: `createBiomes`, `fillFromNoise` (`fillChunk` and
-    /// `primeHeightmaps`) and `buildSurface` (the vanilla surface rules over TerraForged's preliminary heights,
-    /// then `Surface.apply`), in 26.3's status order. Carvers and structures are not run yet.
+    /// TerraForged's stages up to `applyCarvers`: `createBiomes`, `fillFromNoise` (`fillChunk` and
+    /// `primeHeightmaps`), `buildSurface` (the vanilla surface rules over TerraForged's preliminary heights, then
+    /// `Surface.apply`) and `applyCarvers` (the noise caves), in 26.3's order: its single `buildTerrain` runs fill,
+    /// surface and carvers on a BIOMES chunk, so every write updates the WG heightmaps. Structures are not run yet.
     fn generate(
         &self,
         worker: &mut WorkerState,
@@ -311,7 +338,7 @@ impl SeededPipeline for TerraForgedPipeline {
             .into_iter()
             .map(|id| data.biome_name(id).to_owned())
             .collect();
-        let center = neighbors[4].clone();
+        let mut center = neighbors[4].clone();
         let region =
             BiomeRegion::new(neighbors, obfuscate_seed(vanilla.seed)).map_err(stage("biomes"))?;
 
@@ -383,6 +410,22 @@ impl SeededPipeline for TerraForgedPipeline {
                 self.generator.sea_level(),
             )
             .map_err(stage("surface"))?;
+
+        // applyCarvers: TerraForged's noise caves with `(int)` of the level seed; no vanilla carvers run (6dd607eb's
+        // `applyCarvers` replaces them). The CarverChunk (the biomes each cave passed through, which
+        // `NoiseCaveDecorator` reads) is not kept: TerraForged's decoration is not wired yet.
+        self.caves
+            .carve(
+                self.generator.level_seed() as i32,
+                &mut chunk,
+                &mut center,
+                &terrain.read(),
+                self.generator.min_y(),
+                self.generator.sea_level(),
+                self.air,
+                true,
+            )
+            .map_err(stage("carvers"))?;
 
         chunk
             .prime_heightmaps(&[
@@ -594,6 +637,20 @@ mod tests {
         let mut worker = overworld.worker();
         let chunk = worker.generate_proto(ChunkPos::new(0, 0)).unwrap();
         assert_eq!(chunk.position(), ChunkPos::new(0, 0));
+        // Noise caves open air well below the surface somewhere nearby.
+        let mut cave_air = 0;
+        for (cx, cz) in [(0, 0), (3, -2), (-5, 4), (8, 8)] {
+            let chunk = worker.generate_proto(ChunkPos::new(cx, cz)).unwrap();
+            for x in 0..16 {
+                for z in 0..16 {
+                    let top = chunk.surface_height(x, z);
+                    cave_air += (-60..top - 12)
+                        .filter(|y| chunk.block_name(x, *y, z) == "minecraft:air")
+                        .count();
+                }
+            }
+        }
+        assert!(cave_air > 0);
     }
 
     #[test]
@@ -725,7 +782,8 @@ mod tests {
         .generate_proto(pos)
         .unwrap();
 
-        // The biomes are `createBiomes`'s: TerraForged's surface biome per quart column, at every height.
+        // The biomes are `createBiomes`'s (TerraForged's surface biome per quart column, at every height), except
+        // where a noise cave wrote its biome: such a quart was carved, so it holds air.
         let quarts: Vec<[i32; 3]> = (0..16)
             .map(|i| [pos.x * 4 + i % 4, 0, pos.z * 4 + i / 4])
             .collect();
@@ -735,11 +793,12 @@ mod tests {
         for (i, biome) in expected.iter().enumerate() {
             let (x, z) = ((i as i32 % 4) * 4, (i as i32 / 4) * 4);
             for y in (min_y..min_y + height).step_by(4) {
-                assert_eq!(
-                    Some(data.biome_name(a.biome_id_at(x, y, z)).to_owned()),
-                    *biome,
-                    "biome {x} {y} {z}"
-                );
+                let id = a.biome_id_at(x, y, z);
+                assert_eq!(id, again.biome_id_at(x, y, z), "rerun biome {x} {y} {z}");
+                assert_eq!(id, b.biome_id_at(x, y, z), "second world biome {x} {y} {z}");
+                if Some(data.biome_name(id)) != biome.as_deref() {
+                    assert!(carved_quart(&a, x, y, z), "biome {x} {y} {z}");
+                }
             }
         }
         for y in min_y..min_y + height {
@@ -753,6 +812,86 @@ mod tests {
             }
         }
         assert!(differs, "the chunk is still the vanilla overworld's");
+    }
+
+    /// Whether the quart at block `x y z` holds air (the noise caves carve with plain air).
+    fn carved_quart(chunk: &ProtoChunk, x: i32, y: i32, z: i32) -> bool {
+        (0..64).any(|i| chunk.block_name(x + i % 4, y + i / 16, z + i / 4 % 4) == "minecraft:air")
+    }
+
+    #[test]
+    fn noise_caves_carve_the_same_chunk_the_same_way() {
+        // The first chunks where unique caves form (the walk of the cave oracle, `cave_carver.rs`), in two worlds.
+        let Some(data) = data() else { return };
+        let seed = 7;
+        let unique = super::super::terraforged_cave_noise::unique_cave_noise();
+        let chunks: Vec<ChunkPos> = (0i32..)
+            .map(|k| {
+                let cx = k.wrapping_mul(7919).rem_euclid(4001) - 2000;
+                let cz = k.wrapping_mul(104_729).rem_euclid(4001) - 2000;
+                ChunkPos::new(cx, cz)
+            })
+            .filter(|pos| {
+                let (x, z) = ((pos.x * 16 + 8) as f32, (pos.z * 16 + 8) as f32);
+                unique.try_value_seed_first(seed as i32, x, z).unwrap() > 0.3
+            })
+            .take(4)
+            .collect();
+        let overworld = || {
+            OverworldGenerator::for_dimension(
+                Arc::clone(&data),
+                seed,
+                PRESET,
+                "minecraft:overworld",
+            )
+            .unwrap()
+        };
+        let (first, second) = (overworld(), overworld());
+        let (min_y, height) = first.level();
+        let (mut cave_air, mut cave_quarts) = (0, 0);
+        for pos in chunks {
+            let a = first.worker().generate_proto(pos).unwrap();
+            let again = first.worker().generate_proto(pos).unwrap();
+            let b = second.worker().generate_proto(pos).unwrap();
+            for z in 0..16 {
+                for x in 0..16 {
+                    let top = a.surface_height(x, z);
+                    for y in min_y..min_y + height {
+                        let block = a.block(x, y, z);
+                        assert_eq!(block, again.block(x, y, z), "rerun {pos:?} {x} {y} {z}");
+                        assert_eq!(block, b.block(x, y, z), "second world {pos:?} {x} {y} {z}");
+                        cave_air +=
+                            i32::from(y < top - 12 && a.block_name(x, y, z) == "minecraft:air");
+                    }
+                }
+            }
+            let quarts: Vec<[i32; 3]> = (0..16)
+                .map(|i| [pos.x * 4 + i % 4, 0, pos.z * 4 + i / 4])
+                .collect();
+            let surface = first.worker().noise_biomes(&quarts);
+            for (i, biome) in surface.iter().enumerate() {
+                let (x, z) = ((i as i32 % 4) * 4, (i as i32 / 4) * 4);
+                for y in (min_y..min_y + height).step_by(4) {
+                    let id = a.biome_id_at(x, y, z);
+                    assert_eq!(
+                        id,
+                        again.biome_id_at(x, y, z),
+                        "rerun biome {pos:?} {x} {y} {z}"
+                    );
+                    assert_eq!(
+                        id,
+                        b.biome_id_at(x, y, z),
+                        "second world biome {pos:?} {x} {y} {z}"
+                    );
+                    if Some(data.biome_name(id)) != biome.as_deref() {
+                        assert!(carved_quart(&a, x, y, z), "biome {pos:?} {x} {y} {z}");
+                        cave_quarts += 1;
+                    }
+                }
+            }
+        }
+        // Without terraforged:cave only the unique caves write biomes (any registered biome).
+        assert!(cave_air > 0 && cave_quarts > 0, "{cave_air} {cave_quarts}");
     }
 
     #[test]
