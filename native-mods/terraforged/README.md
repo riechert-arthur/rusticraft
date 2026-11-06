@@ -2390,7 +2390,7 @@ always passes, as in Java), the ground `is_steep_at` (un-eroded height noise 12 
 of the block column: the larger height difference times `maxY`, over 24 blocks, above 0.42) and `keeps_snow_cover` (both biomes `freezes` alike at
 the column's height: 0.05 colder per 40 blocks above sea level + 17, snow below 0.15). `getBiomeOverride` (above)
 runs after this and wins. Reimagined's `getBiomeOverride` also widens the beach band to `COAST - BEACH`
-(0.05): that is `current_biome_override` (below); `biome_override` keeps the jar's 0.005.
+(0.05); that is not followed: both paths use 6dd607eb's 0.005 (`biome_override`, below).
 
 The initial biome selection (`InitialBiomeSelector::initial_biome`) assembles them in `getInitialBiome`'s order
 (Reimagined a24d450, MIT, as above; 6dd607eb and the jar pick `getBiomeMap().get(climateType).getValue(noise)` or
@@ -2458,29 +2458,30 @@ two halves, since the two trees' Engine classes can't share a JVM: 6dd607eb's ov
 continent drawing the continent's four seeds) for the climate fields, `getShape`, `sample` and the seed draws; three
 levels variants, two terrain sets, six runtime seeds and 202 block positions (`int` edges and a signed grid) match
 bit for bit in debug and release builds.
-The current surface override (`current_biome_override`, `biome_sampler.rs`) is TerraForged Reimagined a24d450's
-`getBiomeOverride` (MIT, as above): its `beachSize` is `COAST - BEACH` (0.05) instead of the 0.005 of the jar and
-6dd607eb, so `BEACH + beachSize` folds to exactly `COAST` (0.55) and continent noise in (0.505, 0.55] is a beach
-(snowy beach, stony shore) rather than the input biome or a river; the other bands and the river test are the jar's.
-The jar-tested `biome_override` keeps 0.005 (`BEACH_SIZE`; `CURRENT_BEACH_SIZE` is the wide one). A later layer
-(#201) restores 6dd607eb's 0.005 fringe on the current path too. `CurrentBiomeOverrideOracle.java`
-(`.local/terraforged/oracles/biome_override/reimagined/`, `run.sh`) compiles Reimagined's own `BiomeSampler` and runs
-it interpreted and with `-Xcomp` over 30 continent values (each threshold and its neighbouring floats, the floats next
-to 0.55 included), every climate type, Reimagined's 13 built-in terrains and 10 river values; the test matches its
-42,900 overrides and the folded bound's bits, in debug and release.
+The current surface override is 6dd607eb's `getBiomeOverride`, the same `biome_override` as the jar's
+(`biome_sampler.rs`): its `beachSize` is 0.005 (`BEACH_SIZE`), so the beach band is continent noise in
+(0.5, 0.505] (`BEACH + beachSize` folds to the float 0.505f, the same `<=` in `float`), and (0.505, 0.55] keeps the input
+biome or becomes a river. TerraForged Reimagined a24d450 sets `beachSize = COAST - BEACH` (0.05), which makes every column
+up to the coast marker a beach; that is not followed (it was the current path's band from #174 until #201).
+`SourceBiomeOverrideOracle.java` (`.local/terraforged/oracles/biome_override/6dd607eb/`, `run.sh`) compiles
+6dd607eb's own `BiomeSampler`, `ClimateSample`, `NoiseSample` and `ContinentPoints` from source against Engine 0.3.0
+and runs them interpreted and with `-Xcomp` over 30 continent values (each threshold and its neighbouring floats, the
+floats next to 0.55 and either side of 0.55 included), every climate type, Engine's 16 built-in terrains and 10 river
+values; the test matches its 52,800 overrides and the beach size's and folded bound's bits, in debug and release.
 
 The surface biome sampler (`CurrentSurfaceBiomeSampler`, `current_surface_biomes.rs`) is TerraForged Reimagined
-a24d450's `BiomeSampler.sampleBiome` (MIT, as above; 6dd607eb's has the same three steps over one pool and the 0.005
-beach band): the biome sampler bridge's climate sample, then the initial biome selection, then the current surface
-override, which wins. It takes block coordinates and the runtime seed; the height noise is the generator's un-eroded
+a24d450's `BiomeSampler.sampleBiome` (MIT, as above; 6dd607eb's has the same three steps over one pool): the biome
+sampler bridge's climate sample, then the initial biome selection, then 6dd607eb's surface override (`biome_override`,
+with the 0.005 beach band), which wins. It takes block coordinates and the runtime seed; the height noise is the generator's un-eroded
 one and its first error is returned, even where the override then replaces the biome (Java reads it in
 `getInitialBiome` first). The pools and the override biomes come from the caller (building them from the registry is
 a later layer), sharing one `Arc` per biome; Reimagined's debug `reportSlope` survey and `Source`'s per-column cache
 are not ported; `create_biomes` (below) fills chunks with it. `.local/terraforged/oracles/current_surface_biomes/`
 (`run.sh`) records, in a 6dd607eb JVM, what `sampleBiome` reads from the real `Sampler` and newer-source `NoiseGenerator` (the
 continent, the rivers and the five height reads of 7,272 columns: three levels variants, two terrain sets, six
-runtime seeds, `int`-edge and grid positions), then runs Reimagined's real `BiomeSampler`, `Sampler` and
-`ClimateNoise` over that record, interpreted and with `-Xcomp`, for four pool and settings configurations (absent
+runtime seeds, `int`-edge and grid positions), then runs Reimagined's real `BiomeSampler` (with 6dd607eb's
+`beachSize` declaration swapped in by `biome_override/6dd607eb/patch_beach.py`, which checks that the two trees'
+`getBiomeOverride` are otherwise byte-identical), `Sampler` and `ClimateNoise` over that record, interpreted and with `-Xcomp`, for four pool and settings configurations (absent
 and empty pools, highland pools sharing the normal biome, mountain usages and wetland chances). The test matches
 every biome name, in debug and release builds.
 
@@ -2501,7 +2502,7 @@ registry and the registration of the hook are later layers.
 needs `oracles/noise_generator/run.sh`) runs it end to end in two JVMs, as the surface biome oracle does: 6dd607eb's
 real `Sampler` and the newer source's `NoiseGenerator` record what the surface sampler reads at every quart column of
 17 chunks (negative, far and `int`-limit chunks); then 6dd607eb's `fillNoiseBiomes` and `Source` members, copied
-verbatim (its `LossyCache` included), with its real `BiomeBuffer2D` and Reimagined's real `BiomeSampler`, fill stub
+verbatim (its `LossyCache` included), with its real `BiomeBuffer2D` and Reimagined's real `BiomeSampler` (6dd607eb's `beachSize` swapped in, as above), fill stub
 1.19 chunk sections from that record, interpreted and with `-Xcomp`: three levels variants, two terrain sets, six
 runtime seeds (the low halves of level seeds with high bits set), the four pool configurations of the surface biome
 oracle, and six build ranges from `128..192` to `-2032..2032`. The test matches every cell of every section (612
@@ -2716,7 +2717,7 @@ heights either way. The noise, weight and bounds match, so the test pins the two
 
 ## Status: development only
 
-These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives, the biome climate types, the climate settings, the climate module, the climate stage, the continent factory, the generator context, the heightmap, the world generator factory, TerraForged's terrain levels, its terrain data, its terrain generator, its terrain-blend utilities, its terrain blender with its nearest-terrain search (and the newer source's seed-first blender), noise-graph reseeding, the cave noise primitives, the biome viability rules, the biome overrides (and TerraForged Reimagined's wider beach band), the continent control points, the continent cell primitives, the continent configuration, the continent shape blending, the continent cell generator with its spawn-offset search, the continent river nodes, the continent river carver's arithmetic, the continent river networks with their nearest-node sampling and their warped, carved river sampling, the newer source's seed-first noise sources, scalar noise graphs, domain warps, selectors, graph caches, terraces, legacy terraces, advanced terraces, curves, transforms (steps, frequency, gradient and modulation), special sources (boost, cell, cell edge and sine) and lines, and its bounded concurrent lossy cache with the continent's cell and
+These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives, the biome climate types, the climate settings, the climate module, the climate stage, the continent factory, the generator context, the heightmap, the world generator factory, TerraForged's terrain levels, its terrain data, its terrain generator, its terrain-blend utilities, its terrain blender with its nearest-terrain search (and the newer source's seed-first blender), noise-graph reseeding, the cave noise primitives, the biome viability rules, the biome overrides, the continent control points, the continent cell primitives, the continent configuration, the continent shape blending, the continent cell generator with its spawn-offset search, the continent river nodes, the continent river carver's arithmetic, the continent river networks with their nearest-node sampling and their warped, carved river sampling, the newer source's seed-first noise sources, scalar noise graphs, domain warps, selectors, graph caches, terraces, legacy terraces, advanced terraces, curves, transforms (steps, frequency, gradient and modulation), special sources (boost, cell, cell edge and sine) and lines, and its bounded concurrent lossy cache with the continent's cell and
 river-piece caches on it, the continent noise module that joins the continent layers, the newer source's terrain height sampler with its bordered chunk generation and its nearest-terrain search, its biome chunk fill, cave biome sampler and chunk biome hook, the erosion tile geometry, and TerraForged Reimagined's heightmap smoothing, erosion brushes, hydraulic erosion filter, eroded-region cache, eroded region build, eroded chunk generation, terrain cache, generator queries, chunk fill, the terrain stage hand-off to it, the biome pool fallback, the surface-biome decisions, the initial biome selection, the current climate noise, the biome sampler bridge, the surface biome sampler, the biome registry pools, their live biome bindings, the biome settings, the terrain overrides, the terrain asset decoder, the terrain-type and terrain-noise registries, the bundled terrain types and all 14 bundled terrain noises, the bundled noise caves and their reseeded cave array, and 6dd607eb's structure terrain columns with their
 chunk adapter, piece selection and structure-aware terrain stage, 6dd607eb's surface erosion and water edge smoothing passes, and its preliminary surface-height cache. They change nothing in the game, so there is
 nothing for players to install yet. Install instructions come with the layer that wires TerraForged into world generation.

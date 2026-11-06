@@ -1262,43 +1262,41 @@ f 3 -1875000 1874999 128 64 3bed1c90e336aeb8 same
     /// `../noise_generator/run.sh`): `../run.sh`'s half A records what `sampleBiome` reads at every quart column of
     /// [`CHUNKS`] from 6dd607eb's real `Sampler` and the newer source's `NoiseGenerator`; `6dd607eb/run.sh` runs
     /// TerraForged 6dd607eb's `ChunkUtil.fillNoiseBiomes` and `Source` members (verbatim) with its real `BiomeBuffer2D`
-    /// over Reimagined's real `BiomeSampler` (the port's surface sampler at this layer) on that record, into a stub of
+    /// over Reimagined's real `BiomeSampler` (the port's surface sampler at this layer, with 6dd607eb's 0.005
+    /// `beachSize` swapped in by `biome_override/6dd607eb/patch_beach.py`) on that record, into a stub of
     /// 1.19's chunk sections, interpreted and with `-Xcomp`. Per levels variant, terrain set and configuration `k`
     /// (`current_surface_biomes`' pools and settings): the chunk count and a fold of every cell's biome name of every
     /// chunk in each of [`RANGES`], over the six runtime seeds (level seeds `0x5eed << 32 | seed`); then every name's
     /// cell count. The chunks go through [`fill_biomes`] at the captured seed: `create_biomes` without its hint, which
     /// would start a region build per chunk ([`create_biomes_hints_and_fills_one_layer`] checks that the two fill
-    /// alike). The `k = 2` lines equal PR #178's two-layer oracle's (its `k % 3 == 2` cave registry was empty).
+    /// alike). None of these columns falls in the narrow (0.5, 0.505] beach band, so no beach appears (the
+    /// override's beach band is checked by `biome_sampler`'s and `current_surface_biomes`' oracles).
     const JAVA_CHUNK_BIOMES: &str = "\
-chunks 0 0 0 612 44f92643712c1671\n\
-chunks 0 0 1 612 234dc6afb098d351\n\
-chunks 0 0 2 612 745a7ce6694001f1\n\
-chunks 0 0 3 612 197c083044c86551\n\
-chunks 0 1 0 612 968ff8aa8fc6b3d1\n\
-chunks 0 1 1 612 fe8978035f5fdeb1\n\
-chunks 0 1 2 612 b60dc3edb5c85331\n\
-chunks 0 1 3 612 4c3c5d7b53ff1851\n\
-chunks 1 0 0 612 fc5a3b73b6d9acb1\n\
-chunks 1 0 1 612 234dc6afb098d351\n\
-chunks 1 0 2 612 3733ff00527d7971\n\
-chunks 1 0 3 612 cd255bfb7b18d91\n\
-chunks 1 1 0 612 6c02ba3e36b8bcf1\n\
-chunks 1 1 1 612 90e0cc85d9ff1e31\n\
-chunks 1 1 2 612 30be269c281b88f1\n\
-chunks 1 1 3 612 3c5011c78c25ba11\n\
-chunks 2 0 0 612 3bad7d80723e7cf1\n\
-chunks 2 0 1 612 fb064ac16b7400b1\n\
-chunks 2 0 2 612 3ee8c325c15ca71\n\
-chunks 2 0 3 612 4f3b58c2f6fc49b1\n\
-chunks 2 1 0 612 f43c71ffc35fa071\n\
-chunks 2 1 1 612 48acb65588b03831\n\
-chunks 2 1 2 612 14c3fcfe068e0471\n\
-chunks 2 1 3 612 d2361749bc97d571\n\
-names birch_forest=1257344 desert=1001984 forest=903488 grove=1653760 jungle=3654080 meadow=2789504 \
-minecraft:beach=1089536 minecraft:deep_cold_ocean=1926144 minecraft:deep_frozen_ocean=8035328 \
-minecraft:deep_lukewarm_ocean=2646016 minecraft:deep_ocean=7159808 minecraft:frozen_river=466944 \
-minecraft:river=6926336 plains=632320 snowy_plains=969152 swamp=3947136 taiga=740544 windswept_hills=1828864\n\
-";
+chunks 0 0 0 612 90fa97b50098a871\n\
+chunks 0 0 1 612 689af3e08d115551\n\
+chunks 0 0 2 612 6e01b7c0358913f1\n\
+chunks 0 0 3 612 1516287963833551\n\
+chunks 0 1 0 612 20efc33bcb93bfd1\n\
+chunks 0 1 1 612 e5de62489dbba0b1\n\
+chunks 0 1 2 612 9caf58eae7c1f131\n\
+chunks 0 1 3 612 e585ce952676fe51\n\
+chunks 1 0 0 612 d60a58267bd81eb1\n\
+chunks 1 0 1 612 689af3e08d115551\n\
+chunks 1 0 2 612 e800be3c9ee8fa71\n\
+chunks 1 0 3 612 f16dcc422fce4391\n\
+chunks 1 1 0 612 63c436386a7e0ef1\n\
+chunks 1 1 1 612 e6052e4a2009a031\n\
+chunks 1 1 2 612 5d19f3c17cc975f1\n\
+chunks 1 1 3 612 f8e85eb80435a811\n\
+chunks 2 0 0 612 60db0fccbee011f1\n\
+chunks 2 0 1 612 43d95ff3652e5eb1\n\
+chunks 2 0 2 612 ee67ad7966c90c71\n\
+chunks 2 0 3 612 6c50e57869aa02b1\n\
+chunks 2 1 0 612 73d8c1569a841971\n\
+chunks 2 1 1 612 7e1973e75eeda631\n\
+chunks 2 1 2 612 beaeed9b0582e671\n\
+chunks 2 1 3 612 14c3c4ee88718d71\n\
+names birch_forest=1296256 desert=1079808 forest=1000768 grove=1809408 jungle=3965376 meadow=2828416 minecraft:deep_cold_ocean=1926144 minecraft:deep_frozen_ocean=8035328 minecraft:deep_lukewarm_ocean=2646016 minecraft:deep_ocean=7159808 minecraft:frozen_river=466944 minecraft:river=6926336 plains=632320 snowy_plains=1027520 swamp=4024960 taiga=798912 windswept_hills=2003968\n";
 
     const CHUNKS: [(i32, i32); 17] = [
         (0, 0),

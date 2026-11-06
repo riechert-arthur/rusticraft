@@ -25,13 +25,14 @@
 // Adapted from TerraForged Reimagined (https://github.com/Romoslayer/TerraForged-Reimagined, a24d450):
 // `src/main/java/com/terraforged/mod/worldgen/biome/BiomeSampler.java`, `sampleBiome` (getSample, then
 // getInitialBiome, then getBiomeOverride). TerraForged 6dd607eb's `sampleBiome` has the same three steps over one
-// climate pool and the 0.005 beach band. MIT License, Copyright (c) 2020 TerraForged, Copyright (c) 2026
+// climate pool. The override itself is 6dd607eb's `getBiomeOverride` with its 0.005 beach band (`biome_override`),
+// not Reimagined's `COAST - BEACH` band. MIT License, Copyright (c) 2020 TerraForged, Copyright (c) 2026
 // Romoslayer; see `LICENSE-TERRAFORGED-REIMAGINED`.
 
 use super::{
     terraforged_biome_map::BiomePools,
     terraforged_biome_sampler::{
-        BiomeOverride, ClimateSample, InitialBiomeSelector, WetlandSettings, current_biome_override,
+        BiomeOverride, ClimateSample, InitialBiomeSelector, WetlandSettings, biome_override,
     },
     terraforged_current_biome_sampler::CurrentBiomeSampler,
     terraforged_noise_generator::NoiseGenerator,
@@ -40,7 +41,7 @@ use std::sync::Arc;
 
 /// Reimagined's `BiomeSampler` as `Source.compute` uses it: the surface biome of a block column. It joins the
 /// climate sample ([`CurrentBiomeSampler`]), the initial biome ([`InitialBiomeSelector`]: wet or dry pool, then the
-/// highland swap) and the current surface override ([`current_biome_override`], which wins). The height noise is
+/// highland swap) and 6dd607eb's surface override ([`biome_override`], which wins). The height noise is
 /// the generator's un-eroded `getHeightNoise` (Reimagined's `ErodedNoiseGenerator` delegates it to the raw
 /// generator), the levels its `TerrainLevels`. `wetlands` and `mountain_usage` are Reimagined's
 /// `TerraSettings.rivers.wetlands` and `miscellaneous.mountainBiomeUsage`. Biomes are compared by identity, so the
@@ -118,7 +119,7 @@ impl<'a, T> CurrentSurfaceBiomeSampler<'a, T> {
 }
 
 /// `sampleBiome` after `getSample`: [`InitialBiomeSelector::initial_biome`] first (its height reads and their
-/// error come even where the override then replaces the biome, as in Java), then [`current_biome_override`]; a
+/// error come even where the override then replaces the biome, as in Java), then [`biome_override`]; a
 /// replacement goes through `override_biome`.
 pub fn surface_biome<T, E>(
     initial: &InitialBiomeSelector<'_, T>,
@@ -130,7 +131,7 @@ pub fn surface_biome<T, E>(
     override_biome: impl Fn(BiomeOverride) -> Arc<T>,
 ) -> Result<Arc<T>, E> {
     let biome = initial.initial_biome(sample, x, z, height_noise, base_temperature)?;
-    Ok(match current_biome_override(sample) {
+    Ok(match biome_override(sample) {
         BiomeOverride::Input => biome,
         replacement => override_biome(replacement),
     })
@@ -199,9 +200,11 @@ pub(crate) mod tests {
 
         sample.noise.continent_noise = 0.9;
         assert_eq!(*biome(&sample), "highland");
-        // Reimagined's wide beach band: up to COAST (0.55), where the jar's 0.005 band stops at 0.505.
-        sample.noise.continent_noise = 0.53;
+        // 6dd607eb's 0.005 beach band stops at 0.505f; Reimagined's wider one (up to COAST, 0.55) is not followed.
+        sample.noise.continent_noise = 0.505;
         assert_eq!(*biome(&sample), "minecraft:beach");
+        sample.noise.continent_noise = 0.53;
+        assert_eq!(*biome(&sample), "highland");
         sample.noise.continent_noise = 0.1;
         assert_eq!(*biome(&sample), "minecraft:deep_ocean");
         sample.noise.continent_noise = 0.9;
@@ -232,41 +235,37 @@ pub(crate) mod tests {
     /// `.local/terraforged/oracles/current_surface_biomes/` (`run.sh`, after `../noise_generator/run.sh`): half A
     /// records what `sampleBiome` reads from 6dd607eb's real `Sampler` and newer-source `NoiseGenerator` (the
     /// continent, rivers and the five height reads of each column); half B runs Reimagined a24d450's real
-    /// `BiomeSampler.sampleBiome` (its real `Sampler`, `ClimateNoise` and pre-increment `Seed`) over that record,
-    /// interpreted and with `-Xcomp`. Per levels variant, terrain set and pool configuration ([`pools`]): the
+    /// `BiomeSampler.sampleBiome` (its real `Sampler`, `ClimateNoise` and pre-increment `Seed`; 6dd607eb's 0.005
+    /// `beachSize` swapped in by `biome_override/6dd607eb/patch_beach.py`) over that record, interpreted and with
+    /// `-Xcomp`. Per levels variant, terrain set and pool configuration ([`pools`]): the
     /// column count and an FNV-1a fold of the biome names over the six runtime seeds in order; then every name's
     /// count (oceans, beaches, rivers, the plains fallback and every pool biome appear).
     const EXPECTED: &str = "\
-biomes 0 0 0 1212 a8a6b302e4a14308\n\
-biomes 0 0 1 1212 b8daab7ce32a4f35\n\
-biomes 0 0 2 1212 c47c9bd55fbfb639\n\
-biomes 0 0 3 1212 a8c476f1aeda9f6\n\
-biomes 0 1 0 1212 4718e3781af1809d\n\
-biomes 0 1 1 1212 92aa44604f96f725\n\
-biomes 0 1 2 1212 37298a202863b4d6\n\
-biomes 0 1 3 1212 ae39e9935ac6ef6f\n\
-biomes 1 0 0 1212 d1ff0e0fa41121e3\n\
-biomes 1 0 1 1212 643621d8efd82019\n\
-biomes 1 0 2 1212 2707ad9331de4897\n\
-biomes 1 0 3 1212 e054b3e9043bb20\n\
-biomes 1 1 0 1212 776be1a709cc926d\n\
-biomes 1 1 1 1212 ff01ca5cd232be11\n\
-biomes 1 1 2 1212 4c22ac0a4f04ba8b\n\
-biomes 1 1 3 1212 91ab8ac5291d9721\n\
-biomes 2 0 0 1212 628c93b384901863\n\
-biomes 2 0 1 1212 5fe97ba98ab1efc6\n\
-biomes 2 0 2 1212 554021965f9b2d3d\n\
-biomes 2 0 3 1212 c704ac017d84ddd6\n\
-biomes 2 1 0 1212 7a0fc1b54cf8dd3\n\
-biomes 2 1 1 1212 7b057412900f5d1d\n\
-biomes 2 1 2 1212 4e73f1d98def77bf\n\
-biomes 2 1 3 1212 d34932009dad64b4\n\
-names birch_forest=490 desert=720 forest=788 grove=716 jungle=1094 meadow=833 minecraft:beach=864 \
-minecraft:cold_ocean=96 minecraft:deep_cold_ocean=1928 minecraft:deep_frozen_ocean=2664 \
-minecraft:deep_lukewarm_ocean=5120 minecraft:deep_ocean=6808 minecraft:frozen_ocean=160 \
-minecraft:frozen_river=176 minecraft:ocean=168 minecraft:river=1904 minecraft:snowy_beach=248 \
-minecraft:warm_ocean=120 plains=634 snowy_plains=825 swamp=1158 taiga=719 windswept_hills=855\n\
-";
+biomes 0 0 0 1212 e169326726e5f533\n\
+biomes 0 0 1 1212 3c5be5db782ae25\n\
+biomes 0 0 2 1212 b05c9801794c685a\n\
+biomes 0 0 3 1212 10d1069aa09c71c5\n\
+biomes 0 1 0 1212 97a92a236e7dfffa\n\
+biomes 0 1 1 1212 dd6a599396d23356\n\
+biomes 0 1 2 1212 a1d6af3cac448cad\n\
+biomes 0 1 3 1212 e46c309e702ec844\n\
+biomes 1 0 0 1212 2fcc69c43bb9a080\n\
+biomes 1 0 1 1212 a1d1c316e43326f5\n\
+biomes 1 0 2 1212 b7c7328c1fbe1b9e\n\
+biomes 1 0 3 1212 eee4c2ac6bae0361\n\
+biomes 1 1 0 1212 2d5dbf074386b17\n\
+biomes 1 1 1 1212 46d0b8a254589b99\n\
+biomes 1 1 2 1212 a63a9f7643ba8a9d\n\
+biomes 1 1 3 1212 eee0bca9e8f42734\n\
+biomes 2 0 0 1212 62c800b424eac338\n\
+biomes 2 0 1 1212 a723e75ed8206589\n\
+biomes 2 0 2 1212 3c3eb8dc125c4de0\n\
+biomes 2 0 3 1212 213019c18b26a571\n\
+biomes 2 1 0 1212 9f14072d01f15dca\n\
+biomes 2 1 1 1212 803bf72a44c1a915\n\
+biomes 2 1 2 1212 dd508c771a26f67d\n\
+biomes 2 1 3 1212 cabaf8634bc782f\n\
+names birch_forest=558 desert=811 forest=834 grove=796 jungle=1219 meadow=902 minecraft:beach=80 minecraft:cold_ocean=96 minecraft:deep_cold_ocean=1928 minecraft:deep_frozen_ocean=2664 minecraft:deep_lukewarm_ocean=5120 minecraft:deep_ocean=6808 minecraft:frozen_ocean=160 minecraft:frozen_river=200 minecraft:ocean=168 minecraft:river=1952 minecraft:snowy_beach=32 minecraft:warm_ocean=120 plains=718 snowy_plains=925 swamp=1269 taiga=796 windswept_hills=932\n";
 
     pub(crate) const NAMES: [&str; 10] = [
         "forest",

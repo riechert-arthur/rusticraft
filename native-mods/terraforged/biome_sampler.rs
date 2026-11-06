@@ -39,17 +39,14 @@ pub const DEEP_OCEAN: f32 = 0.1;
 pub const SHALLOW_OCEAN: f32 = 0.25;
 /// `ContinentPoints.BEACH`: at or below it (above `SHALLOW_OCEAN`), a shallow ocean.
 pub const BEACH: f32 = 0.5;
-/// `ContinentPoints.COAST`: the top of [`current_biome_override`]'s beach band.
+/// `ContinentPoints.COAST`. Not a beach bound in 6dd607eb (Reimagined's `beachSize = COAST - BEACH` is not followed).
 pub const COAST: f32 = 0.55;
 /// `ContinentPoints.INLAND`.
 pub const INLAND: f32 = 0.6;
-/// `BiomeSampler.beachSize` of the 1.18.2-0.3.1 jar and 6dd607eb: [`biome_override`]'s beach band is
-/// `BEACH < noise <= BEACH + BEACH_SIZE` (javac folds the sum to the float `0.505f`, as this f32 constant sum does).
+/// `BiomeSampler.beachSize` of the 1.18.2-0.3.1 jar and 6dd607eb (`protected final float beachSize = 0.005f`):
+/// [`biome_override`]'s beach band is `BEACH < noise <= BEACH + BEACH_SIZE` (javac folds the sum to the float
+/// `0.505f`, as this f32 constant sum does). Reimagined a24d450 widens it to `COAST - BEACH`; that is not followed.
 pub const BEACH_SIZE: f32 = 0.005;
-/// TerraForged Reimagined a24d450's `BiomeSampler.beachSize` (`ContinentPoints.COAST - ContinentPoints.BEACH`, a
-/// float constant expression): [`current_biome_override`]'s beach band reaches the coast marker, since
-/// `BEACH + CURRENT_BEACH_SIZE` folds to exactly `COAST` (0.55f). #201 later restores 6dd607eb's 0.005.
-pub const CURRENT_BEACH_SIZE: f32 = COAST - BEACH;
 /// Reimagined's `BiomeSampler.SLOPE_STEP`: blocks between the slope gate's opposite height samples.
 pub const SLOPE_STEP: i32 = 24;
 /// Reimagined's `maxFlatGradient`: blocks of rise per block above which ground is steep (about 23 degrees).
@@ -136,29 +133,14 @@ impl BiomeOverride {
     }
 }
 
-/// The jar's (and 6dd607eb's) `BiomeSampler.getBiomeOverride(input, sample)`: checks, in the jar's order, deep ocean
+/// The jar's (and 6dd607eb's) `BiomeSampler.getBiomeOverride(input, sample)`, used by the jar and the current
+/// surface sampler alike: checks, in the jar's order, deep ocean
 /// (`continentNoise <= SHALLOW_OCEAN`), shallow ocean (`<= BEACH`), beach (`<= BEACH + BEACH_SIZE`), then a
 /// river or lake terrain whose river noise `== 0` (either signed zero); anything else keeps the input. A NaN
 /// continent noise fails the three bands, a NaN river noise the river test, as Java's float compares do.
 /// The climate type picks the variant (taiga and cold steppe cold, tundra frozen, desert, savanna and
 /// tropical rainforest warm; at the beach tundra is snowy and cold steppe a stony shore).
 pub fn biome_override(sample: &ClimateSample) -> BiomeOverride {
-    override_with_beach(sample, BEACH_SIZE)
-}
-
-// `current_biome_override` is adapted from TerraForged Reimagined
-// (https://github.com/Romoslayer/TerraForged-Reimagined, a24d450): `BiomeSampler.getBiomeOverride` with its
-// `beachSize = ContinentPoints.COAST - ContinentPoints.BEACH`. MIT License, Copyright (c) 2020 TerraForged,
-// Copyright (c) 2026 Romoslayer; see `LICENSE-TERRAFORGED-REIMAGINED`.
-
-/// Reimagined's `BiomeSampler.getBiomeOverride(input, sample)`: [`biome_override`] with the beach band widened to
-/// `BEACH < noise <= BEACH + CURRENT_BEACH_SIZE` (= `COAST`), so a column stays a beach up to the coast marker.
-/// The other bands, the river test and NaN handling are the jar's.
-pub fn current_biome_override(sample: &ClimateSample) -> BiomeOverride {
-    override_with_beach(sample, CURRENT_BEACH_SIZE)
-}
-
-fn override_with_beach(sample: &ClimateSample, beach_size: f32) -> BiomeOverride {
     let climate = sample.climate_type;
     let continent = sample.noise.continent_noise;
     if continent <= SHALLOW_OCEAN {
@@ -181,7 +163,7 @@ fn override_with_beach(sample: &ClimateSample, beach_size: f32) -> BiomeOverride
             _ => BiomeOverride::Ocean,
         };
     }
-    if continent <= BEACH + beach_size {
+    if continent <= BEACH + BEACH_SIZE {
         return match climate {
             BiomeType::Tundra => BiomeOverride::SnowyBeach,
             BiomeType::ColdSteppe => BiomeOverride::StonyShore,
@@ -590,33 +572,35 @@ K 3f0147ae 19 river-hills flats-hills
         assert_eq!(oracle_output(), ORACLE);
     }
 
-    /// `CurrentBiomeOverrideOracle.java` (`.local/terraforged/oracles/biome_override/reimagined/`, `run.sh`):
-    /// Reimagined a24d450's own `getBiomeOverride` compiled from source (`beachSize = COAST - BEACH`), interpreted
-    /// and with `-Xcomp`. Lines as in [`ORACLE`] over [`CURRENT_CONTINENT`] and Reimagined's 13 built-in terrains
-    /// (it has no composites); `K`: the beach size's bits, the folded bound's (= `COAST`'s) and the terrain names.
-    const CURRENT_ORACLE: &str = "\
-C 0 ddddddddddhhhlllllllnnnnnnlnln ddddddddddhhhlllllllaaaaaalala
-C 1 ddddddddddhhhlllllllnnnnnnlnln ddddddddddhhhlllllllaaaaaalala
-C 2 ddddddddddhhhlllllllnnnnnnlnln ddddddddddhhhlllllllaaaaaalala
-C 3 eeeeeeeeeeiiilllllllnnnnnnlnln eeeeeeeeeeiiilllllllaaaaaalala
-C 4 eeeeeeeeeeiiilllllllnnnnnnlnln eeeeeeeeeeiiilllllllaaaaaalala
-C 5 eeeeeeeeeeiiilllllllnnnnnnlnln eeeeeeeeeeiiilllllllaaaaaalala
-C 6 bbbbbbbbbbfffkkkkkkknnnnnnknkn bbbbbbbbbbfffkkkkkkkaaaaaakaka
-C 7 eeeeeeeeeeiiilllllllnnnnnnlnln eeeeeeeeeeiiilllllllaaaaaalala
-C 8 bbbbbbbbbbffflllllllnnnnnnlnln bbbbbbbbbbffflllllllaaaaaalala
-C 9 ccccccccccgggjjjjjjjmmmmmmjmjm ccccccccccgggjjjjjjjaaaaaajaja
-C 10 eeeeeeeeeeiiilllllllnnnnnnlnln eeeeeeeeeeiiilllllllaaaaaalala
-T 5 aaaaaaaaaa aaaaaaaaaa aaaaaaaaaa aaaaaaaaaa aaaaaaaaaa nnaaaaaaaa nnaaaaaaaa \
-aaaaaaaaaa aaaaaaaaaa aaaaaaaaaa aaaaaaaaaa aaaaaaaaaa aaaaaaaaaa
-T 9 aaaaaaaaaa aaaaaaaaaa aaaaaaaaaa aaaaaaaaaa aaaaaaaaaa mmaaaaaaaa mmaaaaaaaa \
-aaaaaaaaaa aaaaaaaaaa aaaaaaaaaa aaaaaaaaaa aaaaaaaaaa aaaaaaaaaa
-P 42900 cfb61db9638f19e3
-K 3d4cccd0 3f0ccccd 3f0ccccd none deep_ocean shallow_ocean coast beach river lake wetland flats hills \
-badlands plateau mountains
+    /// `SourceBiomeOverrideOracle.java` (`.local/terraforged/oracles/biome_override/6dd607eb/`, `run.sh`): TerraForged
+    /// 6dd607eb's own `getBiomeOverride`, `ClimateSample`, `NoiseSample` and `ContinentPoints` compiled from source
+    /// against Engine 0.3.0 (`beachSize = 0.005f`), interpreted and with `-Xcomp`. Lines as in [`ORACLE`] over
+    /// [`SOURCE_CONTINENT`] and Engine's 16 built-in terrains (no composites); `K`: the beach size's bits, the folded
+    /// bound's (0.505f), `COAST`'s and the terrain names. The floats next to `COAST` and `BEACH + 0.05` are not beach.
+    const SOURCE_ORACLE: &str = "\
+C 0 ddddddddddhhhllllnnnnnnnnnnnnn ddddddddddhhhllllaaaaaaaaaaaaa
+C 1 ddddddddddhhhllllnnnnnnnnnnnnn ddddddddddhhhllllaaaaaaaaaaaaa
+C 2 ddddddddddhhhllllnnnnnnnnnnnnn ddddddddddhhhllllaaaaaaaaaaaaa
+C 3 eeeeeeeeeeiiillllnnnnnnnnnnnnn eeeeeeeeeeiiillllaaaaaaaaaaaaa
+C 4 eeeeeeeeeeiiillllnnnnnnnnnnnnn eeeeeeeeeeiiillllaaaaaaaaaaaaa
+C 5 eeeeeeeeeeiiillllnnnnnnnnnnnnn eeeeeeeeeeiiillllaaaaaaaaaaaaa
+C 6 bbbbbbbbbbfffkkkknnnnnnnnnnnnn bbbbbbbbbbfffkkkkaaaaaaaaaaaaa
+C 7 eeeeeeeeeeiiillllnnnnnnnnnnnnn eeeeeeeeeeiiillllaaaaaaaaaaaaa
+C 8 bbbbbbbbbbfffllllnnnnnnnnnnnnn bbbbbbbbbbfffllllaaaaaaaaaaaaa
+C 9 ccccccccccgggjjjjmmmmmmmmmmmmm ccccccccccgggjjjjaaaaaaaaaaaaa
+C 10 eeeeeeeeeeiiillllnnnnnnnnnnnnn eeeeeeeeeeiiillllaaaaaaaaaaaaa
+T 5 aaaaaaaaaa aaaaaaaaaa aaaaaaaaaa aaaaaaaaaa aaaaaaaaaa nnaaaaaaaa nnaaaaaaaa aaaaaaaaaa aaaaaaaaaa \
+aaaaaaaaaa aaaaaaaaaa aaaaaaaaaa aaaaaaaaaa aaaaaaaaaa aaaaaaaaaa aaaaaaaaaa
+T 9 aaaaaaaaaa aaaaaaaaaa aaaaaaaaaa aaaaaaaaaa aaaaaaaaaa mmaaaaaaaa mmaaaaaaaa aaaaaaaaaa aaaaaaaaaa \
+aaaaaaaaaa aaaaaaaaaa aaaaaaaaaa aaaaaaaaaa aaaaaaaaaa aaaaaaaaaa aaaaaaaaaa
+P 52800 815d2546ac70da45
+K 3ba3d70a 3f0147ae 3f0ccccd none deep_ocean ocean coast beach river lake wetland flats badlands plateau \
+hills mountains mountain_chain volcano volcano_pipe
 ";
 
-    /// [`CONTINENT`] plus the floats next to `COAST` and either side of `BEACH + 0.05`.
-    const CURRENT_CONTINENT: [f32; 30] = {
+    /// [`CONTINENT`] plus the floats next to `COAST` and either side of `BEACH + 0.05` (where Reimagined's wider
+    /// band would still give a beach).
+    const SOURCE_CONTINENT: [f32; 30] = {
         let mut values = [0.0; 30];
         let mut i = 0;
         while i < CONTINENT.len() {
@@ -630,43 +614,20 @@ badlands plateau mountains
         values
     };
 
-    fn current_oracle_output() -> String {
+    fn source_oracle_output() -> String {
         let terrains = TerrainRegistry::new();
-        let names = [
-            "none",
-            "deep_ocean",
-            "shallow_ocean",
-            "coast",
-            "beach",
-            "river",
-            "lake",
-            "wetland",
-            "flats",
-            "hills",
-            "badlands",
-            "plateau",
-            "mountains",
-        ];
-        // Engine 0.3.0 names Reimagined's `shallow_ocean` `ocean`; the override reads only the river and lake
-        // categories, which both registries give to the same names.
-        let all: Vec<Terrain> = names
-            .iter()
-            .map(|&n| match n {
-                "shallow_ocean" => terrains.get_by_name("ocean").unwrap(),
-                _ => terrains.get_by_name(n).unwrap(),
-            })
-            .collect();
-        let (river, hills) = (&all[5], &all[9]);
-        let letter = |s: &ClimateSample| (b'a' + current_biome_override(s) as u8) as char;
+        let all = terrains.terrains().to_vec();
+        let name = |n: &str| terrains.get_by_name(n).unwrap();
+        let (river, hills) = (name("river"), name("hills"));
         let mut out = String::new();
         for kind in BiomeType::VALUES {
             let line = |terrain: &Terrain| -> String {
-                CURRENT_CONTINENT
+                SOURCE_CONTINENT
                     .iter()
                     .map(|&c| letter(&sample(&terrains, kind, c, terrain, 0.0)))
                     .collect()
             };
-            out += &format!("C {} {} {}\n", kind as u8, line(river), line(hills));
+            out += &format!("C {} {} {}\n", kind as u8, line(&river), line(&hills));
         }
         for kind in [BiomeType::Grassland, BiomeType::Tundra] {
             let line: Vec<String> = all
@@ -683,23 +644,23 @@ badlands plateau mountains
         let (mut hash, mut count) = (0xcbf2_9ce4_8422_2325_u64, 0);
         for kind in BiomeType::VALUES {
             for terrain in &all {
-                for continent in CURRENT_CONTINENT {
+                for continent in SOURCE_CONTINENT {
                     for river_noise in RIVER {
                         let mut s = sample(&terrains, kind, continent, terrain, river_noise);
                         s.biome_noise = river_noise;
                         s.temperature = continent;
-                        hash = (hash ^ current_biome_override(&s) as u64)
-                            .wrapping_mul(0x0100_0000_01b3);
+                        hash = (hash ^ biome_override(&s) as u64).wrapping_mul(0x0100_0000_01b3);
                         count += 1;
                     }
                 }
             }
         }
         out += &format!("P {count} {hash:x}\n");
+        let names: Vec<String> = all.iter().map(|t| t.name().to_string()).collect();
         out += &format!(
             "K {:x} {:x} {:x} {}\n",
-            CURRENT_BEACH_SIZE.to_bits(),
-            (BEACH + CURRENT_BEACH_SIZE).to_bits(),
+            BEACH_SIZE.to_bits(),
+            (BEACH + BEACH_SIZE).to_bits(),
             COAST.to_bits(),
             names.join(" ")
         );
@@ -707,17 +668,17 @@ badlands plateau mountains
     }
 
     #[test]
-    fn current_biome_overrides_match_reimagined() {
-        assert_eq!(current_oracle_output(), CURRENT_ORACLE);
-        // The two paths differ only inside (0.505, 0.55]: the jar's band stops at 0.505f, Reimagined's at COAST.
+    fn biome_overrides_match_6dd607eb_source() {
+        assert_eq!(source_oracle_output(), SOURCE_ORACLE);
+        // The band stops at 0.505f: the next float up and everything to COAST keep the input.
         let terrains = TerrainRegistry::new();
         let hills = terrains.get_by_name("hills").unwrap();
-        for continent in CURRENT_CONTINENT {
+        for continent in SOURCE_CONTINENT {
             let s = sample(&terrains, BiomeType::Grassland, continent, &hills, 1.0);
-            let wide = continent > BEACH + BEACH_SIZE && continent <= COAST;
+            let beach = continent > BEACH && continent <= 0.505;
             assert_eq!(
-                biome_override(&s) == current_biome_override(&s),
-                !wide,
+                biome_override(&s) == BiomeOverride::Beach,
+                beach,
                 "{continent:?}"
             );
         }
