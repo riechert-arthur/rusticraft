@@ -140,6 +140,9 @@ pub fn current_vegetation() -> Result<Vec<VegetationConfig>, String> {
 
 /// `BiomeVegetationManager.getConfig`: the first config whose tag holds the biome (`None` for Java's
 /// `VegetationConfig.NONE`).
+///
+/// `biome` is a full `namespace:path` id. Java caches the answer per biome (`computeIfAbsent`); the result does
+/// not change, so callers may cache it too.
 pub fn config_for<'a>(
     configs: &'a [VegetationConfig],
     biome: &str,
@@ -564,6 +567,13 @@ case noise_unknown err
                 assert_eq!(rust, java);
             }
         }
+    }
+
+    #[test]
+    fn configs_can_be_shared_across_generation_threads() {
+        fn shared<T: Send + Sync>() {}
+        shared::<VegetationConfig>();
+        shared::<Vec<VegetationConfig>>();
     }
 
     #[test]
