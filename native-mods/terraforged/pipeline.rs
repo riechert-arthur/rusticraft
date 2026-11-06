@@ -29,8 +29,9 @@
 // Copyright (c) 2021 TerraForged): `createBiomes`, `fillFromNoise`, `buildSurface` (`SurfaceDecorator.decorate`
 // over `NoiseChunkUtil.getNoiseChunk`, then `decoratePost`'s `Surface.apply`), `applyCarvers`
 // (`NoiseCaveGenerator.carve`), the `drop` at the end of `applyBiomeDecoration`, `getSeaLevel` and
-// `Source.getNoiseBiome`. Stages TerraForged does not replace yet run on
-// the vanilla overworld pipeline it wraps (`VanillaGen`).
+// `Source.getNoiseBiome`, and `ChunkGenerator`'s structure placement over `getBaseHeight`/`getBaseColumn`
+// (`structure_queries.rs`). Stages TerraForged does not replace yet run on the vanilla overworld pipeline it wraps
+// (`VanillaGen`).
 
 use super::super::generator_structures::{Starts, StructureState};
 use super::{
@@ -100,7 +101,12 @@ pub(super) fn build(
         return OverworldGenerator::build(data, seed, preset, dimension, with_structures);
     };
     Ok(OverworldGenerator {
-        pipeline: Arc::new(TerraForgedPipeline::new(&data, seed, &stem, with_structures)?),
+        pipeline: Arc::new(TerraForgedPipeline::new(
+            &data,
+            seed,
+            &stem,
+            with_structures,
+        )?),
         noise_clamped: None,
     })
 }
@@ -183,8 +189,8 @@ impl TerraForgedPipeline {
             CaveBiomeSampler::new(800, global, special),
             seed,
         );
-        // ChunkGenerator's structure placement over Source.possibleBiomes (the overworld
-        // biome list).
+        // ChunkGenerator's structure placement over Source.possibleBiomes (the overworld biome list). The concentric
+        // rings are cached per level seed and generator JSON: the stem's own, so they never mix with vanilla's.
         let structures = if with_structures {
             let possible = biomes.map.overworld.iter().map(|id| **id).collect();
             StructureState::new(data, &possible, data.rings_for(seed, &stem["generator"]))?
@@ -206,7 +212,7 @@ impl TerraForgedPipeline {
 
     /// 26.3's `new WorldGenerationContext(generator, level)`: the higher of the two minimum heights, the lower of
     /// the level's height and `getGenDepth()` (480 by default), and the generator's sea level.
-    fn generation(&self) -> WorldGenerationContext {
+    pub(super) fn generation(&self) -> WorldGenerationContext {
         let settings = &self.vanilla.settings;
         WorldGenerationContext::new(
             settings.level_min_y.max(self.generator.min_y()),
@@ -215,9 +221,25 @@ impl TerraForgedPipeline {
         )
     }
 
-    /// `Source.getNoiseBiome` at a block column.
-    pub(super) fn biome_at(&self, x: i32, z: i32) -> BiomeId {
-        self.biomes.sample(&self.generator, x, z)
+    /// The surface sampler [`Self::biome_at`] reads.
+    pub(super) fn surface_sampler(&self) -> CurrentSurfaceBiomeSampler<'_, BiomeId> {
+        self.biomes.surface_sampler(&self.generator)
+    }
+
+    /// `Source.getNoiseBiome` at block column `x z` (a quart's corner) with the captured seed and no terrain-cache
+    /// hint, as [`SeededPipeline::noise_biomes`] samples it. `None` where the column's pool has no biome.
+    pub(super) fn biome_at(
+        &self,
+        sampler: &CurrentSurfaceBiomeSampler<'_, BiomeId>,
+        x: i32,
+        z: i32,
+    ) -> Option<BiomeId> {
+        sampler
+            .sample_biome(self.generator.seed(), x, z, |replacement| {
+                self.biomes.override_biome(replacement)
+            })
+            .ok()
+            .map(|biome| *biome)
     }
 
     fn queries<'a>(&'a self, worker: &'a mut WorkerState) -> TfQueries<'a> {
@@ -338,7 +360,12 @@ impl SeededPipeline for TerraForgedPipeline {
     /// TerraForged's stages up to `applyCarvers`: `createBiomes`, `fillFromNoise` (`fillChunk` and
     /// `primeHeightmaps`), `buildSurface` (the vanilla surface rules over TerraForged's preliminary heights, then
     /// `Surface.apply`) and `applyCarvers` (the noise caves), in 26.3's order: its single `buildTerrain` runs fill,
-    /// surface and carvers on a BIOMES chunk, so every write updates the WG heightmaps. Structures are not run yet.
+    /// surface and carvers on a BIOMES chunk, so every write updates the WG heightmaps. Before the fill, 26.3's
+    /// STRUCTURE_STARTS and STRUCTURE_REFERENCES: [`StructureState::references`] builds (or reads the cached) starts of
+    /// every chunk within 8 of this one, this chunk's own included, then keeps those whose box reaches this chunk;
+    /// that list is what the vanilla beardifier would read, and `fillFromNoise`'s `buildStructureTerrain` adapts
+    /// the terrain to its rigid jigsaw pieces ([`StructureTerrain::from_starts`]). Java's
+    /// `createStructures`/`createReferences` also hint the terrain cache; the biome stage already hints this chunk.
     fn generate(
         &self,
         worker: &mut WorkerState,
@@ -633,20 +660,12 @@ impl SeededPipeline for TerraForgedPipeline {
     /// biome (Java's `sampleBiome` returns null there).
     fn noise_biomes(&self, _worker: &mut WorkerState, quarts: &[[i32; 3]]) -> Vec<Option<String>> {
         let data = self.vanilla.data();
-        let sampler = self.biomes.surface_sampler(&self.generator);
-        let seed = self.generator.seed();
+        let sampler = self.surface_sampler();
         quarts
             .iter()
             .map(|quart| {
-                sampler
-                    .sample_biome(
-                        seed,
-                        quart[0].wrapping_shl(2),
-                        quart[2].wrapping_shl(2),
-                        |replacement| self.biomes.override_biome(replacement),
-                    )
-                    .ok()
-                    .map(|biome| data.biome_name(*biome).to_owned())
+                self.biome_at(&sampler, quart[0].wrapping_shl(2), quart[2].wrapping_shl(2))
+                    .map(|biome| data.biome_name(biome).to_owned())
             })
             .collect()
     }

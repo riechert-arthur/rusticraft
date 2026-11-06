@@ -605,8 +605,8 @@ chunk 2 2147483647 -3 5 3fba3fdd57ea00f8";
 
     /// A chunk is, position by position, a new sample's raw terrain with the uncached region build's height at the
     /// chunk's offset (the border reading the region's margin), then the rivers; the consumer runs once. Its 16x16
-    /// interior equals `eroded_height_noise` (the height Reimagined's `getBaseHeight` places structures at; the port's
-    /// `base_height` follows 6dd607eb and reads the raw sample instead).
+    /// interior equals `eroded_height_noise` (the height Reimagined's `getBaseHeight`, and so the port's `base_height`
+    /// and `base_column`, places structures at).
     #[test]
     fn chunks_are_raw_samples_with_eroded_heights() {
         let eroded = eroded(0, 1, 50, 25, 1);

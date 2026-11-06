@@ -23,9 +23,12 @@
  * SOFTWARE.
  */
 
-// Structure placement over TerraForged: `Generator.getBaseHeight` and `getBaseColumn`,
-// and `Source.getNoiseBiome` (the surface biome, whatever the height), for the vanilla
-// structure placement the original keeps (`ChunkGenerator.createStructures`).
+// Structure placement over TerraForged: `Generator.getBaseHeight` and `getBaseColumn`, and `Source.getNoiseBiome`
+// (the surface biome, whatever the height), for the vanilla structure placement the original keeps
+// (`ChunkGenerator.createStructures`). The heights are TerraForged Reimagined's eroded ones
+// (https://github.com/Romoslayer/TerraForged-Reimagined, a24d450, `Generator.getBaseHeight`; MIT License,
+// Copyright (c) 2020 TerraForged, Copyright (c) 2026 Romoslayer; see `LICENSE-TERRAFORGED-REIMAGINED`), so
+// structures stand on the ground the chunk is filled to; see `TerraForgedGenerator::base_height`.
 
 use super::{
     super::{
@@ -44,6 +47,12 @@ use crate::heightmap::HeightmapType;
 use horizon_core::position::BlockPos;
 use std::collections::BTreeSet;
 
+/// The biome of a column whose pool has no biome (Java's `Source.getNoiseBiome` returns null there): it is in no
+/// structure's biome set and in no ring search's, so nothing is placed on it. Java would throw out of
+/// `Structure.isValidBiome`; such a column's own `createBiomes` fails the same way (`BiomeFillError::Resolve`).
+pub(super) const NO_BIOME: BiomeId = BiomeId(u32::MAX);
+
+/// `ChunkGenerator`'s structure queries over TerraForged's generator, for one worker.
 pub(super) struct TfQueries<'a> {
     pub(super) pipeline: &'a TerraForgedPipeline,
     pub(super) worker: &'a mut WorkerState,
@@ -51,23 +60,40 @@ pub(super) struct TfQueries<'a> {
 }
 
 impl TfQueries<'_> {
-    fn biome(&mut self, x: i32, z: i32) -> BiomeId {
-        let quart = [x >> 2, 0, z >> 2];
-        if let Some(&id) = self.worker.structure_biomes.get(&quart) {
-            return id;
-        }
-        let id = self.pipeline.biome_at(x & !3, z & !3);
-        if self.worker.structure_biomes.len() >= 1 << 16 {
-            self.worker.structure_biomes.clear();
-        }
-        self.worker.structure_biomes.insert(quart, id);
-        id
+    /// `Source.getNoiseBiome` of the quarts at `quarts` (`[x, _, z]`; TerraForged ignores `y`), cached per quart
+    /// column for the worker. Misses are sampled with one surface sampler.
+    fn biomes(&mut self, quarts: &[[i32; 3]]) -> Vec<BiomeId> {
+        let mut sampler = None;
+        quarts
+            .iter()
+            .map(|quart| {
+                let key = [quart[0], 0, quart[2]];
+                if let Some(&id) = self.worker.structure_biomes.get(&key) {
+                    return id;
+                }
+                let sampler = sampler.get_or_insert_with(|| self.pipeline.surface_sampler());
+                let id = self
+                    .pipeline
+                    .biome_at(sampler, key[0].wrapping_shl(2), key[2].wrapping_shl(2))
+                    .unwrap_or(NO_BIOME);
+                if self.worker.structure_biomes.len() >= 1 << 16 {
+                    self.worker.structure_biomes.clear();
+                }
+                self.worker.structure_biomes.insert(key, id);
+                id
+            })
+            .collect()
     }
 
-    /// `getBaseColumn`: stone to the terrain height and water to the base height, held
-    /// from the terrain height up (the original passes the height as the column's minimum).
+    /// `getBaseColumn`: stone to the (eroded) terrain height and water to the base height, held from the terrain
+    /// height up (the original passes the height as the column's minimum). Panics where the noise has no seed-first
+    /// form (no bundled noise is a custom module; Java has no such failure).
     fn column(&self, x: i32, z: i32) -> NoiseColumn {
-        let column = self.pipeline.generator.base_column(x, z);
+        let column = self
+            .pipeline
+            .generator
+            .base_column(x, z)
+            .expect("TerraForged's getBaseColumn: the noise has no seed-first form");
         NoiseColumn {
             min: column.min_y,
             blocks: column
@@ -101,11 +127,25 @@ impl JigsawContext for TfQueries<'_> {
         let settings = &self.pipeline.vanilla.settings;
         settings.level_min_y + settings.level_height - 1
     }
+    /// `getBaseHeight` (Reimagined's eroded height), clipped to the level's build range as the terrain fill clips
+    /// the terrain: a column above the top is filled to a flat top whose heightmaps read the top
+    /// (`level_min_y + level_height`), one below the bottom gets no stone and reads the bottom, so a structure is
+    /// placed where the filled chunk has its ground. Panics as [`Self::column`] does.
     fn base_height(&mut self, x: i32, z: i32, kind: HeightmapType) -> i32 {
         if let Some(height) = self.worker.heights.get(&(x, z, kind as u8)) {
             return *height;
         }
-        let height = self.pipeline.generator.base_height(x, z, heightmap(kind));
+        let settings = &self.pipeline.vanilla.settings;
+        let (bottom, top) = (
+            settings.level_min_y,
+            settings.level_min_y.saturating_add(settings.level_height),
+        );
+        let height = self
+            .pipeline
+            .generator
+            .base_height(x, z, heightmap(kind))
+            .expect("TerraForged's getBaseHeight: the noise has no seed-first form")
+            .clamp(bottom, top.max(bottom));
         if self.worker.heights.len() > 65536 {
             self.worker.heights.clear();
         }
@@ -114,7 +154,7 @@ impl JigsawContext for TfQueries<'_> {
     }
     fn column_has_valid_biome(&mut self, x: i32, z: i32, min_y: i32, max_y: i32) -> bool {
         min_y <= max_y && {
-            let biome = self.biome(x, z);
+            let biome = self.biomes(&[[x >> 2, 0, z >> 2]])[0];
             self.valid.contains(&biome)
         }
     }
@@ -161,22 +201,25 @@ impl StartContext for TfQueries<'_> {
     fn noise_column(&mut self, x: i32, z: i32) -> NoiseColumn {
         self.column(x, z)
     }
+    /// `Biome.coldEnoughToSnow(pos, chunkGenerator.getSeaLevel())` (26.3's `RuinedPortalStructure.isCold`): TerraForged's
+    /// sea level, not the vanilla half's. [`NO_BIOME`] is never cold.
     fn cold_enough_to_snow(&mut self, biome: BiomeId, pos: [i32; 3]) -> bool {
-        let sea = self.pipeline.vanilla.settings.sea_level;
-        self.worker.temperatures[biome.0 as usize]
-            .cold_enough_to_snow(BlockPos::new(pos[0], pos[1], pos[2]), sea)
+        let sea = self.pipeline.generator.sea_level();
+        self.worker
+            .temperatures
+            .get_mut(biome.0 as usize)
+            .is_some_and(|t| t.cold_enough_to_snow(BlockPos::new(pos[0], pos[1], pos[2]), sea))
     }
+    /// `new WorldGenerationContext(chunkGenerator, heightAccessor)`, as 26.3's structures build it for their height
+    /// providers: TerraForged's minimum height, generation depth and sea level.
     fn generation(&self) -> WorldGenerationContext {
-        self.pipeline.vanilla.generation()
+        self.pipeline.generation()
     }
     fn noise_biome(&mut self, quart: [i32; 3]) -> BiomeId {
-        self.biome(quart[0].wrapping_shl(2), quart[2].wrapping_shl(2))
+        self.biomes(&[quart])[0]
     }
     fn noise_biomes(&mut self, quarts: &[[i32; 3]]) -> Vec<BiomeId> {
-        quarts
-            .iter()
-            .map(|&quart| self.noise_biome(quart))
-            .collect()
+        self.biomes(quarts)
     }
     fn set_valid_biomes(&mut self, biomes: Option<&BTreeSet<BiomeId>>) {
         self.valid = match biomes {
