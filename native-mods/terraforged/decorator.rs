@@ -181,9 +181,9 @@ pub(in crate::worldgen) struct TerraForgedDecoration<'a> {
     pub surface: &'a SurfaceBindings,
     /// The air the noise caves carve, for a `getPostCarveChunk` replay.
     pub air: BlockStateId,
-    /// The chunk's `CarverChunk` from its carving (`NoiseCaveGenerator.cache`), or `None` to replay the caves without
-    /// writing (`getPostCarveChunk`, for a chunk that was carved by an earlier run).
-    pub carver: Option<CarverChunk<BiomeId>>,
+    /// `NoiseCaveGenerator.cache`: the carved chunks' `CarverChunk`s. The decorated chunk's is taken out once the
+    /// region is checked; a chunk without one (carved by an earlier run) replays its caves without writing.
+    pub carvers: &'a std::sync::Mutex<HashMap<ChunkPos, CarverChunk<BiomeId>>>,
 }
 
 /// `Generator.applyBiomeDecoration`'s `BiomeGenerator.decorate` for the centre of a 3x3 region: `FeatureDecorator`
@@ -223,7 +223,13 @@ pub(in crate::worldgen) fn decorate(
     let int_seed = seed as i32;
     let terrain_handle = tf.generator.chunk_data(int_seed, center.x, center.z);
     let terrain = terrain_handle.read();
-    let carver = match tf.carver {
+    // getPostCarveChunk: `cache.remove(chunk.getPos())`.
+    let cached = tf
+        .carvers
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&center);
+    let carver = match cached {
         Some(carver) => carver,
         // getPostCarveChunk: the caves again over the carved chunk, recording their biomes without writing.
         None => {
@@ -303,10 +309,13 @@ pub(in crate::worldgen) fn decorate(
         structures_only: worker.structures_only,
         references,
         // VanillaDecorator.getWritableArea: the chunk's minimum build height + 1 to its maximum - 1.
-        chunk_box: BoundingBox::new(
-            [center.x * 16, min_y + 1, center.z * 16],
-            [center.x * 16 + 15, min_y + height - 1, center.z * 16 + 15],
-        ),
+        chunk_box: {
+            let (x, z) = (center.x.wrapping_shl(4), center.z.wrapping_shl(4));
+            BoundingBox::new(
+                [x, min_y + 1, z],
+                [x.wrapping_add(15), min_y + height - 1, z.wrapping_add(15)],
+            )
+        },
         structure_errors: 0,
     };
 

@@ -557,16 +557,6 @@ impl SeededPipeline for TerraForgedPipeline {
             .as_ref()
             .ok_or_else(|| resource("decoration resources were not loaded"))?;
         let center = region[4].position();
-        // NoiseCaveGenerator.getPostCarveChunk: the CarverChunk the chunk's carving left, taken out of the cache
-        // (`cache.remove(pos)`); a chunk carved by an earlier run has none, and its caves are replayed instead.
-        let carver = if region[4].is_decorated() {
-            None
-        } else {
-            self.carvers
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .remove(&center)
-        };
         let mut random = self.vanilla.region_random_at(center);
         let stats = super::super::generator_decoration::terraforged_decorator::decorate(
             &self.vanilla.data,
@@ -582,7 +572,7 @@ impl SeededPipeline for TerraForgedPipeline {
                 caves: &self.caves,
                 surface: &self.surface,
                 air: self.air,
-                carver,
+                carvers: &self.carvers,
             },
         )?;
         // terrainCache.drop(Seeds.get(region.getSeed()), pos).
