@@ -119,6 +119,14 @@ fn heightmap(kind: HeightmapType) -> TerraHeightmap {
     }
 }
 
+/// A TerraForged base height (the first free block above the column) as the clipped fill's heightmaps read it in a
+/// level of `height` blocks from `min_y`: at most the top (`min_y + height`, a column cut flat at `top - 1`), at least
+/// the bottom (a column with no stone in the level).
+fn clip_to_level(base_height: i32, min_y: i32, height: i32) -> i32 {
+    let top = min_y.saturating_add(height);
+    base_height.clamp(min_y, top.max(min_y))
+}
+
 impl JigsawContext for TfQueries<'_> {
     fn min_y(&self) -> i32 {
         self.pipeline.vanilla.settings.level_min_y
@@ -136,16 +144,14 @@ impl JigsawContext for TfQueries<'_> {
             return *height;
         }
         let settings = &self.pipeline.vanilla.settings;
-        let (bottom, top) = (
+        let height = clip_to_level(
+            self.pipeline
+                .generator
+                .base_height(x, z, heightmap(kind))
+                .expect("TerraForged's getBaseHeight: the noise has no seed-first form"),
             settings.level_min_y,
-            settings.level_min_y.saturating_add(settings.level_height),
+            settings.level_height,
         );
-        let height = self
-            .pipeline
-            .generator
-            .base_height(x, z, heightmap(kind))
-            .expect("TerraForged's getBaseHeight: the noise has no seed-first form")
-            .clamp(bottom, top.max(bottom));
         if self.worker.heights.len() > 65536 {
             self.worker.heights.clear();
         }
@@ -228,5 +234,31 @@ impl StartContext for TfQueries<'_> {
                 .map(BiomeId)
                 .collect(),
         };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Heights above the build top read the top, heights below the bottom read the bottom, others are kept.
+    #[test]
+    fn base_heights_clip_to_the_level_as_the_fill_does() {
+        for (height, clipped) in [
+            (405, 320),
+            (321, 320),
+            (320, 320),
+            (319, 319),
+            (85, 85),
+            (-64, -64),
+            (-65, -64),
+            (i32::MIN, -64),
+            (i32::MAX, 320),
+        ] {
+            assert_eq!(clip_to_level(height, -64, 384), clipped, "{height}");
+        }
+        assert_eq!(clip_to_level(500, 0, 256), 256);
+        assert_eq!(clip_to_level(500, i32::MAX - 4, 16), i32::MAX - 4);
+        assert_eq!(clip_to_level(i32::MAX, i32::MAX - 4, 16), i32::MAX);
     }
 }
