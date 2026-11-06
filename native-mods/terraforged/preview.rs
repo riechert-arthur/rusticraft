@@ -23,23 +23,29 @@
  * SOFTWARE.
  */
 
-// TerraForged's `ContinentPreview` shader over `Previewer`'s view: each pixel the
-// continent, river and climate sample coloured as `ColorUtil.getBiomeColor` colours it. The
-// original is a developer window; `/tf preview` renders the same view to a picture.
+// Ported from TerraForged 6dd607eb
+// (https://github.com/TerraForged/TerraForged/tree/6dd607ebfd41a3b7274e090b1f2cf565d53d1d44):
+// `src/main/java/com/terraforged/mod/util/ColorUtil.java` (`getBiomeColor`, `getColor`, `shade`) and
+// `src/main/java/com/terraforged/mod/client/ui/Previewer.java` (`paint`, `each`, `Worker`: the view's size, zoom and
+// centre). MIT License, Copyright (c) 2021 TerraForged (above).
+//
+// TerraForged's `ContinentPreview` is a developer window (a Swing `main`, never opened by the game) that colours
+// `getBiomeColor(sample, 0.2f)` over a generator of its own at the fixed seed 273651, built on `new TerrainLevels()`
+// (frequency 1). `/tf preview` instead draws the player's world: the level's own generator and runtime seed, sampled
+// through the world's `IBiomeSampler.Sampler` at each pixel's block. ContinentPreview's own shader (climate at the raw
+// coordinates, continent and rivers at `getNoiseCoord(floor(x))`) only lines up at frequency 1; the world's levels
+// scale every part by their frequency (0.464 for the bundled preset), as the Sampler does.
 
 use super::{
+    terraforged::{floor, lerp},
     terraforged_biome_sampler::{BEACH, ClimateSample, SHALLOW_OCEAN},
-    terraforged_climate::ClimateSettings,
-    terraforged_current_climate::CurrentClimateNoise,
-    terraforged_generator_facade::TerraForgedGenerator,
-    terraforged_generator_preset::{build, terrain_levels},
-    terraforged_world_preset::preset_json,
+    terraforged_current_biome_sampler::CurrentBiomeSampler,
 };
 
-/// `ContinentPreview`'s fixed sampling seed.
-pub const SEED: i32 = 273_651;
+/// `getBiomeColor`'s shade strength in `ContinentPreview`.
+pub const STRENGTH: f32 = 0.2;
 
-/// What the window showed: its size, zoom and centre (`posX`, `posY`).
+/// What `Previewer`'s window shows: its size, zoom (blocks per pixel) and centre (`posX`, `posY`).
 #[derive(Clone, Copy, Debug)]
 pub struct View {
     pub width: u32,
@@ -50,6 +56,7 @@ pub struct View {
 }
 
 impl Default for View {
+    /// `Previewer`'s opening view: 400x400 (`setPreferredSize`), zoom 1, centred on 0, 0.
     fn default() -> Self {
         Self {
             width: 400,
@@ -61,65 +68,38 @@ impl Default for View {
     }
 }
 
-pub struct Preview {
-    generator: TerraForgedGenerator,
-    climate: CurrentClimateNoise,
-}
-
-impl Preview {
-    /// `ContinentPreview.create`: TerraForged's noise and its climate.
-    pub fn new() -> Result<Self, String> {
-        let preset: serde_json::Value =
-            serde_json::from_str(preset_json()).map_err(|error| error.to_string())?;
-        let levels =
-            terrain_levels(&preset["dimensions"]["minecraft:overworld"]["generator"]["levels"])?;
-        let generator = build(levels)?;
-        let context = generator.noise_generator().continent().context();
-        let mut seed = context.seed;
-        let climate = CurrentClimateNoise::new(&mut seed, ClimateSettings::terraforged());
-        Ok(Self { generator, climate })
+impl View {
+    /// The window's corner label: the area shown in blocks, `floor(w * zoom) x floor(h * zoom)` (`NoiseUtil.floor`).
+    pub fn label(&self) -> String {
+        format!(
+            "{}x{}",
+            floor(self.width as f32 * self.zoom),
+            floor(self.height as f32 * self.zoom)
+        )
     }
 
-    /// `Noise.getSample`: climate at the raw coordinates, continent and rivers at the
-    /// floored ones scaled to noise space, as the original mixes them.
-    pub fn sample(&self, seed: i32, x: f32, y: f32) -> ClimateSample {
-        let mut sample = ClimateSample::default();
-        self.climate.sample(seed, x, y, &mut sample);
-        let noise = self.generator.noise_generator();
-        let frequency = noise.levels().noise_levels.frequency;
-        let (nx, nz) = (
-            x.floor() as i32 as f32 * frequency,
-            y.floor() as i32 as f32 * frequency,
-        );
-        noise
-            .continent()
-            .sample_continent(seed, nx, nz, &mut sample.noise);
-        noise
-            .continent()
-            .sample_river(seed, nx, nz, &mut sample.noise);
-        sample
-    }
-
-    /// The view's pixels, row by row, as 0xRRGGBB.
-    pub fn render(&self, seed: i32, view: View) -> Vec<u32> {
-        let ox = view.x - (view.width >> 1) as f32 * view.zoom;
-        let oy = view.y - (view.height >> 1) as f32 * view.zoom;
-        let mut pixels = vec![0; (view.width * view.height) as usize];
-        let rows: Vec<&mut [u32]> = pixels.chunks_mut(view.width as usize).collect();
+    /// `Previewer.paint`: each pixel's shader colour (0xRRGGBB), row by row. Pixel (x, y) samples
+    /// `ox + x * zoom, oy + y * zoom` with `ox = posX - (w >> 1) * zoom` (all f32, Java's order). Rows are spread over
+    /// all processors but one (Java splits the image into tiles over all of them); each pixel depends only on its
+    /// position, so the split does not change the picture.
+    pub fn render(&self, shader: impl Fn(f32, f32) -> u32 + Sync) -> Vec<u32> {
+        let ox = self.x - (self.width >> 1) as f32 * self.zoom;
+        let oy = self.y - (self.height >> 1) as f32 * self.zoom;
+        let mut pixels = vec![0; self.width as usize * self.height as usize];
+        let threads =
+            std::thread::available_parallelism().map_or(1, |n| n.get().saturating_sub(1).max(1));
+        let mut groups: Vec<Vec<(usize, &mut [u32])>> = (0..threads).map(|_| Vec::new()).collect();
+        for (y, row) in pixels.chunks_mut(self.width as usize).enumerate() {
+            groups[y % threads].push((y, row));
+        }
+        let (shader, zoom) = (&shader, self.zoom);
         std::thread::scope(|scope| {
-            let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
-            let mut groups: Vec<Vec<(usize, &mut [u32])>> =
-                (0..threads).map(|_| Vec::new()).collect();
-            for (y, row) in rows.into_iter().enumerate() {
-                groups[y % threads].push((y, row));
-            }
             for group in groups {
                 scope.spawn(move || {
                     for (y, row) in group {
-                        let py = oy + y as f32 * view.zoom;
+                        let py = oy + y as f32 * zoom;
                         for (x, pixel) in row.iter_mut().enumerate() {
-                            let px = ox + x as f32 * view.zoom;
-                            *pixel = biome_color(&self.sample(seed, px, py), 0.2);
+                            *pixel = shader(ox + x as f32 * zoom, py);
                         }
                     }
                 });
@@ -129,37 +109,183 @@ impl Preview {
     }
 }
 
-/// `ColorUtil.getBiomeColor`.
+/// `/tf preview`'s shader: the world's `IBiomeSampler.Sampler` sample of the block under `(x, y)`
+/// (`NoiseUtil.floor`, as ContinentPreview floors its continent coordinates), coloured by [`biome_color`].
+pub fn world_color(sampler: &CurrentBiomeSampler<'_>, seed: i32, x: f32, y: f32) -> u32 {
+    biome_color(&sampler.get_sample(seed, floor(x), floor(y)), STRENGTH)
+}
+
+/// `ColorUtil.getBiomeColor(sample, strength)`: [`color`] shaded by `lerp(1, biomeNoise, strength)`.
 pub fn biome_color(sample: &ClimateSample, strength: f32) -> u32 {
-    let shade = 1.0 + strength * (sample.biome_noise - 1.0);
+    color(sample, lerp(1.0, sample.biome_noise, strength))
+}
+
+/// `ColorUtil.getColor`: deep blue up to the shallow ocean, light blue up to the beach and on rivers (`riverNoise <=
+/// 0`), else the climate type's colour (`biomes.txt`) shaded. NaN noise passes every test (Java's `<=`).
+pub fn color(sample: &ClimateSample, shade: f32) -> u32 {
     if sample.noise.continent_noise <= SHALLOW_OCEAN {
         return 0x0066DD;
     }
-    if sample.noise.continent_noise <= BEACH || sample.noise.river_noise <= 0.0 {
+    if sample.noise.continent_noise <= BEACH {
+        return 0x0099DD;
+    }
+    if sample.noise.river_noise <= 0.0 {
         return 0x0099DD;
     }
     let [r, g, b] = sample.climate_type.color();
-    let channel = |c: u8| (f32::from(c) * shade).floor() as i32 as u32 & 0xff;
-    (channel(r) << 16) | (channel(g) << 8) | channel(b)
+    shade_rgb(r, g, b, shade)
+}
+
+/// `ColorUtil.shade(r, g, b, brightness)` as a `TYPE_INT_RGB` image stores it: each channel
+/// `NoiseUtil.floor(c * brightness)`, ORed in with Java's int shifts and no masking (a channel outside 0..=255, from a
+/// brightness outside 0..=1, spills into its neighbours as in Java), then the image keeps the low 24 bits.
+fn shade_rgb(r: u8, g: u8, b: u8, brightness: f32) -> u32 {
+    let channel = |c: u8| floor(f32::from(c) * brightness);
+    let rgb = (0xFF << 24) | channel(r).wrapping_shl(16) | channel(g).wrapping_shl(8) | channel(b);
+    rgb as u32 & 0xFF_FFFF
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::{
+        terraforged_engine::BiomeType,
+        terraforged_generator_preset::{build, terrain_levels},
+    };
     use super::*;
 
+    fn fnv(values: impl IntoIterator<Item = u32>) -> u64 {
+        values.into_iter().fold(0xcbf2_9ce4_8422_2325, |hash, v| {
+            (hash ^ u64::from(v)).wrapping_mul(0x0100_0000_01b3)
+        })
+    }
+
+    /// `.local/terraforged/oracles/preview/` (`run.sh`, after `../noise_generator/run.sh` and
+    /// `../current_biome_sampler/run.sh`): 6dd607eb's real `ColorUtil` written to a `TYPE_INT_RGB` `BufferedImage`
+    /// and read back, and `Previewer`'s view over the real `IBiomeSampler.Sampler` (the bundled preset's levels,
+    /// continent caches bypassed). Interpreted and JIT-compiled runs agree.
+    const JAVA: &str = "\
+color 3e4ccccd a5653a924c471135
+color 3f800000 d9e90af0a45cee95
+render 273651 40 40 3f800000 0 0 26e83d5a7e2061bd 40x40
+render 273651 32 24 42c00000 0 0 84debdd052265553 3072x2304
+render 0 24 24 42800000 c49a5000 44425000 82070cce4a2b0e34 1536x1536
+render -17 20 20 3f800000 c3960000 c2240000 76ebe567645f4725 20x20
+render 1234 28 28 42160000 459c4000 c60ca000 fa0705ad41009d5 1050x1050
+render -2147483648 16 16 3f400000 c1080000 40400000 5d3612e4c3b7ce25 12x12
+";
+
+    const MIN: f32 = f32::from_bits(1);
+    const CONTINENT: [f32; 11] = [
+        f32::NAN,
+        -0.0,
+        0.0,
+        0.25,
+        f32::from_bits(0x3e80_0001),
+        0.5,
+        f32::from_bits(0x3f00_0001),
+        0.75,
+        1.0,
+        2.0,
+        -1.0,
+    ];
+    const RIVER: [f32; 7] = [f32::NAN, -0.0, 0.0, MIN, -MIN, 0.5, 1.0];
+    const BIOME: [f32; 16] = [
+        0.0,
+        0.25,
+        0.5,
+        0.999,
+        1.0,
+        f32::NAN,
+        -1.0,
+        2.0,
+        6.0,
+        -6.0,
+        1e9,
+        -1e9,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        -0.0,
+        0.123456,
+    ];
+
+    fn generator() -> super::super::terraforged_generator_facade::TerraForgedGenerator {
+        build(terrain_levels(None).unwrap()).unwrap()
+    }
+
     #[test]
-    fn renders_oceans_and_land() {
-        let preview = Preview::new().unwrap();
-        let pixels = preview.render(
-            SEED,
-            View {
-                width: 48,
-                height: 48,
-                zoom: 64.0,
-                ..View::default()
-            },
+    fn colors_match_6dd607eb_java() {
+        let generator = generator();
+        let terrains = &generator.noise_generator().continent().context().terrain;
+        let mut lines = Vec::new();
+        for strength in [0.2f32, 1.0] {
+            let mut colors = Vec::new();
+            for climate_type in BiomeType::VALUES {
+                for continent in CONTINENT {
+                    for river in RIVER {
+                        for biome in BIOME {
+                            let mut sample = ClimateSample::new(terrains);
+                            sample.climate_type = climate_type;
+                            sample.noise.continent_noise = continent;
+                            sample.noise.river_noise = river;
+                            sample.biome_noise = biome;
+                            colors.push(biome_color(&sample, strength));
+                        }
+                    }
+                }
+            }
+            lines.push(format!("color {:x} {:x}", strength.to_bits(), fnv(colors)));
+        }
+        let java: Vec<&str> = JAVA.lines().filter(|l| l.starts_with("color ")).collect();
+        assert_eq!(lines, java);
+    }
+
+    #[test]
+    fn world_previews_match_6dd607eb_java() {
+        let generator = generator();
+        let sampler = CurrentBiomeSampler::new(generator.noise_generator());
+        for line in JAVA.lines().filter(|l| l.starts_with("render ")) {
+            let f: Vec<&str> = line.split(' ').collect();
+            let bits = |s: &str| f32::from_bits(u32::from_str_radix(s, 16).unwrap());
+            let seed: i32 = f[1].parse().unwrap();
+            let view = View {
+                width: f[2].parse().unwrap(),
+                height: f[3].parse().unwrap(),
+                zoom: bits(f[4]),
+                x: bits(f[5]),
+                y: bits(f[6]),
+            };
+            let pixels = view.render(|x, y| world_color(&sampler, seed, x, y));
+            assert_eq!(
+                format!("{:x} {}", fnv(pixels), view.label()),
+                format!("{} {}", f[7], f[8]),
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn shading_spills_like_java_ints() {
+        // A brightness of 2 doubles 200 to 400 (0x190): its ninth bit lands in the channel above, as Java ORs it.
+        assert_eq!(shade_rgb(0, 200, 0, 2.0), 0x01_90_00);
+        assert_eq!(shade_rgb(10, 20, 30, 1.0), 0x0A_14_1E);
+        // A negative channel sets every higher bit (NoiseUtil.floor(-5f) is -6).
+        assert_eq!(shade_rgb(0, 0, 10, -0.5), 0xFF_FF_FA);
+    }
+
+    #[test]
+    fn default_view_is_the_window() {
+        let view = View::default();
+        assert_eq!(
+            (view.width, view.height, view.label()),
+            (400, 400, "400x400".to_owned())
         );
-        assert!(pixels.iter().any(|&p| p == 0x0066DD));
-        assert!(pixels.iter().any(|&p| p != 0x0066DD && p != 0x0099DD));
+        assert_eq!(
+            View {
+                zoom: 0.0001,
+                ..view
+            }
+            .label(),
+            "0x0"
+        );
     }
 }

@@ -32,14 +32,18 @@ use super::super::native_server::{NativeCommand, NativeServerPlayer};
 use horizon_client::save::terraforged_world_type::is_terraforged;
 use horizon_client::text::{self, ClickEvent, Style, Text};
 use horizon_world::worldgen::generator::{
+    terraforged_current_biome_sampler::CurrentBiomeSampler,
     terraforged_generator_facade::{TerraForgedGenerator, TerraHeightmap, live_generator},
+    terraforged_preview::{View, world_color},
     terraforged_util::{unpack_left, unpack_right},
 };
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex, PoisonError};
 
-/// `TFCommands.register`'s two roots (`/tf` has `export structures` and `regen`), `requires(hasPermission(2))`.
+/// `TFCommands.register`'s two roots (`/tf` has `export structures` and `regen`), `requires(hasPermission(2))`, and
+/// Horizon's `/tf preview` (TerraForged's `Previewer` window as a picture: [`preview`]).
 /// TerraForged registers them in every world (its `/locateterrain` then answers nothing where the level's generator
 /// is not TerraForged's); here only a TerraForged world has them, so other worlds keep vanilla's command tree
 /// (Arthur's choice for the pack and the boats).
@@ -95,12 +99,37 @@ pub(in crate::game) fn perform(
             true
         }
         ["tf", "preview", rest @ ..] if rest.len() <= 2 => {
-            let size = rest.first().map_or(Ok(400), |s| s.parse::<u32>());
-            let zoom = rest.get(1).map_or(Ok(1.0), |z| z.parse::<f32>());
-            let (Ok(size), Ok(zoom)) = (size, zoom) else {
-                return false;
+            // Horizon's: `Previewer`'s window size (one side, in pixels) and zoom (blocks per pixel), checked as
+            // Brigadier's `integer(16, 4096)` and `floatArg(0.0001)` would (its wheel keeps the zoom at 0.0001 or
+            // more; Brigadier reads no NaN or infinity).
+            let size = match rest.first().map(|word| (word, word.parse::<i32>())) {
+                None => 400,
+                Some((_, Ok(size))) if (16..=MAX_PREVIEW_SIZE).contains(&size) => size,
+                Some((word, found)) => {
+                    let message = match found {
+                        Ok(found) if found < 16 => Text::tr("argument.integer.low", &[&16, &found]),
+                        Ok(found) => Text::tr("argument.integer.big", &[&MAX_PREVIEW_SIZE, &found]),
+                        Err(_) => Text::tr("parsing.int.invalid", &[word]),
+                    };
+                    syntax_failure(game, command, offset(command, word), message);
+                    return true;
+                }
             };
-            preview(game, player, size.clamp(16, 4096), zoom.max(0.0001));
+            let zoom = match rest.get(1).map(|word| (word, word.parse::<f32>())) {
+                None => 1.0,
+                Some((_, Ok(zoom))) if zoom.is_finite() && zoom >= MIN_PREVIEW_ZOOM => zoom,
+                Some((word, found)) => {
+                    let message = match found {
+                        Ok(found) if found.is_finite() => {
+                            Text::tr("argument.float.low", &[&MIN_PREVIEW_ZOOM, &found])
+                        }
+                        _ => Text::tr("parsing.float.invalid", &[word]),
+                    };
+                    syntax_failure(game, command, offset(command, word), message);
+                    return true;
+                }
+            };
+            preview(game, player, size as u32, zoom);
             true
         }
         ["locateterrain", terrain, rest @ ..] if rest.len() <= 1 => {
@@ -198,12 +227,12 @@ fn answer(generator: &TerraForgedGenerator, at: [i32; 3], x: i32, z: i32, terrai
     }
 }
 
-/// `/locateterrain` answers still being computed: the player's UUID and the answer's channel.
+/// `/locateterrain` and `/tf preview` answers still being computed: the player's UUID and the answer's channel.
 type Pending = Vec<(u128, Receiver<Text>)>;
 static PENDING: Mutex<Pending> = Mutex::new(Vec::new());
 
-/// Each server tick: sends the `/locateterrain` answers that are ready to their players (dropped for a player who
-/// left).
+/// Each server tick: sends the `/locateterrain` and `/tf preview` answers that are ready to their players (dropped
+/// for a player who left).
 pub(in crate::game) fn deliver(game: &mut Game<'_>) {
     let mut pending = PENDING.lock().unwrap_or_else(PoisonError::into_inner);
     if pending.is_empty() {
@@ -400,13 +429,37 @@ fn regen(game: &mut Game<'_>, player: &NativeServerPlayer, radius: i32) {
     game.feedback(Text::colored("Regen complete!", text::GREEN));
 }
 
-/// `ContinentPreview`'s window as a picture of the view around the player, in the world's
-/// folder.
+/// Where `word` (a slice of `line`, from `split_whitespace`) starts in `line`.
+fn offset(line: &str, word: &str) -> usize {
+    word.as_ptr() as usize - line.as_ptr() as usize
+}
+
+/// `/tf preview`'s largest window side, in pixels.
+const MAX_PREVIEW_SIZE: i32 = 4096;
+/// `Previewer`'s smallest zoom (`Math.max(0.0001f, ..)` on the mouse wheel).
+const MIN_PREVIEW_ZOOM: f32 = 0.0001;
+/// Set while a preview renders: one at a time, since a render takes every processor but one.
+static PREVIEWING: AtomicBool = AtomicBool::new(false);
+
+/// Horizon's in-game form of TerraForged's `Previewer` window (a developer tool that the game never opens): the view
+/// centred on the player, of the level's own generator (never a second one) at its runtime seed, written to
+/// `terraforged-preview.png` in the world's folder (see `terraforged_preview`). A level that does not generate with
+/// TerraForged (the Nether and the End) has nothing to show. The picture renders on its own thread, never on the
+/// server's, and its answer reaches the player at a later server tick ([`deliver`]).
 fn preview(game: &mut Game<'_>, player: &NativeServerPlayer, size: u32, zoom: f32) {
-    use horizon_world::worldgen::generator::terraforged_preview::{Preview, SEED, View};
     let Some(world) = game.native_world_dir() else {
         return;
     };
+    let Some(generator) = live_generator(game.level.seed, &player.dimension) else {
+        game.command_failure(Text::literal(
+            "This dimension does not generate with TerraForged",
+        ));
+        return;
+    };
+    if PREVIEWING.swap(true, Ordering::AcqRel) {
+        game.command_failure(Text::literal("A TerraForged preview is already rendering"));
+        return;
+    }
     let view = View {
         width: size,
         height: size,
@@ -414,32 +467,63 @@ fn preview(game: &mut Game<'_>, player: &NativeServerPlayer, size: u32, zoom: f3
         x: player.position[0] as f32,
         y: player.position[2] as f32,
     };
-    let written = Preview::new().and_then(|preview| {
-        let pixels = preview.render(SEED, view);
-        let path = world.join("terraforged-preview.png");
-        let file = std::fs::File::create(&path).map_err(|e| e.to_string())?;
-        let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), size, size);
-        encoder.set_color(png::ColorType::Rgb);
-        encoder.set_depth(png::BitDepth::Eight);
-        let bytes: Vec<u8> = pixels
-            .iter()
-            .flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8])
-            .collect();
-        encoder
-            .write_header()
-            .and_then(|mut writer| writer.write_image_data(&bytes))
-            .map_err(|e| e.to_string())?;
-        Ok(path)
-    });
-    game.native_feedback(match written {
-        Ok(path) => {
-            // The window's corner label: the area shown, in blocks.
-            let blocks = (size as f32 * zoom).floor();
-            Text::colored(
-                format!("Preview {blocks}x{blocks}: {}", path.display()),
-                GREEN,
-            )
+    let (send, receive) = mpsc::channel();
+    let spawned = std::thread::Builder::new()
+        .name("TerraForged preview".to_owned())
+        .spawn(move || {
+            // Cleared on any exit, a panic included.
+            struct Done;
+            impl Drop for Done {
+                fn drop(&mut self) {
+                    PREVIEWING.store(false, Ordering::Release);
+                }
+            }
+            let _done = Done;
+            let line = match write_preview(&generator, &world, view) {
+                Ok(path) => Text::colored(
+                    format!("Preview {}: {}", view.label(), path.display()),
+                    text::GREEN,
+                ),
+                Err(error) => Text::colored(format!("Preview failed: {error}"), text::RED),
+            };
+            drop(send.send(line));
+        });
+    match spawned {
+        Ok(_) => PENDING
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((player.uuid, receive)),
+        Err(error) => {
+            PREVIEWING.store(false, Ordering::Release);
+            game.command_failure(Text::literal(format!("Preview failed: {error}")));
         }
-        Err(error) => Text::colored(format!("Preview failed: {error}"), RED),
-    });
+    }
+}
+
+/// Renders `view` of `generator`'s world and writes it as an RGB PNG beside the level.
+fn write_preview(
+    generator: &TerraForgedGenerator,
+    world: &std::path::Path,
+    view: View,
+) -> Result<std::path::PathBuf, String> {
+    let sampler = CurrentBiomeSampler::new(generator.noise_generator());
+    let seed = generator.seed();
+    let pixels = view.render(|x, y| world_color(&sampler, seed, x, y));
+    let bytes: Vec<u8> = pixels
+        .iter()
+        .flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8])
+        .collect();
+    let path = world.join("terraforged-preview.png");
+    let file = std::fs::File::create(&path).map_err(|e| e.to_string())?;
+    let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), view.width, view.height);
+    encoder.set_color(png::ColorType::Rgb);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder
+        .write_header()
+        .and_then(|mut writer| {
+            writer.write_image_data(&bytes)?;
+            writer.finish()
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(path)
 }
