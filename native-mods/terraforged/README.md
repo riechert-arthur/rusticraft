@@ -45,7 +45,9 @@ Differences and gaps:
   missing: global caves keep the biomes above them, and `oak_forest` never generates.
 - TerraForged's pack makes every overworld taller; here only TerraForged worlds get it.
 - Far terrain (Horizon's distant tiles) still samples the vanilla generator.
-- Not ported: the world preview screen, the `/tf` and `/locateterrain` commands, the boat hook, TerraForged's
+- The boat hook (boats float up small water steps) works in every world while the bundle is
+  installed, as TerraForged's mixin does, not only in TerraForged worlds.
+- Not ported: the world preview screen, the `/tf` and `/locateterrain` commands, TerraForged's
   dimension effects and the unregistered test volcano feature.
 
 ## Layers
@@ -2893,6 +2895,21 @@ as vanilla does. A dedicated server's `level-type=terraforged:normal` is not rec
 `minecraft:normal` with its usual warning). A game built without this bundle opens a TerraForged world as a Normal one
 and generates new chunks with vanilla terrain. With the bundle applied, Horizon's own test
 `create_world_tabs_follow_vanilla_and_their_choices_reach_the_action` fails, because it counts vanilla's five presets.
+
+Boats (`boat.rs`, plus an OVERWRITE of Horizon's `boat_status`, which is `AbstractBoat.getStatus` with `isUnderwater`
+inlined) follow TerraForged 6dd607eb's `MixinBoat` (RETURN of `isUnderwater`) and `BoatHook.floatTheBoat`. When a
+player's boat is found under water, its floating height under the water surface above it (`getWaterLevelAbove() -
+height + 0.101`) is computed. If that height is no more than 0.8 above the boat, the boat moves halfway there (all the
+way once within 0.01), and the status checks go on as if it were not under water. So a ridden boat climbs a river's
+stepped water instead of sinking. The arithmetic is Java's: the water level and the subtraction are floats, the rest
+doubles. `getWaterLevelAbove` is the hook's own copy of vanilla's bytecode, because Horizon's copy returns a double and
+ignores `lastYd`. The copy reads the boat's vertical motion as `lastYd`; vanilla keeps the motion from before the last
+move's collisions, so the two differ only right after a vertical collision. Like TerraForged's mixin, the hook works in
+every world while the bundle is installed. It runs where a ridden boat's physics run: on the rider's client (single
+player on its server thread, LAN guests and dedicated-server players alike), which sends the boat's position to the
+server. A server never moves a player's boat itself. TerraForged's server also floats it, but the client's next move
+overwrites that position. Boats nobody rides, or that only mobs ride, are unchanged. The tests compare against a Java
+transcription in `.local/terraforged/oracles/boat_hook/` (out of Git).
 
 ## Status: development only
 

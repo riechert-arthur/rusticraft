@@ -103,7 +103,7 @@ mod tests {
     use super::*;
     use horizon_core::geometry::Vec3;
 
-    /// `oracle/boat_hook/` (out of Git): a Java transcription of `floatTheBoat`'s arithmetic over
+    /// `.local/terraforged/oracles/boat_hook/` (out of Git): a Java transcription of `floatTheBoat`'s arithmetic over
     /// these inputs, folded (FNV-1a over the result bits, -1 for "can't reach").
     const FLOAT_FOLD: u64 = 0xe540ec9bbacee5b8;
     const FLOAT_NONE: usize = 270;
