@@ -284,10 +284,12 @@ impl<T> RegistryBiomeMap<T> {
             .collect();
         let mut registry_order = BiomeType::VALUES;
         registry_order.sort_by_key(|climate| climate_name(*climate));
+        let mut resolved: [Vec<(&RegistryBiome<T>, f32)>; 11] = std::array::from_fn(|_| Vec::new());
         for climate in registry_order {
-            for (name, _) in &files[climate as usize] {
+            for &(name, weight) in &files[climate as usize] {
                 let (namespace, path) = identifier(name);
                 let entry = find(name).ok_or_else(|| Arc::from(format!("{namespace}:{path}")))?;
+                resolved[climate as usize].push((entry, weight));
                 if !overworld
                     .iter()
                     .any(|known| Arc::ptr_eq(&known.value, &entry.value))
@@ -302,8 +304,7 @@ impl<T> RegistryBiomeMap<T> {
         let mut registered = BTreeSet::new();
         let mut weighted: [Vec<(Arc<T>, f32)>; 11] = std::array::from_fn(|_| Vec::new());
         for climate in BiomeType::VALUES {
-            for &(name, weight) in &files[climate as usize] {
-                let entry = find(name).expect("checked by getOverworldBiomes");
+            for &(entry, weight) in &resolved[climate as usize] {
                 weighted[climate as usize].push((Arc::clone(&entry.value), weight));
                 registered.insert(Arc::clone(&entry.name));
             }
