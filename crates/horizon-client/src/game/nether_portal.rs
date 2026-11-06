@@ -314,6 +314,7 @@ impl Game<'_> {
     /// they are, the others as saved; chunks never generated have none.
     fn portal_blocks(&self, center: BlockPos, radius: i32) -> Vec<BlockPos> {
         let b = self.res.behaviours();
+        let biomes = self.res.biomes();
         let chunk_radius = radius.div_euclid(16) + 1;
         let (cx, cz) = (center.x >> 4, center.z >> 4);
         let mut out = Vec::new();
@@ -322,10 +323,7 @@ impl Game<'_> {
                 let saved;
                 let chunk = match self.world.chunks.get(&(x, z)) {
                     Some(c) => &**c,
-                    None => match self
-                        .save
-                        .load(x, z, self.pack.assets.registry, self.res.biomes())
-                    {
+                    None => match self.save.load(x, z, self.pack.assets.registry, &biomes) {
                         Some(c) => {
                             saved = c;
                             &saved

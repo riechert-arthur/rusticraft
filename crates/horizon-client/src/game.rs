@@ -1529,7 +1529,9 @@ fn falling_block_visible(state: BlockStateId, cell: BlockStateId) -> bool {
 
 /// The data loaded once at startup and never changed: blocks, items,
 /// recipes, biomes, mobs, collision and motion. Read-only and `Send + Sync`,
-/// so the client and an integrated server thread can share one copy.
+/// so the client and an integrated server thread can share one copy. The
+/// one exception is the biome table, which a world swaps for its own when it
+/// opens (`set_world_biomes`): vanilla's plus the native mods' biomes it takes.
 pub struct Resources {
     core: WorldCore,
     rest: std::sync::OnceLock<WorldRest>,
@@ -1537,7 +1539,7 @@ pub struct Resources {
 
 struct WorldCore {
     facts: BlockFacts,
-    biomes: Arc<Biomes>,
+    biomes: horizon_client::biome::BiomeTable,
     environment: Environment,
     collision: BlockCollisionRegistry<'static>,
     motion: MotionResources,
@@ -1600,8 +1602,19 @@ impl Resources {
     fn transformers(&self) -> &horizon_client::block_transform::Transformers {
         &self.rest().transformers
     }
-    fn biomes(&self) -> &Arc<Biomes> {
-        &self.core.biomes
+    /// The open world's biome table (`BiomeTable::current`).
+    fn biomes(&self) -> Arc<Biomes> {
+        self.core.biomes.current()
+    }
+    /// A world opens with native mods' biomes `native` (`world_biomes::native_biomes`):
+    /// its table, and through it its synchronized registry and its commands' ids, hold
+    /// vanilla's biomes and those. Set before anything of the world reads the table.
+    fn set_world_biomes(&self, native: Vec<(String, serde_json::Value)>) {
+        if self.core.biomes.set_native(native) {
+            let biomes = self.biomes();
+            let names: Vec<&str> = biomes.native().iter().map(|(id, _)| id.as_str()).collect();
+            log::info!("Horizon: the world's biomes are vanilla's and {names:?}");
+        }
     }
     fn environment(&self) -> &Environment {
         &self.core.environment
@@ -1723,7 +1736,7 @@ impl PackResources {
         assets: Arc<Assets>,
         render: Arc<RenderAssets>,
         facts: &BlockFacts,
-        biomes: Arc<Biomes>,
+        biomes: horizon_client::biome::BiomeTable,
         light: Arc<LightTables>,
     ) -> Result<Self> {
         let visibility = models::load_visibility(root, assets.registry)?;
@@ -1750,7 +1763,7 @@ impl PackResources {
         render: Arc<RenderAssets>,
         tables: Arc<MeshTables>,
         item_renderer: horizon_client::item_render::ItemRenderer,
-        biomes: Arc<Biomes>,
+        biomes: horizon_client::biome::BiomeTable,
         light: Arc<LightTables>,
     ) -> Self {
         Self {
@@ -1856,6 +1869,9 @@ struct WorldIcon {
 struct Game<'a> {
     /// Shared with an integrated server; `collision` and `motion` borrow from it.
     res: Arc<Resources>,
+    /// The open world's biome table (`Resources::biomes`) for what borrows it as long as
+    /// `self`: taken when the world opens and when a server sends its registries.
+    world_biomes: Arc<Biomes>,
     rest_loader: Option<WorldRestLoader>,
     pending_entry: Option<PendingWorldEntry>,
     world_loader: Option<world_loading::WorldLoader>,
@@ -3128,7 +3144,7 @@ impl Game<'_> {
                 state,
                 pos,
                 &region,
-                self.res.biomes(),
+                &self.res.biomes(),
                 self.streaming.biome_zoom,
                 self.streaming.biome_blend,
             )
@@ -3660,7 +3676,7 @@ impl Game<'_> {
             player_box,
             guest_boxes,
             player_collision,
-            biomes: self.res.biomes(),
+            biomes: &self.res.biomes(),
             seed: self.level.seed,
             behaviours: self.res.behaviours(),
             items: world_items!(self),
@@ -10752,6 +10768,7 @@ impl Game<'_> {
             locator,
         } = prepared;
         let dim = Dim::from_id(&level.dimension);
+        self.world_biomes = self.res.biomes();
         self.level_shapes = shapes;
         self.world_root = save_root.clone();
         horizon_client::crash::set_detail(
@@ -10953,7 +10970,7 @@ impl Game<'_> {
         let keys: Vec<_> = self.world.modified.drain().collect();
         let chunks = self.with_entities(keys.iter().filter_map(|k| self.world.chunks.get(k)));
         self.save
-            .save(&chunks, self.pack.assets.registry, self.res.biomes())?;
+            .save(&chunks, self.pack.assets.registry, &self.res.biomes())?;
         self.save_dimension_entities()?;
         // Coordinates scale by 8 between the Overworld and the Nether.
         let scale = match (self.dim, target) {
@@ -13598,7 +13615,7 @@ impl Game<'_> {
         let keys: Vec<_> = self.world.modified.drain().collect();
         let chunks = self.with_entities(keys.iter().filter_map(|k| self.world.chunks.get(k)));
         self.save
-            .save_later(&chunks, self.pack.assets.registry, self.res.biomes())?;
+            .save_later(&chunks, self.pack.assets.registry, &self.res.biomes())?;
         // Prepare entities while the chunk writer runs, then use one barrier.
         self.save_entities(false)?;
         self.save_raids();
@@ -14736,7 +14753,7 @@ impl Game<'_> {
         if !modified.is_empty()
             && let Err(e) = horizon_client::spans::time("save_chunks", || {
                 self.save
-                    .save_later(&modified, self.pack.assets.registry, self.res.biomes())
+                    .save_later(&modified, self.pack.assets.registry, &self.res.biomes())
             })
         {
             log::warn!("Horizon: failed to save unloaded chunks: {e}");
@@ -16135,7 +16152,7 @@ impl<'a> Game<'a> {
         let registry = pack.assets.registry;
         // Until a world is opened the streamer is idle.
         let mut streaming = Streaming::new(
-            Arc::new(TestTerrain::new(registry, res.biomes())?),
+            Arc::new(TestTerrain::new(registry, &res.biomes())?),
             pack.context.clone(),
             1,
         );
@@ -16165,6 +16182,7 @@ impl<'a> Game<'a> {
         );
         Ok(Game {
             res: res.clone(),
+            world_biomes: res.biomes(),
             rest_loader: None,
             pending_entry: None,
             world_loader: None,
@@ -16867,7 +16885,12 @@ impl Game<'_> {
         let kept = self.lan.as_ref().map(|host| host.hub.lan.shared.sync());
         match kept {
             Some(kept) => {
-                match lan::reload_sync_data(&self.options.resources, &self.pack_files(), &kept) {
+                match lan::reload_sync_data(
+                    &self.options.resources,
+                    &self.pack_files(),
+                    &kept,
+                    self.res.biomes().native(),
+                ) {
                     Ok(sync) => {
                         if let Some(host) = self.lan.as_mut() {
                             host.hub.reload_resources(sync);
@@ -17260,6 +17283,8 @@ fn load_resources(
     if let Some(folder) = launch_world {
         world_loading::preload_launch_world(folder, &root, assets.registry, biomes.clone());
     }
+    // Vanilla's until a world opens with its own (`Resources::set_world_biomes`).
+    let biomes = horizon_client::biome::BiomeTable::new(biomes);
     let tables = Arc::new(MeshTables::new(&assets, &render, &facts, visibility)?);
     let pack = PackResources::assemble(
         &root,
@@ -17420,11 +17445,11 @@ fn load_world_rest(
     };
     let load_animate = || -> Result<_> {
         let animate = if draws {
-            horizon_client::animate_tick::AnimateTables::load(root, registry, biomes)?
+            horizon_client::animate_tick::AnimateTables::load(root, registry, &biomes)?
         } else {
             Default::default()
         };
-        Ok((animate, horizon_client::fog::FogTables::load(root, biomes)))
+        Ok((animate, horizon_client::fog::FogTables::load(root, &biomes)))
     };
     let load_mobs = || -> Result<_> {
         let mob_types: HashMap<_, _> = MobTypes::load(root)?

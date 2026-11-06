@@ -189,7 +189,7 @@ fn chunks_left_behind_keep_their_decoration() {
     let context = Arc::new(WorkerContext {
         tables: Arc::new(MeshTables::new(&assets, &render, &facts, visibility).unwrap()),
         light: Arc::new(LightTables::load(&root, assets.registry, &facts).unwrap()),
-        biomes: Arc::new(Biomes::load(&root).unwrap()),
+        biomes: horizon_client::biome::BiomeTable::new(Arc::new(Biomes::load(&root).unwrap())),
         assets,
         render: render.clone(),
     });
@@ -259,7 +259,7 @@ fn proto_chunks_are_viewed_once_per_state() {
     let context = Arc::new(WorkerContext {
         tables: Arc::new(MeshTables::new(&assets, &render, &facts, visibility).unwrap()),
         light: Arc::new(LightTables::load(&root, assets.registry, &facts).unwrap()),
-        biomes: Arc::new(Biomes::load(&root).unwrap()),
+        biomes: horizon_client::biome::BiomeTable::new(Arc::new(Biomes::load(&root).unwrap())),
         assets,
         render: render.clone(),
     });

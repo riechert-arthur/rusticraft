@@ -879,7 +879,7 @@ impl Game<'_> {
             force_game_mode: props.force_game_mode,
         };
         if let Some(sync) = sync {
-            sync.adopt(&self.pack_files());
+            sync.adopt(&self.pack_files(), self.res.biomes().native());
         }
         if let Err(e) = self.lan_host(settings, net, config, None) {
             log("WARN", "**** FAILED TO BIND TO PORT!");

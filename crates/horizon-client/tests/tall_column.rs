@@ -69,7 +69,7 @@ fn a_tall_column_streams_lights_and_meshes_to_its_top() {
     let context = Arc::new(WorkerContext {
         tables: Arc::new(MeshTables::new(&assets, &render, &facts, visibility).unwrap()),
         light: Arc::new(LightTables::load(&root, assets.registry, &facts).unwrap()),
-        biomes: Arc::new(Biomes::load(&root).unwrap()),
+        biomes: horizon_client::biome::BiomeTable::new(Arc::new(Biomes::load(&root).unwrap())),
         assets: assets.clone(),
         render: render.clone(),
     });
@@ -134,7 +134,7 @@ fn a_tall_column_streams_lights_and_meshes_to_its_top() {
             assets: &context.assets,
             render: &context.render,
             tables: &context.tables,
-            biomes: &context.biomes,
+            biomes: &context.biomes.current(),
             visibility: context.tables.visibility.clone(),
         };
         // The workers sort solid quads by side, as uploads expect.

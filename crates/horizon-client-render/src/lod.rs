@@ -2078,7 +2078,7 @@ mod tests {
             tables,
             assets: assets.clone(),
             render,
-            biomes: biomes.clone(),
+            biomes: crate::biome::BiomeTable::new(biomes.clone()),
         });
         let source = Arc::new(TestTerrain::new(assets.registry, &biomes)?);
         let mut lod = Lod::new(source, context);

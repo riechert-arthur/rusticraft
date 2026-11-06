@@ -63,7 +63,7 @@ fn columns_loaded_past_the_render_distance_mesh_when_they_come_in_range() {
     let context = Arc::new(WorkerContext {
         tables: Arc::new(MeshTables::new(&assets, &render, &facts, visibility).unwrap()),
         light: Arc::new(LightTables::load(&root, assets.registry, &facts).unwrap()),
-        biomes: Arc::new(Biomes::load(&root).unwrap()),
+        biomes: horizon_client::biome::BiomeTable::new(Arc::new(Biomes::load(&root).unwrap())),
         assets,
         render: render.clone(),
     });
@@ -148,7 +148,7 @@ fn relit_columns_keep_every_mesh_current() {
     let context = Arc::new(WorkerContext {
         tables: Arc::new(MeshTables::new(&assets, &render, &facts, visibility).unwrap()),
         light: Arc::new(LightTables::load(&root, assets.registry, &facts).unwrap()),
-        biomes: Arc::new(Biomes::load(&root).unwrap()),
+        biomes: horizon_client::biome::BiomeTable::new(Arc::new(Biomes::load(&root).unwrap())),
         assets: assets.clone(),
         render: render.clone(),
     });
@@ -222,7 +222,7 @@ fn relit_columns_keep_every_mesh_current() {
             assets: &context.assets,
             render: &context.render,
             tables: &context.tables,
-            biomes: &context.biomes,
+            biomes: &context.biomes.current(),
             visibility: context.tables.visibility.clone(),
         };
         // The workers sort solid quads by side, as uploads expect.

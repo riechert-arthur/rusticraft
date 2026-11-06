@@ -132,20 +132,17 @@ fn pack_entries(
     }
 }
 
-/// Native mods' biomes (`biome::native_biomes`), sent with their data as a pack's entries are,
+/// A world's native mods' biomes (`Biomes::native`), sent with their data as a pack's entries are,
 /// since no client's known packs hold them. An id the registry already has keeps its entry, as
 /// the game's biome table keeps it: a second entry of one id would fail a client's registry.
-fn native_entries(
-    native: Vec<(String, Value)>,
-    entries: &mut Vec<((String, String), Value, bool)>,
-) {
+fn native_entries(native: &[(String, Value)], entries: &mut Vec<((String, String), Value, bool)>) {
     for (name, json) in native {
         let Some((ns, path)) = name.split_once(':') else {
             continue;
         };
         let key = (ns.to_owned(), path.to_owned());
         if !entries.iter().any(|(k, ..)| *k == key) {
-            entries.push((key, json, true));
+            entries.push((key, json.clone(), true));
         }
     }
 }
@@ -211,9 +208,20 @@ impl SyncData {
             content_identity: None,
         }
     }
+    /// A world without native mods' biomes: [`load_for_world`](Self::load_for_world)'s.
     pub fn load(
         resources: &Path,
         overlay: &horizon_world::loot::PackOverlay,
+    ) -> Result<Self, String> {
+        Self::load_for_world(resources, overlay, &[])
+    }
+    /// The registries and tags of a world whose biome table holds native mods' biomes
+    /// `native` (`Biomes::native`): its `minecraft:worldgen/biome` registry adds those to
+    /// vanilla's, so it names exactly the table's biomes.
+    pub fn load_for_world(
+        resources: &Path,
+        overlay: &horizon_world::loot::PackOverlay,
+        native: &[(String, Value)],
     ) -> Result<Self, String> {
         let builtin = Builtin::find(resources)
             .and_then(|p| Builtin::load(&p).ok())
@@ -233,7 +241,7 @@ impl SyncData {
                 pack_entries(path, overlay, &mut entries);
             }
             if *key == "minecraft:worldgen/biome" {
-                native_entries(crate::biome::native_biomes(), &mut entries);
+                native_entries(native, &mut entries);
             }
             file_order(&mut entries);
             let mut e = Entries {
@@ -520,7 +528,7 @@ mod tests {
         let mut entries = vec![vanilla("badlands"), vanilla("plains"), vanilla("river")];
         let cave = serde_json::json!({"temperature": 0.8});
         native_entries(
-            vec![
+            &[
                 ("terraforged:cave".to_owned(), cave.clone()),
                 ("minecraft:plains".to_owned(), cave.clone()),
                 ("terraforged:oak_forest".to_owned(), cave.clone()),

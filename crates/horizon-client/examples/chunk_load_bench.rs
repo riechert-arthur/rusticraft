@@ -75,7 +75,7 @@ fn main() -> Result<(), Error> {
     let context = Arc::new(WorkerContext {
         tables: Arc::new(MeshTables::new(&assets, &render, &facts, visibility)?),
         light: Arc::new(LightTables::load(&root, assets.registry, &facts)?),
-        biomes: biomes.clone(),
+        biomes: horizon_client::biome::BiomeTable::new(biomes.clone()),
         assets: assets.clone(),
         render,
     });
@@ -142,7 +142,7 @@ fn main() -> Result<(), Error> {
             assets: &context.assets,
             render: &context.render,
             tables: &context.tables,
-            biomes: &context.biomes,
+            biomes: &biomes,
             visibility: context.tables.visibility.clone(),
         };
         vertices = 0;

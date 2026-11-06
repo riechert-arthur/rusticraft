@@ -31,8 +31,13 @@ use std::{
 };
 
 /// What `sync_data` loaded: whether it was with data packs over the game's
-/// data, and the registries and tags.
-type Synced = (bool, std::result::Result<Arc<SyncData>, String>);
+/// data, the native mods' biomes it was read for (`Biomes::native`), and the
+/// registries and tags.
+type Synced = (
+    bool,
+    Vec<(String, serde_json::Value)>,
+    std::result::Result<Arc<SyncData>, String>,
+);
 
 /// The registries and tags, loaded once per world (a world with packs open
 /// or a `/reload` forgets them, as `forget_sync_data` does).
@@ -42,22 +47,28 @@ static SYNC: Mutex<Option<Synced>> = Mutex::new(None);
 /// time, with the world's data packs' recipes, advancements and dialogs over
 /// them. What was read with packs is read again for a world without them
 /// (their dialogs would stay); a world with packs forgets what was read
-/// before it at open (`finish_open_world`).
+/// before it at open (`finish_open_world`). `native` is the world's native mods'
+/// biomes (`Biomes::native` of its table): what was read for another list is read
+/// again, so the registry names the table's biomes.
 pub(super) fn sync_data(
     root: &std::path::Path,
     overlay: &horizon_world::loot::PackOverlay,
+    native: &[(String, serde_json::Value)],
 ) -> std::result::Result<Arc<SyncData>, String> {
     let packs = !overlay.files.is_empty();
     let mut sync = SYNC.lock().unwrap_or_else(|e| e.into_inner());
     if sync
         .as_ref()
-        .is_some_and(|(with_packs, _)| *with_packs != packs)
+        .is_some_and(|(with_packs, read, _)| *with_packs != packs || read != native)
     {
         *sync = None;
     }
-    sync.get_or_insert_with(|| (packs, SyncData::load(root, overlay).map(Arc::new)))
-        .1
-        .clone()
+    sync.get_or_insert_with(|| {
+        let read = SyncData::load_for_world(root, overlay, native).map(Arc::new);
+        (packs, native.to_vec(), read)
+    })
+    .2
+    .clone()
 }
 
 /// Let go of what `sync_data` loaded: a preload no world used
@@ -75,6 +86,7 @@ pub(super) fn reload_sync_data(
     root: &std::path::Path,
     overlay: &horizon_world::loot::PackOverlay,
     kept: &SyncData,
+    native: &[(String, serde_json::Value)],
 ) -> std::result::Result<Arc<SyncData>, String> {
     // Kept pack dialogs count as packs: a world opened without packs after
     // a `/reload` that dropped them must read its own registries again.
@@ -83,7 +95,7 @@ pub(super) fn reload_sync_data(
         sync.keep_registries(root, kept);
         Arc::new(sync)
     });
-    *SYNC.lock().unwrap_or_else(|e| e.into_inner()) = Some((packs, sync.clone()));
+    *SYNC.lock().unwrap_or_else(|e| e.into_inner()) = Some((packs, native.to_vec(), sync.clone()));
     sync
 }
 
@@ -125,16 +137,24 @@ pub(super) fn preload_sync_data(root: &std::path::Path) -> Option<SyncPreload> {
 }
 
 impl SyncPreload {
-    /// The world is open: without packs of its own (`overlay`), what was read
-    /// becomes `sync_data`'s; with them, `sync_data` loads them as before.
-    pub(super) fn adopt(self, overlay: &horizon_world::loot::PackOverlay) {
-        if !overlay.files.is_empty() {
+    /// The world is open: without packs or native mods' biomes of its own
+    /// (`overlay`, `native`), what was read becomes `sync_data`'s; with them,
+    /// `sync_data` loads them as before.
+    pub(super) fn adopt(
+        self,
+        overlay: &horizon_world::loot::PackOverlay,
+        native: &[(String, serde_json::Value)],
+    ) {
+        if !overlay.files.is_empty() || !native.is_empty() {
             return;
         }
         if let Ok(read) = self.0.join() {
             let mut sync = SYNC.lock().unwrap_or_else(|e| e.into_inner());
-            if sync.as_ref().is_none_or(|(with_packs, _)| *with_packs) {
-                *sync = Some((false, read.map(Arc::new)));
+            if sync
+                .as_ref()
+                .is_none_or(|(with_packs, read, _)| *with_packs || !read.is_empty())
+            {
+                *sync = Some((false, Vec::new(), read.map(Arc::new)));
             }
         }
     }
@@ -1327,7 +1347,11 @@ impl Game<'_> {
         config: HubConfig,
         host: Option<u128>,
     ) -> Result<()> {
-        let sync = sync_data(&self.options.resources, &self.pack_files())?;
+        let sync = sync_data(
+            &self.options.resources,
+            &self.pack_files(),
+            self.res.biomes().native(),
+        )?;
         self.sync_dialog_ids(&sync);
         let biome_names: Vec<String> = self
             .res

@@ -554,7 +554,8 @@ pub struct WorkerContext {
     pub assets: Arc<crate::assets::Assets>,
     pub render: Arc<crate::assets::RenderAssets>,
     pub tables: Arc<MeshTables>,
-    pub biomes: Arc<crate::biome::Biomes>,
+    /// The world's biome table (`BiomeTable`): a mesh reads the table of the moment.
+    pub biomes: crate::biome::BiomeTable,
     pub light: Arc<LightTables>,
 }
 impl Streaming {
@@ -682,6 +683,7 @@ impl Streaming {
                                         }
                                         _ => context.tables.visibility.clone(),
                                     };
+                                    let biomes = context.biomes.current();
                                     let mut mesher = Mesher {
                                         nether_shading: settings.nether,
                                         shader_pack_lighting: settings.shader_pack_lighting,
@@ -692,7 +694,7 @@ impl Streaming {
                                         assets: &context.assets,
                                         render: &context.render,
                                         tables: &context.tables,
-                                        biomes: &context.biomes,
+                                        biomes: &biomes,
                                         visibility,
                                     };
                                     let recycled = shared.meshes.lock().unwrap().take();
