@@ -26,7 +26,8 @@
 // TerraForged's bundled `worldgen/vegetation` resources as `VegetationConfig.CODEC` reads them (with
 // `ViabilityCodec` and the viability specs), `BiomeVegetationManager.getConfig`'s lookup and `VegetationFeatures`'
 // split of a biome's vegetal features (TerraForged 6dd607eb; Reimagined a24d450 has the same codec, lookup and
-// split, plus `pale_garden_vegetation` among the tree keywords, which is not followed). The eight vegetation files
+// split, plus `pale_garden_vegetation` among the tree keywords, which is followed here: Arthur's decision, so 26.3's
+// pale oaks are placed as trees; the keyword is Reimagined's, MIT). The eight vegetation files
 // are 6dd607eb's generated copies (`generated/resources/default/data/terraforged/worldgen/vegetation/`), bundled
 // unchanged in `data/worldgen/vegetation/`; seven are byte-identical in TerraForged Reimagined a24d450
 // (https://github.com/Romoslayer/TerraForged-Reimagined/tree/a24d4503064780790e975cd17495866ae13eef11, MIT,
@@ -300,14 +301,18 @@ pub struct VegetationFeatures {
     pub other: Vec<String>,
 }
 
-/// 6dd607eb's tree keywords (Reimagined adds `pale_garden_vegetation` for 26.3's pale garden).
-const TREE_KEYWORDS: [&str; 6] = [
+/// 6dd607eb's tree keywords, plus TerraForged Reimagined a24d450's `pale_garden_vegetation` (MIT, (c) 2026
+/// Romoslayer): 26.3's pale garden names its pale oaks that way, which no 6dd607eb keyword matches, so without it
+/// they would fall in `other` (placed once at the chunk's corner, not as trees). A departure from 6dd607eb, by
+/// Arthur's decision.
+const TREE_KEYWORDS: [&str; 7] = [
     "tree",
     "spruce",
     "oak",
     "birch",
     "pine",
     "dark_forest_vegetation",
+    "pale_garden_vegetation",
 ];
 const GRASS_KEYWORDS: [&str; 1] = ["grass"];
 
@@ -641,18 +646,18 @@ case noise_unknown err
             [
                 ("minecraft:trees_birch_and_oak_leaf_litter".to_owned(), true),
                 ("minecraft:dark_forest_vegetation".to_owned(), true),
+                ("minecraft:pale_garden_vegetation".to_owned(), true),
             ]
         );
         assert_eq!(
             features.grass,
             ["minecraft:patch_grass_forest", "patch_tall_grass"]
         );
-        // Only the path counts, and 6dd607eb has no pale_garden keyword.
+        // Only the path counts. `pale_garden_vegetation` is Reimagined's keyword (6dd607eb has none).
         assert_eq!(
             features.other,
             [
                 "minecraft:flower_default",
-                "minecraft:pale_garden_vegetation",
                 "minecraft:mushroom_island_vegetation",
                 "oak:flower",
             ]

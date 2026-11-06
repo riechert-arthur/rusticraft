@@ -1320,7 +1320,7 @@ rules, `SumViability.Builder`, the two `getFallOff` curves, and the `ViabilityCo
 `TerrainData` (no biome edges). Heights scale by `maxY / 255`; a height outside the band scores 1, as in the jar;
 NaN fails every threshold test; the sum is clamped with `NoiseUtil.clamp` (NaN passes); a sum with fewer weights
 than rules panics where Java throws. The context's seed comes from the newer TerraForged source (the jar has none)
-and is kept for the decoration layer (#213), which implements the context; no rule depends on it.
+and is kept for the vegetation step (#214), which implements the context; no rule depends on it.
 The rules' Cereal specs are decoded by `vegetation.rs` (below); nothing samples the
 rules yet. `BiomeViabilityOracle.java` (`.local/terraforged/oracles/biome_viability/`) runs the jar's own classes
 on stub contexts (every rule over signed zeros, infinities, NaN, the smallest subnormal and heights at and next
@@ -1343,9 +1343,10 @@ and a `Sum` with fewer `amounts` than `rules` is an error (Java throws on its fi
 decodes them in registry order (by id), and `config_for` is `BiomeVegetationManager.getConfig`: the first config
 whose tag holds the biome, so taiga (in `trees/hardy` and `trees/hardy_slopes`) takes `trees_hardy`.
 `VegetationFeatures::create` splits a biome's vegetal feature ids by path keyword into trees, grass and the rest
-(6dd607eb's keywords: Reimagined's added `pale_garden_vegetation` is not followed, so pale oaks fall in the rest).
+(6dd607eb's keywords plus TerraForged Reimagined's `pale_garden_vegetation`, so 26.3's pale oaks are placed as trees:
+a departure from 6dd607eb, by Arthur's decision).
 26.3 drops a whole tag that names a missing biome, and `trees/patchy` names `terraforged:oak_forest`, which only
-the bundled biome (#226) provides; binding the tags to a world's registry is the decoration layer's job (#213).
+the bundled biome (#226) provides; binding the tags to a world's registry is the vegetation step's job (#214).
 `VegetationOracle.java` (`.local/terraforged/oracles/vegetation/`, `run.sh`) checks the bundled files against
 6dd607eb, Reimagined and the jar, decodes them and 53 edge-case documents with 6dd607eb's own codec on Noise2D
 2cb4843 and 26.3's DFU, and folds each noise rule's seed-first samples; the test matches its output bit for bit.
@@ -2704,7 +2705,7 @@ the terrain cache for that chunk only, and the 3x3 neighbours the surface rules 
 hint), `fillFromNoise` (stone and water from the terrain cache, `primeHeightmaps`' WG heightmaps) and
 `buildSurface`: the vanilla overworld noise settings' surface rule (`VanillaGen`) with the preliminary surface
 heights from `NoiseChunkUtil.initSurfaceCache` and 26.3's `WorldGenerationContext(generator, level)` (sea level 62),
-then `Surface.apply` (gen depth 480, `#minecraft:substrate_overworld` and `#minecraft:snow` erodible, as Reimagined chose). Decoration is still the vanilla overworld's;
+then `Surface.apply` (gen depth 480, `#minecraft:substrate_overworld` and `#minecraft:snow` erodible, as Reimagined chose). Decoration is TerraForged's (`decorator.rs`, below);
 after it the chunk's terrain-cache entry is dropped, as `applyBiomeDecoration` does. `getSeaLevel()` is
 TerraForged's 62 and `Source.getNoiseBiome` answers biome queries. Structures are placed by 26.3's structure placement
 over TerraForged's queries (`structure_queries.rs`: `getBaseHeight`, `getBaseColumn` and `Source.getNoiseBiome` over
@@ -2717,7 +2718,7 @@ vain, with the same result). It reads only the continent, river and climate nois
 entry and evicts no erosion region. A column whose pool has no biome matches nothing; Java's `Set.contains(null)`
 throws out of the command there instead. Structures' own biome searches (`findBiomeHorizontal` for strongholds,
 biome checks) already go through `Source.getNoiseBiome` in `structure_queries.rs`. Not wired yet: TerraForged's
-decoration (#213), distant terrain (#221) and the taller overworld (#215). Until then TerraForged's levels are not
+vegetation step (#214), distant terrain (#221) and the taller overworld (#215). Until then TerraForged's levels are not
 mapped onto 26.3's build range: the fill clips terrain to the chunk (cut flat at y 319, which the default levels
 seldom reach), and the preliminary surface heights are clipped the same way. The preliminary heights hold per 4x4
 column cell, as the cache stores them; 26.3's surface context reads one value per column. `getBaseHeight` is clipped
@@ -2741,8 +2742,8 @@ UNIQUE caves, and `MathUtil.clamp` bounds top and bottom; every non-fluid block 
 single cache is shared by every cave and resamples whenever it holds null. Differences: where the pool is empty
 Java writes a null biome into the chunk (which fails later in Java); the port keeps the quart's biome and leaves the
 null out of the cave's biome list. Blocks and quarts outside the build range are skipped (Java would throw for a
-quart below it, which only a generator `min_y` under the chunk's reaches). The CarverChunk lists are returned but not
-kept (TerraForged's decoration, which reads them, is #213). `CaveCarverOracle.java`
+quart below it, which only a generator `min_y` under the chunk's reaches). Each chunk's CarverChunk (its caves' biome
+lists) is kept until the chunk is decorated, as `NoiseCaveGenerator.cache` keeps it. `CaveCarverOracle.java`
 (`.local/terraforged/oracles/cave_carver/`, `run.sh`; needs `../seed_first/run.sh` first) runs 6dd607eb's own
 classes (patched mechanically, the diff in `patch.diff`) with the bundled caves on real 26.3 ProtoChunks, heightmaps
 and biome containers: 48 scenarios (build ranges, generator `min_y` and sea level, BIOMES and TERRAIN statuses,
@@ -2750,6 +2751,35 @@ primed or unprimed heightmaps, seeds, chunks where unique caves form, caves in r
 without `terraforged:cave`, river maps, fluid pockets); the test matches its blocks, biomes, heightmaps and per-cave
 biome lists (including a `carve = false` replay) bit for bit, in debug and release. Another test generates four chunks
 with unique caves twice in one world and once in another, checks the blocks and biomes are equal, and that cave biomes were written (each in a carved quart).
+TerraForged's decoration (`decorator.rs`, spliced into Horizon's decoration module) is 6dd607eb's
+`BiomeGenerator.decorate`: `FeatureDecorator`, then `NoiseCaveGenerator.decorate`, `Surface.smoothWater` and
+`Surface.applyPost`, all while the chunk's terrain-cache entry is held; the entry is dropped after them. Unlike
+vanilla's sorted, chunk-wide feature order, `FeatureDecorator` decorates the whole chunk with the one biome at its
+lowest corner (`SectionPos.of(chunkPos, level.getMinSection()).origin()`, read through the biome zoom) and a legacy
+`WorldgenRandom` seeded with `setDecorationSeed(levelSeed, x, z)`. `VanillaDecorator` runs the steps before the
+vegetal one (0 to 8) and after it (10): a step past the biome's last is skipped, structures included; otherwise each
+structure registered for the step gets `setFeatureSeed(seed, i, step)` and places its starts in the chunk, then the
+biome's features of that step get `setFeatureSeed(seed, structures + i, step)`, where `structures` counts every
+structure registered for the step (the same whether or not the world places structures). The vegetal step
+(`PositionSampler`) is the next layer (#214). For each noise cave, in array order, `NoiseCaveDecorator` places every
+biome the cave passed through (its CarverChunk list, kept from the chunk's carving) at the chunk's corner and the
+cave's start height, from `LOCAL_MODIFICATIONS` on, with a fresh legacy random per cave and `setDecorationSeed` per
+biome (no structure offset). Every placement is `placeWithBiomeCheck` in 26.3's `WorldGenerationContext(generator,
+level)` (sea level 62). Because the unique caves give quarts any registered biome (the nether's and the end's too),
+the decoration knows every registered biome's features, as `BiomeFilter` reads `biome.getGenerationSettings()`.
+Differences: Java orders a step's structures by `MappedRegistry.entrySet()`, a `HashMap` of identity-hashed
+`ResourceKey`s, so the order (and each structure's seed) changes from run to run; the port uses registry order, as
+vanilla's `applyBiomeDecoration` does. A chunk carved by an earlier run has no CarverChunk, and its caves are replayed
+without writing (`getPostCarveChunk`), as in Java; the replay reads the carved chunk's OCEAN_FLOOR_WG, so where a
+cave breached the surface its lists can differ from the first run's, as in Java. A cave whose pool is empty
+records no biome (only GLOBAL caves, until #226 registers `terraforged:cave`, which Java always has; Java would
+record a null and fail on it). `DecoratorSeedOracle.java`
+(`.local/terraforged/oracles/decorator/`, `run.sh`) runs the three classes' seeding loops (copied verbatim, with three
+draws in place of each placement) on 26.3's own `WorldgenRandom`, `LegacyRandomSource` and `SectionPos`, for 6 seeds,
+6 chunks (extreme coordinates included), 4 minimum heights, 4 step tables and 3 structure tables; the test matches its
+seeds and draws through the decorator's own ordering. Tests decorate a chunk with unique caves twice in one world and
+once in another (the same blocks, biomes, block-entity positions and entity counts), with its CarverChunk taken out and with a
+replay, and check every biome's features and the per-step structure counts.
 `client_world_type.rs` (a module of horizon-client's `save.rs`) offers the preset on the Create World screen. 26.3's
 world tab cycles through the `#minecraft:normal` world-preset tag: vanilla's five presets, then the
 `terraforged:normal` entry that TerraForged's tag file adds (both trees ship the same file; Horizon reads no
@@ -2761,8 +2791,9 @@ preset editor. Creating the world (`WorldOptions::world_gen` arms the `write_wor
 result) saves vanilla's `world_gen_settings` with the preset's TerraForged overworld stem. Every other write (a world
 opened without settings, a legacy world, a dedicated server's new world) stays vanilla. A world whose saved overworld
 generator is `terraforged:generator` reloads as `terraforged:normal` (`WorldGen::preset`), and Re-Create picks
-TerraForged again. The world screens' decoration preload (`GeneratorData::prepare_decoration`) prepares the vanilla
-overworld's decoration for it, which the pipeline reuses (the stem has no biome source). Differences: TerraForged's
+TerraForged again. The world screens' decoration preload (`GeneratorData::prepare_decoration`) prepares the two
+decorations the pipeline builds (the stem has no biome source): the vanilla overworld's, for its vanilla half, and
+TerraForged's own over every biome. Differences: TerraForged's
 `CreateWorldScreen.init` hook (`DatapackHook.selectPreset`) opens the screen on TerraForged; here it opens on Normal,
 as vanilla does. A dedicated server's `level-type=terraforged:normal` is not recognized (Horizon falls back to
 `minecraft:normal` with its usual warning). A game built without this bundle opens a TerraForged world as a Normal one
@@ -2774,7 +2805,7 @@ and generates new chunks with vanilla terrain. With the bundle applied, Horizon'
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives, the biome climate types, the climate settings, the climate module, the climate stage, the continent factory, the generator context, the heightmap, the world generator factory, TerraForged's terrain levels, its terrain data, its terrain generator, its terrain-blend utilities, its terrain blender with its nearest-terrain search (and the newer source's seed-first blender), noise-graph reseeding, the cave noise primitives, the biome viability rules, the biome overrides, the continent control points, the continent cell primitives, the continent configuration, the continent shape blending, the continent cell generator with its spawn-offset search, the continent river nodes, the continent river carver's arithmetic, the continent river networks with their nearest-node sampling and their warped, carved river sampling, the newer source's seed-first noise sources, scalar noise graphs, domain warps, selectors, graph caches, terraces, legacy terraces, advanced terraces, curves, transforms (steps, frequency, gradient and modulation), special sources (boost, cell, cell edge and sine) and lines, and its bounded concurrent lossy cache with the continent's cell and
 river-piece caches on it, the continent noise module that joins the continent layers, the newer source's terrain height sampler with its bordered chunk generation and its nearest-terrain search, its biome chunk fill, cave biome sampler, initial biome selection, surface biome sampler, chunk biome hook and biome registry pools, the erosion tile geometry, and TerraForged Reimagined's heightmap smoothing, erosion brushes, hydraulic erosion filter, eroded-region cache, eroded region build, eroded chunk generation, terrain cache, generator queries, chunk fill, the terrain stage hand-off to it, the current climate noise, the biome sampler bridge, the live biome bindings, the terrain asset decoder, the terrain-type and terrain-noise registries, the bundled terrain types and all 14 bundled terrain noises, the bundled noise caves and their reseeded cave array, and 6dd607eb's structure terrain columns with their
 chunk adapter, piece selection and structure-aware terrain stage, 6dd607eb's surface erosion and water edge smoothing passes, and its preliminary surface-height cache, and the `terraforged:normal` world preset, whose pipeline generates
-TerraForged's terrain, biomes, surfaces, noise caves and structures (placed on Reimagined's eroded heights), and the Create World screen's TerraForged world type. A game built with the bundle offers it, but TerraForged's own decoration is not wired yet (see above), so it is still for development; install instructions come once it is.
+TerraForged's terrain, biomes, surfaces, noise caves and structures (placed on Reimagined's eroded heights), and the Create World screen's TerraForged world type. A game built with the bundle offers it, but TerraForged's vegetation step is not wired yet (see above), so it is still for development; install instructions come once it is.
 
 ## Development
 
