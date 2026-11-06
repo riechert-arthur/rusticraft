@@ -2137,7 +2137,7 @@ with `findSolid` (MIT, as above). On columns at or above sea level whose gradien
 Writes go through `set_block_worldgen`, so only the chunk stage's heightmaps follow them, as with 26.3's
 `ProtoChunk.setBlockState`: at TERRAIN, where the surface step runs, OCEAN_FLOOR_WG keeps its pre-erosion heights.
 The caller supplies which states are erodible (Java's `isErodible`: `#minecraft:dirt` or `#minecraft:snow`). With
-26.3's tags that leaves grass, podzol, mycelium, moss and mud uneroded (1.18's `#minecraft:dirt` held them);
+26.3's tags that leaves grass, podzol, mycelium, moss and mud uneroded (`#minecraft:dirt` held them before 26.x);
 TerraForged Reimagined switches to `#minecraft:substrate_overworld` to keep them, which this port doesn't follow (the
 binding layer decides). The cached terrain data is only read. Snow and water postprocessing (`applyPost`,
 `smoothWater`) and the call from the surface decorator are later layers. The test runs `SurfaceErosionOracle`

@@ -28,8 +28,8 @@ use super::{
 };
 use crate::{heightmap::HeightmapType, registry::BlockStateId};
 
-/// TerraForged 6dd607eb's `Surface.apply` (the 1.18.2-0.3.1 jar's bytecode is the same): the erosion half of
-/// `SurfaceDecorator.decoratePost`. Each column whose OCEAN_FLOOR_WG height is at or above `sea_level` and whose
+/// TerraForged 6dd607eb's `Surface.apply` (the 1.18.2-0.3.1 jar's bytecode is the same), which
+/// `SurfaceDecorator.decoratePost` runs. Each column whose OCEAN_FLOOR_WG height is at or above `sea_level` and whose
 /// gradient, normalised by `55 * gen_depth / 255`, is not below 0.6 (NaN erodes, as Java's `<` test) loses its
 /// erodible top: from that height down to the first non-erodible state found strictly above `max(0, y - 20)`
 /// (`findSolid`), every block becomes that state. Nothing happens when the top block is not erodible or no
@@ -37,7 +37,7 @@ use crate::{heightmap::HeightmapType, registry::BlockStateId};
 ///
 /// `gen_depth` is the generator's `getGenDepth()` and `sea_level` its `getSeaLevel()`. `is_erodible` is Java's
 /// `isErodible`: `#minecraft:dirt` or `#minecraft:snow`. With 26.3's tags that is dirt, coarse dirt, rooted dirt and
-/// the snow blocks, but not grass, podzol, mycelium, moss or mud, which 1.18's `#minecraft:dirt` held. `terrain` is the
+/// the snow blocks, but not grass, podzol, mycelium, moss or mud, which the tag held before 26.x. `terrain` is the
 /// chunk's cached data (`TerrainDataHandle::read()`); never call this while that thread holds or waits for the
 /// same entry's write guard. Blocks go through `set_block_worldgen`, so only the chunk stage's heightmaps follow the
 /// edits, as 26.3's `ProtoChunk.setBlockState` does: from TERRAIN on (where the surface step runs) OCEAN_FLOOR_WG
