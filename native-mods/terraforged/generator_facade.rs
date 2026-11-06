@@ -31,7 +31,9 @@
 // (https://github.com/TerraForged/TerraForged/tree/6dd607ebfd41a3b7274e090b1f2cf565d53d1d44, MIT License,
 // Copyright (c) 2021 TerraForged): `Generator.createBiomes` (terrain-cache hint, then `ChunkUtil.fillNoiseBiomes`),
 // `worldgen/biome/Source.java` (`withSeed`, `getNoiseBiome`, `compute`) and `Generator.getBaseHeight` (the raw
-// sample's height; Reimagined reads the eroded height there instead).
+// sample's height; Reimagined reads the eroded height there instead); `fill_from_noise_with_structures` is
+// 6dd607eb's `Generator.fillFromNoise` continuation (`fillChunk`, `primeHeightmaps`, `buildStructureTerrain`;
+// Reimagined's `fillFromNoise` starts the same way).
 
 use super::{
     super::biome_chunk::{BiomeChunk, BiomeFillError},
@@ -229,12 +231,12 @@ impl TerraForgedGenerator {
     ///
     /// `structures` is Java's `new StructureTerrain(chunk, structureManager)`: build it with
     /// [`StructureTerrain::from_starts`] over the generator's `references(..)` for this chunk (the beardifier's list)
-    /// and `chunk.position()`. `stone`, `water` and `air` are the default states of `minecraft:stone`, `minecraft:water`
-    /// and `minecraft:air` (`ChunkUtil.FILLER` and `StructureTerrain`'s `solid`/`air`).
+    /// and `chunk.position()`. `stone`, `water` and `air` are the default states of `minecraft:stone`,
+    /// `minecraft:water` and `minecraft:air` (`ChunkUtil.FILLER` and `StructureTerrain`'s `solid`/`air`).
     ///
-    /// Run one of the two stages per chunk: [`Self::fill_from_noise`] on the same entry sets the generated heights back,
-    /// so mixing them would leave the later stages reading whichever ran last. Concurrent runs for one entry serialize
-    /// on its write guard and leave the same data. No guard of the entry may be held on the calling thread.
+    /// Run one of the two stages per chunk: [`Self::fill_from_noise`] on the same entry sets the generated heights
+    /// back, so mixing them would leave the later stages reading whichever ran last. Concurrent runs for one entry
+    /// serialize on its write guard and leave the same data. No guard of the entry may be held on the calling thread.
     ///
     /// `Err` where the chunk refuses a write, in either step, with the chunk and the entry's heights partly edited
     /// (the next run starts again from the generated heights); panics as [`Self::fill_from_noise`] does.

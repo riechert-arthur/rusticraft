@@ -2120,8 +2120,15 @@ fill and the edits run under one write guard: no reader sees a half-adjusted chu
 entry's generated heights (`write_generated`). Java's second run of the stage for the same entry, which happens only
 if the chunk is generated again before its entry is dropped, would fill from the heights the first run's
 structures left, so its output depends on when the chunk was generated again; the port doesn't reproduce that: a
-rerun gives the first run's blocks and heights. Not yet ported: Deep Caves, Strata, the surface and carver steps,
-and the registration that would let Horizon call the stage.
+rerun gives the first run's blocks and heights. The facade tests check that the stage equals `fill_chunk` then
+`modify_chunk` on a freshly generated entry, that every handle sees the edited heights with the extrema unchanged,
+that a rerun of the structure stage (also four at once on four threads) leaves the same chunk and heights, and
+that a plain fill after a structure stage gives the plain blocks and heights again. Each step has its own Java oracle (the terrain stage
+oracle and `ChunkAdapterOracle`, below); the composition is Java's three calls in order, so it has no oracle of its
+own. Heights the structure edits write come from the clipped chunk (its OCEAN_FLOOR_WG), while unedited columns
+keep TerraForged's unclipped heights; with terrain above the build range the two differ, which the world-height
+decision (below) has to settle. Not yet ported: Deep Caves, Strata, the surface and carver steps, and the
+registration that would let Horizon call the stage.
 
 The structure terrain columns (`structure_terrain.rs`, `StructureTerrain`) are TerraForged 6dd607eb's
 `worldgen.terrain.StructureTerrain.modify` and its helpers (MIT, as above), the per-column part of `fillFromNoise`'s
@@ -2147,8 +2154,8 @@ element is not RIGID (the empty element is terrain-matching), takes a pool piece
 pieces) and sorts by `minY`, stable. Within a structure 26.3 visits the starts in its references' `LongOpenHashSet`
 order (which `references` reproduces); across structures in a `HashMap`'s identity-hash order, so Java does not fix
 the order of tied-`minY` pieces from different structures either. The terrain stage calls `modify_chunk` (above);
-building the pieces with `from_starts` from the generator's references is the caller's job. Reimagined a24d450 changes the blend radius (`clamp(length *
-0.75, 8, 24)`, collection radius 32) and skips buried structures; the port keeps 6dd607eb's. `StructureTerrainOracle.java`
+building the pieces with `from_starts` from the generator's references is the caller's job. Reimagined a24d450
+changes the blend radius (`clamp(length * 0.75, 8, 24)`, collection radius 32) and skips buried structures; the port keeps 6dd607eb's. `StructureTerrainOracle.java`
 (`.local/terraforged/oracles/structure_terrain/`, `run.sh`) compiles 6dd607eb's `StructureTerrain.java` unchanged, with
 fastutil's `ObjectArrayList` and Noise2D's `NoiseUtil`, over stub chunks and runs `buildStructureTerrain`'s column loop
 on 96 generated chunks (negative chunk positions, tied `minY`s, pool ground deltas, surfaces near both build limits);
