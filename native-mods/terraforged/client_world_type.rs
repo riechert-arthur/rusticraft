@@ -131,34 +131,20 @@ pub fn preset(world: &Path) -> ControlFlow<&'static str> {
     }
 }
 
-/// `write_world_gen_settings_with` for a world the Create screen makes: TerraForged's settings
-/// for its TerraForged world, Horizon's for any other preset, and either way TerraForged's
-/// built-in pack ([`write_pack`]), as TerraForged's `DatapackHook.injectDatapack` gives every
-/// world the screen makes, whatever its preset.
+/// `write_world_gen_settings_with` for the Create screen's TerraForged world, with TerraForged's
+/// built-in pack ([`write_pack`]). TerraForged's `DatapackHook.injectDatapack` copies that pack
+/// into every world the screen makes, whatever its preset; here only TerraForged worlds get it,
+/// so vanilla world types keep 26.3's overworld.
 pub fn write(
     dir: &Path,
     seed: i64,
     options: WorldGen,
     flat: &Option<Tag>,
 ) -> ControlFlow<Result<()>> {
-    let Some(terraforged) = CREATING.take() else {
+    if CREATING.take() != Some(true) || options.preset != WorldPreset::Normal {
         return ControlFlow::Continue(());
-    };
-    if terraforged && options.preset == WorldPreset::Normal {
-        return ControlFlow::Break(write_terraforged(dir, seed, options, flat.clone()));
     }
-    ControlFlow::Break(write_vanilla(dir, seed, options, flat.clone()))
-}
-
-/// Horizon's settings for `options` (the inner write finds nothing armed), then the pack. A
-/// vanilla world opens without it, as TerraForged's `createWorldDatapack` only logs a failed
-/// copy; a TerraForged world needs it for its height, so there a failure stops the creation.
-fn write_vanilla(dir: &Path, seed: i64, options: WorldGen, flat: Option<Tag>) -> Result<()> {
-    super::write_world_gen_settings_with(dir, seed, options, flat)?;
-    if let Err(error) = write_pack(dir) {
-        log::warn!("TerraForged: built-in pack for {}: {error}", dir.display());
-    }
-    Ok(())
+    ControlFlow::Break(write_terraforged(dir, seed, options, flat.clone()))
 }
 
 /// Vanilla's settings for `options`, with TerraForged's overworld stem. The inner write
@@ -400,13 +386,10 @@ mod tests {
     }
 
     #[test]
-    fn every_preset_the_create_screen_makes_gets_the_pack() {
+    fn vanilla_presets_stay_vanilla_without_the_pack() {
         use WorldPreset::*;
-        for (n, preset) in [Normal, Flat, LargeBiomes, Amplified, SingleBiomeSurface]
-            .into_iter()
-            .enumerate()
-        {
-            let dir = scratch(&format!("preset-{n}"));
+        let dir = scratch("vanilla-presets");
+        for preset in [Normal, Flat, LargeBiomes, Amplified, SingleBiomeSurface] {
             let options = WorldGen {
                 preset,
                 ..WorldGen::default()
@@ -416,45 +399,12 @@ mod tests {
                 if terraforged && preset == Normal {
                     continue;
                 }
-                let _ = std::fs::remove_dir_all(&dir);
                 CREATING.set(Some(terraforged));
-                assert!(matches!(
-                    write(&dir, 3, options, &None),
-                    ControlFlow::Break(Ok(()))
-                ));
+                assert!(write(&dir, 3, options, &None).is_continue());
                 assert_eq!(CREATING.get(), None);
-                let vanilla = scratch(&format!("preset-{n}-vanilla"));
-                super::super::write_world_gen_settings(&vanilla, 3, options).unwrap();
-                assert_eq!(world_gen_settings(&dir), world_gen_settings(&vanilla));
-                assert!(!is_terraforged(&dir));
-                assert!(is_this_pack(
-                    &dir.join("datapacks/terraforged"),
-                    &pack_meta()
-                ));
-                std::fs::remove_dir_all(&vanilla).unwrap();
+                assert!(!dir.exists());
             }
-            std::fs::remove_dir_all(&dir).unwrap();
         }
-    }
-
-    #[test]
-    fn only_a_terraforged_world_needs_the_pack() {
-        // `datapacks` is a file, so the pack can't be written.
-        let dir = scratch("unwritable");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("datapacks"), "").unwrap();
-        CREATING.set(Some(false));
-        assert!(matches!(
-            write(&dir, 1, WorldGen::default(), &None),
-            ControlFlow::Break(Ok(()))
-        ));
-        assert!(world_gen_settings(&dir).is_some());
-        CREATING.set(Some(true));
-        assert!(matches!(
-            write(&dir, 1, WorldGen::default(), &None),
-            ControlFlow::Break(Err(_))
-        ));
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -475,7 +425,7 @@ mod tests {
         .unwrap();
         std::fs::write(dir.join("datapacks/terraforged-1"), "a file").unwrap();
         let before = walk(&own);
-        CREATING.set(Some(false));
+        CREATING.set(Some(true));
         assert!(write(&dir, 1, WorldGen::default(), &None).is_break());
         assert_eq!(walk(&own), before);
         assert_eq!(
