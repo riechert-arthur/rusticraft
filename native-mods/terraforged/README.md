@@ -2609,9 +2609,11 @@ Reimagined's `entryIds`, which nothing here uses, so the tests compare only the 
 horizon-mixins stages a bundle's `data/` folder under `native-data/terraforged/`, and `data.rs`'s `terraforged_data!`
 embeds them in the build, so no TerraForged checkout is needed at runtime. `decode_current_terrain_types(&mut registry)`
 decodes them under their `terraforged:` registry keys into the world's terrain registry (before it is shared); a second
-call registers nothing new. Nothing calls it yet. Because the registry is Engine 0.3.0's (above), 12 of the 18 types
-come out as in Reimagined and 6 differ: `ocean`, `mountain_chain`, `volcano` and `volcano_pipe` stay Engine's built-ins
-(Reimagined: new terrains under `none`), and `badlands` and `plateau` keep Engine's categories. `CurrentTerrainResourcesOracle.java`
+call registers nothing new. The generator (`generator_preset.rs`) decodes them into `TerrainRegistry::new()`, Engine
+0.3.0's built-ins, the registry TerraForged 6dd607eb links and generated these 18 files from. Reimagined's rewritten
+engine has other built-ins, so 12 of the 18 types come out as in Reimagined and 6 differ (Reimagined vs Engine):
+`ocean`, `mountain_chain`, `volcano` and `volcano_pipe` stay Engine's built-ins (Reimagined: new terrains under
+`none`), and `badlands` and `plateau` keep Engine's categories. `CurrentTerrainResourcesOracle.java`
 (`.local/terraforged/oracles/current_terrain_resources/`, `run.sh`) decodes Reimagined's own files with its asset and
 engine `TerrainType` (registry order and three shuffled orders give the same result, interpreted and JIT-compiled) and
 checks the bundled copies are byte-identical; the test matches its 12 agreeing lines and pins the 6 differences.
@@ -2650,10 +2652,33 @@ and end. `pipeline.rs` overwrites `OverworldGenerator::for_world` and `for_dimen
 function returning `Self`, so a HEAD hook is not possible): a dimension of that preset whose level stem uses
 `terraforged:generator` gets a `TerraForgedPipeline`. The stem is picked as Horizon's `build` and 26.3's
 `WorldDimensions.bake` pick it, a data pack's over the preset's, so a pack's own overworld keeps its generator. Every
-other preset, dimension and stem goes through Horizon's own `build` unchanged. The pipeline wraps the vanilla
-`minecraft:normal` overworld and still hands it every stage, so it generates vanilla's blocks and biomes (a test compares
-a whole chunk). Only two answers are TerraForged's own: the spawn origin is 0 0 (`ChunkGenerator.getOrigin`, which a
-generator without spawn targets inherits) and there is no density debug line. The preset's `levels` are not read yet.
+other preset, dimension and stem goes through Horizon's own `build` unchanged.
+
+The pipeline generates with TerraForged 6dd607eb's `Generator`. `generator_preset.rs` reads the stem's `levels` as
+`TerrainLevels.CODEC` does (absent: `TerrainLevels.DEFAULT`; out-of-range or mistyped fields are errors, as 26.3's
+strict `optionalFieldOf` makes them) and builds `GeneratorPreset.build`'s noise: the 14 bundled terrain noises in
+registry order, `createLandTerrain`'s blender (`TerrainBlender(45763218, 800, 0.8, 0.4)`), `createContinentNoise`'s
+continent (`ClimateSettings::terraforged()`, continent scale 400, its control points) and the erosion stage. Terrain
+types, continent and blender share one terrain registry, Engine 0.3.0's built-ins (`TerrainRegistry::new()`), as
+6dd607eb links Engine 0.3.0.
+The erosion stage is TerraForged Reimagined's region erosion with its default filters (350 droplets, droplet
+lifetime 25; 6dd607eb's Engine 0.3.0 settings would give it 12). Each chunk then runs the statuses in 26.3's order:
+`createBiomes` (TerraForged's surface biome per quart column, at every height, from the registry pools; it hints
+the terrain cache for that chunk only, and the 3x3 neighbours the surface rules read are sampled again without a
+hint), `fillFromNoise` (stone and water from the terrain cache, `primeHeightmaps`' WG heightmaps) and
+`buildSurface`: the vanilla overworld noise settings' surface rule (`VanillaGen`) with the preliminary surface
+heights from `NoiseChunkUtil.initSurfaceCache` and 26.3's `WorldGenerationContext(generator, level)` (sea level 62),
+then `Surface.apply` (gen depth 480, `#minecraft:substrate_overworld` and `#minecraft:snow` erodible, as Reimagined chose). Decoration is still the vanilla overworld's;
+after it the chunk's terrain-cache entry is dropped, as `applyBiomeDecoration` does. `getSeaLevel()` is
+TerraForged's 62 and `Source.getNoiseBiome` answers biome queries. Not wired yet: structures and their terrain
+(#210; the vanilla half runs without structures), carvers and noise caves (#209), biome search (#211), TerraForged's
+decoration (#213), distant terrain (#221) and the taller overworld (#215). Until then TerraForged's levels are not
+mapped onto 26.3's build range: the fill clips terrain to the chunk (cut flat at y 319, which the default levels
+seldom reach), and the preliminary surface heights are clipped the same way. The preliminary heights hold per 4x4
+column cell, as the cache stores them; 26.3's surface context reads one value per column. `base_height` is not
+used yet, so the structure height question (Reimagined's eroded height) waits for #210. A test generates a chunk
+twice in one world and once in a second world, checks the blocks are equal and differ from the normal overworld,
+and that every quart's biome is `getNoiseBiome`'s.
 The create screen does not offer the preset: Horizon's world types are a fixed list. The `#minecraft:normal`
 world-preset tag entry that both trees ship is not bundled, since Horizon reads no world-preset tags.
 
@@ -2661,8 +2686,8 @@ world-preset tag entry that both trees ship is not bundled, since Horizon reads 
 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives, the biome climate types, the climate settings, the climate module, the climate stage, the continent factory, the generator context, the heightmap, the world generator factory, TerraForged's terrain levels, its terrain data, its terrain generator, its terrain-blend utilities, its terrain blender with its nearest-terrain search (and the newer source's seed-first blender), noise-graph reseeding, the cave noise primitives, the biome viability rules, the biome overrides, the continent control points, the continent cell primitives, the continent configuration, the continent shape blending, the continent cell generator with its spawn-offset search, the continent river nodes, the continent river carver's arithmetic, the continent river networks with their nearest-node sampling and their warped, carved river sampling, the newer source's seed-first noise sources, scalar noise graphs, domain warps, selectors, graph caches, terraces, legacy terraces, advanced terraces, curves, transforms (steps, frequency, gradient and modulation), special sources (boost, cell, cell edge and sine) and lines, and its bounded concurrent lossy cache with the continent's cell and
 river-piece caches on it, the continent noise module that joins the continent layers, the newer source's terrain height sampler with its bordered chunk generation and its nearest-terrain search, its biome chunk fill, cave biome sampler, initial biome selection, surface biome sampler, chunk biome hook and biome registry pools, the erosion tile geometry, and TerraForged Reimagined's heightmap smoothing, erosion brushes, hydraulic erosion filter, eroded-region cache, eroded region build, eroded chunk generation, terrain cache, generator queries, chunk fill, the terrain stage hand-off to it, the current climate noise, the biome sampler bridge, the live biome bindings, the terrain asset decoder, the terrain-type and terrain-noise registries, the bundled terrain types and all 14 bundled terrain noises, the bundled noise caves and their reseeded cave array, and 6dd607eb's structure terrain columns with their
-chunk adapter, piece selection and structure-aware terrain stage, 6dd607eb's surface erosion and water edge smoothing passes, and its preliminary surface-height cache, and the `terraforged:normal` world preset, whose pipeline still generates
-vanilla's overworld. Players cannot select the preset yet, so they see no change and there is nothing to install yet. Install instructions come with the layer that wires TerraForged into world generation.
+chunk adapter, piece selection and structure-aware terrain stage, 6dd607eb's surface erosion and water edge smoothing passes, and its preliminary surface-height cache, and the `terraforged:normal` world preset, whose pipeline generates
+TerraForged's terrain, biomes and surfaces. Players cannot select the preset yet, so they see no change and there is nothing to install yet. Install instructions come with the layer that wires TerraForged into world generation.
 
 ## Development
 

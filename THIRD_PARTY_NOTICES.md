@@ -30,6 +30,10 @@ The climate noise in `native-mods/terraforged/current_climate.rs` and the biome 
 `current_biome_sampler.rs` follow TerraForged's own `ClimateNoise` (Engine's post-increment `Seed`, no edge warp or
 macro grouping) and `IBiomeSampler.Sampler` with `createClimate`, with `NoiseGenerator.createContinentNoise`'s climate
 settings.
+The generator in `native-mods/terraforged/generator_preset.rs` and `pipeline.rs` follows TerraForged's own
+`GeneratorPreset.build`, `TerrainLevels.CODEC`, `NoiseGenerator.createLandTerrain` and `createContinentNoise`, and
+`Generator`'s `createBiomes`, `fillFromNoise`, `buildSurface` (`SurfaceDecorator`, `NoiseChunkUtil`), the terrain-cache
+drop in `applyBiomeDecoration`, `getSeaLevel` and `Source.getNoiseBiome`.
 
 The seed-first source API additionally follows
 [Noise2D 2cb48431148a321f74319d7ef0ea61b26bf8e59c](https://github.com/TerraForged/Noise2D/tree/2cb48431148a321f74319d7ef0ea61b26bf8e59c),

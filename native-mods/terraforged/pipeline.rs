@@ -185,8 +185,10 @@ impl TerraForgedPipeline {
 /// `VanillaGen`'s pipeline: the `minecraft:normal` preset's overworld generator (its biome source) over the
 /// `minecraft:overworld` noise settings (a data pack's over the vanilla ones, as `getHolderOrThrow` reads them),
 /// in `level`, the TerraForged stem's build range, clamped to it as `OverworldGenerator::build` does
-/// (`NoiseSettings.clampToHeightAccessor`), without structures. Always Xoroshiro: a pack that turns on
-/// `legacy_random_source` for the overworld settings is not followed (its surface noises would differ).
+/// (`NoiseSettings.clampToHeightAccessor`), without structures. Always Xoroshiro: TerraForged's generator is no
+/// `NoiseBasedChunkGenerator`, so 26.3's `ChunkMap` builds its `RandomState` (whose surface system runs the rule) with
+/// the legacy random source off, stone and sea level 63, whatever the noise settings say. (Here the surface
+/// system's default block and sea level come from the overworld settings: the same unless a data pack changes them.)
 fn vanilla_overworld(
     data: &Arc<GeneratorData>,
     seed: i64,
