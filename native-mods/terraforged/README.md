@@ -2878,9 +2878,8 @@ generator's build range, the level shapes, saving and the synced `dimension_type
 clients get the patched height) follow it as for any pack, and the world reopens with the same height. TerraForged's
 built-in pack also holds its worldgen registries and its world preset; the port bundles those, so only the dimension
 type is copied. TerraForged's `DatapackHook.injectDatapack` copies that pack into every world the Create screen makes,
-whatever the preset; here only TerraForged worlds get it, so vanilla world types keep 26.3's overworld. Worlds made
-before this, worlds made without the screen (`--world`, a dedicated server) and worlds opened again keep their height; disabling the pack gives the overworld 26.3's
-height again. The screen copies the packs its Data Packs screen showed into the world first: a `datapacks/terraforged`
+whatever the preset; here only TerraForged worlds get it (Arthur's choice), so vanilla world types keep 26.3's
+overworld. Worlds made before this keep their height; disabling the pack gives the overworld 26.3's height again. The screen copies the packs its Data Packs screen showed into the world first: a `datapacks/terraforged`
 folder holding exactly this pack (Re-Create's copy) is kept, and any other (the player's own pack of that name) is left
 alone while TerraForged's pack takes the next free name (`terraforged-1`, ...), which Horizon enables as a new pack above
 the player's, as TerraForged selects its pack last. Horizon reads only the type's build range and sky light: its other

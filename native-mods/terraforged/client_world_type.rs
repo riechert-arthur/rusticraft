@@ -52,11 +52,11 @@ static CHOSEN: AtomicBool = AtomicBool::new(false);
 thread_local! {
     /// Set by Re-Create for the `WorldOptions::default` its body ends with.
     static RECREATING: Cell<Option<bool>> = const { Cell::new(None) };
-    /// Set by `WorldOptions::world_gen` for the `write_world_gen_settings_with` that takes its
-    /// result on the same thread: `Some(true)` when the screen's choice is TerraForged. Other
+    /// Set by `WorldOptions::world_gen` when the screen's choice is TerraForged, for the
+    /// `write_world_gen_settings_with` that takes its result on the same thread. Other
     /// writes (`Level::write` for a world without settings, a dedicated server's new world)
-    /// find nothing armed and stay Horizon's, whatever the screen last showed.
-    static CREATING: Cell<Option<bool>> = const { Cell::new(None) };
+    /// stay vanilla whatever the screen last showed.
+    static CREATING: Cell<bool> = const { Cell::new(false) };
 }
 
 pub fn chosen() -> bool {
@@ -80,7 +80,7 @@ pub fn recreate(world: &Path) {
 
 /// `WorldOptions::world_gen`: the new world's settings are about to be written.
 pub fn arm() {
-    CREATING.set(Some(chosen()));
+    CREATING.set(chosen());
 }
 
 /// The world-type button.
@@ -141,7 +141,7 @@ pub fn write(
     options: WorldGen,
     flat: &Option<Tag>,
 ) -> ControlFlow<Result<()>> {
-    if CREATING.take() != Some(true) || options.preset != WorldPreset::Normal {
+    if !CREATING.take() || options.preset != WorldPreset::Normal {
         return ControlFlow::Continue(());
     }
     ControlFlow::Break(write_terraforged(dir, seed, options, flat.clone()))
@@ -371,12 +371,12 @@ mod tests {
         // Nothing armed (`Level::write` for a world without settings): Horizon's write, no pack.
         assert!(write(&dir, 1, WorldGen::default(), &None).is_continue());
         assert!(!dir.join("datapacks").exists());
-        CREATING.set(Some(true));
+        CREATING.set(true);
         assert!(matches!(
             write(&dir, 1, WorldGen::default(), &None),
             ControlFlow::Break(Ok(()))
         ));
-        assert_eq!(CREATING.get(), None);
+        assert!(!CREATING.get());
         assert!(is_terraforged(&dir));
         assert!(is_this_pack(
             &dir.join("datapacks/terraforged"),
@@ -399,9 +399,9 @@ mod tests {
                 if terraforged && preset == Normal {
                     continue;
                 }
-                CREATING.set(Some(terraforged));
+                CREATING.set(terraforged);
                 assert!(write(&dir, 3, options, &None).is_continue());
-                assert_eq!(CREATING.get(), None);
+                assert!(!CREATING.get());
                 assert!(!dir.exists());
             }
         }
@@ -425,7 +425,7 @@ mod tests {
         .unwrap();
         std::fs::write(dir.join("datapacks/terraforged-1"), "a file").unwrap();
         let before = walk(&own);
-        CREATING.set(Some(true));
+        CREATING.set(true);
         assert!(write(&dir, 1, WorldGen::default(), &None).is_break());
         assert_eq!(walk(&own), before);
         assert_eq!(
@@ -450,7 +450,7 @@ mod tests {
             overworld_type_json(),
         )
         .unwrap();
-        CREATING.set(Some(true));
+        CREATING.set(true);
         assert!(write(&again, 1, WorldGen::default(), &None).is_break());
         assert!(is_this_pack(&copy, &pack_meta()));
         assert_eq!(
