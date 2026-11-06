@@ -37,6 +37,7 @@ use super::{
     Pipeline, PreLightChunkStage, ProtoChunk, SeededPipeline, SurfaceInputs, SurfaceQueries,
     SurfaceSample, TerrainChunk, UniformSurfaceBiomes, WorkerState, WorldGenerationContext,
     build_surface, overrides, resource, stage,
+    terraforged_biome_registry::identifier_order,
     terraforged_cave_assets::current_caves,
     terraforged_cave_biome_sampler::CaveBiomeSampler,
     terraforged_cave_carver::NoiseCaveGenerator,
@@ -157,16 +158,17 @@ impl TerraForgedPipeline {
         };
         let level = overrides::LevelHeight::of_type(&stem["type"], &data.dimension_types)
             .map(|height| (height.min_y, height.height));
-        // CaveBiomeSampler: GLOBAL caves use terraforged:cave (not registered in Horizon
-        // yet, so they keep their biomes); UNIQUE caves draw from every registered biome.
+        // CaveBiomeSampler(800, biomeMapManager): GLOBAL caves use terraforged:cave (not registered in Horizon yet, so
+        // they keep their biomes); UNIQUE caves draw from every registered biome (6dd607eb's UNDERGROUND filter is
+        // commented out), in 26.3's registry order: path, then namespace.
         let global = data
             .biome_id("terraforged:cave")
             .map(Arc::new)
             .into_iter()
             .collect();
-        let special = (0..data.biome_names().len())
-            .map(|id| Arc::new(BiomeId(id as u32)))
-            .collect();
+        let mut special: Vec<_> = (0..data.biome_names().len() as u32).map(BiomeId).collect();
+        special.sort_by(|a, b| identifier_order(data.biome_name(*a), data.biome_name(*b)));
+        let special = special.into_iter().map(Arc::new).collect();
         let caves = NoiseCaveGenerator::new(
             current_caves().map_err(resource)?,
             CaveBiomeSampler::new(800, global, special),
