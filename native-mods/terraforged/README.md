@@ -2529,7 +2529,7 @@ through `from_generator_data`, skipped without the bundle), in debug and release
 
 There are no terrain settings at generation time. TerraForged 6dd607eb's `GeneratorPreset` hands the terrain-noise
 registry's entries (`RegistryKey.entries`, registry order) to its `NoiseGenerator` unchanged, and `createLandTerrain`
-builds the terrain blender with fixed values (seed `TERRAIN_OFFSET`, region size 800, jitter 0.8, blending 0.4; the
+builds the terrain blender with fixed values (seed `TERRAIN_OFFSET`, scale 800, jitter 0.8, blending 0.4; the
 preset layer wires it). The vertical scale and fancy mountains are Engine `TerrainSettings` that `ModTerrains` used when
 it generated the noise files (above), so they are already in the bundled noises, and the weights are in the files too.
 TerraForged Reimagined adds a Terrain settings page whose `GeneratorPreset.applyTerrainOverrides` reweights and rescales
