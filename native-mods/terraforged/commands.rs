@@ -38,6 +38,7 @@ use horizon_world::worldgen::generator::{
     terraforged_util::{unpack_left, unpack_right},
 };
 use std::collections::HashSet;
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -99,9 +100,10 @@ pub(in crate::game) fn perform(
             true
         }
         ["tf", "preview", rest @ ..] if rest.len() <= 2 => {
-            // Horizon's: `Previewer`'s window size (one side, in pixels) and zoom (blocks per pixel), checked as
-            // Brigadier's `integer(16, 4096)` and `floatArg(0.0001)` would (its wheel keeps the zoom at 0.0001 or
-            // more; Brigadier reads no NaN or infinity).
+            // Horizon's: `Previewer`'s window size (one side, in pixels) and zoom (blocks per pixel, a `number`:
+            // `brigadier:double` in the tree sent to clients, read as Previewer's float), checked as Brigadier's
+            // `integer(16, 4096)` and `doubleArg(0.0001)` would (the window's wheel keeps the zoom at 0.0001 or more;
+            // Brigadier reads no NaN or infinity).
             let size = match rest.first().map(|word| (word, word.parse::<i32>())) {
                 None => 400,
                 Some((_, Ok(size))) if (16..=MAX_PREVIEW_SIZE).contains(&size) => size,
@@ -121,9 +123,9 @@ pub(in crate::game) fn perform(
                 Some((word, found)) => {
                     let message = match found {
                         Ok(found) if found.is_finite() => {
-                            Text::tr("argument.float.low", &[&MIN_PREVIEW_ZOOM, &found])
+                            Text::tr("argument.double.low", &[&MIN_PREVIEW_ZOOM, &found])
                         }
-                        _ => Text::tr("parsing.float.invalid", &[word]),
+                        _ => Text::tr("parsing.double.invalid", &[word]),
                     };
                     syntax_failure(game, command, offset(command, word), message);
                     return true;
@@ -479,7 +481,12 @@ fn preview(game: &mut Game<'_>, player: &NativeServerPlayer, size: u32, zoom: f3
                 }
             }
             let _done = Done;
-            let line = match write_preview(&generator, &world, view) {
+            // A panic in a sample (where Java would throw) still answers the player.
+            let written = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                write_preview(&generator, &world, view)
+            }))
+            .unwrap_or_else(|_| Err("the sampler panicked".to_owned()));
+            let line = match written {
                 Ok(path) => Text::colored(
                     format!("Preview {}: {}", view.label(), path.display()),
                     text::GREEN,

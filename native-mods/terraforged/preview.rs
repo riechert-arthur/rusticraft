@@ -264,6 +264,30 @@ render -2147483648 16 16 3f400000 c1080000 40400000 5d3612e4c3b7ce25 12x12
     }
 
     #[test]
+    fn extreme_views_still_render() {
+        // Pixel positions past i32 (NoiseUtil.floor saturates as Java's `(int)` does), infinite (an f32 overflow of
+        // `(w >> 1) * zoom`) and NaN (`-inf + inf`): the samples are Java's at the clamped blocks, never a panic.
+        let generator = generator();
+        let sampler = CurrentBiomeSampler::new(generator.noise_generator());
+        for (zoom, x, y) in [
+            (1.0, 3e9, -3e9),
+            (1e30, 0.0, 0.0),
+            (f32::MAX, 0.0, 0.0),
+            (1.0, f32::MAX, f32::MIN),
+        ] {
+            let view = View {
+                width: 16,
+                height: 16,
+                zoom,
+                x,
+                y,
+            };
+            let pixels = view.render(|x, y| world_color(&sampler, 273_651, x, y));
+            assert_eq!(pixels.len(), 256);
+        }
+    }
+
+    #[test]
     fn shading_spills_like_java_ints() {
         // A brightness of 2 doubles 200 to 400 (0x190): its ninth bit lands in the channel above, as Java ORs it.
         assert_eq!(shade_rgb(0, 200, 0, 2.0), 0x01_90_00);
