@@ -276,10 +276,10 @@ pub fn native_biome_files() -> Vec<(String, Value)> {
     Vec::new()
 }
 
-/// [`native_biome_files`] as the game takes them: a valid, namespaced `Identifier` each
-/// (`Identifier.isValidNamespace`/`isValidPath`; a client can't read others), the first of
-/// each id. The game's table and the synchronized registry both read this, so they hold
-/// the same biomes; both keep a vanilla biome over a mod's of the same id.
+/// [`native_biome_files`] as the game takes them: a valid `Identifier` each, with a non-empty
+/// namespace and path (`Identifier.isValidNamespace`/`isValidPath`; a client can't read
+/// others), the first of each id. The game's table and the synchronized registry both read
+/// this, so they hold the same biomes; both keep a vanilla biome over a mod's of the same id.
 pub fn native_biomes() -> Vec<(String, Value)> {
     native_biomes_from(native_biome_files())
 }
@@ -290,7 +290,11 @@ fn native_biomes_from(files: Vec<(String, Value)>) -> Vec<(String, Value)> {
             return false;
         };
         let common = |c: char| matches!(c, 'a'..='z' | '0'..='9' | '_' | '-' | '.');
-        !path.is_empty() && ns.chars().all(common) && path.chars().all(|c| common(c) || c == '/')
+        // Both parts non-empty: `Identifier.parse(":x")` reads `minecraft:x`, another name.
+        !ns.is_empty()
+            && !path.is_empty()
+            && ns.chars().all(common)
+            && path.chars().all(|c| common(c) || c == '/')
     }
     let mut out: Vec<(String, Value)> = Vec::new();
     for (id, json) in files {
@@ -599,6 +603,7 @@ mod pack_tests {
             ("cave".to_owned(), blue.clone()),
             ("Mod:Upper".to_owned(), blue.clone()),
             ("mod:".to_owned(), blue.clone()),
+            (":cave".to_owned(), blue.clone()),
             ("mod:deep/caves".to_owned(), blue.clone()),
             ("mod:cave".to_owned(), red.clone()),
             ("minecraft:plains".to_owned(), red),
