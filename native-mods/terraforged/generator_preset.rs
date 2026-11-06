@@ -25,8 +25,9 @@
 
 // TerraForged 6dd607eb (https://github.com/TerraForged/TerraForged/tree/6dd607ebfd41a3b7274e090b1f2cf565d53d1d44, MIT
 // License, Copyright (c) 2021 TerraForged): `Generator.CODEC`'s `levels` (`TerrainLevels.CODEC`), `GeneratorPreset.build`
-// and `NoiseGenerator`'s factories (`createLandTerrain`, `createContinentNoise`); `withErosion` is TerraForged
-// Reimagined's region erosion (`ErodedNoiseGenerator`, see `eroded_noise_generator.rs`) with its default filters.
+// and `NoiseGenerator`'s factories (`createLandTerrain`, `createContinentNoise`, and `withErosion`'s Engine 0.3.0 filter
+// settings); the erosion itself is TerraForged Reimagined's region erosion (`ErodedNoiseGenerator`, see
+// `eroded_noise_generator.rs`).
 
 use super::{
     terraforged_climate::ClimateSettings,
@@ -164,10 +165,25 @@ pub fn build(levels: TerrainLevels) -> Result<TerraForgedGenerator, String> {
         levels,
         ErodedNoiseGenerator::new(
             noise,
-            ErosionFilterSettings::default(),
+            erosion_settings(),
             HeightmapSmoothingSettings::default(),
         ),
     ))
+}
+
+/// `withErosion`'s filter settings: 6dd607eb's `ErodedNoiseGenerator` takes Engine 0.3.0's `new FilterSettings.Erosion()`
+/// (lifetime 12, volume and velocity 0.7, erosion and deposit rates 0.5) and sets `dropletsPerChunk = 350`. Not
+/// Reimagined's `TerraSettings.Erosion` defaults ([`ErosionFilterSettings::default`]: lifetime 25). The region erosion
+/// that runs them is Reimagined's; its heightmap smoothing stays at its default, off (6dd607eb has none).
+pub fn erosion_settings() -> ErosionFilterSettings {
+    ErosionFilterSettings {
+        droplets_per_chunk: 350,
+        droplet_lifetime: 12,
+        droplet_volume: 0.7,
+        droplet_velocity: 0.7,
+        erosion_rate: 0.5,
+        deposit_rate: 0.5,
+    }
 }
 
 /// `NoiseGenerator.createContinentNoise`'s settings (Java builds its `GeneratorContext` before it sets the continent
@@ -258,6 +274,26 @@ mod tests {
         }
         assert!(terrain_levels(Some(&json!({"min_y": 0}))).is_err());
         assert!(terrain_levels(Some(&json!([]))).is_err());
+    }
+
+    /// `oracles/generator_preset/` (`run.sh`): Engine 0.3.0's `FilterSettings.Erosion` from the jar, with
+    /// `dropletsPerChunk = 350` as 6dd607eb's `ErodedNoiseGenerator` sets it.
+    const JAVA_EROSION: &str = "droplets=350 lifetime=12 volume=3f333333 velocity=3f333333 erosion=3f000000 deposit=3f000000";
+
+    #[test]
+    fn erosion_settings_are_6dd607eb_with_erosion() {
+        let s = erosion_settings();
+        let rust = format!(
+            "droplets={} lifetime={} volume={:08x} velocity={:08x} erosion={:08x} deposit={:08x}",
+            s.droplets_per_chunk,
+            s.droplet_lifetime,
+            s.droplet_volume.to_bits(),
+            s.droplet_velocity.to_bits(),
+            s.erosion_rate.to_bits(),
+            s.deposit_rate.to_bits()
+        );
+        assert_eq!(rust, JAVA_EROSION);
+        assert!(HeightmapSmoothingSettings::default().iterations <= 0);
     }
 
     #[test]

@@ -2663,8 +2663,10 @@ registry order, `createLandTerrain`'s blender (`TerrainBlender(45763218, 800, 0.
 continent (`ClimateSettings::terraforged()`, continent scale 400, its control points) and the erosion stage. Terrain
 types, continent and blender share one terrain registry, Engine 0.3.0's built-ins (`TerrainRegistry::new()`), as
 6dd607eb links Engine 0.3.0.
-The erosion stage is TerraForged Reimagined's region erosion with its default filters (350 droplets, droplet
-lifetime 25; 6dd607eb's Engine 0.3.0 settings would give it 12). Each chunk then runs the statuses in 26.3's order:
+The erosion stage is TerraForged Reimagined's region erosion run with 6dd607eb's `withErosion` settings: Engine
+0.3.0's `FilterSettings.Erosion` (droplet lifetime 12, volume and velocity 0.7, erosion and deposit rates 0.5) with
+350 droplets per chunk, checked against the jar (`.local/terraforged/oracles/generator_preset/`), not Reimagined's
+defaults (lifetime 25); Reimagined's heightmap smoothing stays off, as 6dd607eb has none. Each chunk then runs the statuses in 26.3's order:
 `createBiomes` (TerraForged's surface biome per quart column, at every height, from the registry pools; it hints
 the terrain cache for that chunk only, and the 3x3 neighbours the surface rules read are sampled again without a
 hint), `fillFromNoise` (stone and water from the terrain cache, `primeHeightmaps`' WG heightmaps) and
