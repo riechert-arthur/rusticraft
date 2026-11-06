@@ -194,6 +194,9 @@ impl TerraForgedGenerator {
     /// rescaled to it. [`Self::fill_from_noise_with_structures`] adds `buildStructureTerrain`; not ported here: Deep
     /// Caves, Strata and the stage's surface and carver steps.
     ///
+    /// The fill reads the entry's generated heights ([`TerrainDataHandle::write_generated`]: any structure heights an
+    /// earlier run of the stage wrote are undone first, so a chunk generated again gets the same blocks).
+    ///
     /// `Err` where the chunk refuses a write ([`fill_chunk`]). Panics where Java's future completes exceptionally: a
     /// chunk whose region build failed (the cache task panicked; see [`TerrainCache::get_now`]). A failure after the
     /// region is read leaves the data unfilled and the chunk is filled from it, as in Java
@@ -209,7 +212,7 @@ impl TerraForgedGenerator {
         fill_chunk(
             self.sea_level(),
             chunk,
-            &terrain.read(),
+            &terrain.write_generated(),
             stone,
             water,
         )?;
@@ -222,7 +225,7 @@ impl TerraForgedGenerator {
     /// `TerrainData`. The returned handle (and every other handle of the entry: [`Self::chunk_data`] for the same seed
     /// and chunk until [`Self::drop_chunk`]) then reads those heights, as Java's surface, carver and decoration stages
     /// read the same `TerrainData` object. The fill and the structure edits run under one write guard, so no reader
-    /// sees a half-adjusted chunk.
+    /// sees a half-adjusted chunk; a rerun starts from the generated heights, never from the previous run's.
     ///
     /// `structures` is Java's `new StructureTerrain(chunk, structureManager)`: build it with
     /// [`StructureTerrain::from_starts`] over the generator's `references(..)` for this chunk (the beardifier's list)
@@ -241,7 +244,7 @@ impl TerraForgedGenerator {
         let position = chunk.position();
         let terrain = self.chunk_data(self.seed(), position.x, position.z);
         {
-            let mut data = terrain.write();
+            let mut data = terrain.write_generated();
             fill_chunk(self.sea_level(), chunk, &data, stone, water)?;
             structures.modify_chunk(chunk, &mut data, stone, air)?;
         }
@@ -868,9 +871,10 @@ q 3 -770 1240 3eafbae6 3f060470 135 135 134 134 134 0
 
     /// The structure stage is `fill_chunk` then `modify_chunk` on the entry's own `TerrainData` (6dd607eb's
     /// `fillFromNoise`): the chunk at its position gets the structure's blocks and OCEAN_FLOOR_WG, and every handle of
-    /// the entry the edited heights, with the extrema unchanged.
+    /// the entry the edited heights, with the extrema unchanged. Running a stage again for the same entry starts from
+    /// the generated heights: the structure stage gives the same chunk and heights, the plain fill the plain ones.
     #[test]
-    fn structure_stage_shares_its_heights() {
+    fn structure_stage_shares_its_heights_and_reruns_from_the_generated_terrain() {
         use super::super::terraforged_structure_terrain::{Bounds, Piece};
         use crate::heightmap::HeightmapType;
 
@@ -923,6 +927,16 @@ q 3 -770 1240 3eafbae6 3f060470 135 135 134 134 134 0
             Some(floor - 1)
         );
         assert_eq!(extrema(&g.chunk_data(7, -2, 3)), generated);
+
+        let mut again = new_chunk();
+        let rerun = g
+            .fill_from_noise_with_structures(&mut again, STONE, WATER, AIR, &structures)
+            .unwrap();
+        assert!(rerun.ptr_eq(&cached));
+        assert_eq!(stage_state(&rerun, &again), state);
+        let mut plain_again = new_chunk();
+        let plain_rerun = g.fill_from_noise(&mut plain_again, STONE, WATER).unwrap();
+        assert_eq!(stage_state(&plain_rerun, &plain_again), plain_state);
 
         // The same two steps by hand on a freshly generated entry.
         g.drop_chunk(7, -2, 3);

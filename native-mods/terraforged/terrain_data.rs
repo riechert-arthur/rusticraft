@@ -76,6 +76,7 @@ impl Index {
     }
 }
 
+#[derive(Clone)]
 pub struct FloatMap {
     index: Index,
     data: Vec<f32>,
@@ -347,6 +348,17 @@ impl TerrainData {
     /// and `max_base` are not updated.
     pub fn set_height_at(&mut self, x: i32, z: i32, height: i32) {
         self.height.set(x, z, height as f32);
+    }
+
+    /// Sets every height back to `height`'s (a copy of [`Self::height`] taken earlier), undoing
+    /// [`Self::set_height_at`] writes; the extrema are untouched, as those writes leave them.
+    pub fn restore_height(&mut self, height: &FloatMap) {
+        assert_eq!(
+            self.height.data.len(),
+            height.data.len(),
+            "a chunk height map"
+        );
+        self.height.data.copy_from_slice(&height.data);
     }
 
     pub fn base_height_at(&self, x: i32, z: i32) -> i32 {

@@ -2061,7 +2061,8 @@ readiness, sharing, removal, regeneration, seeds and `int`-limit chunks, interpr
 replays the trace on one task thread. Others check that cached chunks equal uncached ones bit for bit for four seeds
 on eight threads, that a running task is shared and reported not ready, and that a failed generation is not rerun.
 An entry's `TerrainData` is one shared, mutable value, as Java's single object is: handles read it with `read()` and
-write it with `write()` (an `RwLock`, so a write serializes with every reader and every handle sees it).
+write it with `write()` (an `RwLock`, so a write serializes with every reader and every handle sees it), and the
+entry keeps a copy of its generated heights, which `write_generated()` puts back before it hands out the data.
 
 The generator queries (`generator_facade.rs`, `TerraForgedGenerator`) are TerraForged Reimagined's
 `worldgen.Generator` (a24d450, MIT, as above) over its terrain cache: `createState`'s seed capture (`Seeds.get`, the
@@ -2115,7 +2116,11 @@ states of `minecraft:stone` and `minecraft:air`. The caller builds the `Structur
 Java's constructor reads them from the `StructureManager`. The structure edits write their OCEAN_FLOOR_WG heights into
 the cache entry's own `TerrainData`, so the later stages that read the entry (surface, carvers, decoration, each at
 the chunk's own position, until `drop_chunk`) see the structure-adjusted heights, as they read Java's one object. The
-fill and the edits run under one write guard: no reader sees a half-adjusted chunk. Not yet ported: Deep Caves, Strata, the surface and carver steps,
+fill and the edits run under one write guard: no reader sees a half-adjusted chunk. Both fills start from the
+entry's generated heights (`write_generated`). Java's second run of the stage for the same entry, which happens only
+if the chunk is generated again before its entry is dropped, would fill from the heights the first run's
+structures left, so its output depends on when the chunk was generated again; the port doesn't reproduce that: a
+rerun gives the first run's blocks and heights. Not yet ported: Deep Caves, Strata, the surface and carver steps,
 and the registration that would let Horizon call the stage.
 
 The structure terrain columns (`structure_terrain.rs`, `StructureTerrain`) are TerraForged 6dd607eb's

@@ -30,7 +30,7 @@
 use super::{
     terraforged_concurrent::{CacheEntry, ThreadPool},
     terraforged_eroded_noise_generator::ErodedNoiseGenerator,
-    terraforged_terrain_data::{NoiseSample, TerrainData},
+    terraforged_terrain_data::{FloatMap, NoiseSample, TerrainData},
     terraforged_terrain_generator::{NoiseGenerator, TerrainGenerator, available_processors},
     terraforged_terrain_levels::TerrainLevels,
 };
@@ -53,15 +53,18 @@ struct CacheKey {
 ///
 /// Java's stages share one mutable `TerrainData`: `fillFromNoise`'s `buildStructureTerrain` writes the structure
 /// heights into it and the later stages of the chunk read them. The port keeps it behind an `RwLock` (a write
-/// serializes with every reader).
+/// serializes with every reader) and also keeps the generated heights (`generated_height`), so the terrain stage can
+/// start from them again ([`TerrainDataHandle::write_generated`]).
 struct PooledTerrain<N: NoiseGenerator> {
     data: Option<RwLock<TerrainData>>,
+    generated_height: FloatMap,
     generator: Arc<TerrainGenerator<N>>,
 }
 
 impl<N: NoiseGenerator> PooledTerrain<N> {
     fn new(data: TerrainData, generator: Arc<TerrainGenerator<N>>) -> Self {
         Self {
+            generated_height: data.height().clone(),
             data: Some(RwLock::new(data)),
             generator,
         }
@@ -101,7 +104,7 @@ impl<N: NoiseGenerator> TerrainDataHandle<N> {
 
 impl<N: NoiseGenerator> TerrainDataHandle<N> {
     /// Reads the shared data (Java's plain field reads), waiting for a writer. A panic under a write guard does not
-    /// poison it.
+    /// poison it: the next terrain stage starts again from the generated heights ([`Self::write_generated`]).
     pub fn read(&self) -> RwLockReadGuard<'_, TerrainData> {
         self.0.lock().read().unwrap_or_else(PoisonError::into_inner)
     }
@@ -112,6 +115,17 @@ impl<N: NoiseGenerator> TerrainDataHandle<N> {
             .lock()
             .write()
             .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// [`Self::write`] with the heights first set back to what the generation produced (the rest of the data is never
+    /// written). The terrain stage starts from here, so running it again for the same entry (a chunk generated again
+    /// before `drop`) gives the first run's blocks and heights. Java's second run would read the heights its first
+    /// `buildStructureTerrain` left, so its output would depend on whether and when the chunk was generated again;
+    /// the port does not reproduce that.
+    pub fn write_generated(&self) -> RwLockWriteGuard<'_, TerrainData> {
+        let mut data = self.write();
+        data.restore_height(&self.0.generated_height);
+        data
     }
 }
 
@@ -496,10 +510,10 @@ call 7 5 1 2
     }
 
     /// Every handle of an entry shares one `TerrainData` (Java's one object): writes from several threads serialize
-    /// and every handle sees them; a removed entry's data stays with its handles while a new entry is generated
-    /// afresh.
+    /// and every handle sees them; `write_generated` sets the heights back to the generated ones; a removed entry's
+    /// data stays with its handles while a new entry is generated afresh.
     #[test]
-    fn handles_share_writes() {
+    fn handles_share_writes_and_write_generated_restores_heights() {
         let noise = Recorder::new();
         let cache = TerrainCache::with_pool(noise.levels, noise, ThreadPool::create(2));
         let handle = cache.get_now(7, 2, -1);
@@ -519,6 +533,14 @@ call 7 5 1 2
         let raised = generated + 80;
         assert_eq!(cache.get_now(7, 2, -1).read().height_at(3, 4), raised);
         assert_eq!(handle.read().height_at(4, 3), generated);
+        {
+            let entry = cache.get_now(7, 2, -1);
+            let data = entry.write_generated();
+            assert_eq!(data.height_at(3, 4), generated);
+            assert_eq!(data.river().get(0, 0), 0.0);
+        }
+        assert_eq!(handle.read().height_at(3, 4), generated);
+        handle.write().set_height_at(3, 4, raised);
         cache.remove(7, 2, -1);
         assert_eq!(handle.read().height_at(3, 4), raised);
         let fresh = cache.get_now(7, 2, -1);
