@@ -28,10 +28,10 @@ fn boat_status(game: &Game<'_>, b: &mut Boat) -> Status {
         }
         None
     };
-    if let Some(status) = underwater {
-        if !terraforged_boat::float_the_boat(game, b) {
-            return status;
-        }
+    if let Some(status) = underwater
+        && !terraforged_boat::float_the_boat(game, b)
+    {
+        return status;
     }
     let bb = b.bounds();
     let (lo, hi) = (bb.min_position(), bb.max_position());
