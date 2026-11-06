@@ -92,7 +92,9 @@ pub fn apply<B: TerrainBlockStates>(
 /// `is(Blocks.WATER) && LEVEL == 0` accepts), `level_two_water` the same block with `level=2`. Writes go through
 /// `set_block_worldgen` (26.3's `ProtoChunk.setBlockState`); nothing updates heightmaps by hand. A missing
 /// MOTION_BLOCKING_NO_LEAVES is primed when the first smoothable column reads it, as `ChunkAccess.getHeight` does,
-/// so a chunk without one stays without it. `terrain` is the chunk's cached data, only read (see [`apply`]).
+/// so a chunk without one stays without it. `terrain` is the chunk's cached data, only read (see [`apply`]); a column
+/// without a terrain panics where Java's `isSmoothable` throws a NullPointerException. Block coordinates use Java's
+/// int wrapping.
 pub fn smooth_water<B: TerrainBlockStates>(
     terrain: &TerrainData,
     chunk: &mut TerrainChunk<'_, B>,
@@ -1098,6 +1100,57 @@ t volcano_pipe false false
             (scenarios, smoothing, total, all_reads),
             (128, 116, 6830, 88165)
         );
+    }
+
+    /// At chunk x 2^27 - 1 the block x of column 15 plus the disc offsets passes `i32::MAX`: Java's int `x + dx` wraps
+    /// to the far negative edge (another chunk, so a region read), and `>> 4` / `& 15` follow it. No debug overflow.
+    #[test]
+    fn water_smoothing_wraps_block_coordinates_like_java_ints() {
+        let blocks = water_registry();
+        let terrains = TerrainRegistry::new();
+        let cx = (1 << 27) - 1;
+        let mut chunk =
+            TerrainChunk::new(ChunkPos::new(cx, 0), 0, 16, &blocks, WaterProperties).unwrap();
+        for z in 0..16 {
+            for x in 0..16 {
+                chunk.set_block_raw(x, 5, z, BlockStateId(2)).unwrap();
+            }
+        }
+        chunk.set_block_raw(15, 5, 8, BlockStateId(3)).unwrap();
+        let mut noise = NoiseData::new(&terrains);
+        for z in 0..16 {
+            for x in 0..16 {
+                noise.set_noise(x, z, &NoiseSample::new(&terrains));
+            }
+        }
+        let mut sample = NoiseSample::new(&terrains);
+        sample.river_noise = 0.0;
+        sample.terrain_type = terrains.get_by_name("river").unwrap();
+        noise.set_noise(15, 8, &sample);
+        let mut terrain = TerrainData::new(TerrainLevels::default());
+        terrain.accept(&noise);
+        let mut wrapped = Vec::new();
+        smooth_water(
+            &terrain,
+            &mut chunk,
+            BlockStateId(3),
+            BlockStateId(5),
+            |x, y, z| {
+                wrapped.push((x, y, z));
+                // Air only at the wrapped (x = i32::MIN + 1, z = 8): the row dz = 0, dx = 2.
+                Ok(BlockStateId(if (x, z) == (i32::MIN + 1, 8) {
+                    0
+                } else {
+                    2
+                }))
+            },
+        )
+        .unwrap();
+        // Java: x = 2147483632 + 15 = 2147483647; x + 1 = -2147483648, x + 2 = -2147483647 (chunk -2^27).
+        assert_eq!(wrapped.first(), Some(&(i32::MIN, 5, 3)));
+        assert_eq!(wrapped.last(), Some(&(i32::MIN + 1, 5, 8)));
+        assert!(wrapped.iter().all(|&(x, _, _)| x < 0));
+        assert_eq!(chunk.block(15, 5, 8), BlockStateId(5));
     }
 
     /// A failing region read stops the pass at once: that column keeps its source water (Java's exception leaves
