@@ -52,11 +52,11 @@ static CHOSEN: AtomicBool = AtomicBool::new(false);
 thread_local! {
     /// Set by Re-Create for the `WorldOptions::default` its body ends with.
     static RECREATING: Cell<Option<bool>> = const { Cell::new(None) };
-    /// Set by `WorldOptions::world_gen` when the screen's choice is TerraForged, for the
-    /// `write_world_gen_settings_with` that takes its result on the same thread. Other
+    /// Set by `WorldOptions::world_gen` for the `write_world_gen_settings_with` that takes its
+    /// result on the same thread: `Some(true)` when the screen's choice is TerraForged. Other
     /// writes (`Level::write` for a world without settings, a dedicated server's new world)
-    /// stay vanilla whatever the screen last showed.
-    static CREATING: Cell<bool> = const { Cell::new(false) };
+    /// find nothing armed and stay Horizon's, whatever the screen last showed.
+    static CREATING: Cell<Option<bool>> = const { Cell::new(None) };
 }
 
 pub fn chosen() -> bool {
@@ -80,7 +80,7 @@ pub fn recreate(world: &Path) {
 
 /// `WorldOptions::world_gen`: the new world's settings are about to be written.
 pub fn arm() {
-    CREATING.set(chosen());
+    CREATING.set(Some(chosen()));
 }
 
 /// The world-type button.
@@ -131,17 +131,29 @@ pub fn preset(world: &Path) -> ControlFlow<&'static str> {
     }
 }
 
-/// `write_world_gen_settings_with` for the Create screen's TerraForged world.
+/// `write_world_gen_settings_with` for a world the Create screen makes: TerraForged's settings
+/// for its TerraForged world, Horizon's for any other preset, and either way TerraForged's
+/// built-in pack ([`write_pack`]), as TerraForged's `DatapackHook.injectDatapack` gives every
+/// world the screen makes, whatever its preset.
 pub fn write(
     dir: &Path,
     seed: i64,
     options: WorldGen,
     flat: &Option<Tag>,
 ) -> ControlFlow<Result<()>> {
-    if !CREATING.take() || options.preset != WorldPreset::Normal {
+    let Some(terraforged) = CREATING.take() else {
         return ControlFlow::Continue(());
+    };
+    if terraforged && options.preset == WorldPreset::Normal {
+        return ControlFlow::Break(write_terraforged(dir, seed, options, flat.clone()));
     }
-    ControlFlow::Break(write_terraforged(dir, seed, options, flat.clone()))
+    ControlFlow::Break(write_vanilla(dir, seed, options, flat.clone()))
+}
+
+/// Horizon's settings for `options` (the inner write finds nothing armed), then the pack.
+fn write_vanilla(dir: &Path, seed: i64, options: WorldGen, flat: Option<Tag>) -> Result<()> {
+    super::write_world_gen_settings_with(dir, seed, options, flat)?;
+    write_pack(dir)
 }
 
 /// Vanilla's settings for `options`, with TerraForged's overworld stem. The inner write
@@ -157,27 +169,76 @@ fn write_terraforged(dir: &Path, seed: i64, options: WorldGen, flat: Option<Tag>
     write_pack(dir)
 }
 
-/// The world's own data pack `datapacks/terraforged`, with TerraForged's taller overworld dimension type
-/// ([`overworld_type_json`], TerraForged's built-in pack's file): from y -64, 1024 blocks, so the generator's range,
-/// the level shapes and the synced `dimension_type` registry follow it as for any world pack (Horizon enables the
-/// packs in a world's folder unless `datapacks.json` disables them). TerraForged copies its whole built-in pack into
-/// every world the Create screen makes; only the dimension type is needed here (the rest is bundled), and only
-/// TerraForged worlds get it, so vanilla worlds keep 26.3's overworld.
+/// The folder name of the world's copy of TerraForged's built-in pack.
+const PACK_FOLDER: &str = "terraforged";
+
+/// The world's own copy of TerraForged's built-in pack, with its taller overworld dimension
+/// type ([`overworld_type_json`], the built-in pack's file): from y -64, 1024 blocks, so the
+/// generator's range, the level shapes and the synced `dimension_type` registry follow it as
+/// for any world pack. TerraForged's built-in pack also holds its worldgen registries; the
+/// port bundles those, so only the dimension type is copied. The Create screen copies the
+/// packs its Data Packs screen showed into `datapacks` first: a folder already named
+/// `terraforged` holding exactly this pack (Re-Create's copy) is kept as it is, and any other
+/// (a pack of the player's own) is left alone and this pack takes the next free name,
+/// `terraforged-1`, ..., which Horizon enables as a new pack, above the player's, as
+/// TerraForged selects its pack last.
 fn write_pack(dir: &Path) -> Result<()> {
-    let pack = dir.join("datapacks").join("terraforged");
+    let datapacks = dir.join("datapacks");
+    let meta = pack_meta();
+    let mut pack = datapacks.join(PACK_FOLDER);
+    for n in 1.. {
+        if !pack.exists() {
+            break;
+        }
+        if is_this_pack(&pack, &meta) {
+            return Ok(());
+        }
+        pack = datapacks.join(format!("{PACK_FOLDER}-{n}"));
+    }
     let types = pack.join("data").join("minecraft").join("dimension_type");
     std::fs::create_dir_all(&types)?;
+    std::fs::write(pack.join("pack.mcmeta"), meta)?;
+    std::fs::write(types.join("overworld.json"), overworld_type_json())?;
+    Ok(())
+}
+
+fn pack_meta() -> String {
     let (major, _) = horizon_core::version::DATA_PACK_FORMAT;
-    let meta = serde_json::json!({
+    serde_json::json!({
         "pack": {
             "description": "TerraForged's overworld",
             "min_format": major,
             "max_format": major,
         }
-    });
-    std::fs::write(pack.join("pack.mcmeta"), meta.to_string())?;
-    std::fs::write(types.join("overworld.json"), overworld_type_json())?;
-    Ok(())
+    })
+    .to_string()
+}
+
+/// Whether the folder `pack` holds exactly the pack [`write_pack`] writes.
+fn is_this_pack(pack: &Path, meta: &str) -> bool {
+    let read = |path: &Path| std::fs::read(path).ok();
+    let overworld = pack.join("data/minecraft/dimension_type/overworld.json");
+    let files = walk(pack);
+    files.len() == 2
+        && read(&pack.join("pack.mcmeta")).as_deref() == Some(meta.as_bytes())
+        && read(&overworld).as_deref() == Some(overworld_type_json().as_bytes())
+}
+
+/// The files under `dir` (none when it is not a folder).
+fn walk(dir: &Path) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(next) = stack.pop() {
+        for entry in std::fs::read_dir(&next).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                stack.push(path);
+            } else {
+                files.push(path);
+            }
+        }
+    }
+    files
 }
 
 /// The overworld stem of TerraForged's world preset, as NBT.
@@ -303,6 +364,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!((height.min_y, height.height), (-64, 1024));
+        assert!(is_this_pack(
+            &dir.join("datapacks/terraforged"),
+            &pack_meta()
+        ));
+        // A world written outside the Create screen has no pack.
         assert!(!vanilla.join("datapacks").exists());
         std::fs::remove_dir_all(&dir).unwrap();
         std::fs::remove_dir_all(&vanilla).unwrap();
@@ -311,23 +377,112 @@ mod tests {
     #[test]
     fn only_the_create_screens_write_is_terraforged() {
         let dir = scratch("armed");
-        // Nothing armed (`Level::write` for a world without settings): Horizon's write.
+        // Nothing armed (`Level::write` for a world without settings): Horizon's write, no pack.
         assert!(write(&dir, 1, WorldGen::default(), &None).is_continue());
-        // Armed, but the screen's preset is not Normal: vanilla, and the arm is spent.
-        CREATING.set(true);
-        let amplified = WorldGen {
-            preset: WorldPreset::Amplified,
-            ..WorldGen::default()
-        };
-        assert!(write(&dir, 1, amplified, &None).is_continue());
-        assert!(!CREATING.get());
-        CREATING.set(true);
+        assert!(!dir.join("datapacks").exists());
+        CREATING.set(Some(true));
         assert!(matches!(
             write(&dir, 1, WorldGen::default(), &None),
             ControlFlow::Break(Ok(()))
         ));
-        assert!(!CREATING.get());
+        assert_eq!(CREATING.get(), None);
         assert!(is_terraforged(&dir));
+        assert!(is_this_pack(
+            &dir.join("datapacks/terraforged"),
+            &pack_meta()
+        ));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn every_preset_the_create_screen_makes_gets_the_pack() {
+        use WorldPreset::*;
+        for (n, preset) in [Normal, Flat, LargeBiomes, Amplified, SingleBiomeSurface]
+            .into_iter()
+            .enumerate()
+        {
+            let dir = scratch(&format!("preset-{n}"));
+            let options = WorldGen {
+                preset,
+                ..WorldGen::default()
+            };
+            // Vanilla's choice, or TerraForged chosen while the screen shows another preset.
+            for terraforged in [false, true] {
+                if terraforged && preset == Normal {
+                    continue;
+                }
+                let _ = std::fs::remove_dir_all(&dir);
+                CREATING.set(Some(terraforged));
+                assert!(matches!(
+                    write(&dir, 3, options, &None),
+                    ControlFlow::Break(Ok(()))
+                ));
+                assert_eq!(CREATING.get(), None);
+                let vanilla = scratch(&format!("preset-{n}-vanilla"));
+                super::super::write_world_gen_settings(&vanilla, 3, options).unwrap();
+                assert_eq!(world_gen_settings(&dir), world_gen_settings(&vanilla));
+                assert!(!is_terraforged(&dir));
+                assert!(is_this_pack(
+                    &dir.join("datapacks/terraforged"),
+                    &pack_meta()
+                ));
+                std::fs::remove_dir_all(&vanilla).unwrap();
+            }
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_players_own_terraforged_pack_is_kept() {
+        let dir = scratch("clash");
+        let own = dir.join("datapacks/terraforged");
+        std::fs::create_dir_all(own.join("data/minecraft/dimension_type")).unwrap();
+        std::fs::write(
+            own.join("pack.mcmeta"),
+            "{\"pack\":{\"description\":\"mine\"}}",
+        )
+        .unwrap();
+        // A pack with this pack's dimension type but its own `pack.mcmeta` is the player's.
+        std::fs::write(
+            own.join("data/minecraft/dimension_type/overworld.json"),
+            overworld_type_json(),
+        )
+        .unwrap();
+        std::fs::write(dir.join("datapacks/terraforged-1"), "a file").unwrap();
+        let before = walk(&own);
+        CREATING.set(Some(false));
+        assert!(write(&dir, 1, WorldGen::default(), &None).is_break());
+        assert_eq!(walk(&own), before);
+        assert_eq!(
+            std::fs::read_to_string(own.join("pack.mcmeta")).unwrap(),
+            "{\"pack\":{\"description\":\"mine\"}}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("datapacks/terraforged-1")).unwrap(),
+            "a file"
+        );
+        assert!(is_this_pack(
+            &dir.join("datapacks/terraforged-2"),
+            &pack_meta()
+        ));
+        // Re-Create copies the world's pack first: it is kept, and no second copy is made.
+        let again = scratch("clash-recreate");
+        let copy = again.join("datapacks/terraforged");
+        std::fs::create_dir_all(copy.join("data/minecraft/dimension_type")).unwrap();
+        std::fs::write(copy.join("pack.mcmeta"), pack_meta()).unwrap();
+        std::fs::write(
+            copy.join("data/minecraft/dimension_type/overworld.json"),
+            overworld_type_json(),
+        )
+        .unwrap();
+        CREATING.set(Some(true));
+        assert!(write(&again, 1, WorldGen::default(), &None).is_break());
+        assert!(is_this_pack(&copy, &pack_meta()));
+        assert_eq!(
+            std::fs::read_dir(again.join("datapacks")).unwrap().count(),
+            1
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::remove_dir_all(&again).unwrap();
     }
 }

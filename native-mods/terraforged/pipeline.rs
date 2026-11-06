@@ -1102,6 +1102,78 @@ mod tests {
         assert!(!column[(height + 64) as usize]);
     }
 
+    /// Every world the Create screen makes gets TerraForged's taller overworld (`client_world_type.rs`), vanilla
+    /// world types included: their build range becomes -64..960, but their terrain stays vanilla's, as in Java
+    /// (`WorldGenerationContext` takes the smaller of the level's and the generator's heights, so the generator
+    /// keeps its noise range): the same blocks below 320 and nothing above.
+    #[test]
+    fn vanilla_world_types_keep_their_terrain_in_the_taller_overworld() {
+        let Some(normal_data) = data() else { return };
+        let mut ov = crate::worldgen::overrides::WorldgenOverrides::default();
+        ov.set(
+            crate::worldgen::overrides::DIMENSION_TYPES,
+            "minecraft:overworld",
+            super::super::terraforged_world_preset::overworld_type_json().to_owned(),
+        );
+        let Some(tall_data) = data_with(&ov) else {
+            return;
+        };
+        let seed = 1234;
+        for preset in [
+            "minecraft:normal",
+            "minecraft:amplified",
+            "minecraft:large_biomes",
+            "minecraft:single_biome_surface",
+        ] {
+            let generator = |data: &Arc<GeneratorData>| {
+                OverworldGenerator::for_dimension(
+                    Arc::clone(data),
+                    seed,
+                    preset,
+                    "minecraft:overworld",
+                )
+                .unwrap()
+            };
+            let (normal, tall) = (generator(&normal_data), generator(&tall_data));
+            assert_eq!(
+                (normal.level(), tall.level()),
+                ((-64, 384), (-64, 1024)),
+                "{preset}"
+            );
+            assert_eq!(normal.sea_level(), tall.sea_level(), "{preset}");
+            for pos in [ChunkPos::new(0, 0), ChunkPos::new(-37, 52)] {
+                let (a, b) = (
+                    normal.worker().generate_proto(pos).unwrap(),
+                    tall.worker().generate_proto(pos).unwrap(),
+                );
+                for (x, z) in (0..256).map(|i| (i % 16, i / 16)) {
+                    assert_eq!(
+                        a.surface_height(x, z),
+                        b.surface_height(x, z),
+                        "{preset} {x} {z}"
+                    );
+                    for y in -64..320 {
+                        assert_eq!(a.block(x, y, z), b.block(x, y, z), "{preset} {x} {y} {z}");
+                        if y % 4 == 0 {
+                            assert_eq!(
+                                a.biome_at(x, y, z),
+                                b.biome_at(x, y, z),
+                                "{preset} {x} {y} {z}"
+                            );
+                        }
+                    }
+                    for y in 320..960 {
+                        assert_eq!(
+                            b.block_name(x, y, z),
+                            "minecraft:air",
+                            "{preset} {x} {y} {z}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn terraforged_chunks_are_terraforged_and_repeatable() {
         let Some(data) = data() else { return };
