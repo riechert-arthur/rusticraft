@@ -700,6 +700,16 @@ impl<T> Default for ErosionRegionCache<T> {
 }
 
 impl<T> ErosionRegionCache<T> {
+    /// How many regions the cache holds (built or building).
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entries
+            .len()
+    }
+
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(RegionCacheInner {

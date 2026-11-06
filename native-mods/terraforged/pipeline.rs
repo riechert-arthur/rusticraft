@@ -39,10 +39,11 @@ use super::super::generator_decoration::terraforged_decorator::TerraForgedFeatur
 use super::super::generator_structures::{Starts, StructureState};
 use super::{
     BiomeChunk, BiomeId, BiomeRegion, BiomeSearch, Biomes, DecorateStats, GeneratorData,
-    GeneratorError, JigsawPieces, JigsawQuery, LodColumn, NoiseSettings, OverworldGenerator,
-    Pipeline, PreLightChunkStage, ProtoChunk, SeededPipeline, SurfaceInputs, SurfaceQueries,
-    SurfaceSample, TerrainChunk, UniformSurfaceBiomes, WorkerState, WorldGenerationContext,
-    build_surface, overrides, resource, stage,
+    GeneratorError, JigsawPieces, JigsawQuery, LodColumn, MaterialConditions,
+    MaterialDensitySources, NoiseSettings, OverworldGenerator, Pipeline, PreLightChunkStage,
+    ProtoChunk, SeededPipeline, SurfaceInputs, SurfaceQueries, SurfaceSample, TerrainChunk,
+    UniformSurfaceBiomes, WorkerState, WorldGenerationContext, build_surface, overrides, resource,
+    stage,
     terraforged_biome_registry::identifier_order,
     terraforged_cave_assets::current_caves,
     terraforged_cave_biome_sampler::CaveBiomeSampler,
@@ -62,7 +63,7 @@ use crate::registry::BlockStateId;
 use horizon_core::biome::obfuscate_seed;
 use horizon_core::density::{DensitySampler, SampleError, SamplerContext};
 use horizon_core::noise::DensityVolume;
-use horizon_core::position::ChunkPos;
+use horizon_core::position::{BlockPos, ChunkPos};
 use horizon_core::random::XoroshiroRandom;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -284,6 +285,167 @@ impl TerraForgedPipeline {
                 .map_err(stage("biomes"))?;
         }
         Ok(chunk)
+    }
+
+    /// Horizon's far terrain (`SeededPipeline::lod_grid`; vanilla has no counterpart): each column is TerraForged's
+    /// ground in `getBaseColumn`'s shape (stone from the level bottom to the terrain height, water above it to the
+    /// surface, clipped to the level as the fill clips it), from the UN-ERODED height
+    /// ([`TerraForgedGenerator::far_heights`]): the eroded one needs the column's erosion region, about 0.25 s to
+    /// build per 256x256 blocks (a 16x16 tile of 64-block cells spans 64 regions: about 20 s), and the 16-region
+    /// cache would then evict the regions the chunks being generated read. Erosion moves the ground by about 2 blocks
+    /// on average (6 at the 90th percentile, at most about 10), so distant ground can sit that much off the real
+    /// chunks'. Far sampling creates no terrain-cache entry and builds no region; it only shares the continent's
+    /// lossy cell caches with the chunks, as `/locate biome` does. Its top eight blocks are
+    /// painted by the vanilla surface rule as `buildSurface` paints a chunk: TerraForged's generation context (sea
+    /// level 62), its preliminary height at the column, and the column's TerraForged biome (the one the chunk stores
+    /// at the surface block's zoomed quart). Like vanilla's far sampling it skips the surface rule's slope reads and
+    /// column extensions, and `Surface.apply`, the carvers and the decoration. A failed height or biome sample is an
+    /// `Err` (the chunk would fail to generate there too).
+    fn far_columns(
+        &self,
+        worker: &mut WorkerState,
+        columns: &[(i32, i32)],
+    ) -> Result<Vec<LodColumn>, GeneratorError> {
+        let vanilla = &self.vanilla;
+        let (min_y, level_height) = (vanilla.settings.level_min_y, vanilla.settings.level_height);
+        let top = min_y.saturating_add(level_height).saturating_sub(1);
+        let zoom = horizon_core::biome::BiomeZoom::new(obfuscate_seed(vanilla.seed));
+        let sampler = self.surface_sampler();
+        let mut geometry = Vec::with_capacity(columns.len());
+        // The preliminary heights per 4x4 cell, and each column's biome at every quart its zoomed lookups can reach
+        // (`(y - 2) >> 2` and the next quart on each axis): the first column to claim a quart keeps it.
+        let mut heights = BTreeMap::new();
+        let mut quarts: BTreeMap<(i32, i32), BiomeId> = BTreeMap::new();
+        for &(x, z) in columns {
+            let (height, surface) = self
+                .generator
+                .far_heights(x, z)
+                .map_err(stage("far terrain"))?;
+            heights.entry(column_key(x & !3, z & !3)).or_insert(height);
+            // The stone and water tops, clipped as the fill clips them (cut flat at the top block).
+            let stone = height.min(top);
+            let water = surface.min(top);
+            let shown = if stone >= min_y {
+                stone
+            } else {
+                water.max(min_y)
+            };
+            let quart = zoom.quart_at_block(BlockPos::new(x, shown, z));
+            let biome = self
+                .biome_at(&sampler, quart[0].wrapping_shl(2), quart[2].wrapping_shl(2))
+                .ok_or_else(|| resource("far biome: the column's pool has no biome"))?;
+            let (qx, qz) = (x.wrapping_sub(2) >> 2, z.wrapping_sub(2) >> 2);
+            for (dx, dz) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                quarts
+                    .entry((qx.wrapping_add(dx), qz.wrapping_add(dz)))
+                    .or_insert(biome);
+            }
+            let mut spans = Vec::new();
+            let water_bottom = stone.saturating_add(1).max(min_y);
+            if water >= water_bottom {
+                spans.push((water_bottom, water + 1, self.water));
+            }
+            if stone >= min_y {
+                spans.push((min_y, stone + 1, self.stone));
+            }
+            let water_top = (water >= water_bottom).then_some((water + 1, self.water));
+            let solid = (stone >= min_y).then_some((stone + 1, self.stone));
+            geometry.push((solid, water_top, stone + 1 - min_y, spans, biome));
+        }
+        // One 16-block section per chunk is enough: the region clamps every lookup's y into it.
+        let mut chunks: BTreeMap<(i32, i32), BiomeChunk<BiomeId>> = BTreeMap::new();
+        for (&(qx, qz), &biome) in &quarts {
+            let (cx, cz) = (qx >> 2, qz >> 2);
+            if let std::collections::btree_map::Entry::Vacant(entry) = chunks.entry((cx, cz)) {
+                let mut chunk = BiomeChunk::new(ChunkPos::new(cx, cz), min_y, 16, biome)
+                    .map_err(stage("far biome"))?;
+                chunk
+                    .fill(min_y, min_y + 15, |quart| {
+                        Ok::<_, std::convert::Infallible>(
+                            quarts.get(&(quart[0], quart[2])).copied().unwrap_or(biome),
+                        )
+                    })
+                    .map_err(stage("far biome"))?;
+                entry.insert(chunk);
+            }
+        }
+        let region = BiomeRegion::new(chunks.into_values().collect(), obfuscate_seed(vanilla.seed))
+            .map_err(stage("far biome"))?;
+        let generation = self.generation();
+        let preliminary: Arc<dyn DensitySampler> = Arc::new(PreliminarySurface::new(
+            heights,
+            min_y,
+            level_height,
+            generation.sea_level,
+        ));
+        let volume = DensityVolume::new([1; 3], [columns[0].0, 0, columns[0].1], [1; 3])
+            .map_err(stage("far material"))?;
+        let queries = SurfaceQueries {
+            pipeline: vanilla,
+            temperatures: &mut worker.temperatures,
+            biome: Biomes::Region(&region),
+            uniform_biomes: None,
+            possible: None,
+        };
+        let sources =
+            MaterialDensitySources::new(queries, volume, preliminary, SamplerContext::cached())
+                .map_err(stage("far material"))?;
+        let mut material =
+            MaterialConditions::<XoroshiroRandom, _>::new(generation, vanilla.root, sources);
+        let rule = material
+            .add_rule(vanilla.rule.clone())
+            .map_err(stage("far material"))?;
+        let mut result = Vec::with_capacity(geometry.len());
+        for (&(wx, wz), (solid, water, below, mut spans, biome)) in columns.iter().zip(geometry) {
+            let Some((height, mut state)) = solid else {
+                result.push((None, spans));
+                continue;
+            };
+            material.update_xz(wx, wz, 0, 0);
+            for depth in 1..=below.min(8) {
+                let y = height - depth;
+                material.update_y(
+                    depth,
+                    below - depth + 1,
+                    water.map_or(i32::MIN, |(h, _)| h),
+                    y,
+                );
+                let Some(index) = spans.iter().position(|&(min, max, _)| min <= y && y < max)
+                else {
+                    continue;
+                };
+                let (min, max, old) = spans[index];
+                let painted = material
+                    .try_apply(rule, BlockPos::new(wx, y, wz))
+                    .map_err(stage("far material"))?
+                    .unwrap_or(old);
+                if depth == 1 {
+                    state = painted;
+                }
+                if old == painted {
+                    continue;
+                }
+                let mut replacement = Vec::with_capacity(3);
+                if y + 1 < max {
+                    replacement.push((y + 1, max, old));
+                }
+                replacement.push((y, y + 1, painted));
+                if min < y {
+                    replacement.push((min, y, old));
+                }
+                spans.splice(index..=index, replacement);
+            }
+            result.push((
+                Some(SurfaceSample {
+                    height,
+                    state,
+                    water,
+                    biome,
+                }),
+                spans,
+            ));
+        }
+        Ok(result)
     }
 }
 
@@ -596,7 +758,11 @@ impl SeededPipeline for TerraForgedPipeline {
         z: i32,
         spans: Option<&mut Vec<(i32, i32, BlockStateId)>>,
     ) -> Option<SurfaceSample> {
-        self.vanilla.surface_sample(worker, x, z, spans)
+        let (sample, column) = self.far_columns(worker, &[(x, z)]).ok()?.pop()?;
+        if let Some(spans) = spans {
+            *spans = column;
+        }
+        sample
     }
     fn lod_grid(
         &self,
@@ -605,10 +771,22 @@ impl SeededPipeline for TerraForgedPipeline {
         z: i32,
         width: i32,
         side: usize,
-        approximate: bool,
+        _approximate: bool,
     ) -> Result<Vec<LodColumn>, GeneratorError> {
-        self.vanilla
-            .lod_grid(worker, x, z, width, side, approximate)
+        if width <= 0 || side == 0 || side > 64 {
+            return Err(resource("far sample dimensions"));
+        }
+        // `approximate` (Reduced far detail) has nothing to trade here: each column is one height sample and one
+        // biome sample already. Columns in the order vanilla's `lod_grid` returns them (x first, then z).
+        let columns: Vec<(i32, i32)> = (0..side * side)
+            .map(|index| {
+                (
+                    x.wrapping_add((index % side) as i32 * width),
+                    z.wrapping_add((index / side) as i32 * width),
+                )
+            })
+            .collect();
+        self.far_columns(worker, &columns)
     }
     fn structure_starts(
         &self,
@@ -790,6 +968,7 @@ impl SeededPipeline for TerraForgedPipeline {
 
 #[cfg(test)]
 mod tests {
+    use super::super::terraforged_generator_facade::TerraHeightmap;
     use super::*;
     use std::path::{Path, PathBuf};
 
@@ -1575,5 +1754,104 @@ mod tests {
         let nether = |name: &str| name == "minecraft:nether_wastes";
         assert_eq!(worker.find_closest_biome(&search(&nether, origin)), None);
         assert_eq!(pipeline.generator.cached_chunks(), 0);
+    }
+    /// Distant tiles show the chunks' ground: the biome the chunk stores at the surface, the un-eroded height (within
+    /// erosion's few blocks of the filled ground), the surface rule's top block, and the level's clipping; sampling
+    /// them creates no terrain-cache entry and builds no erosion region.
+    #[test]
+    fn far_terrain_follows_the_chunks() {
+        let Some(data) = data() else { return };
+        let (pipeline, overworld) = terraforged(&data, 7, false);
+        let generator = &pipeline.generator;
+        let mut worker = overworld.worker();
+        let far = worker.lod_grid(4104, -2040, 16, 16, false).unwrap();
+        assert_eq!(far.len(), 256);
+        assert!(
+            far.iter()
+                .all(|(sample, spans)| sample.is_some() && !spans.is_empty())
+        );
+        assert_eq!(
+            (generator.cached_chunks(), generator.cached_regions()),
+            (0, 0)
+        );
+        // One block per column over chunk (3, -2), then the chunk itself.
+        let columns = worker.lod_grid(48, -32, 1, 16, false).unwrap();
+        assert_eq!(
+            (generator.cached_chunks(), generator.cached_regions()),
+            (0, 0)
+        );
+        let chunk = worker.generate_proto(ChunkPos::new(3, -2)).unwrap();
+        let zoom = horizon_core::biome::BiomeZoom::new(obfuscate_seed(7));
+        let (mut off, mut worst, mut level, mut same, mut painted) = (0, 0, 0, 0, 0);
+        for (index, (sample, spans)) in columns.iter().enumerate() {
+            let (lx, lz) = ((index % 16) as i32, (index / 16) as i32);
+            let (x, z) = (48 + lx, -32 + lz);
+            let sample = sample.unwrap();
+            let raw = generator.far_heights(x, z).unwrap();
+            assert_eq!(sample.height, raw.0 + 1);
+            assert_eq!(spans.last().unwrap().0, -64);
+            let eroded = generator
+                .base_height(x, z, TerraHeightmap::OceanFloorWorldgen)
+                .unwrap();
+            let difference = (sample.height - eroded).abs();
+            off += difference;
+            worst = worst.max(difference);
+            if (2..14).contains(&lx) && (2..14).contains(&lz) {
+                let quart = zoom.quart_at_block(BlockPos::new(x, sample.height - 1, z));
+                assert_eq!(sample.biome, *chunk.biomes().noise_biome(quart), "{x} {z}");
+            }
+            painted += usize::from(sample.state != pipeline.stone);
+            if sample.height == eroded && sample.water.is_none() {
+                level += 1;
+                same += usize::from(chunk.block(lx, sample.height - 1, lz) == sample.state);
+            }
+        }
+        eprintln!("off {off} worst {worst} level {level} same {same} painted {painted}");
+        assert!(
+            worst <= 12 && off <= 3 * 256,
+            "erosion moved the ground by {off} ({worst})"
+        );
+        assert!(painted > 200, "{painted} columns painted");
+        assert!(
+            level > 32 && same * 10 >= level * 8,
+            "{same} of {level} tops match"
+        );
+    }
+
+    /// Far terrain is clipped to the level as the fill clips it: flat at y 319 in a 26.3-high overworld, above it in
+    /// the taller one.
+    #[test]
+    fn far_terrain_is_clipped_to_the_level() {
+        let Some(normal) = data() else { return };
+        let mut ov = crate::worldgen::overrides::WorldgenOverrides::default();
+        ov.set(
+            crate::worldgen::overrides::DIMENSION_TYPES,
+            "minecraft:overworld",
+            super::super::terraforged_world_preset::overworld_type_json().to_owned(),
+        );
+        let Some(tall) = data_with(&ov) else { return };
+        // Seed 1234's peak near x -14848, z -32256 (see the taller overworld's test).
+        let (pipeline, _) = terraforged(&normal, 1234, false);
+        let peak = (0..64 * 64)
+            .map(|i| (-14848 + (i % 64 - 32) * 16, -32256 + (i / 64 - 32) * 16))
+            .max_by_key(|&(x, z)| pipeline.generator.far_heights(x, z).unwrap().0)
+            .unwrap();
+        assert!(pipeline.generator.far_heights(peak.0, peak.1).unwrap().0 > 340);
+        for (data, expected) in [(&normal, Some(320)), (&tall, None)] {
+            let (pipeline, overworld) = terraforged(data, 1234, false);
+            let (sample, spans) = overworld
+                .worker()
+                .lod_grid(peak.0, peak.1, 1, 1, false)
+                .unwrap()
+                .pop()
+                .unwrap();
+            let height = sample.unwrap().height;
+            match expected {
+                Some(top) => assert_eq!(height, top),
+                None => assert!(height > 340, "{height}"),
+            }
+            assert_eq!(spans.first().unwrap().1, height);
+            assert_eq!(pipeline.generator.cached_regions(), 0);
+        }
     }
 }

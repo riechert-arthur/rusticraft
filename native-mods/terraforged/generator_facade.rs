@@ -388,6 +388,12 @@ impl TerraForgedGenerator {
         self.terrain.len()
     }
 
+    /// How many eroded regions the generator's erosion holds.
+    #[cfg(test)]
+    pub(crate) fn cached_regions(&self) -> usize {
+        self.terrain.noise_generator().cached_regions()
+    }
+
     /// `terrainCache().drop(seed, pos)`, as `applyBiomeDecoration` calls it with `Seeds.get(region.getSeed())`.
     pub fn drop_chunk(&self, seed: i32, chunk_x: i32, chunk_z: i32) {
         self.terrain.remove(seed, chunk_x, chunk_z);
@@ -452,6 +458,22 @@ impl TerraForgedGenerator {
             height_noise,
             level_min_y,
             level_height,
+        ))
+    }
+
+    /// Horizon's distant terrain (no Java counterpart): `getBaseColumn`'s two heights at block `(x, z)` with the
+    /// captured seed, the terrain height (the top stone block) and the surface (the higher of the height and the base
+    /// level), in TerraForged's levels and unclipped, from ONE un-eroded sample (rivers included). Unlike
+    /// [`Self::base_column`] it skips the eroded height: that needs the block's erosion region, whose build takes a
+    /// fraction of a second and would push the regions the chunks being generated read out of the 16-region cache. So
+    /// this creates no terrain-cache entry and builds no region; erosion is the only difference from the fill.
+    /// `Err` as [`Self::base_height`].
+    pub fn far_heights(&self, x: i32, z: i32) -> Result<(i32, i32), &'static str> {
+        let sample = self.terrain.noise_sample(self.seed(), x, z)?;
+        Ok(column_heights(
+            self.levels,
+            sample.base_noise,
+            sample.height_noise,
         ))
     }
 
