@@ -1275,7 +1275,11 @@ The jar and 6dd607eb agree except for the runtime seed, and the samplers follow 
 and `floor_depth` take the runtime seed (`Seeds.get`, the world seed narrowed to an `int`) and sample their noise
 seed-first (`Err` where a node can't be), and the distributor places its cells with the runtime seed while it rolls
 their occupancy with its own seed (the parameter shadows the field). At seed 0 the samplers give the jar's
-seedless results, and the distributor's seedless sample is the jar's (its own seed for both). `unique_cave_noise`
+seedless results wherever seed-first and seedless sampling agree (not at zero or infinite source ranges, see the
+seed-first sources), and the distributor's seedless sample is the jar's (its own seed for both).
+`SeededCaveNoiseOracle.java` (`.local/terraforged/oracles/noise_cave_seeded/`) runs 6dd607eb's own classes on Noise2D
+2cb4843: the 8 distributors and 6 caves below at 8 runtime seeds (caves also after `withSeed`), and both modifiers
+over a 20,000-point scan; the test matches it bit for bit, in debug and release. `unique_cave_noise`
 and `cave_breach_noise` are 6dd607eb's `NoiseCaveGenerator.createUniqueNoise(500, 0.05)` and
 `createBreachNoise(300, 0.7)`, with fixed seeds; the jar derives them from the context seed instead.
 `CaveType::for_name` upper-cases like `toUpperCase(Locale.ROOT)` and returns `None` where `valueOf` throws.

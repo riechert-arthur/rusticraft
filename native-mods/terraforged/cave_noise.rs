@@ -127,8 +127,9 @@ impl NoiseCave {
     }
 
     /// 6dd607eb's `getHeight(seed, x, z)`: `minY` plus the elevation noise scaled to `rangeY`. `Err` where the noise
-    /// can't be sampled seed-first (see [`Module::try_value_seed_first`]). The jar's `getHeight(x, z)` is this with
-    /// seed 0.
+    /// can't be sampled seed-first (see [`Module::try_value_seed_first`]). At seed 0 this is the jar's
+    /// `getHeight(x, z)` for graphs that sample alike on both paths (no zero or infinite source ranges, where
+    /// Noise2D 2cb4843's `NoiseUtil.map` differs).
     pub fn height(&self, seed: i32, x: i32, z: i32) -> Result<i32, &'static str> {
         scale_value(seed, x, z, 1.0, self.min_y, self.range_y, &self.elevation)
     }
@@ -360,6 +361,50 @@ r 1 unique f38e08606a465985 -2147483600,100,10 -2147483600,100,10 -2147483600,10
 r 1 unique f38e08606a465985 -2147483600,100,10 -2147483600,100,10 -2147483600,100,10 -2147483600,100,10 -2147483600,100,10 -2147483600,100,10 -2147483600,100,10 -2147483600,100,10
 ";
 
+    /// `SeededCaveNoiseOracle`'s output (`.local/terraforged/oracles/noise_cave_seeded/`): TerraForged 6dd607eb's own
+    /// `UniqueCaveDistributor` and `NoiseCave` (seed-first samplers, `withSeed` through its Cereal round trip) and
+    /// `NoiseCaveGenerator`'s `createUniqueNoise`/`createBreachNoise` (copied verbatim) on Noise2D 2cb4843, run
+    /// interpreted and JIT-compiled. Folds over the runtime seeds `RUN_SEEDS`.
+    const SEEDED_ORACLE: &str = "\
+d 0 79af56688a695270 c68d4a9930ca86e 954ffa61ef63f1a b77bff49688f0182 79af56688a695270 fffa76da4fca602a dd5a7eb2f6fd738c be6dc6fced6a99ab
+d 1 502b70628f0555fd 26ec013fadc721f 47708e5fd1197c2e e7ff35f90d84716e 502b70628f0555fd e8c3dde9ebcdd23d 4005a2b3b330fd66 9f0ec4be1bb9bf75
+d 2 f7890e0bf68ffd7b 8e760a6b03c3aac2 56579e9ae58e68ed 80397edcef15809e f7890e0bf68ffd7b 51fff604998b9684 842344b73576ad0b 683bf69d9ecf91a9
+d 3 53d3ed56e2dd4981 f82bc4de8fa49479 bde42d5ed77c7580 73f89d2ab2b97613 53d3ed56e2dd4981 d518f5e2e62b37b4 ccd50c7763821d67 84ec3576216d687c
+d 4 db4264f7dda0c68b db4264f7dda0c68b db4264f7dda0c68b db4264f7dda0c68b db4264f7dda0c68b db4264f7dda0c68b db4264f7dda0c68b db4264f7dda0c68b
+d 5 501b812ebf662b50 b830d430ed879cd3 505ffae95ef35e17 21f2f6d48137c37c 501b812ebf662b50 32e3049fe549cad3 361904c7260917db cc87fdf2fe6bcbf2
+d 6 8218ee41a9a125ea 191f579748e8fcb7 5b8c5a2971bc091d 41733ef7657c4905 8218ee41a9a125ea b7aea1e2767b549e 4d434c879ec174e7 5605c40f4d32f6d2
+d 7 5cfed93dc945ff75 5cfed93dc945ff75 5cfed93dc945ff75 5cfed93dc945ff75 5cfed93dc945ff75 5cfed93dc945ff75 5cfed93dc945ff75 5cfed93dc945ff75
+m bounds 0 3f800000 0 3f800000
+m 0 6c24f8041714cd3e 708 28ca6a9d6fd0da67 2257 -887584,292192,3d91a363 -887487,292131,3f363f78 -887390,292070,3f60dbab
+g 0 8e170f1df2de41ff e7a175d43480ceba
+m 1 553eb0f99cc197bc 629 da837ad89359429e 2227 -896120,297560,3e455769 -896023,297499,3eb8109b -887584,292192,3e44ed88
+g 1 b880b70414ea2d8b 9d141f2058531a1a
+m 1337 4dcb4050cbc6dfed 727 59c4f7aa0fe6a2c5 2268 -896217,297621,3d1aa2db -896120,297560,3dda2345 -881570,288410,3e1ee75f
+g 1337 2c63af548721d7cf f2b09b35043455f8
+m -987654321 1a009c00fcd4053 748 c701baf8c1900f6b 2280 -896314,297682,3f1de064 -896217,297621,3f7dbeba -896120,297560,3f28ef7c
+g -987654321 1dd21608deac9ff6 97c0e521f6e9beb
+m -2147483648 6c24f8041714cd3e 708 e88ca23a7006792 2243 -887584,292192,3d91a363 -887487,292131,3f363f78 -887390,292070,3f60dbab
+g -2147483648 8e170f1df2de41ff e3e13ccb1ed0bba3
+m 2147483647 90b21e19d69f5693 682 e390fe5d23bca689 2255 -896314,297682,3ebee265 -896217,297621,3f42a934 -896120,297560,3f670e47
+g 2147483647 6f162a08f28a6be3 e3487de280c269
+m 1737075661 ac13eef1c740524e 689 a9c1106016931340 2194 -896120,297560,3e25fd3d -896023,297499,3e85672e -895926,297438,3e313149
+g 1737075661 3e5382be14333afa 2832bda98778584d
+m -594886753 ea7e5bf17fd6cd00 688 d4d3806e3ea644e 2251 -896217,297621,3e784a66 -896120,297560,3ecbd989 -896023,297499,3f138e0b
+g -594886753 fa3d6064b69891cb 3ac933a0066c0bd5
+c 0 59d870578541fb88 5bbb231aaadb15 246915b396abe19c ac42080d53a108ef 69e396756f6027c2 8469eff622bec578 89943cb1ee7645c8 e775337295e9f85e
+r 0 f1ca4301dd8e1075 669671d8427923cd dc4ce14252911ced 87b8e14d5e56e6a7 eb6c5e7a2c221d87 33594d08ee2b22c6 d0ec55a077044a05 942768cfe48ec603 b963646872ae1fec
+c 1 47f82724ef4debc9 e0d4d8a0379eed9 cd552aff0bd6712c 83ee8f1aea2918ce 77f126677fa9259e 4acf0d425bb4e827 12992a8c05710411 bac529262c88f472
+r 1 d96bcae2ad3e982b b5e8e89afea587a9 46908d07cf2d40d8 62a516335b30f434 6fae0c0d82541ba3 a9a910ee1e4fd3e3 af5d44403fcba45 4197c3f30428681d d421422e9d2d8d14
+c 2 c7978789f1b3cd6b ced3e95fb433cd42 8e93238729abbd70 780b8e5c249a87dd 5b19ace44f37e4a5 3dcd6075674aed45 e257b4d0b71d095a 7d00ad4de1b0d870
+r 2 69d7c7a5b49b1412 20c15f361ec4d86a f47a8dde69c783e2 8b8920a6049b27e6 36379f34beec3d72 69a91a25dc2a8216 3117421e95a8944a 37a7055331ebade5 6a28b3905a5639e4
+c 3 419fd092d741d8a5 419fd092d741d8a5 419fd092d741d8a5 419fd092d741d8a5 419fd092d741d8a5 419fd092d741d8a5 419fd092d741d8a5 419fd092d741d8a5
+r 3 419fd092d741d8a5 419fd092d741d8a5 419fd092d741d8a5 419fd092d741d8a5 419fd092d741d8a5 419fd092d741d8a5 419fd092d741d8a5 419fd092d741d8a5 419fd092d741d8a5
+c 4 536cdf68b94733a5 536cdf68b94733a5 536cdf68b94733a5 536cdf68b94733a5 536cdf68b94733a5 536cdf68b94733a5 536cdf68b94733a5 536cdf68b94733a5
+r 4 536cdf68b94733a5 536cdf68b94733a5 536cdf68b94733a5 536cdf68b94733a5 536cdf68b94733a5 536cdf68b94733a5 536cdf68b94733a5 536cdf68b94733a5 536cdf68b94733a5
+c 5 f38e08606a465985 f38e08606a465985 f38e08606a465985 f38e08606a465985 f38e08606a465985 f38e08606a465985 f38e08606a465985 f38e08606a465985
+r 5 f38e08606a465985 f38e08606a465985 f38e08606a465985 f38e08606a465985 f38e08606a465985 f38e08606a465985 f38e08606a465985 f38e08606a465985 f38e08606a465985
+";
+
     const NAMES: [&str; 12] = [
         "global",
         "GLOBAL",
@@ -419,6 +464,19 @@ r 1 unique f38e08606a465985 -2147483600,100,10 -2147483600,100,10 -2147483600,10
     const MODIFIERS: [f32; 8] = [1.0, 0.5, -1.0, 0.0, -0.0, f32::NAN, f32::INFINITY, 1e30];
     const SEEDS: [i64; 6] = [99, 0x1_0000_0063, -1, i64::MIN + 5, i32::MAX as i64, 0];
     const BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    /// Runtime seeds as `Seeds.get` narrows them (`(int)` of the world seed), including two wider longs.
+    const RUN_SEEDS: [i32; 8] = [
+        0,
+        1,
+        1337,
+        -987_654_321,
+        i32::MIN,
+        i32::MAX,
+        0x1_2345_6789_abcd_i64 as i32,
+        -4_172_117_037_062_373_473_i64 as i32,
+    ];
+    /// `NoiseCaveGenerator.createArray`'s second copy (`1 * 0xFA90C2L`), then two of the #110 oracle's reseeds.
+    const RESEEDS: [i64; 3] = [0xFA_90C2, 0x1_0000_0063, i64::MIN + 5];
 
     fn gx(i: i32) -> f32 {
         ((i * 7919) % 2001 - 1000) as f32 * 3.7
@@ -601,6 +659,94 @@ r 1 unique f38e08606a465985 -2147483600,100,10 -2147483600,100,10 -2147483600,10
         out
     }
 
+    /// The seeded oracle's module fold: 200 grid points, then `F_POINTS`.
+    fn fold_seeded(module: &Module, seed: i32) -> String {
+        let points = (0..200).map(|i| (gx(i), gz(i))).chain(F_POINTS);
+        let hash = points.fold(BASIS, |hash, (x, z)| {
+            fnv(hash, bits(module.try_value_seed_first(seed, x, z).unwrap()))
+        });
+        format!("{hash:x}")
+    }
+
+    #[test]
+    fn seeded_cave_noise_matches_terraforged_6dd607eb() {
+        let mut out = String::new();
+        for d in 0..D_SEED.len() {
+            let module =
+                UniqueCaveDistributor::new(D_SEED[d], D_FREQ[d], D_JITTER[d], D_DENSITY[d])
+                    .module();
+            write!(out, "d {d}").unwrap();
+            for seed in RUN_SEEDS {
+                write!(out, " {}", fold_seeded(&module, seed)).unwrap();
+            }
+            writeln!(out).unwrap();
+        }
+        let (unique, breach) = (unique_cave_noise(), cave_breach_noise());
+        writeln!(
+            out,
+            "m bounds {:x} {:x} {:x} {:x}",
+            bits(unique.min_value()),
+            bits(unique.max_value()),
+            bits(breach.min_value()),
+            bits(breach.max_value())
+        )
+        .unwrap();
+        for seed in RUN_SEEDS {
+            let (mut unique_hash, mut breach_hash) = (BASIS, BASIS);
+            let (mut hits, mut breaches) = (0, 0);
+            let mut raw = String::new();
+            // A long scan: unique caves occupy one cell in twenty, each 500 blocks wide.
+            for n in 0..20_000 {
+                let (x, z) = (n * 97 - 900_000, n * -61 + 300_000);
+                let value = unique
+                    .try_value_seed_first(seed, x as f32, z as f32)
+                    .unwrap();
+                let mask = breach
+                    .try_value_seed_first(seed, x as f32, z as f32)
+                    .unwrap();
+                unique_hash = fnv(unique_hash, bits(value));
+                breach_hash = fnv(breach_hash, bits(mask));
+                if value != 0.0 {
+                    if hits < 3 {
+                        write!(raw, " {x},{z},{:x}", bits(value)).unwrap();
+                    }
+                    hits += 1;
+                }
+                if mask != 0.0 && mask != 1.0 {
+                    breaches += 1;
+                }
+            }
+            writeln!(
+                out,
+                "m {seed} {unique_hash:x} {hits} {breach_hash:x} {breaches}{raw}"
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "g {seed} {} {}",
+                fold_seeded(&unique, seed),
+                fold_seeded(&breach, seed)
+            )
+            .unwrap();
+        }
+        for index in 0..6 {
+            let cave = cave(index);
+            write!(out, "c {index}").unwrap();
+            for seed in RUN_SEEDS {
+                write!(out, " {:x}", fold_cave(&cave, seed)).unwrap();
+            }
+            write!(out, "\nr {index}").unwrap();
+            for reseed in RESEEDS {
+                let reseeded = cave.with_seed(reseed);
+                for seed in [0, 1337, -987_654_321] {
+                    write!(out, " {:x}", fold_cave(&reseeded, seed)).unwrap();
+                }
+            }
+            writeln!(out).unwrap();
+        }
+        assert_eq!(out, SEEDED_ORACLE);
+    }
+
     #[test]
     fn cave_noise_matches_terraforged_0_3_1() {
         let mut out = String::new();
@@ -666,60 +812,5 @@ r 1 unique f38e08606a465985 -2147483600,100,10 -2147483600,100,10 -2147483600,10
         }
         assert_eq!(out, ORACLE);
         assert_eq!(CaveType::VALUES.map(CaveType::name), ["global", "unique"]);
-    }
-
-    // From TerraForgedNoiseCaveOracle (6dd607eb; `.local/terraforged/oracles/noise_cave_seeded/`): seed, x, z,
-    // unique, breach.
-    const MODIFIERS_6DD: [(i32, i32, i32, u32, u32); 15] = [
-        (0, 0, 0, 0, 1065353216),
-        (0, 37, -91, 0, 0),
-        (0, -1024, 4096, 0, 1040947585),
-        (0, 12345, -6789, 0, 0),
-        (0, -30001, 15003, 0, 0),
-        (1337, 0, 0, 0, 1065353216),
-        (1337, 37, -91, 0, 0),
-        (1337, -1024, 4096, 0, 0),
-        (1337, 12345, -6789, 0, 0),
-        (1337, -30001, 15003, 0, 0),
-        (-987654321, 0, 0, 0, 1065353216),
-        (-987654321, 37, -91, 0, 0),
-        (-987654321, -1024, 4096, 0, 0),
-        (-987654321, 12345, -6789, 0, 0),
-        (-987654321, -30001, 15003, 0, 0),
-    ];
-
-    // The oracle's first unique-cave hits along a fixed scan: seed, x, z, value.
-    const UNIQUE_HITS: [(i32, i32, i32, u32); 12] = [
-        (0, -887584, 292192, 1032954723),
-        (0, -887487, 292131, 1060519800),
-        (0, -887390, 292070, 1063312299),
-        (0, -887293, 292009, 1053391849),
-        (1337, -896217, 297621, 1025155803),
-        (1337, -896120, 297560, 1037706053),
-        (1337, -881570, 288410, 1042212703),
-        (1337, -880600, 287800, 1049766814),
-        (-987654321, -896314, 297682, 1058922596),
-        (-987654321, -896217, 297621, 1065205434),
-        (-987654321, -896120, 297560, 1059647356),
-        (-987654321, -896023, 297499, 1049694601),
-    ];
-
-    #[test]
-    fn cave_modifiers_match_terraforged_source() {
-        let unique = unique_cave_noise();
-        let breach = cave_breach_noise();
-        for (seed, x, z, unique_bits, breach_bits) in MODIFIERS_6DD {
-            let (x, z) = (x as f32, z as f32);
-            let value = unique.try_value_seed_first(seed, x, z).unwrap();
-            assert_eq!(value.to_bits(), unique_bits, "unique {seed} {x} {z}");
-            let value = breach.try_value_seed_first(seed, x, z).unwrap();
-            assert_eq!(value.to_bits(), breach_bits, "breach {seed} {x} {z}");
-        }
-        for (seed, x, z, bits) in UNIQUE_HITS {
-            let value = unique
-                .try_value_seed_first(seed, x as f32, z as f32)
-                .unwrap();
-            assert_eq!(value.to_bits(), bits, "unique hit {seed} {x} {z}");
-        }
     }
 }
