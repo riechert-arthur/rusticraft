@@ -31,7 +31,7 @@
 use super::{Result, WorldGen, WorldPreset, read_saved_data, world_gen_settings, write_saved_data};
 use horizon_world::nbt::Tag;
 use horizon_world::worldgen::generator::terraforged_world_preset::{
-    GENERATOR_TYPE, PRESET, preset_json,
+    GENERATOR_TYPE, PRESET, overworld_type_json, preset_json,
 };
 use std::cell::Cell;
 use std::ops::ControlFlow;
@@ -109,24 +109,6 @@ fn cycle(chosen: &mut bool, world_type: &mut WorldPreset, id: u8) -> ControlFlow
     ControlFlow::Break(())
 }
 
-/// The overworld of TerraForged's built-in data pack (`dimension_type/overworld.json`):
-/// from y -64, 1024 blocks and logical height. A TerraForged world carries it as its own
-/// data pack, so the generator, the level shapes and the synced registry all follow it.
-pub const OVERWORLD_MIN_Y: i32 = -64;
-pub const OVERWORLD_HEIGHT: i32 = 1024;
-
-/// That overworld as a dimension type: the fields Horizon reads from a pack's type. The
-/// world's TerraForged generator keeps it from opening in vanilla Java anyway.
-pub fn overworld_type_json() -> String {
-    serde_json::json!({
-        "min_y": OVERWORLD_MIN_Y,
-        "height": OVERWORLD_HEIGHT,
-        "logical_height": OVERWORLD_HEIGHT,
-        "has_skylight": true,
-    })
-    .to_string()
-}
-
 /// Whether a saved world's overworld is TerraForged's.
 pub fn is_terraforged(world: &Path) -> bool {
     world_gen_settings(world)
@@ -175,8 +157,12 @@ fn write_terraforged(dir: &Path, seed: i64, options: WorldGen, flat: Option<Tag>
     write_pack(dir)
 }
 
-/// The world's `datapacks/terraforged`: TerraForged's taller overworld. New world packs
-/// are enabled when the world opens.
+/// The world's own data pack `datapacks/terraforged`, with TerraForged's taller overworld dimension type
+/// ([`overworld_type_json`], TerraForged's built-in pack's file): from y -64, 1024 blocks, so the generator's range,
+/// the level shapes and the synced `dimension_type` registry follow it as for any world pack (Horizon enables the
+/// packs in a world's folder unless `datapacks.json` disables them). TerraForged copies its whole built-in pack into
+/// every world the Create screen makes; only the dimension type is needed here (the rest is bundled), and only
+/// TerraForged worlds get it, so vanilla worlds keep 26.3's overworld.
 fn write_pack(dir: &Path) -> Result<()> {
     let pack = dir.join("datapacks").join("terraforged");
     let types = pack.join("data").join("minecraft").join("dimension_type");
@@ -310,14 +296,13 @@ mod tests {
         assert_eq!(WorldGen::preset(&vanilla), "minecraft:normal");
         // The world's own pack gives its overworld TerraForged's height; vanilla's has none.
         let pack = dir.join("datapacks/terraforged/data/minecraft/dimension_type/overworld.json");
+        let written = std::fs::read_to_string(pack).unwrap();
+        assert_eq!(written, overworld_type_json());
         let height = horizon_world::worldgen::overrides::LevelHeight::of_json(
-            &serde_json::from_str(&std::fs::read_to_string(pack).unwrap()).unwrap(),
+            &serde_json::from_str(&written).unwrap(),
         )
         .unwrap();
-        assert_eq!(
-            (height.min_y, height.height),
-            (OVERWORLD_MIN_Y, OVERWORLD_HEIGHT)
-        );
+        assert_eq!((height.min_y, height.height), (-64, 1024));
         assert!(!vanilla.join("datapacks").exists());
         std::fs::remove_dir_all(&dir).unwrap();
         std::fs::remove_dir_all(&vanilla).unwrap();
