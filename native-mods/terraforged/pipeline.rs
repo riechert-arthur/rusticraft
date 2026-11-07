@@ -314,21 +314,22 @@ impl TerraForgedPipeline {
         self.biomes.surface_sampler(&self.generator)
     }
 
-    /// `Source.getNoiseBiome` at block column `x z` (a quart's corner) with the captured seed and no terrain-cache
-    /// hint, as [`SeededPipeline::noise_biomes`] samples it. `None` where the column's pool has no biome.
     /// The cave biome of `wanted` the noise caves leave in the column at block `x, z`, and a block of it, for
-    /// `/locate biome` (see [`NoiseCaveGenerator::written_cave_biome`]). The caves' noise comes first; only a column
-    /// where a cave would carve a wanted biome reads its height: the un-eroded one first (no erosion region), then,
-    /// if that passes, the eroded height the chunk is filled to, which builds the column's erosion region and
-    /// answers. `None` where a noise fails, as everywhere in the search.
+    /// `/locate biome` (see [`NoiseCaveGenerator::written_cave_biome`]). The cave biomes' noise comes first, then the
+    /// caves' noise; only a column where a cave would carve a wanted biome reads its height: the un-eroded one first
+    /// (no erosion region), then, if that passes, the eroded height the chunk is filled to, which builds the column's
+    /// erosion region (a fraction of a second; the region the answer's chunks need) and answers. `None` where a noise
+    /// fails, as everywhere in the search.
     fn cave_biome_at(&self, x: i32, z: i32, wanted: &BTreeSet<BiomeId>) -> Option<(BiomeId, i32)> {
         if wanted.is_empty() {
             return None;
         }
         let caves = self
             .caves
-            .column_caves(self.generator.level_seed() as i32, x, z)
-            .ok()?;
+            .column_caves(self.generator.level_seed() as i32, x, z, |biome| {
+                wanted.contains(biome)
+            })
+            .ok()??;
         if !caves
             .iter()
             .any(|cave| cave.biome().is_some_and(|biome| wanted.contains(biome)))
@@ -351,6 +352,8 @@ impl TerraForgedPipeline {
         )
     }
 
+    /// `Source.getNoiseBiome` at block column `x z` (a quart's corner) with the captured seed and no terrain-cache
+    /// hint, as [`SeededPipeline::noise_biomes`] samples it. `None` where the column's pool has no biome.
     pub(super) fn biome_at(
         &self,
         sampler: &CurrentSurfaceBiomeSampler<'_, BiomeId>,

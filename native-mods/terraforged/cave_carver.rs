@@ -192,19 +192,38 @@ impl<T: Clone + PartialEq> NoiseCaveGenerator<T> {
     }
 
     /// `/locate biome`'s first look at the column at block `x, z` (no Java counterpart: TerraForged's search reads
-    /// only `Source.getNoiseBiome`): each cave config that opens a cavern there, in `carve`'s order, with its top
-    /// (`y + cavern`) and bottom (`y - floor`) before the surface clamps them, and the biome `carve` samples for it
-    /// at this column. Reads only the caves' and the cave biomes' noise. `Err` where a noise fails (`carve` fails the
-    /// chunk there).
+    /// only `Source.getNoiseBiome`): `None` unless a cave config would carve a biome `wanted` accepts there, else
+    /// each cave config that opens a cavern there, in `carve`'s order, with its top (`y + cavern`) and bottom
+    /// (`y - floor`) before the surface clamps them, and the biome `carve` samples for it at this column. The cave
+    /// biomes' noise (one simplex per config) comes first, so a column no wanted biome reaches costs no cave noise.
+    /// `Err` where a noise fails (`carve` fails the chunk there).
     pub fn column_caves(
         &self,
         seed: i32,
         x: i32,
         z: i32,
-    ) -> Result<Vec<ColumnCave<T>>, &'static str> {
+        wanted: impl Fn(&T) -> bool,
+    ) -> Result<Option<Vec<ColumnCave<T>>>, &'static str> {
+        let biomes: Vec<Option<T>> = self
+            .caves
+            .iter()
+            .map(|config| {
+                self.biomes
+                    .get_underground_biome(
+                        self.source_seed.wrapping_add(config.seed()),
+                        x,
+                        z,
+                        config.cave_type(),
+                    )
+                    .map(|biome| T::clone(biome))
+            })
+            .collect();
+        if !biomes.iter().flatten().any(&wanted) {
+            return Ok(None);
+        }
         let mut unique = None;
         let mut caves = Vec::new();
-        for config in &self.caves {
+        for (config, biome) in self.caves.iter().zip(biomes) {
             let value = match config.cave_type() {
                 CaveType::Global => 1.0,
                 CaveType::Unique => match unique {
@@ -220,27 +239,18 @@ impl<T: Clone + PartialEq> NoiseCaveGenerator<T> {
                 continue;
             }
             let floor = config.floor_depth(seed, x, z, cavern)?;
-            let biome = self
-                .biomes
-                .get_underground_biome(
-                    self.source_seed.wrapping_add(config.seed()),
-                    x,
-                    z,
-                    config.cave_type(),
-                )
-                .map(|biome| T::clone(biome));
             caves.push(ColumnCave {
                 top: y.wrapping_add(cavern),
                 bottom: y.wrapping_sub(floor),
                 biome,
             });
         }
-        Ok(caves)
+        Ok(Some(caves))
     }
 
     /// Where [`Self::carve`] leaves a cave biome `wanted` accepts in the column whose caves are `caves`
     /// ([`Self::column_caves`]) and whose first free block over the terrain (OCEAN_FLOOR_WG) is `first_free`: that
-    /// biome and the lowest block of the lowest such quart. The surface takes the river breach's mask as 1 (the
+    /// biome and a carved block of the lowest such quart (one above the cave's floor where the quart has it). The surface takes the river breach's mask as 1 (the
     /// deepest surface `getSurface` gives, away from rivers), so a quart found here is written whatever the river
     /// noise, and a later cave that would write over it does so here too. Other columns of the same quart (and
     /// `CarverChunk`'s per-quart biome cache) are not replayed.
@@ -275,11 +285,20 @@ impl<T: Clone + PartialEq> NoiseCaveGenerator<T> {
         let lowest = writes.iter().map(|w| w.0 >> 2).min()?;
         let highest = writes.iter().map(|w| w.1 >> 2).max()?;
         (lowest..=highest).find_map(|quart| {
-            let (bottom, _, biome) = writes
+            let (bottom, last, biome) = writes
                 .iter()
                 .rev()
                 .find(|(bottom, last, _)| (bottom >> 2..=last >> 2).contains(&quart))?;
-            wanted(biome).then(|| (T::clone(biome), (*bottom).max(quart * 4) as i32))
+            // The quart's lowest carved block, or the one above the cave's floor (decoration covers the floor) when
+            // that is still in the quart.
+            let lowest = (*bottom).max(quart * 4);
+            let above = lowest + 1;
+            let y = if lowest == *bottom && above <= (*last).min(quart * 4 + 3) {
+                above
+            } else {
+                lowest
+            };
+            wanted(biome).then(|| (T::clone(biome), y as i32))
         })
     }
 

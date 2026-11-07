@@ -2884,7 +2884,10 @@ builds that column's erosion region). The answer is the lowest carved block of t
 breach shut (its deepest, so the quart is written whatever the river noise). Other columns of the same
 quart and `CarverChunk`'s one-quart biome cache are not replayed, so near a cave biome's border the
 quart can hold a neighbour's choice. A biome the climate pools hold is looked for only as a noise
-biome, as before, so searches for surface biomes cost what they did. Structures' own biome searches (`findBiomeHorizontal` for strongholds,
+biome, as before, so searches for surface biomes cost what they did. Like 26.3's own search, it runs on the
+server thread: the cave biomes' noise goes first (one simplex per cave), so a whole 6,400-block spiral's cave part
+(cave noise, and un-eroded heights where a wanted cave carves) takes about 0.03–1.3 s in an optimized build at
+seed 777, against 0.37 s for its noise biomes, and a found cave adds one erosion region (up to about 1.5 s; the region the answer's chunks need anyway). Structures' own biome searches (`findBiomeHorizontal` for strongholds,
 biome checks) already go through `Source.getNoiseBiome` in `structure_queries.rs`. Distant terrain (Horizon's far tiles, `lod_grid` and `surface_sample`) reads the same continent, river and
 climate noise: each column is `getBaseColumn`'s shape from the UN-ERODED height (`far_heights`), with the biome the
 chunk stores at its surface block and the vanilla surface rule over TerraForged's generation context and preliminary
