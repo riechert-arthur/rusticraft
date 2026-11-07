@@ -84,7 +84,9 @@ Differences and gaps:
   build for distant tiles (about 20 s per wide tile), so far ground can sit a few blocks (about 2 on average,
   at most about 10) off the real chunks'. With Reduced far detail (Horizon's video setting, off by default) the
   surface rule paints only the top two blocks of a far column instead of eight, so the sides of steep far
-  columns show stone under them; heights, top blocks, water and biomes are unchanged. Decorated far chunks
+  columns show stone under them (grey stripes on distant badlands slopes, which Full far detail paints in
+  terracotta bands); heights, top blocks, water and biomes are unchanged. It saves 10–35% of a far tile's
+  sampling; most of Reduced's speed comes from Horizon merging far tiles. Decorated far chunks
   (Horizon's far decoration) are generated in full, eroded.
 - The boat hook (boats float up small water steps) works only in TerraForged worlds (Arthur's
   choice); TerraForged's mixin works in every world.
