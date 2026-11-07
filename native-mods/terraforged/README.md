@@ -35,7 +35,7 @@ operators get `/locateterrain <terrain> [radius]`, `/tf export structures`, `/tf
 `/locate biome` in a TerraForged world also finds the biomes only caves hold (`terraforged:cave`, and
 with `corrected_biomes` the cave biomes unique caves draw), at a block of the cave, where TerraForged's
 search asks only the noise biome and never finds them. `terraforged:oak_forest` is registered but no
-climate places it, so it is never found, as in TerraForged.
+climate places it, so it is found only where a unique cave draws it (never with `corrected_biomes`).
 
 The Nether and the End stay vanilla, as in TerraForged. Deliberate fidelity to the pinned source,
 including its quirks: JSON `Bias` nodes decode as 0 (Engine's spec reads a module as a float), cave
@@ -143,9 +143,9 @@ don't generate, so they need none.
   that names one of them still places it. Unique caves draw from those cave biomes (in registry order;
   `terraforged:cave` alone if there are none) instead of every registered biome, the End's and the
   Nether's included. Structures still see every overworld biome as possible. `/locate biome` finds
-  what the chunks' biome layer holds, so with the setting it no longer finds a cave biome (unique
-  caves write theirs into the chunk while carving, which it doesn't search); `/tf preview` colours by
-  climate and is the same either way. Off, generation is unchanged.
+  the cave biomes either way: off as noise biomes (at the search's first height), on where the
+  unique caves carve them (at a block of the cave); `/tf preview` colours by climate and is the same
+  either way. Off, generation is unchanged.
 
 ## Layers
 
@@ -2872,8 +2872,19 @@ structures. `/locate biome` is 26.3's `BiomeSource.findClosestBiome3d` (TerraFor
 it) over `possibleBiomes` (the overworld biome list) and `getNoiseBiome`: the same spiral, step and radius, and since
 TerraForged's noise biome ignores `y`, a column answers at the first sample height (Java samples the other heights in
 vain, with the same result). It reads only the continent, river and climate noise, so a search adds no terrain-cache
-entry and evicts no erosion region. A column whose pool has no biome matches nothing; Java's `Set.contains(null)`
-throws out of the command there instead. Structures' own biome searches (`findBiomeHorizontal` for strongholds,
+entry and evicts no erosion region (a cave biome's search, below, builds the regions of the columns it checks). A column whose pool has no biome matches nothing; Java's `Set.contains(null)`
+throws out of the command there instead. Beyond TerraForged (its search never finds them), the biomes only caves hold
+(`terraforged:cave`, unique caves' biomes outside the climate pools: the End's and the Nether's
+without `corrected_biomes`, the cave biomes with it) are looked for in the same spiral, after each
+column's noise biome: the caves' noise first (`NoiseCaveGenerator.carve`'s height, cavern and floor
+and the cave biome sample), and only where a cave would carve a wanted biome, the column's
+un-eroded height (no erosion region) and then the eroded height the chunk is filled to (which
+builds that column's erosion region). The answer is the lowest carved block of the lowest quart
+`carve` leaves that biome in, more than 16 blocks below the surface `getSurface` gives with the river
+breach shut (its deepest, so the quart is written whatever the river noise). Other columns of the same
+quart and `CarverChunk`'s one-quart biome cache are not replayed, so near a cave biome's border the
+quart can hold a neighbour's choice. A biome the climate pools hold is looked for only as a noise
+biome, as before, so searches for surface biomes cost what they did. Structures' own biome searches (`findBiomeHorizontal` for strongholds,
 biome checks) already go through `Source.getNoiseBiome` in `structure_queries.rs`. Distant terrain (Horizon's far tiles, `lod_grid` and `surface_sample`) reads the same continent, river and
 climate noise: each column is `getBaseColumn`'s shape from the UN-ERODED height (`far_heights`), with the biome the
 chunk stores at its surface block and the vanilla surface rule over TerraForged's generation context and preliminary

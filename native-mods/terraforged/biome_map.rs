@@ -53,4 +53,15 @@ impl<T> BiomePools<T> {
     pub fn get(&self, climate: BiomeType) -> Option<&Arc<WeightMap<T>>> {
         self.pools[climate as usize].as_ref()
     }
+
+    /// Whether any pool holds `biome` (no Java counterpart: `/locate biome` asks it).
+    pub fn holds(&self, biome: &T) -> bool
+    where
+        T: PartialEq,
+    {
+        self.pools
+            .iter()
+            .flatten()
+            .any(|pool| pool.values().iter().any(|value| **value == *biome))
+    }
 }
