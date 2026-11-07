@@ -1736,6 +1736,63 @@ mod tests {
         serde_json::from_str(data.biome_json(id)).map_err(|e| e.to_string())
     }
 
+    /// A TerraForged world's pack (`write_pack`) as the generator reads it: its two biomes, built from the bundle's
+    /// own 26.3 parents.
+    fn terraforged_biomes(data: &GeneratorData) -> crate::worldgen::overrides::WorldgenOverrides {
+        let mut ov = crate::worldgen::overrides::WorldgenOverrides::default();
+        let (biomes, missing) = mod_biomes(|name| parent_of(data, name));
+        assert!(missing.is_empty(), "{missing:?}");
+        for (id, json) in biomes {
+            ov.set("biomes", &id, json.to_string());
+        }
+        ov
+    }
+
+    /// With the world's pack the generator has TerraForged's biomes where 6dd607eb places them: GLOBAL noise caves
+    /// write `terraforged:cave` (in carved quarts only), neither is a surface biome (no `minecraft:is_overworld` tag,
+    /// as in 6dd607eb; UNIQUE caves can still draw either, as they draw any registered biome), and `trees/patchy`
+    /// (which names `terraforged:oak_forest`) binds wooded badlands.
+    #[test]
+    fn terraforged_biomes_generate_where_6dd607eb_places_them() {
+        let Some(vanilla) = data() else { return };
+        let data = data_with(&terraforged_biomes(&vanilla)).unwrap();
+        let cave = data.biome_id("terraforged:cave").unwrap();
+        let oak = data.biome_id("terraforged:oak_forest").unwrap();
+        let stem = terraforged_stem(&data, PRESET, "minecraft:overworld").unwrap();
+        let pipeline = TerraForgedPipeline::new(&data, 7, &stem, false).unwrap();
+        let overworld = &pipeline.biomes.map.overworld;
+        assert!(!overworld.iter().any(|id| **id == cave || **id == oak));
+        assert!(
+            overworld
+                .iter()
+                .any(|id| data.biome_name(**id) == "minecraft:plains")
+        );
+        let features = pipeline.features.as_ref().unwrap();
+        for biome in ["minecraft:wooded_badlands", "terraforged:oak_forest"] {
+            let (tag, ..) = features.vegetation_of(data.biome_id(biome).unwrap());
+            assert_eq!(tag, Some("terraforged:trees/patchy"), "{biome}");
+        }
+        let overworld =
+            OverworldGenerator::for_dimension(Arc::clone(&data), 7, PRESET, "minecraft:overworld")
+                .unwrap();
+        let (min_y, height) = overworld.level();
+        let mut worker = overworld.worker();
+        let mut caves = 0;
+        for (cx, cz) in [(0, 0), (3, -2), (-5, 4), (8, 8), (-12, -9), (20, 3)] {
+            let chunk = worker.generate_proto(ChunkPos::new(cx, cz)).unwrap();
+            for y in (min_y..min_y + height).step_by(4) {
+                for i in 0..16 {
+                    let (x, z) = ((i % 4) * 4, (i / 4) * 4);
+                    if chunk.biome_id_at(x, y, z) == cave {
+                        assert!(carved_quart(&chunk, x, y, z), "{cx} {cz} {x} {y} {z}");
+                        caves += 1;
+                    }
+                }
+            }
+        }
+        assert!(caves > 0);
+    }
+
     /// `/locate biome` (`findClosestBiome3d`) follows the spiral over TerraForged's noise biomes: it answers with the
     /// first sampled column whose biome is allowed, at the first sample height, and finds no biome outside
     /// `possibleBiomes`. Searching adds no terrain-cache entry.

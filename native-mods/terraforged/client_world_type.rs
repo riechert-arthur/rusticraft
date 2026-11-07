@@ -358,7 +358,7 @@ mod tests {
 
     #[test]
     fn a_terraforged_world_saves_and_reloads_as_terraforged() {
-        vanilla_biomes();
+        let vanilla_data = vanilla_biomes();
         let dir = scratch("round-trip");
         let options = WorldGen {
             preset: WorldPreset::Normal,
@@ -399,6 +399,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!((height.min_y, height.height), (-64, 1024));
+        // It holds TerraForged's biomes for the generator, copied from the game's 26.3 data.
+        if vanilla_data {
+            let biomes = biome_bytes();
+            assert_eq!(biomes.len(), 2);
+            for (id, json) in biomes {
+                let file = dir.join("datapacks/terraforged").join(biome_file(&id));
+                assert_eq!(std::fs::read(file).unwrap(), json, "{id}");
+            }
+        }
+        assert_eq!(
+            biome_file("terraforged:oak_forest"),
+            Path::new("data/terraforged/worldgen/biome/oak_forest.json")
+        );
         assert!(is_this_pack(
             &dir.join("datapacks/terraforged"),
             &pack_meta(),
@@ -453,6 +466,39 @@ mod tests {
         .unwrap();
         assert_eq!(files[1].1, plains);
         assert_eq!(files[0].1["carvers"], serde_json::json!([]));
+    }
+
+    /// The `native_biome_files` hook: a TerraForged world takes TerraForged's biomes, a vanilla world none (its table
+    /// and registry stay 26.3's), and a client of another server keeps those the server's registry names.
+    #[test]
+    fn only_terraforged_worlds_take_terraforged_biomes() {
+        use crate::world_biomes::{native_biomes, native_biomes_for_registry};
+        let ids = |biomes: Vec<(String, serde_json::Value)>| -> Vec<String> {
+            biomes.into_iter().map(|(id, _)| id).collect()
+        };
+        let both: &[&str] = if vanilla_biomes() {
+            &["terraforged:cave", "terraforged:oak_forest"]
+        } else {
+            &[]
+        };
+        let terraforged = scratch("biomes-terraforged");
+        write_terraforged(&terraforged, 5, WorldGen::default(), None).unwrap();
+        let vanilla = scratch("biomes-vanilla");
+        super::super::write_world_gen_settings(&vanilla, 5, WorldGen::default()).unwrap();
+        assert_eq!(ids(native_biomes(Some(&terraforged))), both);
+        assert!(native_biomes(Some(&vanilla)).is_empty());
+        assert!(native_biomes(Some(&scratch("biomes-missing"))).is_empty());
+        assert_eq!(ids(native_biomes(None)), both);
+        assert!(native_biomes_for_registry(["minecraft:plains"]).is_empty());
+        assert_eq!(
+            ids(native_biomes_for_registry([
+                "minecraft:plains",
+                "terraforged:cave"
+            ])),
+            both[..both.len().min(1)]
+        );
+        std::fs::remove_dir_all(&terraforged).unwrap();
+        std::fs::remove_dir_all(&vanilla).unwrap();
     }
 
     #[test]
