@@ -51,9 +51,15 @@ pub const NAME: &str = "TerraForged";
 /// creates is written on the server thread, so this one is shared.
 static CHOSEN: AtomicBool = AtomicBool::new(false);
 
+/// The Horizon settings of the world Re-Create started from, for the world it creates (a
+/// fresh screen has none: the new world takes the settings file's). Shared for the same
+/// reason as [`CHOSEN`].
+static CHOSEN_SETTINGS: std::sync::Mutex<Option<Settings>> = std::sync::Mutex::new(None);
+
 thread_local! {
-    /// Set by Re-Create for the `WorldOptions::default` its body ends with.
-    static RECREATING: Cell<Option<bool>> = const { Cell::new(None) };
+    /// Set by Re-Create for the `WorldOptions::default` its body ends with: whether the
+    /// world is TerraForged's, and its Horizon settings.
+    static RECREATING: Cell<Option<(bool, Option<Settings>)>> = const { Cell::new(None) };
     /// Set by `WorldOptions::world_gen` when the screen's choice is TerraForged, for the
     /// `write_world_gen_settings_with` that takes its result on the same thread. Other
     /// writes (`Level::write` for a world without settings, a dedicated server's new world)
@@ -72,12 +78,21 @@ pub fn label() -> String {
 
 /// A fresh screen starts at Normal; Re-Create keeps the world's own type.
 pub fn reset() {
-    CHOSEN.store(RECREATING.take().unwrap_or(false), Ordering::Relaxed);
+    let (chosen, settings) = RECREATING.take().unwrap_or((false, None));
+    CHOSEN.store(chosen, Ordering::Relaxed);
+    *CHOSEN_SETTINGS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = settings;
 }
 
-/// Re-Create: the world's type, applied when its options' defaults are made.
+/// Re-Create: the world's type and Horizon settings, applied when its options' defaults
+/// are made, so the world it makes generates as this one did.
 pub fn recreate(world: &Path) {
-    RECREATING.set(Some(is_terraforged(world)));
+    let generator = terraforged_generator(world);
+    RECREATING.set(Some((
+        generator.is_some(),
+        generator.as_ref().map(saved_settings),
+    )));
 }
 
 /// `WorldOptions::world_gen`: the new world's settings are about to be written.
@@ -200,11 +215,15 @@ pub fn write(
     if !CREATING.take() || options.preset != WorldPreset::Normal {
         return ControlFlow::Continue(());
     }
-    // Tests never read or write the game folder's settings file.
-    let horizon = if cfg!(test) {
-        Settings::default()
-    } else {
-        new_world_settings()
+    // Re-Create's world keeps its source's settings. Tests never read or write the game
+    // folder's settings file.
+    let recreated = *CHOSEN_SETTINGS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let horizon = match recreated {
+        Some(settings) => settings,
+        None if cfg!(test) => Settings::default(),
+        None => new_world_settings(),
     };
     ControlFlow::Break(write_terraforged(dir, seed, options, flat.clone(), horizon))
 }
@@ -461,7 +480,7 @@ mod tests {
         assert_eq!(terraforged_settings::current(), Settings::default());
         // Re-Create picks TerraForged again, with the world's other choices.
         recreate(&dir);
-        assert_eq!(RECREATING.take(), Some(true));
+        assert_eq!(RECREATING.take(), Some((true, Some(Settings::default()))));
         assert_eq!(WorldGen::read(&dir), Some(options));
         let settings = world_gen_settings(&dir).unwrap();
         assert_eq!(settings.get("seed"), Some(&Tag::Long(9)));
@@ -584,6 +603,9 @@ mod tests {
             Some(&Tag::compound([("deterministic", Tag::Byte(1))]))
         );
         assert_eq!(saved_settings(&generator), on);
+        // Re-Create keeps them.
+        recreate(&dir);
+        assert_eq!(RECREATING.take(), Some((true, Some(on))));
         // A world from before the settings existed is faithful.
         let mut old = generator.clone();
         if let Tag::Compound(entries) = &mut old {

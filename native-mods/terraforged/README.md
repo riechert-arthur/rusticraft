@@ -88,8 +88,8 @@ Horizon's own additions to TerraForged (none of them is TerraForged's), every on
 is the faithful port. A new TerraForged world takes them from `config/terraforged/settings.json` in the
 game folder, written with every setting off the first time, and keeps them in its overworld generator
 (`generator.horizon_settings` in `world_gen_settings.dat`, beside TerraForged's own generator fields),
-so changing the file later leaves existing worlds as they are. A world made before the settings existed
-has every setting off. Vanilla worlds never get the block or the file. The game installs a world's
+so changing the file later leaves existing worlds as they are; Re-Create keeps the world's own. A world
+made before the settings existed has every setting off. Vanilla worlds never get the block or the file. The game installs a world's
 settings as it opens it (also on a dedicated server running a TerraForged world); clients of a server
 don't generate, so they need none.
 
