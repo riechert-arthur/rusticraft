@@ -45,8 +45,8 @@ pub const TERRAIN_OFFSET: i64 = 45_763_218;
 /// `NoiseGenerator.CONTINENT_OFFSET`: the world seed of the settings `createContinentNoise` builds the
 /// [`ContinentNoise`]'s context from.
 pub const CONTINENT_OFFSET: i64 = 18_749_560;
-/// `NoiseGenerator.heightMultiplier`.
-const HEIGHT_MULTIPLIER: f32 = 1.2;
+/// `NoiseGenerator.heightMultiplier`: land reaches up to 1.2 times the terrain range.
+pub const HEIGHT_MULTIPLIER: f32 = 1.2;
 
 // TerraForged samples one generator from its worker threads (each with its own blender and sample).
 const _: fn() = || {

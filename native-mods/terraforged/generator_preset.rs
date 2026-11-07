@@ -142,24 +142,27 @@ fn json_int(value: &Value) -> Option<i32> {
     }
 }
 
-/// The `height_scale` setting: the land's reach above sea level (`max_y`, `base_height`)
-/// and the oceans' depth below it (`sea_floor`, down to y 0) times `scale`, at the original's
-/// horizontal frequency, which `auto_scale` would otherwise widen with the range.
+/// The `height_scale` setting over the world's `levels` (an `Err`-free mapping of the decoded [`TerrainLevels`]): the
+/// land's height above sea level and the oceans' depth below it, times `scale`, at the original's horizontal
+/// frequency (`auto_scale` would widen the landforms with the range; here they keep their width and get steeper).
+/// TerraForged's noise levels put a land column at `sea_level + base_height * base + (max_y - sea_level -
+/// base_height) * terrain` and an ocean floor at `sea_floor + depth * (sea_level - sea_floor)`, so `base_height` (the
+/// base's range above the sea) is scaled, and `max_y` and `sea_floor` are stretched around the sea level, the floor
+/// no lower than y 0 (`TerrainLevels::MIN_SEA_FLOOR`, the codec's bound). `scale` 1 returns `levels` unchanged.
 pub fn scale_heights(levels: TerrainLevels, scale: f32) -> TerrainLevels {
     if scale == 1.0 {
         return levels;
     }
     let sea = levels.sea_level;
-    let stretch = |level: i32| sea + ((level - sea) as f32 * scale).round() as i32;
+    let times = |range: i32| (range as f32 * scale).round() as i32;
     let mut scaled = TerrainLevels::new(
         levels.noise_levels.auto,
         levels.noise_levels.scale,
         levels.min_y,
-        stretch(levels.max_y),
-        stretch(levels.base_height),
+        sea + times(levels.max_y - sea),
+        times(levels.base_height),
         sea,
-        // Base columns start at y 0, as `TerrainLevels::MIN_SEA_FLOOR` holds the floor.
-        stretch(levels.sea_floor).max(TerrainLevels::MIN_SEA_FLOOR),
+        (sea - times(sea - levels.sea_floor)).max(TerrainLevels::MIN_SEA_FLOOR),
     );
     scaled.noise_levels.frequency = levels.noise_levels.frequency;
     scaled
@@ -352,44 +355,78 @@ mod tests {
     }
 
     #[test]
-    fn height_scale_stretches_levels_around_sea_level() {
-        let original = TerrainLevels::new(true, 1.0, -64, 480, 128, 62, 22);
-        let doubled = scale_heights(original, 2.0);
-        assert_eq!(
-            (
-                doubled.max_y,
-                doubled.base_height,
-                doubled.sea_level,
-                doubled.sea_floor
-            ),
-            (898, 194, 62, 0)
-        );
-        assert_eq!(
-            doubled.noise_levels.frequency,
-            original.noise_levels.frequency
-        );
+    fn height_scale_stretches_heights_around_sea_level() {
+        use super::super::terraforged_noise_generator::HEIGHT_MULTIPLIER;
+        use super::super::terraforged_settings::HEIGHT_SCALES;
+        let original = terrain_levels(None).unwrap();
         assert_eq!(scale_heights(original, 1.0), original);
-        // Generated land reaches about twice as far above the sea.
-        let peak = |levels| {
+        let frequency = original.noise_levels.frequency.to_bits();
+        let fields = |scale| {
+            let levels = scale_heights(original, scale);
+            (
+                levels.max_y,
+                levels.base_height,
+                levels.sea_level,
+                levels.sea_floor,
+                levels.min_y,
+                levels.noise_levels.frequency.to_bits(),
+            )
+        };
+        assert_eq!(fields(1.85), (835, 237, 62, 0, -64, frequency));
+        assert_eq!(fields(1.5), (689, 192, 62, 2, -64, frequency));
+        assert_eq!(fields(0.5), (271, 64, 62, 42, -64, frequency));
+        // The highest land the noise can make (base 1, terrain 1, times the height multiplier) stays under the
+        // 1024-block overworld's top at the highest scale, and the base range above the sea at the lowest.
+        let reach = |levels: TerrainLevels| {
+            levels.sea_level as f32
+                + levels.base_height as f32
+                + HEIGHT_MULTIPLIER * (levels.max_y - levels.sea_level - levels.base_height) as f32
+        };
+        assert_eq!(reach(original), 538.0);
+        let highest = scale_heights(original, *HEIGHT_SCALES.end());
+        assert!(reach(highest) < 960.0, "{}", reach(highest));
+        let lowest = scale_heights(original, *HEIGHT_SCALES.start());
+        assert_eq!(lowest.base_height, 64);
+        // Every height above the sea, and every depth below it, scales with the setting: the same un-eroded noise
+        // (one sample per column) at the same position, within the rounding of the scaled levels.
+        let heights = |levels: TerrainLevels| {
             let generator = build(levels).unwrap();
             generator.capture_seed(98765);
-            (0..400)
+            let noise = generator.noise_generator();
+            let max_y = levels.max_y as f32;
+            (0..600)
                 .map(|i| {
-                    generator
-                        .base_height(
-                            (i % 20) * 160,
-                            (i / 20) * 160,
-                            TerraHeightmap::OceanFloorWorldgen,
-                        )
-                        .unwrap()
+                    let (x, z) = ((i % 30 - 15) * 400 + 7, (i / 30 - 10) * 400 - 3);
+                    noise.height_noise(generator.seed(), x, z).unwrap() * max_y
                 })
-                .max()
-                .unwrap()
+                .collect::<Vec<_>>()
         };
-        let (one, two) = (peak(original) - 62, peak(doubled) - 62);
-        assert!(
-            one > 40 && two > one * 3 / 2 && two < one * 5 / 2,
-            "{one} {two}"
+        let one = heights(original);
+        let (land, sea) = (
+            one.iter().filter(|h| **h >= 62.0).count(),
+            one.iter().filter(|h| **h < 62.0).count(),
         );
+        assert!(land > 200 && sea > 200, "{land} {sea}");
+        for scale in [*HEIGHT_SCALES.start(), 1.5, *HEIGHT_SCALES.end()] {
+            // Above 1.55 the floor stops at y 0, so depths scale by 62 / 40 only.
+            let depth_scale = scale.min(62.0 / 40.0);
+            let mut shore = (0, 0);
+            for (one, scaled) in one.iter().zip(heights(scale_heights(original, scale))) {
+                let off = if *one >= 62.0 {
+                    scaled - (62.0 + (one - 62.0) * scale)
+                } else {
+                    scaled - (62.0 + (one - 62.0) * depth_scale)
+                };
+                if (52.0..=72.0).contains(one) {
+                    // Rivers, lakes and beaches carve by fixed block depths near the sea, which don't scale.
+                    shore = (shore.0 + 1, shore.1 + usize::from(off.abs() <= 2.0));
+                    assert!(off.abs() <= 8.0, "scale {scale}: {one} -> {scaled}");
+                } else {
+                    // Within the rounding of the scaled levels.
+                    assert!(off.abs() <= 2.5, "scale {scale}: {one} -> {scaled}");
+                }
+            }
+            assert!(shore.1 * 2 > shore.0, "scale {scale}: {shore:?}");
+        }
     }
 }
