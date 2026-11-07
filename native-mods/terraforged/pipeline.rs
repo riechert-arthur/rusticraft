@@ -44,7 +44,7 @@ use super::{
     ProtoChunk, SeededPipeline, SurfaceInputs, SurfaceQueries, SurfaceSample, TerrainChunk,
     UniformSurfaceBiomes, WorkerState, WorldGenerationContext, build_surface, overrides, resource,
     stage,
-    terraforged_biome_registry::identifier_order,
+    terraforged_biome_registry::{identifier_order, registry_entries},
     terraforged_cave_assets::current_caves,
     terraforged_cave_biome_sampler::CaveBiomeSampler,
     terraforged_cave_carver::{CarverChunk, NoiseCaveGenerator},
@@ -223,11 +223,13 @@ impl TerraForgedPipeline {
         stem: &Value,
         with_structures: bool,
     ) -> Result<Self, GeneratorError> {
+        let settings = terraforged_settings::current();
         let levels = terrain_levels(stem["generator"].get("levels")).map_err(resource)?;
         let generator = Arc::new(build_noise(levels).map_err(resource)?);
         generator.capture_seed(seed);
-        let biomes = LiveBiomeBindings::from_generator_data(data, &[])
-            .map_err(|error| resource(error.to_string()))?;
+        let biomes =
+            LiveBiomeBindings::from_generator_data_with(data, &[], settings.corrected_biomes)
+                .map_err(|error| resource(error.to_string()))?;
         let (_, block_tags) = super::super::block_feature::FeatureBlockBindings::bind_tags(
             data.registry,
             &data.block_tags,
@@ -242,14 +244,29 @@ impl TerraForgedPipeline {
         let level = overrides::LevelHeight::of_type(&stem["type"], &data.dimension_types)
             .map(|height| (height.min_y, height.height));
         // CaveBiomeSampler(800, biomeMapManager): GLOBAL caves use terraforged:cave; UNIQUE caves draw from every
-        // registered biome (6dd607eb's UNDERGROUND filter is commented out), in 26.3's registry order: path, then
-        // namespace.
-        let global = data
+        // registered biome (6dd607eb's UNDERGROUND filter is commented out; the Nether's and the End's too), in
+        // 26.3's registry order: path, then namespace. `corrected_biomes` keeps only the cave biomes.
+        let global: Vec<_> = data
             .biome_id("terraforged:cave")
             .map(Arc::new)
             .into_iter()
             .collect();
-        let mut special: Vec<_> = (0..data.biome_names().len() as u32).map(BiomeId).collect();
+        let mut special: Vec<_> = if settings.corrected_biomes {
+            // TerraForged Reimagined a24d450's CaveBiomeSampler: the registry's `isNonSurface` biomes, or the
+            // GLOBAL pool when there are none.
+            let caves: Vec<_> = registry_entries(data)
+                .iter()
+                .filter(|entry| entry.is_non_surface())
+                .map(|entry| *entry.value)
+                .collect();
+            if caves.is_empty() {
+                global.iter().map(|id: &Arc<BiomeId>| **id).collect()
+            } else {
+                caves
+            }
+        } else {
+            (0..data.biome_names().len() as u32).map(BiomeId).collect()
+        };
         special.sort_by(|a, b| identifier_order(data.biome_name(*a), data.biome_name(*b)));
         let special = special.into_iter().map(Arc::new).collect();
         let caves = NoiseCaveGenerator::new(
@@ -277,7 +294,7 @@ impl TerraForgedPipeline {
             carvers: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             features: TerraForgedFeatures::new(data)?,
             structures,
-            settings: terraforged_settings::current(),
+            settings,
         })
     }
 
@@ -2219,5 +2236,143 @@ mod tests {
             assert_eq!(spans.first().unwrap().1, height);
             assert_eq!(pipeline.generator.cached_regions(), 0);
         }
+    }
+
+    /// Seed 98765's chunk (-9, -128) holds a unique cave the original fills with
+    /// `the_end`; corrected biomes give it an overworld cave biome.
+    #[test]
+    fn corrected_unique_caves_stay_in_the_overworld() {
+        let Some(data) = data() else { return };
+        let biomes = |corrected| {
+            super::terraforged_settings::set_for_thread(Some(
+                super::terraforged_settings::Settings {
+                    corrected_biomes: corrected,
+                    ..super::terraforged_settings::FAITHFUL
+                },
+            ));
+            let overworld = OverworldGenerator::for_world(
+                Arc::clone(&data),
+                98765,
+                PRESET,
+                "minecraft:overworld",
+                true,
+            )
+            .unwrap();
+            super::terraforged_settings::set_for_thread(None);
+            let chunk = overworld
+                .worker()
+                .generate_proto(ChunkPos::new(-9, -128))
+                .unwrap();
+            let mut names = std::collections::BTreeSet::new();
+            for y in (-64..64).step_by(4) {
+                for x in (0..16).step_by(4) {
+                    for z in (0..16).step_by(4) {
+                        names.insert(chunk.biome_at(x, y, z).to_owned());
+                    }
+                }
+            }
+            names
+        };
+        let faithful = biomes(false);
+        assert!(faithful.contains("minecraft:the_end"), "{faithful:?}");
+        let corrected = biomes(true);
+        assert!(!corrected.contains("minecraft:the_end"), "{corrected:?}");
+        assert!(
+            corrected
+                .iter()
+                .any(|name| super::super::terraforged_biome_registry::NON_SURFACE
+                    .contains(&name.as_str())),
+            "{corrected:?}"
+        );
+    }
+
+    /// Seed 777's noise biomes over 4096 blocks around spawn, with `corrected_biomes` off and on. On, no column
+    /// takes a cave biome, and the only biomes that aren't climate choices are the water biomes TerraForged's
+    /// overrides place; `/locate biome` finds no cave biome, and the chunks' biome layer is the noise biomes'.
+    #[test]
+    fn corrected_biomes_keep_seed_777_s_surface_to_climate_biomes() {
+        let Some(data) = data() else { return };
+        let entries = registry_entries(&data);
+        let entry = |name: &str| entries.iter().find(|e| *e.name == *name).unwrap();
+        let overrides = [
+            "minecraft:deep_cold_ocean",
+            "minecraft:deep_frozen_ocean",
+            "minecraft:deep_lukewarm_ocean",
+            "minecraft:deep_ocean",
+            "minecraft:cold_ocean",
+            "minecraft:frozen_ocean",
+            "minecraft:warm_ocean",
+            "minecraft:ocean",
+            "minecraft:snowy_beach",
+            "minecraft:stony_shore",
+            "minecraft:beach",
+            "minecraft:frozen_river",
+            "minecraft:river",
+        ];
+        let quarts: Vec<[i32; 3]> = (-64..64)
+            .flat_map(|x| (-64..64).map(move |z| [x * 8, 0, z * 8]))
+            .collect();
+        let run = |corrected| {
+            terraforged_settings::set_for_thread(Some(Settings {
+                corrected_biomes: corrected,
+                ..terraforged_settings::FAITHFUL
+            }));
+            let (pipeline, overworld) = terraforged(&data, 777, false);
+            terraforged_settings::set_for_thread(None);
+            assert_eq!(pipeline.settings.corrected_biomes, corrected);
+            let mut worker = overworld.worker();
+            let biomes = worker.noise_biomes(&quarts);
+            let mut counts = BTreeMap::<String, usize>::new();
+            for biome in biomes.iter().flatten() {
+                *counts.entry(biome.clone()).or_default() += 1;
+            }
+            let mut search = |name: &'static str| {
+                let allowed = move |candidate: &str| candidate == name;
+                worker.find_closest_biome(&BiomeSearch {
+                    allowed: &allowed,
+                    origin: [0, 64, 0],
+                    radius: 2_048,
+                    horizontal: 32,
+                    vertical: 64,
+                    min_y: -64,
+                    max_y: 319,
+                })
+            };
+            let deep_dark = search("minecraft:deep_dark");
+            let chunk = overworld
+                .worker()
+                .generate_proto(ChunkPos::new(3, -5))
+                .unwrap();
+            let layer: Vec<_> = (0..4)
+                .flat_map(|x| (0..4).map(move |z| [x, z]))
+                .map(|[x, z]| chunk.biome_at(x * 4, 300, z * 4).to_owned())
+                .collect();
+            let noise: Vec<_> = (0..4)
+                .flat_map(|x| (0..4).map(move |z| [12 + x, 0, -20 + z]))
+                .collect();
+            let noise = overworld.worker().noise_biomes(&noise);
+            (counts, deep_dark, layer, noise)
+        };
+        let (faithful, faithful_dark, _, _) = run(false);
+        let (corrected, corrected_dark, layer, noise) = run(true);
+        eprintln!("faithful {faithful:?}\ncorrected {corrected:?}");
+        assert!(
+            faithful
+                .keys()
+                .any(|name| !entry(name).is_climate_biome() && !overrides.contains(&name.as_str())),
+            "{faithful:?}"
+        );
+        for name in corrected.keys() {
+            assert!(
+                entry(name).is_climate_biome() || overrides.contains(&name.as_str()),
+                "{name} in {corrected:?}"
+            );
+        }
+        assert!(faithful_dark.is_some() || !faithful.contains_key("minecraft:deep_dark"));
+        assert_eq!(corrected_dark, None);
+        assert_eq!(
+            layer,
+            noise.into_iter().map(Option::unwrap).collect::<Vec<_>>()
+        );
     }
 }

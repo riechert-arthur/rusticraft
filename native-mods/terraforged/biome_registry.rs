@@ -29,6 +29,8 @@
 // `Biome.getPrecipitation()` is gone in 26.3: its position-free stand-in (`snowy`) is TerraForged Reimagined
 // a24d450's `BiomeUtil.getPrecipitation` (https://github.com/Romoslayer/TerraForged-Reimagined, MIT License,
 // Copyright (c) 2020 TerraForged, Copyright (c) 2026 Romoslayer; see `LICENSE-TERRAFORGED-REIMAGINED`).
+// Horizon's `corrected_biomes` setting uses Reimagined's `BiomeUtil.isClimateBiome` (`isNonSurface`, `isWaterPlaced`,
+// `POSITIONAL` and the values of its `terraforged:non_surface` tag); 6dd607eb filters nothing.
 
 use super::super::{biome::BiomeId, biome_temperature::BiomeTemperatureSettings};
 use super::{
@@ -252,6 +254,18 @@ impl<T> RegistryBiomeMap<T> {
         entries: &[RegistryBiome<T>],
         configured: &[ClimateWeight],
     ) -> Result<Self, Arc<str>> {
+        Self::build_with(entries, configured, false)
+    }
+
+    /// [`Self::build`]; with `corrected` (the `corrected_biomes` setting) the biomes no climate file names go into
+    /// the pools only if they are climate choices ([`RegistryBiome::is_climate_biome`], from TerraForged
+    /// Reimagined a24d450's `getWeightsMap`): no cave, ocean, river or beach biome, nor stony shore. A climate file
+    /// naming one still places it. They all stay in `overworld` (`possibleBiomes`), as in Reimagined.
+    pub fn build_with(
+        entries: &[RegistryBiome<T>],
+        configured: &[ClimateWeight],
+        corrected: bool,
+    ) -> Result<Self, Arc<str>> {
         let find = |name: &str| {
             let key = identifier(name);
             entries.iter().find(|entry| identifier(&entry.name) == key)
@@ -310,7 +324,8 @@ impl<T> RegistryBiomeMap<T> {
             }
         }
         for entry in &overworld {
-            if !registered.contains(&entry.name) {
+            // `corrected_biomes`: Reimagined's `getWeightsMap` skips the biomes that aren't climate choices.
+            if !registered.contains(&entry.name) && (!corrected || entry.is_climate_biome()) {
                 weighted[entry.climate_type() as usize].push((Arc::clone(&entry.value), 1.0));
             }
         }
@@ -368,6 +383,55 @@ pub(super) fn registry_entries(data: &GeneratorData) -> Vec<RegistryBiome<BiomeI
             )
         })
         .collect()
+}
+
+/// The values of TerraForged Reimagined a24d450's `terraforged:non_surface` biome tag
+/// (`src/main/resources/default/data/terraforged/tags/worldgen/biome/non_surface.json`), the biomes that grow
+/// underground. The `corrected_biomes` setting's classification ([`RegistryBiome::is_non_surface`]).
+pub const NON_SURFACE: [&str; 5] = [
+    "minecraft:deep_dark",
+    "minecraft:dripstone_caves",
+    "minecraft:lush_caves",
+    "minecraft:sulfur_caves",
+    "terraforged:cave",
+];
+
+/// The tag a data pack can add its own underground biomes to, as in Reimagined.
+const NON_SURFACE_TAG: &str = "terraforged:non_surface";
+
+/// Reimagined's `BiomeUtil.POSITIONAL`: biomes `getBiomeOverride` places by position that the water tags miss.
+const POSITIONAL: [&str; 1] = ["minecraft:stony_shore"];
+
+impl<T> RegistryBiome<T> {
+    /// Reimagined's `BiomeUtil.isNonSurface`: in `terraforged:non_surface` ([`NON_SURFACE`], or a data pack's
+    /// additions to the tag), or named like a cave biome (a `cave/` path prefix or a `_caves` suffix).
+    pub fn is_non_surface(&self) -> bool {
+        let (_, path) = identifier(&self.name);
+        self.is(NON_SURFACE_TAG)
+            || NON_SURFACE
+                .iter()
+                .any(|name| identifier(name) == identifier(&self.name))
+            || path.starts_with("cave/")
+            || path.ends_with("_caves")
+    }
+
+    /// Reimagined's `BiomeUtil.isClimateBiome`: neither underground ([`Self::is_non_surface`]) nor placed by
+    /// position (`isWaterPlaced`: an ocean, deep ocean, river or beach tag, or [`POSITIONAL`]). TerraForged's
+    /// overrides (`getBiomeOverride`) still place the water biomes where they belong.
+    pub fn is_climate_biome(&self) -> bool {
+        let water_placed = [
+            "minecraft:is_ocean",
+            "minecraft:is_deep_ocean",
+            "minecraft:is_river",
+            "minecraft:is_beach",
+        ]
+        .iter()
+        .any(|tag| self.is(tag))
+            || POSITIONAL
+                .iter()
+                .any(|name| identifier(name) == identifier(&self.name));
+        !self.is_non_surface() && !water_placed
+    }
 }
 
 #[cfg(test)]
@@ -760,5 +824,53 @@ mod tests {
             section.case(&case.to_string(), map, String::clone);
         }
         section.check("random");
+    }
+
+    #[test]
+    fn corrected_pools_keep_caves_and_water_off_land() {
+        let overworld = |name: &'static str, tags: &[&str]| {
+            let mut tags = tags.to_vec();
+            tags.push(IS_OVERWORLD);
+            spec(name, name, 0.8, 0.4, true, &tags)
+        };
+        let entries = [
+            overworld("minecraft:plains", &[]),
+            overworld("minecraft:deep_dark", &[]),
+            overworld("minecraft:sulfur_caves", &[]),
+            overworld("minecraft:stony_shore", &[]),
+            overworld(
+                "minecraft:deep_ocean",
+                &["minecraft:is_ocean", "minecraft:is_deep_ocean"],
+            ),
+            overworld("minecraft:river", &["minecraft:is_river"]),
+            overworld("minecraft:beach", &["minecraft:is_beach"]),
+            overworld("example:cave/glow", &[]),
+            overworld("example:crystal_caves", &[]),
+            overworld("example:hollow", &[NON_SURFACE_TAG]),
+            overworld("example:meadow", &[]),
+        ];
+        let pooled = |configured: &[ClimateWeight], corrected| {
+            let map = RegistryBiomeMap::build_with(&entries, configured, corrected).unwrap();
+            let mut pooled: Vec<&str> = BiomeType::VALUES
+                .iter()
+                .flat_map(|climate| names(&map, *climate))
+                .collect();
+            pooled.sort_unstable();
+            (pooled, map.overworld.len())
+        };
+        assert_eq!(pooled(&[], false).0.len(), entries.len());
+        assert_eq!(
+            pooled(&[], true),
+            (vec!["example:meadow", "minecraft:plains"], entries.len())
+        );
+        // A climate file naming a cave biome still places it (Reimagined: only the fall-through is filtered).
+        let file = weights(BiomeType::Grassland, &[("minecraft:deep_dark", 1.0)]);
+        assert_eq!(
+            pooled(&file, true).0,
+            ["example:meadow", "minecraft:deep_dark", "minecraft:plains"]
+        );
+        assert!(entries[0].is_climate_biome() && entries[1].is_non_surface());
+        let cave = spec((), "terraforged:cave", 0.8, 0.4, true, &[]);
+        assert!(cave.is_non_surface() && !cave.is_climate_biome());
     }
 }
