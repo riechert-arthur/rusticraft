@@ -64,7 +64,10 @@ pub struct ErodedNoiseGenerator {
 /// generates, never resetting their river noise, which the carver only multiplies (by factors in 0..=1 inside a valley)
 /// and sets back to 1 only seaward of the beach. So a sample starts where the same position of the thread's previous
 /// chunk left it: 1 in a new resource, falling with every valley it has passed through, and exactly 0, for good, once
-/// one of them was a river bed. A few dozen chunks into play nearly every inland sample is there.
+/// one of them was a river bed. A few chunks into play nearly every land sample is at 0 or within a few hundredths of
+/// it (replayed on seed 777: 98.5% of the land samples of 625 chunks around spawn on six workers, every one from a
+/// worker's third chunk on); only a worker's first chunks, its first after the sea, or a worker starting far from rivers
+/// (sparse for a few dozen chunks) differ, and those depend on scheduling.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RiverStart {
     /// The default: the 0 Java's reused samples settle at in play (TerraForged's dense forests), the same for every

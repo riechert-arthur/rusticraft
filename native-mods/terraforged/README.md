@@ -54,13 +54,16 @@ Differences and gaps:
   carry-over and pooled-object reuse in Java's caches are not reproduced. The one carry-over that
   shapes the world is replaced by the value it settles at: 6dd607eb reuses each worker's chunk
   samples without resetting their river noise, which the river carver only multiplies (and sets back
-  to 1 seaward of the beach), so a few dozen chunks into play nearly every land sample starts at 0.
-  Every chunk sample here starts at that 0 (a world's first chunks on a worker start at 1 in Java),
-  which gives TerraForged's dense forests and, as in Java's play, two more effects: every river or
-  lake cell fills with water up to its base height (`getWaterLevel` needs river noise 0), and on
-  land the noise caves' ceiling stays 8 to 17 blocks under the ground (their carving mask,
-  `1 - breach noise * river noise`, stays 1), so they don't breach it. `sparse_forests` starts at 1
-  instead.
+  to 1 seaward of the beach), so a few chunks into play nearly every land sample starts at 0, or
+  within a few hundredths of it (on seed 777, 98.5% of the land samples of 625 chunks around spawn
+  on six workers, every one from a worker's third chunk on). In Java a worker's first chunks, and
+  its first after crossing the sea, start higher, and a worker starting far from rivers stays sparse
+  for a few dozen chunks; which chunks those are depends on scheduling. Every chunk sample here
+  starts at 0. That gives TerraForged's dense forests and, as in Java's play, two more effects:
+  every river or lake cell fills with water up to its base height (`getWaterLevel` needs river
+  noise 0), and on land the noise caves' ceiling stays 8 to 17 blocks under the ground (their
+  carving mask, `1 - breach noise * river noise`, stays 1), so they don't breach it.
+  `sparse_forests` starts at 1 instead.
 - The Create World screen opens on Normal, not TerraForged, and a dedicated server's
   `level-type=terraforged:normal` is not recognized.
 - TerraForged's biomes `terraforged:cave` and `terraforged:oak_forest` exist in TerraForged worlds
