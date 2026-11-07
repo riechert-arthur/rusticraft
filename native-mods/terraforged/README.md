@@ -161,11 +161,14 @@ don't generate, so they need none.
   sea at 1) stays under the overworld's top, y 959, so nothing is cut flat. Whatever reads TerraForged's
   levels follows: rivers and lakes, erosion, surfaces, vegetation and steepness (which scale with
   `max_y`, as with a data pack's own levels), structures, distant tiles, `/locateterrain` and `/tf
-  preview`. River beds keep their depth below the sea, so rivers cut deeper valleys, and caves keep
-  their own heights. Neither TerraForged tree has this: their heights change only with a pack's
+  preview`. A river's bed and banks keep their heights in blocks around its base level (the carver
+  counts them in `1 / max_y` units), so the valleys through the taller land get deeper; caves keep
+  their own heights, so tall mountains have no caves near their tops; the climate ignores height, as
+  TerraForged's does, so a taller summit keeps its biome (vanilla's height-adjusted temperature still
+  snows on it). Neither TerraForged tree has this setting: their heights change only with a pack's
   `levels` (where `auto_scale` widens the land too), and TerraForged Reimagined's
-  `globalVerticalScale` multiplies only the land terrain's noise through terrain overrides, which
-  this port, following 6dd607eb, doesn't apply.
+  `globalVerticalScale` multiplies only the land terrain's noise through terrain overrides, which this
+  port, following 6dd607eb, doesn't apply.
 
 ## Layers
 
