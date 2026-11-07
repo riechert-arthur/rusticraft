@@ -171,7 +171,7 @@ mod tests {
             tables,
             assets,
             render,
-            biomes: Arc::new(Biomes::load(&root)?),
+            biomes: crate::biome::BiomeTable::new(Arc::new(Biomes::load(&root)?)),
         }))
     }
 

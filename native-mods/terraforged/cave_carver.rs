@@ -54,7 +54,7 @@ pub struct NoiseCaveGenerator<T> {
 /// the original's single cache is) and each config's biomes, in first-seen order. A
 /// null biome (an empty pool) is never cached, as Java's `cached == null` test resamples
 /// it, and is left out of the lists (Java records it once, and its `NoiseCaveDecorator` then fails on it; Java
-/// always registers `terraforged:cave`, which Horizon does from #226).
+/// always registers `terraforged:cave`, which a TerraForged world's pack provides).
 pub struct CarverChunk<T> {
     cached: Option<(i32, i32, T)>,
     biomes: Vec<Option<Vec<T>>>,

@@ -4,7 +4,7 @@ version = "0.1.0"
 priority = 100
 
 [compatibility]
-horizon_revision = "1b6e55d4f3bd14079551bcad173d0fac8f8225bb"
+horizon_revision = "d20e681e8bc0a0a230f6f5c604b4f3beadae9803"
 
 [[module]]
 id = "noise"
@@ -681,3 +681,27 @@ file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_preview"
 source = "preview.rs"
 visibility = "pub"
+
+[[module]]
+id = "mod_biomes"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_mod_biomes"
+source = "mod_biomes.rs"
+visibility = "pub"
+
+[[injection]]
+id = "remember-biome-root"
+target = "horizon_client_render::biome::Biomes::load"
+kind = "HEAD"
+helper = "hooks/remember_biome_root.rs"
+bindings = [{ name = "root", ty = "&Path", value = "root" }]
+
+[[injection]]
+id = "native-biome-files"
+target = "horizon_client::world_biomes::native_biome_files"
+kind = "RETURN"
+helper = "hooks/native_biome_files.rs"
+bindings = [
+  { name = "world", ty = "Option<&Path>", value = "world" },
+  { name = "value", ty = "Vec<(String, Value)>", value = "$value" },
+]
