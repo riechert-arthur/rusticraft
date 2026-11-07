@@ -70,6 +70,11 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+/// How many blocks from the top down distant terrain paints with the surface rule: the eight vanilla's far tiles
+/// paint, or two with Reduced far detail (the player's choice to draw far terrain coarser).
+const FULL_PAINT: i32 = 8;
+const REDUCED_PAINT: i32 = 2;
+
 pub(super) struct TerraForgedPipeline {
     /// `VanillaGen`: the `minecraft:overworld` noise settings' surface rule, fluids, features and carvers, with
     /// the vanilla overworld's biome source. It runs without structures: TerraForged's own placement
@@ -411,8 +416,8 @@ impl TerraForgedPipeline {
     /// cache would then evict the regions the chunks being generated read. Erosion moves the ground by about 2 blocks
     /// on average (6 at the 90th percentile, at most about 10), so distant ground can sit that much off the real
     /// chunks'. Far sampling creates no terrain-cache entry and builds no region; it only shares the continent's
-    /// lossy cell caches with the chunks, as `/locate biome` does. Its top eight blocks are
-    /// painted by the vanilla surface rule as `buildSurface` paints a chunk: TerraForged's generation context (sea
+    /// lossy cell caches with the chunks, as `/locate biome` does. Its top `paint_depth` blocks ([`FULL_PAINT`], or
+    /// [`REDUCED_PAINT`] with Reduced far detail) are painted by the vanilla surface rule as `buildSurface` paints a chunk: TerraForged's generation context (sea
     /// level 62), its preliminary height at the column, and the column's TerraForged biome (the one the chunk stores
     /// at the surface block's zoomed quart). Like vanilla's far sampling it skips the surface rule's slope reads and
     /// column extensions, and `Surface.apply`, the carvers and the decoration. A failed height or biome sample is an
@@ -421,6 +426,7 @@ impl TerraForgedPipeline {
         &self,
         worker: &mut WorkerState,
         columns: &[(i32, i32)],
+        paint_depth: i32,
     ) -> Result<Vec<LodColumn>, GeneratorError> {
         let vanilla = &self.vanilla;
         let (min_y, level_height) = (vanilla.settings.level_min_y, vanilla.settings.level_height);
@@ -518,7 +524,7 @@ impl TerraForgedPipeline {
                 continue;
             };
             material.update_xz(wx, wz, 0, 0);
-            for depth in 1..=below.min(8) {
+            for depth in 1..=below.min(paint_depth) {
                 let y = height - depth;
                 material.update_y(
                     depth,
@@ -875,7 +881,10 @@ impl SeededPipeline for TerraForgedPipeline {
         z: i32,
         spans: Option<&mut Vec<(i32, i32, BlockStateId)>>,
     ) -> Option<SurfaceSample> {
-        let (sample, column) = self.far_columns(worker, &[(x, z)]).ok()?.pop()?;
+        let (sample, column) = self
+            .far_columns(worker, &[(x, z)], FULL_PAINT)
+            .ok()?
+            .pop()?;
         if let Some(spans) = spans {
             *spans = column;
         }
@@ -888,13 +897,14 @@ impl SeededPipeline for TerraForgedPipeline {
         z: i32,
         width: i32,
         side: usize,
-        _approximate: bool,
+        approximate: bool,
     ) -> Result<Vec<LodColumn>, GeneratorError> {
         if width <= 0 || side == 0 || side > 64 {
             return Err(resource("far sample dimensions"));
         }
-        // `approximate` (Reduced far detail) has nothing to trade here: each column is one height sample and one
-        // biome sample already. Columns in the order vanilla's `lod_grid` returns them (x first, then z).
+        // Columns in the order vanilla's `lod_grid` returns them (x first, then z). Each is one height sample and one
+        // biome sample; `approximate` (Reduced far detail) paints fewer blocks of it, which only changes the blocks
+        // under the top (seen on the sides of steep far columns).
         let columns: Vec<(i32, i32)> = (0..side * side)
             .map(|index| {
                 (
@@ -903,7 +913,12 @@ impl SeededPipeline for TerraForgedPipeline {
                 )
             })
             .collect();
-        self.far_columns(worker, &columns)
+        let paint = if approximate {
+            REDUCED_PAINT
+        } else {
+            FULL_PAINT
+        };
+        self.far_columns(worker, &columns, paint)
     }
     fn structure_starts(
         &self,
@@ -2300,6 +2315,103 @@ mod tests {
             }
             assert_eq!(spans.first().unwrap().1, height);
             assert_eq!(pipeline.generator.cached_regions(), 0);
+        }
+    }
+
+    /// The block a far column's spans hold at `y` (spans run top down), if any.
+    fn span_block(spans: &[(i32, i32, BlockStateId)], y: i32) -> Option<BlockStateId> {
+        spans
+            .iter()
+            .find(|&&(min, max, _)| min <= y && y < max)
+            .map(|span| span.2)
+    }
+
+    /// Reduced far detail changes only the blocks more than [`REDUCED_PAINT`] under a far column's top: over
+    /// several seeds, tile positions and widths, every height, top block, water level and biome is the full tile's,
+    /// so are the top two blocks, and every block below them is the full tile's or unpainted stone.
+    #[test]
+    fn reduced_far_detail_changes_only_blocks_under_the_top() {
+        let Some(data) = data() else { return };
+        let (mut columns, mut deep) = (0, 0);
+        for seed in [7, 1234, 98765, -4_000_000_000] {
+            let (pipeline, overworld) = terraforged(&data, seed, false);
+            let mut worker = overworld.worker();
+            for (x, z, width) in [(4104, -2040, 16), (-30_000, 12_345, 64), (517, 903, 4)] {
+                let full = worker.lod_grid(x, z, width, 16, false).unwrap();
+                let reduced = worker.lod_grid(x, z, width, 16, true).unwrap();
+                assert_eq!(full.len(), reduced.len());
+                for ((full, full_spans), (reduced, reduced_spans)) in full.iter().zip(&reduced) {
+                    columns += 1;
+                    let key = |sample: &Option<SurfaceSample>| {
+                        sample.map(|s| (s.height, s.state, s.water, s.biome))
+                    };
+                    assert_eq!(key(full), key(reduced), "seed {seed} at {x} {z}");
+                    let bottom = full_spans.last().map_or(0, |span| span.0);
+                    let top = full_spans.first().map_or(0, |span| span.1);
+                    assert_eq!(top, reduced_spans.first().map_or(0, |span| span.1));
+                    let height = full.map_or(i32::MIN, |sample| sample.height);
+                    for y in bottom..top {
+                        let (f, r) = (span_block(full_spans, y), span_block(reduced_spans, y));
+                        if y >= height - REDUCED_PAINT || f == r {
+                            assert_eq!(f, r, "seed {seed} at {x} {z}, y {y}");
+                        } else {
+                            assert_eq!(r, Some(pipeline.stone), "seed {seed} at {x} {z}, y {y}");
+                            deep += 1;
+                        }
+                    }
+                }
+            }
+            assert_eq!(pipeline.generator.cached_regions(), 0);
+        }
+        eprintln!("{columns} columns, {deep} blocks left unpainted");
+        assert!(
+            deep > 0,
+            "the full tiles painted nothing under their top two blocks"
+        );
+    }
+
+    /// Far terrain's cost, by part and per tile (run with `--ignored --nocapture` in an optimized build).
+    #[test]
+    #[ignore = "benchmark; run by hand with --ignored --nocapture"]
+    fn far_terrain_benchmark() {
+        let Some(data) = data() else { return };
+        let (pipeline, overworld) = terraforged(&data, 98765, false);
+        let mut worker = overworld.worker();
+        let tiles: Vec<(i32, i32)> = (0..16)
+            .map(|tile| (5000 + (tile % 4) * 512, 5000 + (tile / 4) * 512))
+            .collect();
+        let columns: Vec<(i32, i32)> = (0..16 * 32 * 32)
+            .map(|i| (5000 + (i % 128) * 16, 5000 + (i / 128) * 16))
+            .collect();
+        let start = std::time::Instant::now();
+        for &(x, z) in &columns {
+            std::hint::black_box(pipeline.generator.far_heights(x, z).unwrap());
+        }
+        let heights = start.elapsed();
+        let start = std::time::Instant::now();
+        let sampler = pipeline.surface_sampler();
+        for &(x, z) in &columns {
+            std::hint::black_box(pipeline.biome_at(&sampler, x & !3, z & !3));
+        }
+        let biomes = start.elapsed();
+        eprintln!(
+            "{} columns: far_heights {heights:?}, biome_at {biomes:?}",
+            columns.len()
+        );
+        // Each run samples its own area, so none reads cells another warmed.
+        let runs = [(16, false), (16, true), (64, false), (64, true)];
+        for (run, (width, approximate)) in runs.into_iter().enumerate() {
+            let offset = 200_000 * (run as i32 + 1);
+            let start = std::time::Instant::now();
+            for &(x, z) in &tiles {
+                let tile = worker.lod_grid(x + offset, z, width, 32, approximate);
+                std::hint::black_box(tile.unwrap());
+            }
+            eprintln!(
+                "{width}-block cells, {}: {:?} per 32x32 tile",
+                if approximate { "reduced" } else { "full" },
+                start.elapsed() / tiles.len() as u32
+            );
         }
     }
 

@@ -82,8 +82,12 @@ Differences and gaps:
 - Far terrain (Horizon's distant tiles; TerraForged has none) shows TerraForged's ground and biomes with
   the vanilla surface rule's top blocks, but from the un-eroded height: erosion's regions are too costly to
   build for distant tiles (about 20 s per wide tile), so far ground can sit a few blocks (about 2 on average,
-  at most about 10) off the real chunks'. Decorated far chunks (Horizon's far decoration) are generated in
-  full, eroded.
+  at most about 10) off the real chunks'. With Reduced far detail (Horizon's video setting, off by default) the
+  surface rule paints only the top two blocks of a far column instead of eight, so the sides of steep far
+  columns show stone under them (grey stripes on distant badlands slopes, which Full far detail paints in
+  terracotta bands); heights, top blocks, water and biomes are unchanged. It saves 10–35% of a far tile's
+  sampling; most of Reduced's speed comes from Horizon merging far tiles. Decorated far chunks
+  (Horizon's far decoration) are generated in full, eroded.
 - The boat hook (boats float up small water steps) works only in TerraForged worlds (Arthur's
   choice); TerraForged's mixin works in every world.
 - `/locateterrain`, `/tf export structures`, `/tf regen` and `/tf preview` exist only in TerraForged worlds
@@ -2891,7 +2895,7 @@ seed 777, against 0.37 s for its noise biomes, and a found cave adds one erosion
 biome checks) already go through `Source.getNoiseBiome` in `structure_queries.rs`. Distant terrain (Horizon's far tiles, `lod_grid` and `surface_sample`) reads the same continent, river and
 climate noise: each column is `getBaseColumn`'s shape from the UN-ERODED height (`far_heights`), with the biome the
 chunk stores at its surface block and the vanilla surface rule over TerraForged's generation context and preliminary
-height painting its top eight blocks; it too adds no terrain-cache entry and builds no erosion region. A TerraForged world's overworld is TerraForged's taller one (`-64..960`, the
+height painting its top eight blocks (two with Reduced far detail, the `approximate` flag); it too adds no terrain-cache entry and builds no erosion region. A TerraForged world's overworld is TerraForged's taller one (`-64..960`, the
 world type below), so the default levels (`max_y` 480) always fit; nothing is rescaled, and in a 26.3-high overworld
 (the generator without the world's pack) the fill clips terrain to the chunk (cut flat at y 319, which the default
 levels seldom reach: the highest un-eroded heights within 32768 blocks of the origin are about 310 to 350), and the
