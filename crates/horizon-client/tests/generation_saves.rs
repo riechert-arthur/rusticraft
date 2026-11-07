@@ -436,14 +436,42 @@ fn saved_proto_block_entities_keep_their_id() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Chunks deleted and generated again (`Streaming::regenerate`, TerraForged's
-/// `/tf regen`) decorate like vanilla's: the ring next to the finished columns
-/// is decorated too, against them, instead of counting as decorated already.
-#[test]
-fn regenerated_chunks_decorate_beside_finished_ones() {
-    let Some(root) = resources() else {
-        return;
-    };
+/// `/tf regen`'s part: the columns at `keys` leave the save and memory, and
+/// the streaming generates them again.
+fn regenerate(session: &mut Session, keys: &[(i32, i32)]) {
+    for &key in keys {
+        session.world.modified.remove(&key);
+        session.streaming.forget(&mut session.world, key.0, key.1);
+        session.generator.chunks.lock().unwrap().remove(&key);
+        session.generator.protos.lock().unwrap().remove(&key);
+        session.generator.finished.lock().unwrap().remove(&key);
+    }
+    session.streaming.regenerate(keys);
+}
+
+/// Each column at `keys` was finished once more, decorated, and holds each of
+/// its nine neighbours' decoration once, as when it was first generated: the
+/// regenerated ones decorate again, the finished ones are replayed.
+fn assert_regenerated(generator: &Recorder, keys: &[(i32, i32)]) {
+    let finished = generator.finished.lock().unwrap();
+    for &(x, z) in keys {
+        let finishes = finished
+            .get(&(x, z))
+            .unwrap_or_else(|| panic!("({x}, {z}) was not generated again"));
+        assert_eq!(finishes.len(), 1, "({x}, {z}) finished twice");
+        let column = &finishes[0];
+        assert!(column.decorated, "({x}, {z}) was finished undecorated");
+        let mut writes = column.writes.clone();
+        writes.sort_unstable();
+        let expected: Vec<(i32, i32)> = (-1..=1)
+            .flat_map(|dx| (-1..=1).map(move |dz| (x + dx, z + dz)))
+            .collect();
+        assert_eq!(writes, expected, "({x}, {z})");
+    }
+}
+
+fn regen_session() -> Option<(Session, Arc<Recorder>)> {
+    let root = resources()?;
     let assets = Arc::new(Assets::load(&root).unwrap());
     let render = Arc::new(assets.reload(&root).unwrap());
     let facts = BlockFacts::load(&root, assets.registry).unwrap();
@@ -458,38 +486,51 @@ fn regenerated_chunks_decorate_beside_finished_ones() {
     let generator = Arc::new(Recorder::default());
     let mut session = Session::new(generator.clone(), context);
     session.settle_at((0, 0));
-    let keys: Vec<(i32, i32)> = (-1..=1)
-        .flat_map(|x| (-1..=1).map(move |z| (x, z)))
-        .collect();
-    for &key in &keys {
-        session.world.modified.remove(&key);
-        session.streaming.forget(&mut session.world, key.0, key.1);
-        generator.chunks.lock().unwrap().remove(&key);
-        generator.protos.lock().unwrap().remove(&key);
-        generator.finished.lock().unwrap().remove(&key);
-    }
-    session.streaming.regenerate(&keys);
+    Some((session, generator))
+}
+
+/// The 3x3 columns around `(x, z)`.
+fn square(x: i32, z: i32) -> Vec<(i32, i32)> {
+    (-1..=1)
+        .flat_map(|dx| (-1..=1).map(move |dz| (x + dx, z + dz)))
+        .collect()
+}
+
+/// Chunks deleted and generated again (`Streaming::regenerate`, TerraForged's
+/// `/tf regen`) decorate like vanilla's: the ring next to the finished columns
+/// is decorated too, against them, instead of counting as decorated already,
+/// and the finished columns' decoration is replayed into them.
+#[test]
+fn regenerated_chunks_decorate_beside_finished_ones() {
+    let Some((mut session, generator)) = regen_session() else {
+        return;
+    };
+    let keys = square(0, 0);
+    regenerate(&mut session, &keys);
     session.settle_at((0, 0));
-    let finished = generator.finished.lock().unwrap();
-    for &(x, z) in &keys {
-        let finishes = finished
-            .get(&(x, z))
-            .unwrap_or_else(|| panic!("({x}, {z}) was not generated again"));
-        assert_eq!(finishes.len(), 1, "({x}, {z}) finished twice");
-        let column = &finishes[0];
-        assert!(column.decorated, "({x}, {z}) was finished undecorated");
-        // Its own decoration and that of each regenerated neighbour; the
-        // finished columns around wrote into it before it was deleted.
-        let mut writes = column.writes.clone();
-        writes.sort_unstable();
-        let mut expected: Vec<(i32, i32)> = keys
-            .iter()
-            .copied()
-            .filter(|k| (k.0 - x).abs() <= 1 && (k.1 - z).abs() <= 1)
-            .collect();
-        expected.sort_unstable();
-        assert_eq!(writes, expected, "({x}, {z})");
-    }
+    assert_regenerated(&generator, &keys);
+}
+
+/// A second regeneration over an area that overlaps the first: the columns
+/// the first one regenerated are finished ones now, like any other, so their
+/// decoration is replayed into the new area and nothing waits on them.
+#[test]
+fn regenerating_again_beside_an_earlier_area_replays_it() {
+    let Some((mut session, generator)) = regen_session() else {
+        return;
+    };
+    let first = square(0, 0);
+    regenerate(&mut session, &first);
+    session.settle_at((0, 0));
+    assert_regenerated(&generator, &first);
+    let second = square(1, 0);
+    regenerate(&mut session, &second);
+    session.settle_at((0, 0));
+    assert_regenerated(&generator, &second);
+    // The same area again, as `/tf regen` run twice in place.
+    regenerate(&mut session, &second);
+    session.settle_at((0, 0));
+    assert_regenerated(&generator, &second);
 }
 
 /// Generation whose proto chunks are columns: decorating a centre sets two
