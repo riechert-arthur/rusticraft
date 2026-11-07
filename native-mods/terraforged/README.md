@@ -9,26 +9,34 @@ An exact Rust translation of [TerraForged](https://github.com/TerraForged/TerraF
 Still for development only (see [Status: development only](#status-development-only)). Choose
 **World Type: TerraForged** on Create World's World tab (after Single Biome). The world
 saves TerraForged's overworld stem and a `datapacks/terraforged` pack with TerraForged's
-1024-block overworld, and generates its overworld with TerraForged (vanilla world types keep
-26.3's overworld):
+1024-block overworld (y −64 to 959) and TerraForged's biomes, and generates its overworld with
+TerraForged (vanilla world types keep 26.3's overworld):
 
 - terrain: continents, rivers, lakes, the 14 terrain graphs blended by `TerrainBlender`, and
   hydraulic erosion with 6dd607eb's `withErosion` settings and no heightmap smoothing
-  (`NoiseGenerator`, `ErodedNoiseGenerator`);
+  (`NoiseGenerator`, `ErodedNoiseGenerator`), also (un-eroded) in Horizon's distant tiles;
 - biomes: `ClimateNoise`, `BiomeMapManager`'s climate pools and `BiomeSampler`'s ocean, beach,
-  river and lake overrides, also for `/locate biome`;
+  river and lake overrides, also for `/locate biome`, plus TerraForged's own `terraforged:cave`
+  and `terraforged:oak_forest` (`ModBiomes`), derived from the player's own 26.3 dripstone caves
+  and plains;
 - surfaces: the vanilla surface rules over TerraForged's preliminary heights, then `Surface`;
-- caves: TerraForged's five noise caves and their biomes; no vanilla carvers run;
+- caves: TerraForged's five noise caves and their biomes (global caves write `terraforged:cave`);
+  no vanilla carvers run;
 - structures: vanilla placement over TerraForged's (eroded) base heights and biomes, with terrain
   adapted under beardified structures' pieces (`StructureTerrain`);
 - decoration: `FeatureDecorator` with TerraForged's vegetation (jittered, fitness-gated trees),
   cave decoration, water smoothing and snow.
 
+In TerraForged worlds, a player's boat rises to a river's stepped water surface (`BoatHook`), and
+operators get `/locateterrain <terrain> [radius]`, `/tf export structures`, `/tf regen <radius>` and
+`/tf preview [size] [zoom]` (see the differences below).
+
 The Nether and the End stay vanilla, as in TerraForged. Deliberate fidelity to the pinned source,
 including its quirks: JSON `Bias` nodes decode as 0 (Engine's spec reads a module as a float), cave
 and other non-surface overworld biomes stay in the climate pools (so `deep_dark` can reach the
-surface), unique caves draw from every registered biome, and outside the vegetation step each chunk
-is decorated with the one biome at its lowest corner.
+surface), unique caves draw from every registered biome (TerraForged's two included), `oak_forest`
+is in no climate pool (it lacks `minecraft:is_overworld`), so it never generates on the surface,
+and outside the vegetation step each chunk is decorated with the one biome at its lowest corner.
 
 Differences and gaps:
 
@@ -42,9 +50,11 @@ Differences and gaps:
 - The Create World screen opens on Normal, not TerraForged, and a dedicated server's
   `level-type=terraforged:normal` is not recognized.
 - TerraForged's biomes `terraforged:cave` and `terraforged:oak_forest` exist in TerraForged worlds
-  only; vanilla worlds' biomes, synced registry and commands stay 26.3's. As in 6dd607eb, `oak_forest`
-  is not a surface biome (it has no `minecraft:is_overworld` tag); TerraForged Reimagined tags it and
-  copies forest instead of plains, which this port does not follow.
+  only; vanilla worlds' biomes, synced registry and commands stay 26.3's. The bundle ships no
+  vanilla biome file: the two are derived at runtime from the game's own 26.3 data, as 6dd607eb's
+  `ModBiome.create` derives them. `oak_forest` copies plains with no `minecraft:` tag, as in 6dd607eb;
+  TerraForged Reimagined copies forest and tags it `minecraft:is_overworld` (a surface biome) and
+  `minecraft:is_forest`, which this port does not follow.
 - TerraForged's pack makes every overworld taller; here only TerraForged worlds get it.
 - Far terrain (Horizon's distant tiles; TerraForged has none) shows TerraForged's ground and biomes with
   the vanilla surface rule's top blocks, but from the un-eroded height: erosion's regions are too costly to
@@ -62,7 +72,9 @@ Differences and gaps:
 - `/tf preview [size] [zoom]` is Horizon's: TerraForged has no in-game preview, only a developer window
   (`Previewer`, never opened by the game). The command draws that window's map of the player's own world to
   `terraforged-preview.png` in the world folder.
-- Not ported: TerraForged's dimension effects and the unregistered test volcano feature.
+- Not ported: TerraForged's dimension effects (clouds at y=300; the pack's Reimagined dimension type
+  asks for the same height, but Horizon draws clouds at vanilla's height in every world) and the
+  unregistered test volcano feature.
 
 ## Layers
 
