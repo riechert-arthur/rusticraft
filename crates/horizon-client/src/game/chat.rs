@@ -480,7 +480,6 @@ impl Game<'_> {
         reg.effects.sort();
         reg.enchantments = list("data/minecraft/enchantment");
         reg.structures = list("data/minecraft/worldgen/structure");
-        reg.biomes = list("data/minecraft/worldgen/biome");
         reg.clocks = list("data/minecraft/world_clock");
         reg.dimensions = vec![
             "minecraft:overworld".into(),
@@ -531,6 +530,7 @@ impl Game<'_> {
                 break;
             }
         }
+        self.set_biome_ids();
         let reg = &mut self.ui.registries;
         reg.timelines = self.ui.timelines.keys().cloned().collect();
         reg.time_markers = self
@@ -540,6 +540,37 @@ impl Game<'_> {
             .filter(|(_, m)| m.show)
             .map(|(k, _)| k.clone())
             .collect();
+    }
+    /// The `minecraft:worldgen/biome` ids the biome arguments accept and suggest
+    /// (ResourceArgument, ResourceOrTagArgument): the world's registry. A client of a
+    /// server takes the registry it was sent (ClientSuggestionProvider reads the
+    /// connection's registryAccess); a server, its world's table (vanilla's biomes and
+    /// the native mods' ones it takes, `Resources::set_world_biomes`), which its
+    /// synchronized registry names too. A vanilla world's are 26.3's.
+    pub(super) fn set_biome_ids(&mut self) {
+        let synced = self.remote.as_ref().and_then(|r| {
+            r.registries
+                .registries
+                .get("minecraft:worldgen/biome")
+                .filter(|list| !list.is_empty())
+                .map(|list| {
+                    list.iter()
+                        .map(|(name, _)| name.clone())
+                        .collect::<Vec<String>>()
+                })
+        });
+        let ids = match synced {
+            Some(mut ids) => {
+                ids.sort();
+                ids
+            }
+            None => horizon_client::world_biomes::biome_ids(&self.res.biomes()),
+        };
+        let reg = &mut self.ui.registries;
+        if let Some(exported) = reg.by_registry.get_mut("minecraft:worldgen/biome") {
+            exported.ids = ids.clone();
+        }
+        reg.biomes = ids;
     }
     /// The block the player is looking at, for coordinate suggestions, and
     /// the entity, for entity arguments (ClientSuggestionProvider).

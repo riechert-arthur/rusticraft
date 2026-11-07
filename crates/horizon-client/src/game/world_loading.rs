@@ -140,8 +140,13 @@ impl WorldRequest {
             level.dimension = d.clone();
             level.position = None;
         }
+        // The world's biomes, now that its generator settings are written: the table, the
+        // synchronized registry and the commands read them from here on.
+        res.set_world_biomes(horizon_client::world_biomes::native_biomes(Some(
+            &save_root,
+        )));
         let dim = Dim::from_id(&level.dimension);
-        let shapes = level_shapes(&save_root, res.biomes());
+        let shapes = level_shapes(&save_root, &res.biomes());
         let shape = shapes.get(dim.id());
         let (mut streaming, save, locator) = make_streaming(
             res, pack, options, settings, &save_root, dim, shape, level.seed,
@@ -301,8 +306,11 @@ pub(super) fn preload_world_data(
                         &resources,
                         &horizon_world::loot::PackOverlay::NONE,
                     );
-                    let _ =
-                        super::lan::sync_data(&resources, &horizon_world::loot::PackOverlay::NONE);
+                    let _ = super::lan::sync_data(
+                        &resources,
+                        &horizon_world::loot::PackOverlay::NONE,
+                        &[],
+                    );
                 });
             match spawned {
                 Ok(thread) => *preload = Preload::Started { thread, left: None },
@@ -352,6 +360,9 @@ pub(super) fn preload_launch_world(
             // Not behind the server: the world's opening waits for it.
             let started = std::time::Instant::now();
             // Errors are left for the world opening to report.
+            let biomes = biomes.with_native(horizon_client::world_biomes::native_biomes(Some(
+                &world_root,
+            )));
             let (overrides, _) = worldgen_overrides_of(&world_root, &biomes);
             if let Ok(data) = horizon_client::vanillagen::shared_data_with(
                 &resources.join("worldgen"),
@@ -365,7 +376,7 @@ pub(super) fn preload_launch_world(
                 &resources,
                 &horizon_world::loot::PackOverlay::NONE,
             );
-            let _ = super::lan::sync_data(&resources, &horizon_world::loot::PackOverlay::NONE);
+            let _ = super::lan::sync_data(&resources, &horizon_world::loot::PackOverlay::NONE, &[]);
             log::info!(
                 "Horizon: world data preloaded for the launch's world in {} ms",
                 started.elapsed().as_millis()
@@ -499,7 +510,7 @@ pub(super) fn make_streaming(
             horizon_client::flatgen::FlatTerrain::from_settings(
                 &s,
                 pack.assets.registry,
-                res.biomes(),
+                &res.biomes(),
                 shape,
             )
         });
@@ -515,7 +526,7 @@ pub(super) fn make_streaming(
             res.threads(),
         )
     } else if options.test_terrain && dim == Dim::Overworld {
-        let inner = Arc::new(TestTerrain::new(pack.assets.registry, res.biomes())?);
+        let inner = Arc::new(TestTerrain::new(pack.assets.registry, &res.biomes())?);
         Streaming::new(
             Arc::new(Persistent {
                 inner,
@@ -531,8 +542,8 @@ pub(super) fn make_streaming(
         let structures =
             horizon_client::save::WorldGen::read(world_root).is_none_or(|w| w.structures);
         let preset = horizon_client::save::WorldGen::preset(world_root);
-        let overrides = world_worldgen_overrides(world_root, res.biomes());
-        let inner = Arc::new(VanillaTerrain::for_world_with(&options.resources.join("worldgen"), &overrides, pack.assets.registry, res.biomes(), seed, preset, dim.id(), structures).map_err(|e| {
+        let overrides = world_worldgen_overrides(world_root, &res.biomes());
+        let inner = Arc::new(VanillaTerrain::for_world_with(&options.resources.join("worldgen"), &overrides, pack.assets.registry, &res.biomes(), seed, preset, dim.id(), structures).map_err(|e| {
                 if overrides.is_empty() {
                     format!("{e}\nPrepare the worldgen bundle with the launcher, or: horizon-prepare --prepare")
                 } else {

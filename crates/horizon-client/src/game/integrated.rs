@@ -637,7 +637,7 @@ impl Game<'_> {
         self.perf.world_opening();
         self.finish_open_world(opening.world?.finish()?)?;
         if let Some(sync) = opening.sync {
-            sync.adopt(&self.pack_files());
+            sync.adopt(&self.pack_files(), self.res.biomes().native());
         }
         let saved = Box::new(self.level.clone());
         // IntegratedServer runs the server mods; the window the client mods.

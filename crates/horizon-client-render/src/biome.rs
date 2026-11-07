@@ -153,6 +153,38 @@ pub struct Biomes {
     /// The data packs' biome files (new biomes and replaced built-in ones),
     /// for the tables that read more of a biome than `BiomeInfo` keeps.
     packs: BTreeMap<String, Arc<Value>>,
+    /// The native mods' biomes of the world (`with_native`): the last of `builtin`.
+    native: Arc<Vec<(String, Value)>>,
+}
+
+/// The game's biome table, shared by the gameplay and the chunk workers: vanilla's until a
+/// world opens, then that world's (`Biomes::with_native`), so a vanilla world's table stays
+/// 26.3's whatever native mods are installed. A world's server sets it before anything reads
+/// it; a client of another server sets it from the registry the server sends. Readers take a
+/// snapshot per use (`current`).
+#[derive(Clone)]
+pub struct BiomeTable(Arc<std::sync::RwLock<Arc<Biomes>>>);
+
+impl BiomeTable {
+    pub fn new(biomes: Arc<Biomes>) -> Self {
+        Self(Arc::new(std::sync::RwLock::new(biomes)))
+    }
+    /// The table now.
+    pub fn current(&self) -> Arc<Biomes> {
+        self.0.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+    /// The table for a world with native mods' biomes `native` (`Biomes::with_native`). The
+    /// table stays the same `Arc` when it already holds them, so a world's readers keep one
+    /// table; returns whether it changed.
+    pub fn set_native(&self, native: Vec<(String, Value)>) -> bool {
+        let mut table = self.0.write().unwrap_or_else(|e| e.into_inner());
+        let next = table.with_native(native);
+        if *next.native == *table.native {
+            return false;
+        }
+        *table = Arc::new(next);
+        true
+    }
 }
 /// The grass, foliage and dry foliage colormaps.
 struct Colormaps {
@@ -268,55 +300,6 @@ pub fn identifier_order(a: &str, b: &str) -> std::cmp::Ordering {
     }
     split(a).cmp(&split(b))
 }
-/// The biomes native mods add, as `(id, biome JSON)`: built-in biomes after vanilla's in the
-/// game's table and the synchronized `minecraft:worldgen/biome` registry. A native mod adds
-/// its own with a RETURN hook here; the generator reads them from the mod's data pack.
-/// Readers go through [`native_biomes`], which drops the ids the game can't take.
-pub fn native_biome_files() -> Vec<(String, Value)> {
-    Vec::new()
-}
-
-/// [`native_biome_files`] as the game takes them: a valid `Identifier` each, with a non-empty
-/// namespace and path (`Identifier.isValidNamespace`/`isValidPath`; a client can't read
-/// others), the first of each id. The game's table and the synchronized registry both read
-/// this, so they hold the same biomes; both keep a vanilla biome over a mod's of the same id.
-pub fn native_biomes() -> Vec<(String, Value)> {
-    native_biomes_from(native_biome_files())
-}
-
-fn native_biomes_from(files: Vec<(String, Value)>) -> Vec<(String, Value)> {
-    fn valid(id: &str) -> bool {
-        let Some((ns, path)) = id.split_once(':') else {
-            return false;
-        };
-        let common = |c: char| matches!(c, 'a'..='z' | '0'..='9' | '_' | '-' | '.');
-        // Both parts non-empty: `Identifier.parse(":x")` reads `minecraft:x`, another name.
-        !ns.is_empty()
-            && !path.is_empty()
-            && ns.chars().all(common)
-            && path.chars().all(|c| common(c) || c == '/')
-    }
-    let mut out: Vec<(String, Value)> = Vec::new();
-    for (id, json) in files {
-        if !valid(&id) {
-            log::warn!("Horizon: a native mod's biome {id:?} is not a namespaced id; skipped");
-        } else if !out.iter().any(|(seen, _)| *seen == id) {
-            out.push((id, json));
-        }
-    }
-    out
-}
-
-/// Native mods' biomes join the built-in table after vanilla's, whose ids stay put; a vanilla
-/// biome keeps its id and data over a mod's of the same id.
-fn append_native(list: &mut Vec<BiomeInfo>, native: Vec<(String, Value)>, maps: &Colormaps) {
-    for (name, json) in native {
-        if !list.iter().any(|b| b.name == name) {
-            list.push(BiomeInfo::from_json(name, &json, maps));
-        }
-    }
-}
-
 impl Biomes {
     pub fn load(root: &Path) -> Result<Self> {
         let maps = Colormaps {
@@ -341,7 +324,6 @@ impl Biomes {
             let v: Value = serde_json::from_slice(&fs::read(&path)?)?;
             list.push(BiomeInfo::from_json(name, &v, &maps));
         }
-        append_native(&mut list, native_biomes(), &maps);
         let index = list
             .iter()
             .enumerate()
@@ -353,8 +335,44 @@ impl Biomes {
             index,
             colormaps: Arc::new(maps),
             packs: BTreeMap::new(),
+            native: Arc::new(Vec::new()),
             info_noise: SimplexNoise::with_skipped_offsets(&mut LegacyRandom::new(2345), true),
         })
+    }
+    /// This table for a world whose native mods add `native`, `(id, biome JSON)` (the world's
+    /// list, `horizon_client::world_biomes::native_biomes`): vanilla's biomes, then each of
+    /// `native` whose id vanilla lacks, in that order. Vanilla's ids never move, and a world
+    /// without mod biomes gets vanilla's table back. Like `with_packs`, it starts from the
+    /// built-in table, without what packs gave `self`; the mods' biomes then count as
+    /// built-in ones, which a data pack's biome goes over as over vanilla's.
+    pub fn with_native(&self, native: Vec<(String, Value)>) -> Self {
+        let vanilla = self.builtin.len() - self.native.len();
+        let mut list = self.builtin[..vanilla].to_vec();
+        let mut kept = Vec::new();
+        for (name, json) in native {
+            if list.len() < usize::from(u16::MAX) && !list.iter().any(|b| b.name == name) {
+                list.push(BiomeInfo::from_json(name.clone(), &json, &self.colormaps));
+                kept.push((name, json));
+            }
+        }
+        Self {
+            index: list
+                .iter()
+                .enumerate()
+                .map(|(i, b)| (b.name.clone(), i as u16))
+                .collect(),
+            builtin: Arc::new(list.clone()),
+            list,
+            packs: BTreeMap::new(),
+            native: Arc::new(kept),
+            colormaps: self.colormaps.clone(),
+            info_noise: self.info_noise.clone(),
+        }
+    }
+    /// The native mods' biomes this table holds (`with_native`), in table order: what the
+    /// world's synchronized registry adds to vanilla's.
+    pub fn native(&self) -> &[(String, Value)] {
+        &self.native
     }
     /// The built-in biomes with a world's data packs' biome files (id →
     /// JSON) over them, as `RegistryDataLoader` builds the registry: a file
@@ -529,6 +547,7 @@ mod pack_tests {
             info_noise: SimplexNoise::with_skipped_offsets(&mut LegacyRandom::new(2345), true),
             colormaps: Arc::new(maps),
             packs: BTreeMap::new(),
+            native: Arc::new(Vec::new()),
         }
     }
 
@@ -584,38 +603,16 @@ mod pack_tests {
     }
 
     #[test]
-    fn no_native_biomes_without_a_mod() {
-        assert!(native_biome_files().is_empty());
-        assert!(native_biomes().is_empty());
-    }
-
-    #[test]
-    fn native_biomes_join_after_vanilla_with_valid_ids_once() {
-        let maps = Colormaps {
-            grass: Vec::new(),
-            foliage: Vec::new(),
-            dry: Vec::new(),
-        };
+    fn a_worlds_native_biomes_join_after_vanilla_and_leave_with_it() {
+        let base = builtin(&["minecraft:meadow", "minecraft:plains"]);
         let blue = json!({"effects": {"water_color": 0x0000ff}});
         let red = json!({"effects": {"water_color": 0xff0000}});
-        let native = native_biomes_from(vec![
+        let world = base.with_native(vec![
             ("mod:cave".to_owned(), blue.clone()),
-            ("cave".to_owned(), blue.clone()),
-            ("Mod:Upper".to_owned(), blue.clone()),
-            ("mod:".to_owned(), blue.clone()),
-            (":cave".to_owned(), blue.clone()),
-            ("mod:deep/caves".to_owned(), blue.clone()),
-            ("mod:cave".to_owned(), red.clone()),
             ("minecraft:plains".to_owned(), red),
+            ("mod:deep/caves".to_owned(), blue.clone()),
         ]);
-        let ids: Vec<&str> = native.iter().map(|(id, _)| id.as_str()).collect();
-        assert_eq!(ids, ["mod:cave", "mod:deep/caves", "minecraft:plains"]);
-        let mut list: Vec<BiomeInfo> = ["minecraft:meadow", "minecraft:plains"]
-            .iter()
-            .map(|n| BiomeInfo::from_json((*n).to_owned(), &json!({}), &maps))
-            .collect();
-        append_native(&mut list, native, &maps);
-        let names: Vec<&str> = list.iter().map(|b| b.name.as_str()).collect();
+        let names: Vec<&str> = world.list.iter().map(|b| b.name.as_str()).collect();
         // Vanilla's ids stay put and vanilla's plains keeps its data.
         assert_eq!(
             names,
@@ -626,8 +623,36 @@ mod pack_tests {
                 "mod:deep/caves"
             ]
         );
-        assert_eq!(list[1].water, 0x3F76E4);
-        assert_eq!(list[2].water, 0x0000FF);
+        assert_eq!(world.get(1).water, 0x3F76E4);
+        assert_eq!((world.id("mod:cave"), world.get(2).water), (2, 0x0000FF));
+        let native: Vec<&str> = world.native().iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(native, ["mod:cave", "mod:deep/caves"]);
+        // The mods' biomes are built-in ones to a data pack.
+        assert!(world.builtin_only().contains("mod:cave"));
+        // Another world's list replaces this one's; none gives vanilla's table back.
+        let other = world.with_native(vec![("mod:other".to_owned(), blue)]);
+        assert_eq!(other.id("mod:other"), 2);
+        assert!(!other.contains("mod:cave"));
+        let vanilla = other.with_native(Vec::new());
+        assert_eq!(vanilla.list.len(), 2);
+        assert!(vanilla.native().is_empty());
+        assert_eq!(vanilla.id("mod:cave"), vanilla.id("minecraft:plains"));
+    }
+
+    #[test]
+    fn the_shared_table_changes_only_for_another_list() {
+        let table = BiomeTable::new(Arc::new(builtin(&["minecraft:plains"])));
+        let reader = table.clone();
+        let cave = || vec![("mod:cave".to_owned(), json!({}))];
+        assert!(!table.set_native(Vec::new()));
+        assert!(table.set_native(cave()));
+        let first = reader.current();
+        assert!(first.contains("mod:cave"));
+        // The same list keeps the same table for the world's readers.
+        assert!(!table.set_native(cave()));
+        assert!(Arc::ptr_eq(&first, &reader.current()));
+        assert!(table.set_native(Vec::new()));
+        assert!(!reader.current().contains("mod:cave"));
     }
 }
 

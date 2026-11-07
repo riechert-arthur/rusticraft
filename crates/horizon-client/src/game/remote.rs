@@ -1740,6 +1740,19 @@ impl Game<'_> {
         }
     }
     fn set_registries(&mut self, registries: Arc<Dynamic>) {
+        let names = registries.registries.get("minecraft:worldgen/biome");
+        // The server's native mods' biomes join the table this client draws with. Single
+        // player's client shares its server's table, which the world set when it opened.
+        let local = self
+            .remote
+            .as_ref()
+            .is_some_and(|r| r.session.address == "local");
+        if !local {
+            self.res
+                .set_world_biomes(horizon_client::world_biomes::native_biomes_for_registry(
+                    names.into_iter().flatten().map(|(name, _)| name.as_str()),
+                ));
+        }
         let biomes: Vec<u16> = registries
             .registries
             .get("minecraft:worldgen/biome")
@@ -1756,6 +1769,8 @@ impl Game<'_> {
                 Arc::new(ChunkFormat::new(&r.dimension, biomes, bits).in_column(column));
             r.registries = registries;
         }
+        self.world_biomes = self.res.biomes();
+        self.set_biome_ids();
     }
     /// Switch to a (possibly new) dimension: a fresh client level.
     fn enter_remote_dimension(

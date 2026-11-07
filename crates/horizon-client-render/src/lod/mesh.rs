@@ -67,6 +67,7 @@ impl Mesher {
         neighbors: &[Vec<EdgeColumn>; 4],
         finer: &[TileKey],
     ) -> SectionMesh {
+        let biomes = context.biomes.current();
         mesh_columns_with_edges(
             key,
             columns,
@@ -74,7 +75,7 @@ impl Mesher {
             covered_bounds,
             neighbors,
             finer,
-            |span, direction, at| self.material(span, direction, at, context),
+            |span, direction, at| self.material(span, direction, at, context, &biomes),
         )
     }
     /// `at`: the block column the face covers, for the grass colours that
@@ -85,6 +86,7 @@ impl Mesher {
         direction: Direction,
         at: [i32; 2],
         context: &WorkerContext,
+        biomes: &crate::biome::Biomes,
     ) -> Material {
         let styles = *self
             .styles
@@ -181,7 +183,7 @@ impl Mesher {
                     fluid,
                 }
             });
-        let biome = context.biomes.get(span.biome);
+        let biome = biomes.get(span.biome);
         let shade = match direction {
             Direction::Up => 1.0,
             Direction::Down => 0.5,
@@ -193,11 +195,7 @@ impl Mesher {
                 face.map(|face| {
                     let rgb = match face.tint {
                         Tint::None => 0xffffff,
-                        Tint::Grass => {
-                            context
-                                .biomes
-                                .grass(span.biome, f64::from(at[0]), f64::from(at[1]))
-                        }
+                        Tint::Grass => biomes.grass(span.biome, f64::from(at[0]), f64::from(at[1])),
                         Tint::Foliage => biome.foliage,
                         Tint::Dry => biome.dry_foliage,
                         Tint::Water => biome.water,

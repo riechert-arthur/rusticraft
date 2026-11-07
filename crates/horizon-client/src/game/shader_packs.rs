@@ -175,7 +175,7 @@ impl Game<'_> {
             .get(&(at.x >> 4, at.z >> 4))
             .map(|c| c.biome(at.x, at.y, at.z));
         let (held_items, held_light) = self.held_for_pack();
-        let info = biome.map(|b| self.res.biomes().get(b));
+        let info = biome.map(|b| self.world_biomes.get(b));
         PackInputs {
             day_time: self.world.day_time,
             rain: lerp(self.world.weather.rain_level),
