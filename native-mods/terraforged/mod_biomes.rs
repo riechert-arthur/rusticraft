@@ -121,3 +121,55 @@ pub fn mod_biome_files() -> (Vec<(String, Value)>, Vec<String>) {
         ),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A synthetic parent: the copy keeps everything but the cave's generation settings.
+    #[test]
+    fn copies_keep_the_parent_but_the_caves_generation() {
+        let parent = json!({
+            "temperature": 0.8, "downfall": 0.4, "has_precipitation": true,
+            "attributes": { "a": 1 }, "effects": { "water_color": "#3f76e4" },
+            "carvers": ["minecraft:cave"],
+            "features": [[], ["x:lake"], ["x:geode"], [], [], [], [], ["x:ore"], [], [], ["x:top"]],
+        });
+        assert_eq!(mod_biome("terraforged:oak_forest", parent.clone()), parent);
+        let cave = mod_biome("terraforged:cave", parent.clone());
+        let mut expected = parent;
+        expected["carvers"] = json!([]);
+        expected["features"] = json!([
+            [],
+            [],
+            ["minecraft:large_dripstone"],
+            [],
+            [],
+            [],
+            [],
+            ["minecraft:pointed_dripstone"],
+            [],
+            [],
+            []
+        ]);
+        assert_eq!(cave, expected);
+        // A parent with fewer steps still gets UNDERGROUND_DECORATION.
+        let short = mod_biome("terraforged:cave", json!({ "features": [] }));
+        assert_eq!(short["features"].as_array().unwrap().len(), 8);
+    }
+
+    #[test]
+    fn a_missing_parent_leaves_its_biome_out() {
+        let (biomes, missing) = mod_biomes(|name| match name {
+            "minecraft:plains" => Ok(json!({ "temperature": 0.8 })),
+            "minecraft:dripstone_caves" => Ok(json!([])),
+            _ => Err("absent".to_owned()),
+        });
+        let ids: Vec<&str> = biomes.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, ["terraforged:oak_forest"]);
+        assert_eq!(missing.len(), 1);
+        let (biomes, missing) = mod_biomes_in(Path::new("/nonexistent/terraforged-biomes"));
+        assert!(biomes.is_empty());
+        assert_eq!(missing.len(), 2);
+    }
+}

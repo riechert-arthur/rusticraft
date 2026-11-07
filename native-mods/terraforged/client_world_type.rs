@@ -435,6 +435,27 @@ mod tests {
     }
 
     #[test]
+    fn the_biomes_copy_the_games_own() {
+        if !vanilla_biomes() {
+            return;
+        }
+        let files = biome_files();
+        let ids: Vec<&str> = files.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, ["terraforged:cave", "terraforged:oak_forest"]);
+        let root = std::env::var_os("HORIZON_TEST_RESOURCES")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.local/horizon-client/26.3")
+            });
+        let plains: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(root.join("data/minecraft/worldgen/biome/plains.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(files[1].1, plains);
+        assert_eq!(files[0].1["carvers"], serde_json::json!([]));
+    }
+
+    #[test]
     fn only_the_create_screens_write_is_terraforged() {
         vanilla_biomes();
         let dir = scratch("armed");

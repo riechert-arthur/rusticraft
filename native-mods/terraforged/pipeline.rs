@@ -969,6 +969,7 @@ impl SeededPipeline for TerraForgedPipeline {
 #[cfg(test)]
 mod tests {
     use super::super::terraforged_generator_facade::TerraHeightmap;
+    use super::super::terraforged_mod_biomes::mod_biomes;
     use super::*;
     use std::path::{Path, PathBuf};
 
@@ -1691,6 +1692,48 @@ mod tests {
             let (_, _, _, unwrapped) = features.vegetation_of(BiomeId(id));
             assert!(unwrapped, "{}", data.biome_name(BiomeId(id)));
         }
+    }
+
+    /// TerraForged's biomes (6dd607eb `ModBiomes`) built from the real 26.3 parents as `ModBiome.create` builds them:
+    /// `oak_forest` is plains unchanged; `cave` is dripstone caves with only large dripstone (LOCAL_MODIFICATIONS) and
+    /// pointed dripstone (UNDERGROUND_DECORATION) and no carvers, its climate, effects and spawns kept.
+    #[test]
+    fn mod_biomes_copy_their_26_3_parents() {
+        let Some(data) = data() else { return };
+        let (biomes, missing) = mod_biomes(|name| parent_of(&data, name));
+        assert!(missing.is_empty(), "{missing:?}");
+        let [(cave_id, cave), (oak_id, oak)] = <[_; 2]>::try_from(biomes).unwrap();
+        assert_eq!(
+            (cave_id.as_str(), oak_id.as_str()),
+            ("terraforged:cave", "terraforged:oak_forest")
+        );
+        assert_eq!(oak, parent_of(&data, "minecraft:plains").unwrap());
+        let dripstone = parent_of(&data, "minecraft:dripstone_caves").unwrap();
+        let features = cave["features"].as_array().unwrap();
+        assert_eq!(
+            features.len(),
+            dripstone["features"].as_array().unwrap().len()
+        );
+        for (step, list) in features.iter().enumerate() {
+            let expected: &[&str] = match step {
+                2 => &["minecraft:large_dripstone"],
+                7 => &["minecraft:pointed_dripstone"],
+                _ => &[],
+            };
+            assert_eq!(list, &serde_json::json!(expected), "step {step}");
+        }
+        assert_eq!(cave["carvers"], serde_json::json!([]));
+        for (key, value) in dripstone.as_object().unwrap() {
+            if key != "features" && key != "carvers" {
+                assert_eq!(&cave[key], value, "{key}");
+            }
+        }
+    }
+
+    /// A vanilla biome's JSON from the generator's data.
+    fn parent_of(data: &GeneratorData, name: &str) -> Result<serde_json::Value, String> {
+        let id = data.biome_id(name).ok_or_else(|| format!("no {name}"))?;
+        serde_json::from_str(data.biome_json(id)).map_err(|e| e.to_string())
     }
 
     /// `/locate biome` (`findClosestBiome3d`) follows the spiral over TerraForged's noise biomes: it answers with the
