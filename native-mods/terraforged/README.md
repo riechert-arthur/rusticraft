@@ -50,14 +50,12 @@ Differences and gaps:
 - The Create World screen opens on Normal, not TerraForged, and a dedicated server's
   `level-type=terraforged:normal` is not recognized.
 - TerraForged's biomes `terraforged:cave` and `terraforged:oak_forest` exist in TerraForged worlds
-  only; vanilla worlds' biomes, synced registry and commands stay 26.3's. No vanilla biome file is
-  shipped: the two are derived at runtime from the game's own 26.3 data, as 6dd607eb's
+  only; vanilla worlds' biomes, synced registry and commands stay 26.3's. The bundle ships no
+  vanilla biome file: the two are derived at runtime from the game's own 26.3 data, as 6dd607eb's
   `ModBiome.create` derives them. As in 6dd607eb, `oak_forest` is not a surface biome (it has no
   `minecraft:is_overworld` tag); TerraForged Reimagined tags it and copies forest instead of
   plains, which this port does not follow.
-- TerraForged's pack makes every overworld taller; here only TerraForged worlds get it. Its
-  dimension type also sets clouds at y=300, but Horizon draws clouds at vanilla's height in every
-  world (it doesn't read a dimension type's cloud height).
+- TerraForged's pack makes every overworld taller; here only TerraForged worlds get it.
 - Far terrain (Horizon's distant tiles; TerraForged has none) shows TerraForged's ground and biomes with
   the vanilla surface rule's top blocks, but from the un-eroded height: erosion's regions are too costly to
   build for distant tiles (about 20 s per wide tile), so far ground can sit a few blocks (about 2 on average,
@@ -74,7 +72,9 @@ Differences and gaps:
 - `/tf preview [size] [zoom]` is Horizon's: TerraForged has no in-game preview, only a developer window
   (`Previewer`, never opened by the game). The command draws that window's map of the player's own world to
   `terraforged-preview.png` in the world folder.
-- Not ported: TerraForged's dimension effects and the unregistered test volcano feature.
+- Not ported: TerraForged's dimension effects (clouds at y=300; the pack's Reimagined dimension type
+  asks for the same height, but Horizon draws clouds at vanilla's height in every world) and the
+  unregistered test volcano feature.
 
 ## Layers
 
