@@ -944,6 +944,14 @@ impl Streaming {
     /// neighbours' or the player's changes), and its writes land only where
     /// the live column still holds that generated block. Block entities of
     /// what it writes there are not carried over.
+    ///
+    /// What the finished columns around once wrote into the area (leaves of
+    /// trees rooted next door) went with the deleted chunks: each of them that
+    /// decorated already has its decoration replayed into the new proto
+    /// chunks (`schedule_spill`), against copies of its other neighbours
+    /// generated again, keeping only what lands in the area. Java's
+    /// `Regenerator` loses it. Nothing of this runs until `regenerate` is
+    /// called: vanilla worlds stream as before.
     pub fn regenerate(&mut self, keys: &[(i32, i32)]) {
         for key in keys {
             self.protos.remove(key);
@@ -1609,6 +1617,9 @@ impl Streaming {
                 // `vanilla_order`'s area are all unranked, and a replay that waited
                 // for them would come too late.
                 let replaying = |s: &Self| {
+                    if s.spill.is_empty() && s.spilling.is_empty() {
+                        return false;
+                    }
                     let own = s.regen_rank((x, z));
                     (-2..=2).any(|dz| {
                         (-2..=2).any(|dx| {
@@ -2465,7 +2476,8 @@ fn nearest_first<T: Ord>(candidates: &mut Vec<T>, room: usize) {
 }
 /// `Job::DecorateEdge` on a worker: the finished neighbours are generated
 /// again for the region, and the blocks decoration changed in them are
-/// returned to be written into the finished columns.
+/// returned to be written into the finished columns; none when `apply` is
+/// false (a replay: only the proto chunks keep what it wrote).
 fn decorate_edge<G: ChunkGenerator>(
     generator: &G,
     worker: &mut G::Worker,
