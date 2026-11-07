@@ -459,6 +459,7 @@ id = "pipeline"
 file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_pipeline"
 source = "pipeline.rs"
+visibility = "pub"
 
 [[injection]]
 id = "add-world-preset"
@@ -674,6 +675,18 @@ file = "crates/horizon-client-render/src/streaming.rs"
 name = "terraforged_regen"
 source = "regen_streaming.rs"
 visibility = "pub"
+
+# `/tf regen`: the finished chunks an edge decoration generated again leave the pipeline's per-chunk state.
+[[injection]]
+id = "release-edge-copies"
+target = "horizon_client_render::streaming::Streaming::receive_decorated_edge"
+kind = "HEAD"
+helper = "hooks/release_edge_copies.rs"
+bindings = [
+  { name = "x", ty = "i32", value = "x" },
+  { name = "z", ty = "i32", value = "z" },
+  { name = "region", ty = "&[Option<Proto>; 9]", value = "&region" },
+]
 
 [[module]]
 id = "preview"

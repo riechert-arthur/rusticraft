@@ -3013,7 +3013,9 @@ chunks" and "Regen complete!" to the player and the operators (`sendSuccess(.., 
   `WorldGenRegion`. Horizon's `Streaming::regenerate` decorates the outermost ring too, but against copies of the kept
   neighbours generated again (without their own decoration, their neighbours' or the players' changes), and writes
   into a kept chunk only where it still holds the block it was generated with; block entities of those writes are not
-  carried over. As in Java, what the kept chunks' decoration once spread into the area (leaves of trees rooted next door)
+  carried over. The copies' terrain-cache entries and carver records are dropped when their edge decoration comes back
+  (a HEAD hook on `Streaming::receive_decorated_edge` calls `release_finished`), as a chunk's own decoration drops
+  its own. As in Java, what the kept chunks' decoration once spread into the area (leaves of trees rooted next door)
   is gone; Horizon's issue #239 replays it.
 - Nothing is deleted while a load or generation of the area is still running, or a decoration or save the flush waits
   for did not finish in 30 seconds: it answers "Regen failed" instead, as it does when the region writer has stopped.
