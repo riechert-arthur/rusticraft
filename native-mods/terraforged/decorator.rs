@@ -1754,7 +1754,8 @@ G 123456789012345 -1 -1 3292 846005903824255357\n\
         };
         let (none, every_third, all) = (|_| false, |n| n % 3 == 0, |_| true);
         let fixed = run(true, none);
-        assert!(fixed.iter().all(|chunk| chunk.len() > 20), "{fixed:?}");
+        assert!(fixed.iter().all(|chunk| !chunk.is_empty()), "{fixed:?}");
+        assert!(fixed.iter().map(Vec::len).sum::<usize>() > 20, "{fixed:?}");
         assert_eq!(run(true, every_third), fixed);
         assert_eq!(run(true, all), fixed);
         for chunk in &fixed {

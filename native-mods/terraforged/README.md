@@ -39,8 +39,8 @@ is in no climate pool (it lacks `minecraft:is_overworld`), so it never generates
 and outside the vegetation step each chunk is decorated with the one biome at its lowest corner. Vegetation counts
 only the features that placed (`offset++`) to seed the next, so a tree blocked by a neighbour's
 leaves reseeds the rest of its chunk: the trees depend on the order chunks are decorated in, which
-varies with threads in Java and here alike (`/tf regen` included), unless the world has Horizon's
-`deterministic` setting ([Settings](#settings)).
+varies with threads in Java and here alike (`/tf regen` included); Horizon's `deterministic` setting
+([Settings](#settings)) takes most of that away.
 
 Differences and gaps:
 
@@ -93,16 +93,19 @@ has every setting off. Vanilla worlds never get the block or the file. The game 
 settings as it opens it (also on a dedicated server running a TerraForged world); clients of a server
 don't generate, so they need none.
 
-- `deterministic`: the same seed grows the same trees whatever order the chunks decorate in. Vegetation
-  seeds each placement with how many features placed before it in the chunk (`offset++`), and reads the
+- `deterministic`: the trees depend much less on the order the chunks decorate in. Vegetation seeds
+  each placement with how many features placed before it in the chunk (`offset++`), and reads the
   ground from the heightmap, where a neighbour's overhanging leaves may already be: whether a
   neighbour decorated first changes both, and with them every later tree of the chunk. With the
   setting, each placement is seeded from a fixed slot (its kind, the biome's place in the chunk, its
-  column or grass pass, and the feature's place in its list), on the ground under any logs, leaves, huge
-  mushrooms, vines or bee nests. The terrain itself needs no setting: every noise sample starts fresh
-  (TerraForged's pooled samples carry river noise over from a worker's earlier chunks; that is not
-  reproduced). Trees that grow into each other across a chunk border still depend on which was placed
-  first.
+  column or grass pass, and the feature's place in its list), on the ground under any logs, leaves,
+  huge mushrooms, vines or bee nests. Decorating a wooded 3x3 in two orders, about 15% of its tree
+  blocks differ with the setting and 35% without. Not covered: trees that grow into each other
+  across a chunk border, a tree whose own placement (its `heightmap` modifier, which 6dd607eb keeps)
+  lands on a neighbour's leaves, and vanilla's underground blobs (ores, granite...) that overlap a
+  border, which depend on the order in every world. The terrain needs no setting: every noise sample
+  starts fresh (TerraForged's pooled samples carry river noise over from a worker's earlier chunks;
+  that is not reproduced), so heights, rivers and biomes never depend on threads or order.
 
 ## Layers
 

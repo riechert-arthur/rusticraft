@@ -10,8 +10,8 @@ use std::sync::RwLock;
 /// The world's settings, as `generator.horizon_settings` holds them.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Settings {
-    /// The same seed makes the same trees whatever order the chunks decorate in:
-    /// each vegetation placement is seeded from its kind, biome, column or pass and
+    /// The trees depend much less on the order the chunks decorate in: each
+    /// vegetation placement is seeded from its kind, biome, column or pass and
     /// feature index, on the ground under any trees, instead of from how many
     /// placed before it (the original's count, which a neighbour's tree changes).
     pub deterministic: bool,
