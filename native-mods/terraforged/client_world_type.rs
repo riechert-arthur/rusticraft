@@ -493,6 +493,7 @@ mod tests {
                 Tag::compound([
                     ("corrected_biomes", Tag::Byte(0)),
                     ("deterministic", Tag::Byte(0)),
+                    ("height_scale", Tag::Float(1.0f32.to_bits())),
                     ("sparse_forests", Tag::Byte(0)),
                 ]),
             );
@@ -600,6 +601,7 @@ mod tests {
             deterministic: true,
             sparse_forests: true,
             corrected_biomes: true,
+            height_scale: 1.5,
         };
         let dir = scratch("settings");
         write_terraforged(&dir, 3, WorldGen::default(), None, on).unwrap();
@@ -609,6 +611,7 @@ mod tests {
             Some(&Tag::compound([
                 ("corrected_biomes", Tag::Byte(1)),
                 ("deterministic", Tag::Byte(1)),
+                ("height_scale", Tag::Float(1.5f32.to_bits())),
                 ("sparse_forests", Tag::Byte(1)),
             ]))
         );
@@ -626,21 +629,22 @@ mod tests {
         assert_eq!(settings_file(&file), Settings::default());
         assert_eq!(
             std::fs::read_to_string(&file).unwrap(),
-            "{\n  \"corrected_biomes\": false,\n  \"deterministic\": false,\n  \"sparse_forests\": false\n}\n"
+            "{\n  \"corrected_biomes\": false,\n  \"deterministic\": false,\n  \"height_scale\": 1.0,\n  \"sparse_forests\": false\n}\n"
         );
         std::fs::write(
             &file,
-            "{\"deterministic\": true, \"sparse_forests\": true, \"corrected_biomes\": true}",
+            "{\"deterministic\": true, \"sparse_forests\": true, \"corrected_biomes\": true, \"height_scale\": 1.5}",
         )
         .unwrap();
         assert_eq!(settings_file(&file), on);
-        // A key left out keeps its default (dense forests, TerraForged's biomes).
+        // A key left out keeps its default (dense forests, TerraForged's biomes and heights).
         std::fs::write(&file, "{\"deterministic\": true}").unwrap();
         assert_eq!(
             settings_file(&file),
             Settings {
                 sparse_forests: false,
                 corrected_biomes: false,
+                height_scale: 1.0,
                 ..on
             }
         );

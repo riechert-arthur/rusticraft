@@ -14,7 +14,8 @@ TerraForged (vanilla world types keep 26.3's overworld):
 
 - terrain: continents, rivers, lakes, the 14 terrain graphs blended by `TerrainBlender`, and
   hydraulic erosion with 6dd607eb's `withErosion` settings and no heightmap smoothing
-  (`NoiseGenerator`, `ErodedNoiseGenerator`), also (un-eroded) in Horizon's distant tiles;
+  (`NoiseGenerator`, `ErodedNoiseGenerator`), also (un-eroded) in Horizon's distant tiles; the
+  `height_scale` setting stretches it vertically;
 - biomes: `ClimateNoise`, `BiomeMapManager`'s climate pools and `BiomeSampler`'s ocean, beach,
   river and lake overrides, also for `/locate biome`, plus TerraForged's own `terraforged:cave`
   and `terraforged:oak_forest` (`ModBiomes`), derived from the player's own 26.3 dripstone caves
@@ -150,6 +151,24 @@ don't generate, so they need none.
   the cave biomes either way: off as noise biomes (at the search's first height), on where the
   unique caves carve them (at a block of the cave); `/tf preview` colours by climate and is the same
   either way. Off, generation is unchanged.
+- `height_scale` (a number, 1 by default, held to 0.5–1.85): every height above sea level and depth
+  below it times the setting. TerraForged puts a land column at `sea_level + base_height × base +
+  (max_y − sea_level − base_height) × terrain`, so the world's levels become `base_height × scale`,
+  `max_y` and `sea_floor` stretched around the sea level (the floor no lower than y 0, the levels
+  codec's bound, so oceans deepen only up to 1.55); the levels saved in the world stay TerraForged's.
+  Landforms keep their width (TerraForged's `auto_scale` would widen them with the range), so they grow
+  steeper as well as taller. At 1.85 even the highest land the noise can make (476 blocks above the
+  sea at 1) stays under the overworld's top, y 959, so nothing is cut flat. Whatever reads TerraForged's
+  levels follows: rivers and lakes, erosion, surfaces, vegetation and steepness (which scale with
+  `max_y`, as with a data pack's own levels), structures, distant tiles, `/locateterrain` and `/tf
+  preview`. A river's bed and banks keep their heights in blocks around its base level (the carver
+  counts them in `1 / max_y` units), so the valleys through the taller land get deeper; caves keep
+  their own heights, so tall mountains have no caves near their tops; the climate ignores height, as
+  TerraForged's does, so a taller summit keeps its biome (vanilla's height-adjusted temperature still
+  snows on it). Neither TerraForged tree has this setting: their heights change only with a pack's
+  `levels` (where `auto_scale` widens the land too), and TerraForged Reimagined's
+  `globalVerticalScale` multiplies only the land terrain's noise through terrain overrides, which this
+  port, following 6dd607eb, doesn't apply.
 
 ## Layers
 

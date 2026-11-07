@@ -50,7 +50,7 @@ use super::{
     terraforged_cave_carver::{CarverChunk, NoiseCaveGenerator},
     terraforged_current_surface_biomes::CurrentSurfaceBiomeSampler,
     terraforged_generator_facade::{TerraForgedGenerator, TerraHeightmap, register_live},
-    terraforged_generator_preset::{build as build_noise, terrain_levels},
+    terraforged_generator_preset::{build as build_noise, scale_heights, terrain_levels},
     terraforged_live_biomes::LiveBiomeBindings,
     terraforged_settings::{self, Settings},
     terraforged_structure_queries::TfQueries,
@@ -229,7 +229,10 @@ impl TerraForgedPipeline {
         with_structures: bool,
     ) -> Result<Self, GeneratorError> {
         let settings = terraforged_settings::current();
-        let levels = terrain_levels(stem["generator"].get("levels")).map_err(resource)?;
+        let levels = scale_heights(
+            terrain_levels(stem["generator"].get("levels")).map_err(resource)?,
+            settings.height_scale,
+        );
         let generator = Arc::new(build_noise(levels).map_err(resource)?);
         generator.capture_seed(seed);
         let biomes =
