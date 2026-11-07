@@ -922,6 +922,12 @@ impl Streaming {
     /// `WorldGenRegion` writes into its full neighbours. Otherwise a column
     /// beside a finished one counts as decorated already (it was, before it
     /// was saved).
+    ///
+    /// Unlike vanilla, decoration does not read the finished columns as they
+    /// are: it reads them generated again (without their own decoration, their
+    /// neighbours' or the player's changes), and its writes land only where
+    /// the live column still holds that generated block. Block entities of
+    /// what it writes there are not carried over.
     pub fn regenerate(&mut self, keys: &[(i32, i32)]) {
         for key in keys {
             self.protos.remove(key);
