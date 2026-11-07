@@ -41,8 +41,10 @@ Differences and gaps:
   caches are not reproduced.
 - The Create World screen opens on Normal, not TerraForged, and a dedicated server's
   `level-type=terraforged:normal` is not recognized.
-- Horizon cannot register new biomes yet, so `terraforged:cave` and `terraforged:oak_forest` are
-  missing: global caves keep the biomes above them, and `oak_forest` never generates.
+- TerraForged's biomes `terraforged:cave` and `terraforged:oak_forest` exist in TerraForged worlds
+  only; vanilla worlds' biomes, synced registry and commands stay 26.3's. As in 6dd607eb, `oak_forest`
+  is not a surface biome (it has no `minecraft:is_overworld` tag); TerraForged Reimagined tags it and
+  copies forest instead of plains, which this port does not follow.
 - TerraForged's pack makes every overworld taller; here only TerraForged worlds get it.
 - Far terrain (Horizon's distant tiles; TerraForged has none) shows TerraForged's ground and biomes with
   the vanilla surface rule's top blocks, but from the un-eroded height: erosion's regions are too costly to
@@ -1410,8 +1412,8 @@ whose tag holds the biome, so taiga (in `trees/hardy` and `trees/hardy_slopes`) 
 (6dd607eb's keywords plus TerraForged Reimagined's `pale_garden_vegetation`, so 26.3's pale oaks are placed as trees:
 a departure from 6dd607eb, by Arthur's decision).
 26.3 drops a whole tag that names a missing biome, and `trees/patchy` names `terraforged:oak_forest`, which only
-the bundled biome (#226) provides; `bind_tags` applies that rule to a world's registry, so until #226 `trees/patchy`
-holds nothing and `minecraft:wooded_badlands` has no config.
+the bundled biome provides (a TerraForged world's pack has it); `bind_tags` applies that rule to a world's registry, so
+without that biome `trees/patchy` holds nothing and `minecraft:wooded_badlands` has no config.
 `VegetationOracle.java` (`.local/terraforged/oracles/vegetation/`, `run.sh`) checks the bundled files against
 6dd607eb, Reimagined and the jar, decodes them and 53 edge-case documents with 6dd607eb's own codec on Noise2D
 2cb4843 and 26.3's DFU, and folds each noise rule's seed-first samples; the test matches its output bit for bit.
@@ -2810,8 +2812,8 @@ After the surface the pipeline carves TerraForged's noise caves (`cave_carver.rs
 carvers, so none run. 26.3 has a single `ChunkGenerator.buildTerrain` for fill, surface and carvers (TerraForged
 Reimagined runs them in that order too), on a chunk whose persisted status is still BIOMES, so the carver's writes
 update the WG heightmaps and later caves read the lowered OCEAN_FLOOR_WG. The cave array (`current_caves()`) and
-`CaveBiomeSampler(800, …)` are built once per world: GLOBAL caves draw `terraforged:cave` (not registered in Horizon
-yet, so their pool is empty) and UNIQUE caves every registered biome in 26.3's registry order (6dd607eb's UNDERGROUND
+`CaveBiomeSampler(800, …)` are built once per world: GLOBAL caves draw `terraforged:cave` (from the world's pack; a
+registry without it leaves their pool empty) and UNIQUE caves every registered biome in 26.3's registry order (6dd607eb's UNDERGROUND
 filter is commented out). Each cave, in array order, goes through the chunk's 256 columns with the `(int)` level
 seed: the surface is OCEAN_FLOOR_WG's first free block minus 2, raised by 9 off the sea-level band and lowered by
 `NoiseUtil.floor(16 * mask)` (mask = 1 - breach noise × river), the cavern size takes the unique-cave noise for
@@ -2850,8 +2852,8 @@ Differences: Java orders a step's structures by `MappedRegistry.entrySet()`, a `
 vanilla's `applyBiomeDecoration` does. A chunk carved by an earlier run has no CarverChunk, and its caves are replayed
 without writing (`getPostCarveChunk`), as in Java; the replay reads the carved chunk's OCEAN_FLOOR_WG, so where a
 cave breached the surface its lists can differ from the first run's, as in Java. A cave whose pool is empty
-records no biome (only GLOBAL caves, until #226 registers `terraforged:cave`, which Java always has; Java would
-record a null and fail on it). `DecoratorSeedOracle.java`
+records no biome (only GLOBAL caves in a registry without `terraforged:cave`, e.g. a TerraForged world whose pack
+was disabled; Java always has it, and would record a null and fail on it). `DecoratorSeedOracle.java`
 (`.local/terraforged/oracles/decorator/`, `run.sh`) runs the three classes' seeding loops (copied verbatim, with three
 draws in place of each placement) on 26.3's own `WorldgenRandom`, `LegacyRandomSource` and `SectionPos`, for 6 seeds,
 6 chunks (extreme coordinates included), 4 minimum heights, 4 step tables and 3 structure tables; the test matches its
@@ -2894,7 +2896,16 @@ built-in `dimension_type/overworld.json`, bundled unchanged; 6dd607eb's has the 
 generator's build range, the level shapes, saving and the synced `dimension_type` registry (LAN and multiplayer
 clients get the patched height) follow it as for any pack, and the world reopens with the same height. TerraForged's
 built-in pack also holds its worldgen registries and its world preset; the port bundles those, so only the dimension
-type is copied. TerraForged's `DatapackHook.injectDatapack` copies that pack into every world the Create screen makes,
+type and TerraForged's two biomes are copied. The biomes are 6dd607eb's `ModBiomes` (`mod_biomes.rs`), built at
+runtime from the player's own 26.3 data as `ModBiome.create` builds them, so the mod ships no vanilla biome file:
+`terraforged:cave` is 26.3's dripstone caves with only large dripstone and pointed dripstone and no carvers,
+`terraforged:oak_forest` is 26.3's plains unchanged (the parent's climate, effects, spawns and generation are kept).
+The parents are read from the resources folder the game reads vanilla's biomes from (a HEAD hook on Horizon's
+`Biomes::load` remembers it); a parent that can't be read leaves its biome out, with a warning. The game's biome table, the synced registry and the commands take them through a
+RETURN hook on Horizon's `world_biomes::native_biome_files`, for TerraForged worlds only (and, for a client of another
+server, as far as that server's registry names them); the generator reads them from the world's pack, so GLOBAL caves
+get `terraforged:cave` and the UNIQUE pool (every registered biome) holds both. A TerraForged world made before the
+pack held the biomes has them in its table but not in its generator, so its GLOBAL caves keep the biomes above them. TerraForged's `DatapackHook.injectDatapack` copies that pack into every world the Create screen makes,
 whatever the preset; here only TerraForged worlds get it (Arthur's choice), so vanilla world types keep 26.3's
 overworld. Worlds made before this keep their height; disabling the pack gives the overworld 26.3's height again. The screen copies the packs its Data Packs screen showed into the world first: a `datapacks/terraforged`
 folder holding exactly this pack (Re-Create's copy) is kept, and any other (the player's own pack of that name) is left
@@ -2909,7 +2920,9 @@ TerraForged's own over every biome. Differences: TerraForged's
 as vanilla does. A dedicated server's `level-type=terraforged:normal` is not recognized (Horizon falls back to
 `minecraft:normal` with its usual warning). A game built without this bundle opens a TerraForged world as a Normal one
 and generates new chunks with vanilla terrain. With the bundle applied, Horizon's own test
-`create_world_tabs_follow_vanilla_and_their_choices_reach_the_action` fails, because it counts vanilla's five presets.
+`create_world_tabs_follow_vanilla_and_their_choices_reach_the_action` fails, because it counts vanilla's five presets,
+and so does `world_biomes::tests::no_native_biomes_without_a_mod`, because a client of another server is offered
+TerraForged's biomes.
 
 Boats (`boat.rs`, plus an OVERWRITE of Horizon's `boat_status`, which is `AbstractBoat.getStatus` with `isUnderwater`
 inlined) follow TerraForged 6dd607eb's `MixinBoat` (RETURN of `isUnderwater`) and `BoatHook.floatTheBoat`. When a

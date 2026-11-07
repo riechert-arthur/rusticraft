@@ -1476,7 +1476,7 @@ mod tests {
                 }
             }
         }
-        // Without terraforged:cave only the unique caves write biomes (any registered biome).
+        // Without terraforged:cave (no TerraForged pack) only the unique caves write biomes (any registered biome).
         assert!(cave_air > 0 && cave_quarts > 0, "{cave_air} {cave_quarts}");
     }
 
@@ -1681,7 +1681,7 @@ mod tests {
         assert_eq!(of("minecraft:taiga").0, Some("terraforged:trees/hardy"));
         assert_eq!(of("minecraft:pale_garden").0, None);
         assert!(of("minecraft:pale_garden").2[0].contains(&"minecraft:pale_garden_vegetation"));
-        // Without terraforged:oak_forest (#226) trees/patchy is dropped: wooded badlands has no config.
+        // Without terraforged:oak_forest (no TerraForged pack) trees/patchy is dropped: wooded badlands has no config.
         assert!(data.biome_id("terraforged:oak_forest").is_none());
         assert_eq!(of("minecraft:wooded_badlands").0, None);
         for river in ["minecraft:river", "minecraft:frozen_river"] {
