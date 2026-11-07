@@ -2132,8 +2132,9 @@ mod tests {
     }
 
     /// `/locate biome` (`findClosestBiome3d`) follows the spiral over TerraForged's noise biomes: it answers with the
-    /// first sampled column whose biome is allowed, at the first sample height, and finds no biome outside
-    /// `possibleBiomes`. Searching adds no terrain-cache entry.
+    /// first sampled column whose biome is allowed, at the first sample height. Outside `possibleBiomes` it finds
+    /// only what the noise caves carve (here, without `corrected_biomes`, any registered biome). Searching adds no
+    /// terrain-cache entry.
     #[test]
     fn locating_a_biome_follows_the_noise_biomes() {
         let Some(data) = data() else { return };
@@ -2352,7 +2353,8 @@ mod tests {
 
     /// Seed 777's noise biomes over 4096 blocks around spawn, with `corrected_biomes` off and on. On, no column
     /// takes a cave biome, and the only biomes that aren't climate choices are the water biomes TerraForged's
-    /// overrides place; `/locate biome` finds no cave biome, and the chunks' biome layer is the noise biomes'.
+    /// overrides place; `/locate biome` finds no cave biome among the noise biomes (it finds them in caves, see
+    /// `locate_finds_cave_biomes_where_the_chunks_hold_them`), and the chunks' biome layer is the noise biomes'.
     #[test]
     fn corrected_biomes_keep_seed_777_s_surface_to_climate_biomes() {
         let Some(data) = data() else { return };
