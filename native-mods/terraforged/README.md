@@ -35,7 +35,8 @@ operators get `/locateterrain <terrain> [radius]`, `/tf export structures`, `/tf
 The Nether and the End stay vanilla, as in TerraForged. Deliberate fidelity to the pinned source,
 including its quirks: JSON `Bias` nodes decode as 0 (Engine's spec reads a module as a float), cave
 and other non-surface overworld biomes stay in the climate pools (so `deep_dark` can reach the
-surface), unique caves draw from every registered biome (TerraForged's two included), `oak_forest`
+surface), unique caves draw from every registered biome (TerraForged's two included; Horizon's
+`corrected_biomes` setting changes both), `oak_forest`
 is in no climate pool (it lacks `minecraft:is_overworld`), so it never generates on the surface,
 and outside the vegetation step each chunk is decorated with the one biome at its lowest corner. Vegetation counts
 only the features that placed (`offset++`) to seed the next, so a tree blocked by a neighbour's
@@ -47,8 +48,8 @@ Differences and gaps:
 
 - Some parts follow TerraForged Reimagined instead (credited in `THIRD_PARTY_NOTICES.md`): the
   eroded-region builder, structures' eroded base heights, the erodible-block tags
-  (`#minecraft:substrate_overworld` and `#minecraft:snow`), the pale garden tree keyword and the
-  taller overworld's dimension type. `base_column` reports vanilla's `NoiseColumn` shape (solid from
+  (`#minecraft:substrate_overworld` and `#minecraft:snow`), the pale garden tree keyword, the
+  taller overworld's dimension type and, with the `corrected_biomes` setting, the biome classification. `base_column` reports vanilla's `NoiseColumn` shape (solid from
   the level bottom up to the eroded height), departing from both TerraForged trees.
 - Apart from the decoration order above, results never depend on thread scheduling: per-thread
   carry-over and pooled-object reuse in Java's caches are not reproduced. The one carry-over that
@@ -2663,7 +2664,8 @@ a biome, a mod's included, ends up in a pool:
    tundra if it snows, else taiga; `is_forest` tundra if it snows, temperate rainforest at a downfall of 0.8 or more,
    else temperate forest. **Anything else is grassland**, whatever its temperature and downfall: that is where an
    untagged mod biome (most carry none of these tags) goes. Ocean, river, beach and cave biomes are not filtered out
-   (they sit in grassland with the plains). Biomes are placed in `BIOME_SORTER` order: path first, then namespace
+   (they sit in grassland with the plains); with Horizon's `corrected_biomes` setting, Reimagined's
+   `isClimateBiome` keeps them out ([Settings](#settings)). Biomes are placed in `BIOME_SORTER` order: path first, then namespace
    (`terralith:alpine_grove` comes before `minecraft:badlands`, and `a:plains` before `minecraft:plains`).
 4. Every climate has a pool, and an empty one stays empty: no climate borrows another's biomes (`getInitialBiome`
    gives plains for it). With 26.3's biomes and no climate files, cold steppe, steppe and alpine are empty.
@@ -2893,7 +2895,7 @@ Reimagined runs them in that order too), on a chunk whose persisted status is st
 update the WG heightmaps and later caves read the lowered OCEAN_FLOOR_WG. The cave array (`current_caves()`) and
 `CaveBiomeSampler(800, …)` are built once per world: GLOBAL caves draw `terraforged:cave` (from the world's pack; a
 registry without it leaves their pool empty) and UNIQUE caves every registered biome in 26.3's registry order (6dd607eb's UNDERGROUND
-filter is commented out). Each cave, in array order, goes through the chunk's 256 columns with the `(int)` level
+filter is commented out; `corrected_biomes` takes Reimagined's `isNonSurface` biomes instead). Each cave, in array order, goes through the chunk's 256 columns with the `(int)` level
 seed: the surface is OCEAN_FLOOR_WG's first free block minus 2, raised by 9 off the sea-level band and lowered by
 `NoiseUtil.floor(16 * mask)` (mask = 1 - breach noise × river), the cavern size takes the unique-cave noise for
 UNIQUE caves, and `MathUtil.clamp` bounds top and bottom; every non-fluid block in between becomes air through

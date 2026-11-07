@@ -491,6 +491,7 @@ mod tests {
             generator.insert(
                 "horizon_settings".into(),
                 Tag::compound([
+                    ("corrected_biomes", Tag::Byte(0)),
                     ("deterministic", Tag::Byte(0)),
                     ("sparse_forests", Tag::Byte(0)),
                 ]),
@@ -598,6 +599,7 @@ mod tests {
         let on = Settings {
             deterministic: true,
             sparse_forests: true,
+            corrected_biomes: true,
         };
         let dir = scratch("settings");
         write_terraforged(&dir, 3, WorldGen::default(), None, on).unwrap();
@@ -605,6 +607,7 @@ mod tests {
         assert_eq!(
             generator.get("horizon_settings"),
             Some(&Tag::compound([
+                ("corrected_biomes", Tag::Byte(1)),
                 ("deterministic", Tag::Byte(1)),
                 ("sparse_forests", Tag::Byte(1)),
             ]))
@@ -623,16 +626,21 @@ mod tests {
         assert_eq!(settings_file(&file), Settings::default());
         assert_eq!(
             std::fs::read_to_string(&file).unwrap(),
-            "{\n  \"deterministic\": false,\n  \"sparse_forests\": false\n}\n"
+            "{\n  \"corrected_biomes\": false,\n  \"deterministic\": false,\n  \"sparse_forests\": false\n}\n"
         );
-        std::fs::write(&file, "{\"deterministic\": true, \"sparse_forests\": true}").unwrap();
+        std::fs::write(
+            &file,
+            "{\"deterministic\": true, \"sparse_forests\": true, \"corrected_biomes\": true}",
+        )
+        .unwrap();
         assert_eq!(settings_file(&file), on);
-        // A key left out keeps its default (dense forests).
+        // A key left out keeps its default (dense forests, TerraForged's biomes).
         std::fs::write(&file, "{\"deterministic\": true}").unwrap();
         assert_eq!(
             settings_file(&file),
             Settings {
                 sparse_forests: false,
+                corrected_biomes: false,
                 ..on
             }
         );

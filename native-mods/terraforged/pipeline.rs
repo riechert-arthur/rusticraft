@@ -245,7 +245,7 @@ impl TerraForgedPipeline {
             .map(|height| (height.min_y, height.height));
         // CaveBiomeSampler(800, biomeMapManager): GLOBAL caves use terraforged:cave; UNIQUE caves draw from every
         // registered biome (6dd607eb's UNDERGROUND filter is commented out; the Nether's and the End's too), in
-        // 26.3's registry order: path, then namespace. `corrected_biomes` keeps only the overworld's cave biomes.
+        // 26.3's registry order: path, then namespace. `corrected_biomes` keeps only the cave biomes.
         let global: Vec<_> = data
             .biome_id("terraforged:cave")
             .map(Arc::new)
