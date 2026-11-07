@@ -490,7 +490,10 @@ mod tests {
         if let Some(Tag::Compound(generator)) = expected.get_mut("generator") {
             generator.insert(
                 "horizon_settings".into(),
-                Tag::compound([("deterministic", Tag::Byte(0))]),
+                Tag::compound([
+                    ("deterministic", Tag::Byte(0)),
+                    ("sparse_forests", Tag::Byte(0)),
+                ]),
             );
         }
         assert_eq!(overworld, expected);
@@ -594,13 +597,17 @@ mod tests {
         vanilla_biomes();
         let on = Settings {
             deterministic: true,
+            sparse_forests: true,
         };
         let dir = scratch("settings");
         write_terraforged(&dir, 3, WorldGen::default(), None, on).unwrap();
         let generator = terraforged_generator(&dir).unwrap();
         assert_eq!(
             generator.get("horizon_settings"),
-            Some(&Tag::compound([("deterministic", Tag::Byte(1))]))
+            Some(&Tag::compound([
+                ("deterministic", Tag::Byte(1)),
+                ("sparse_forests", Tag::Byte(1)),
+            ]))
         );
         assert_eq!(saved_settings(&generator), on);
         // Re-Create keeps them.
@@ -616,10 +623,19 @@ mod tests {
         assert_eq!(settings_file(&file), Settings::default());
         assert_eq!(
             std::fs::read_to_string(&file).unwrap(),
-            "{\n  \"deterministic\": false\n}\n"
+            "{\n  \"deterministic\": false,\n  \"sparse_forests\": false\n}\n"
         );
-        std::fs::write(&file, "{\"deterministic\": true}").unwrap();
+        std::fs::write(&file, "{\"deterministic\": true, \"sparse_forests\": true}").unwrap();
         assert_eq!(settings_file(&file), on);
+        // A key left out keeps its default (dense forests).
+        std::fs::write(&file, "{\"deterministic\": true}").unwrap();
+        assert_eq!(
+            settings_file(&file),
+            Settings {
+                sparse_forests: false,
+                ..on
+            }
+        );
         std::fs::write(&file, "not json").unwrap();
         assert_eq!(settings_file(&file), Settings::default());
         std::fs::remove_dir_all(&dir).unwrap();

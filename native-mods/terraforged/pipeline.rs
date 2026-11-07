@@ -1827,6 +1827,7 @@ mod tests {
         };
         let on = differences(Settings {
             deterministic: true,
+            ..Settings::default()
         });
         let off = differences(Settings::default());
         eprintln!(
@@ -1837,8 +1838,9 @@ mod tests {
     }
 
     /// A chunk's terrain data (heights, rivers, gradients, base heights) is the same whichever thread computes it and
-    /// whatever it computed before: the eroded generator resets every sample (`ErodedNoiseGenerator::generate`), so
-    /// TerraForged's river-noise carry-over from a worker's earlier chunks never reaches the world.
+    /// whatever it computed before, by default and with `sparse_forests`: the eroded generator resets every sample and
+    /// starts its river noise at the same constant (`RiverStart`, `ErodedNoiseGenerator::generate`), so TerraForged's
+    /// river-noise carry-over from a worker's earlier chunks never reaches the world.
     #[test]
     fn terrain_data_ignores_threads() {
         let preset: Value =
@@ -1864,25 +1866,32 @@ mod tests {
             v
         };
         let all: Vec<(i32, i32)> = (0..4).flat_map(|x| (0..4).map(move |z| (x, z))).collect();
-        let single = build_noise(levels).unwrap();
-        let a: Vec<_> = all.iter().map(|&(x, z)| summary(&single, x, z)).collect();
-        let threaded = build_noise(levels).unwrap();
-        let made = std::sync::Mutex::new(BTreeMap::new());
-        std::thread::scope(|scope| {
-            for t in 0..6 {
-                let (g, all, made) = (&threaded, &all, &made);
-                scope.spawn(move || {
-                    for &(x, z) in all.iter().rev().skip(t).step_by(6) {
-                        let s = summary(g, x, z);
-                        made.lock().unwrap().insert((x, z), s);
-                    }
-                });
+        for sparse_forests in [false, true] {
+            terraforged_settings::set_for_thread(Some(Settings {
+                sparse_forests,
+                ..Settings::default()
+            }));
+            let single = build_noise(levels).unwrap();
+            let a: Vec<_> = all.iter().map(|&(x, z)| summary(&single, x, z)).collect();
+            let threaded = build_noise(levels).unwrap();
+            let made = std::sync::Mutex::new(BTreeMap::new());
+            std::thread::scope(|scope| {
+                for t in 0..6 {
+                    let (g, all, made) = (&threaded, &all, &made);
+                    scope.spawn(move || {
+                        for &(x, z) in all.iter().rev().skip(t).step_by(6) {
+                            let s = summary(g, x, z);
+                            made.lock().unwrap().insert((x, z), s);
+                        }
+                    });
+                }
+            });
+            let made = made.into_inner().unwrap();
+            for (i, key) in all.iter().enumerate() {
+                assert!(a[i] == made[key], "chunk {key:?} differs between threads");
             }
-        });
-        let made = made.into_inner().unwrap();
-        for (i, key) in all.iter().enumerate() {
-            assert!(a[i] == made[key], "chunk {key:?} differs between threads");
         }
+        terraforged_settings::set_for_thread(None);
     }
 
     /// TerraForged's decoration knows every registered biome's features, the nether's and the end's included (the

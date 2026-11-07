@@ -24,8 +24,9 @@ TerraForged (vanilla world types keep 26.3's overworld):
   no vanilla carvers run;
 - structures: vanilla placement over TerraForged's (eroded) base heights and biomes, with terrain
   adapted under beardified structures' pieces (`StructureTerrain`);
-- decoration: `FeatureDecorator` with TerraForged's vegetation (jittered, fitness-gated trees),
-  cave decoration, water smoothing and snow.
+- decoration: `FeatureDecorator` with TerraForged's vegetation (jittered, fitness-gated trees, as
+  dense as TerraForged's worlds are in play; `sparse_forests` thins them), cave decoration, water
+  smoothing and snow.
 
 In TerraForged worlds, a player's boat rises to a river's stepped water surface (`BoatHook`), and
 operators get `/locateterrain <terrain> [radius]`, `/tf export structures`, `/tf regen <radius>` and
@@ -50,7 +51,19 @@ Differences and gaps:
   taller overworld's dimension type. `base_column` reports vanilla's `NoiseColumn` shape (solid from
   the level bottom up to the eroded height), departing from both TerraForged trees.
 - Apart from the decoration order above, results never depend on thread scheduling: per-thread
-  carry-over and pooled-object reuse in Java's caches are not reproduced.
+  carry-over and pooled-object reuse in Java's caches are not reproduced. The one carry-over that
+  shapes the world is replaced by the value it settles at: 6dd607eb reuses each worker's chunk
+  samples without resetting their river noise, which the river carver only multiplies (and sets back
+  to 1 seaward of the beach), so a few chunks into play nearly every land sample starts at 0, or
+  within a few hundredths of it (on seed 777, 98.5% of the land samples of 625 chunks around spawn
+  on six workers, every one from a worker's third chunk on). In Java a worker's first chunks, and
+  its first after crossing the sea, start higher, and a worker starting far from rivers stays sparse
+  for a few dozen chunks; which chunks those are depends on scheduling. Every chunk sample here
+  starts at 0. That gives TerraForged's dense forests and, as in Java's play, two more effects:
+  every river or lake cell fills with water up to its base height (`getWaterLevel` needs river
+  noise 0), and on land the noise caves' ceiling stays 8 to 17 blocks under the ground (their
+  carving mask, `1 - breach noise * river noise`, stays 1), so they don't breach it.
+  `sparse_forests` starts at 1 instead.
 - The Create World screen opens on Normal, not TerraForged, and a dedicated server's
   `level-type=terraforged:normal` is not recognized.
 - TerraForged's biomes `terraforged:cave` and `terraforged:oak_forest` exist in TerraForged worlds
@@ -103,9 +116,17 @@ don't generate, so they need none.
   blocks differ with the setting and 35% without. Not covered: trees that grow into each other
   across a chunk border, a tree whose own placement (its `heightmap` modifier, which 6dd607eb keeps)
   lands on a neighbour's leaves, and vanilla's underground blobs (ores, granite...) that overlap a
-  border, which depend on the order in every world. The terrain needs no setting: every noise sample
-  starts fresh (TerraForged's pooled samples carry river noise over from a worker's earlier chunks;
-  that is not reproduced), so heights, rivers and biomes never depend on threads or order.
+  border, which depend on the order in every world. The terrain needs no setting: every chunk sample
+  starts from the same river noise (see `sparse_forests`), so heights, rivers and biomes never depend
+  on threads or order.
+- `sparse_forests`: every chunk sample's river noise starts at 1, a new sample's value and what
+  TerraForged's code intends (TerraForged Reimagined resets it to 1 on every call), instead of the 0
+  6dd607eb's reused samples settle at in play (the default, see the differences above). Tree fitness
+  (`SaturationViability`, 1 − river noise) then falls away from rivers and lakes, and the forests
+  with it: they gather along the water and thin out elsewhere. Cave breaches open through land again
+  away from rivers, and river cells above the river bed fill to sea level instead of their base
+  height (where the ground is higher anyway). Deterministic either way, with `deterministic` on or
+  off.
 
 ## Layers
 
@@ -2199,12 +2220,14 @@ neighbouring chunk's edge), then the rivers carved. Java samples each position i
 `NoiseResource`: a new resource starts every position from the defaults, while a reused one carries the river noise
 over from the same position of the chunk that used it before, so Java's output depends on which chunks shared a
 resource (the oracle's `pool` lines show it: chunk (25, 16) right after (24, 16) on one resource differs from a fresh
-fill). The port starts every position from the defaults (Java's new resource) and fills a new `NoiseData` per call,
-so a chunk never depends on the chunks or threads before it. A failed region build is an `Err` (the trait panics) where
+fill). The port starts every position from the defaults and fills a new `NoiseData` per call, so a chunk never
+depends on the chunks or threads before it; the river noise starts at `RiverStart::InPlay`'s 0 (what 6dd607eb's
+reused samples settle at in play, Arthur's choice) or, with `sparse_forests`, at `RiverStart::Fresh`'s 1 (Java's new
+resource). A failed region build is an `Err` (the trait panics) where
 Java throws out of `generate`; a later failure (a failing sample, or a panic, the consumer's included) is logged and the
 chunk left unfilled, as Java's `catch (Throwable)` does. The trait's `height_noise` and `levels`, and `find`, stay on the
 un-eroded generator, as in Reimagined. `ErodedChunkOracle.java` (same folder, `run-chunks.sh`) runs Reimagined's real
-`generate` (its resource pool cleared before every chunk) over twelve chunks in three settings groups (seeds 0,
+`generate` (its resource pool cleared before every chunk, so the test uses `RiverStart::Fresh`) over twelve chunks in three settings groups (seeds 0,
 `i32::MIN` and `i32::MAX`; negative chunks, chunks on both sides of region boundaries, region corners, river chunks, and
 chunks whose block coordinates wrap at the `int` limits), interpreted and JIT-compiled alike; the test matches every
 element of each chunk's `NoiseData` bit for bit, in debug and release. Others check that cached chunks equal uncached
