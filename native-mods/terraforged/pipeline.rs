@@ -86,11 +86,67 @@ pub(super) struct TerraForgedPipeline {
     caves: NoiseCaveGenerator<BiomeId>,
     /// `NoiseCaveGenerator.cache`: each carved chunk's `CarverChunk` (its caves' biome lists), until the chunk is
     /// decorated. Like the terrain cache, an entry lives from the chunk's terrain stage to its decoration.
-    carvers: std::sync::Mutex<std::collections::HashMap<ChunkPos, CarverChunk<BiomeId>>>,
+    carvers: Arc<Carvers>,
     /// Every biome's features, for TerraForged's decoration (`None` without feature resources).
     features: Option<TerraForgedFeatures>,
     /// `ChunkGenerator`'s structure placement, when the world generates structures.
     structures: Option<StructureState>,
+}
+
+type Carvers = std::sync::Mutex<std::collections::HashMap<ChunkPos, CarverChunk<BiomeId>>>;
+
+/// What each live pipeline keeps per chunk between its terrain stage and its decoration (the level seed as an
+/// int, the terrain cache's generator and the carver records), for [`release_finished`]. Entries die with their
+/// pipeline: they hold no reference that keeps it alive.
+type Held = Vec<(
+    i32,
+    std::sync::Weak<TerraForgedGenerator>,
+    std::sync::Weak<Carvers>,
+)>;
+static HELD: std::sync::Mutex<Held> = std::sync::Mutex::new(Vec::new());
+
+/// Records what `pipeline` keeps per chunk, for [`release_finished`].
+fn hold(pipeline: &TerraForgedPipeline) {
+    let mut held = HELD
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    held.retain(|(_, generator, carvers)| {
+        generator.strong_count() > 0 && carvers.strong_count() > 0
+    });
+    held.push((
+        pipeline.vanilla.seed as i32,
+        Arc::downgrade(&pipeline.generator),
+        Arc::downgrade(&pipeline.carvers),
+    ));
+}
+
+/// Horizon's edge decoration (`Streaming::regenerate`, `/tf regen`) generates finished chunks again to decorate
+/// their regenerated neighbour against, and drops those copies without decorating them: what their terrain stage
+/// left in the terrain cache and the carver records, which only a chunk's own decoration removes, goes here
+/// instead. A finished chunk has no generation in progress that needs them; another pipeline of the world (the
+/// far-terrain ones) that held such a chunk would only compute it again.
+pub fn release_finished(chunks: &[(i32, i32)]) {
+    if chunks.is_empty() {
+        return;
+    }
+    let mut held = HELD
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    held.retain(|(_, generator, carvers)| {
+        generator.strong_count() > 0 && carvers.strong_count() > 0
+    });
+    for (seed, generator, carvers) in held.iter() {
+        let (Some(generator), Some(carvers)) = (generator.upgrade(), carvers.upgrade()) else {
+            continue;
+        };
+        let mut carvers = carvers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for &(x, z) in chunks {
+            carvers.remove(&ChunkPos::new(x, z));
+            generator.drop_chunk(*seed, x, z);
+        }
+    }
 }
 
 /// `OverworldGenerator::for_world` and `for_dimension`, overwritten: a TerraForged
@@ -112,6 +168,7 @@ pub(super) fn build(
     };
     let pipeline = TerraForgedPipeline::new(&data, seed, &stem, with_structures)?;
     register_live(seed, dimension, &pipeline.generator);
+    hold(&pipeline);
     Ok(OverworldGenerator {
         pipeline: Arc::new(pipeline),
         noise_clamped: None,
@@ -214,7 +271,7 @@ impl TerraForgedPipeline {
             water: block("minecraft:water")?,
             air: block("minecraft:air")?,
             caves,
-            carvers: std::sync::Mutex::new(std::collections::HashMap::new()),
+            carvers: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             features: TerraForgedFeatures::new(data)?,
             structures,
         })
@@ -1478,6 +1535,38 @@ mod tests {
         }
         // Without terraforged:cave (no TerraForged pack) only the unique caves write biomes (any registered biome).
         assert!(cave_air > 0 && cave_quarts > 0, "{cave_air} {cave_quarts}");
+    }
+
+    #[test]
+    fn finished_chunks_generated_again_are_released() {
+        // `Streaming::regenerate`'s edge decoration generates finished neighbours again and drops them
+        // undecorated: their terrain-cache entries and carver records go with `release_finished`.
+        let Some(data) = data() else { return };
+        let stem = terraforged_stem(&data, PRESET, "minecraft:overworld").unwrap();
+        let pipeline = Arc::new(TerraForgedPipeline::new(&data, 12, &stem, false).unwrap());
+        super::hold(&pipeline);
+        let overworld = OverworldGenerator {
+            pipeline: Arc::clone(&pipeline) as Arc<dyn SeededPipeline>,
+            noise_clamped: None,
+        };
+        let mut worker = overworld.worker();
+        let (copy, other) = (ChunkPos::new(3, -2), ChunkPos::new(9, 9));
+        for pos in [copy, other] {
+            worker.generate_proto(pos).unwrap();
+        }
+        let held = |pipeline: &TerraForgedPipeline| {
+            let carvers = pipeline.carvers.lock().unwrap();
+            (
+                pipeline.generator.cached_chunks(),
+                carvers.contains_key(&copy),
+                carvers.len(),
+            )
+        };
+        assert_eq!(held(&pipeline), (2, true, 2));
+        super::release_finished(&[(copy.x, copy.z)]);
+        // Only the released chunk goes; the other is still waiting for its decoration.
+        assert_eq!(held(&pipeline), (1, false, 1));
+        assert!(pipeline.carvers.lock().unwrap().contains_key(&other));
     }
 
     #[test]

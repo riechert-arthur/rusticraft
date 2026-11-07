@@ -24,8 +24,10 @@
  */
 
 // `/tf regen`'s generation half. Java drops the area's `ChunkHolder`s and lets the next
-// `chunkSource.tick` load them again; here the area's columns and proto chunks leave the
-// streaming, and the next `update` generates them again.
+// `chunkSource.tick` load them again; here the area's columns leave the streaming
+// (`Streaming::forget`), `Streaming::regenerate` drops its proto chunks and has its edge
+// decorated against the chunks kept around it, and the next `update` generates it again.
+// What `settle` waits for first is below.
 
 use super::{BinaryHeap, Done, Job, Streaming};
 use std::collections::HashSet;
@@ -36,7 +38,8 @@ use std::time::{Duration, Instant};
 /// old column back. Queued ones are dropped, running ones are waited for and their
 /// results dropped (others wait for the next `update`, as in `Streaming::save`). False
 /// when that work, or a decoration or save `Streaming::save` waited for, did not finish
-/// in time: then nothing may be deleted.
+/// in time: then nothing may be deleted. An edge decoration (`Done::DecoratedEdge`) counts
+/// in `decorating` like any other, so none is out while the area settles.
 pub fn settle(streaming: &mut Streaming, keys: &HashSet<(i32, i32)>) -> bool {
     if streaming.decorating > 0 || !streaming.finishing.is_empty() || streaming.saving > 0 {
         return false;
@@ -87,23 +90,10 @@ pub fn settle(streaming: &mut Streaming, keys: &HashSet<(i32, i32)>) -> bool {
     true
 }
 
-/// After the delete: the area's proto chunks, and what the streaming knows of them, are
-/// dropped, so the scan generates the area again (`Streaming::forget` drops the columns).
-pub fn discard(streaming: &mut Streaming, keys: &HashSet<(i32, i32)>) {
-    for key in keys {
-        streaming.protos.remove(key);
-        streaming.written.remove(key);
-        streaming.decorated.remove(key);
-        streaming.light_views.remove(key);
-        streaming.light_snapshots.remove(key);
-    }
-    streaming.generation_scan.exhausted = false;
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::{Chunk, ChunkGenerator, Job, Proto, Streaming, WorkerContext};
-    use super::{discard, settle};
+    use super::settle;
     use std::collections::HashSet;
     use std::sync::{Arc, Condvar, Mutex};
     use std::time::Duration;
@@ -206,7 +196,8 @@ mod tests {
         assert_eq!(generator.wait_started(2), [running, elsewhere]);
         std::thread::sleep(Duration::from_millis(100));
         assert_eq!(generator.state.lock().unwrap().1, [running, elsewhere]);
-        discard(&mut streaming, &area);
+        let keys: Vec<(i32, i32)> = area.iter().copied().collect();
+        streaming.regenerate(&keys);
         assert!(!streaming.generation_scan.exhausted);
         Ok(())
     }

@@ -339,9 +339,10 @@ const MAX_REGEN_RADIUS: i32 = 32;
 ///   is what the flush is for; unsaved changes in the area are dropped with it.
 /// - Nothing is deleted while a load or generation of the area is still running (`settle`): its result would
 ///   bring the old chunk back. It answers `Regen failed` instead.
-/// - The ring at the radius comes back without features (ores, trees, plants): Horizon's streaming does not
-///   decorate a proto chunk next to a finished one (it can't write into it), while Java's decoration writes into
-///   the neighbours. The ring inside it lacks what those features would have spread into it.
+/// - The ring at the radius is decorated and writes into the kept chunks around it, as Java's `WorldGenRegion`
+///   does (`Streaming::regenerate`), but it reads them as generated again, not as they are: its writes land only
+///   where a kept chunk still holds its generated block, without block entities. As in Java, what the kept
+///   chunks' own decoration once spread into the area is gone (Horizon's #239 replays it).
 fn regen(game: &mut Game<'_>, player: &NativeServerPlayer, radius: i32) {
     let italic = |text: &str| {
         Text::styled(
@@ -379,8 +380,10 @@ fn regen(game: &mut Game<'_>, player: &NativeServerPlayer, radius: i32) {
         return;
     }
     let data = horizon_client::save::terraforged_regen::delete_chunk_data(&game.save, &keys);
-    // The save no longer has the area: memory follows, whatever happened to its entities' records.
-    horizon_client::streaming::terraforged_regen::discard(&mut game.streaming, &set);
+    // The save no longer has the area: memory follows, whatever happened to its entities' records. The
+    // streaming generates it again, its edge decorated against the chunks kept around it, which that
+    // decoration writes into, as Java's WorldGenRegion does with full neighbours.
+    game.streaming.regenerate(&keys);
     // Entities read with a column that loaded since the last tick wait in `loaded_entities`: theirs go too.
     game.world
         .loaded_entities
