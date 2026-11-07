@@ -22,10 +22,10 @@ pub struct Settings {
     /// (`SaturationViability`, 1 - river noise) then falls away from rivers and lakes,
     /// and so do the forests.
     pub sparse_forests: bool,
-    /// Keep cave, ocean, river and beach biomes out of the climate pools (the
-    /// original lets `deep_dark` and `deep_ocean` grow on dry land; oceans, rivers
-    /// and beaches still come from its own overrides), and draw unique caves from
-    /// the overworld's cave biomes, not from every registered biome.
+    /// TerraForged Reimagined's biome fixes: keep cave, ocean, river and beach biomes
+    /// (and stony shore) out of the climate pools (the original lets `deep_dark` and
+    /// `deep_ocean` grow on dry land; its own overrides still place the water ones),
+    /// and draw unique caves from the cave biomes, not from every registered biome.
     pub corrected_biomes: bool,
 }
 

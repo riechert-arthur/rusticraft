@@ -44,7 +44,7 @@ use super::{
     ProtoChunk, SeededPipeline, SurfaceInputs, SurfaceQueries, SurfaceSample, TerrainChunk,
     UniformSurfaceBiomes, WorkerState, WorldGenerationContext, build_surface, overrides, resource,
     stage,
-    terraforged_biome_registry::{CAVE_BIOMES, identifier_order},
+    terraforged_biome_registry::{identifier_order, registry_entries},
     terraforged_cave_assets::current_caves,
     terraforged_cave_biome_sampler::CaveBiomeSampler,
     terraforged_cave_carver::{CarverChunk, NoiseCaveGenerator},
@@ -246,17 +246,24 @@ impl TerraForgedPipeline {
         // CaveBiomeSampler(800, biomeMapManager): GLOBAL caves use terraforged:cave; UNIQUE caves draw from every
         // registered biome (6dd607eb's UNDERGROUND filter is commented out; the Nether's and the End's too), in
         // 26.3's registry order: path, then namespace. `corrected_biomes` keeps only the overworld's cave biomes.
-        let global = data
+        let global: Vec<_> = data
             .biome_id("terraforged:cave")
             .map(Arc::new)
             .into_iter()
             .collect();
         let mut special: Vec<_> = if settings.corrected_biomes {
-            CAVE_BIOMES
+            // TerraForged Reimagined a24d450's CaveBiomeSampler: the registry's `isNonSurface` biomes, or the
+            // GLOBAL pool when there are none.
+            let caves: Vec<_> = registry_entries(data)
                 .iter()
-                .filter(|name| **name != "terraforged:cave")
-                .filter_map(|name| data.biome_id(name))
-                .collect()
+                .filter(|entry| entry.is_non_surface())
+                .map(|entry| *entry.value)
+                .collect();
+            if caves.is_empty() {
+                global.iter().map(|id: &Arc<BiomeId>| **id).collect()
+            } else {
+                caves
+            }
         } else {
             (0..data.biome_names().len() as u32).map(BiomeId).collect()
         };
@@ -2271,12 +2278,10 @@ mod tests {
         let corrected = biomes(true);
         assert!(!corrected.contains("minecraft:the_end"), "{corrected:?}");
         assert!(
-            corrected.iter().any(|name| [
-                "minecraft:lush_caves",
-                "minecraft:dripstone_caves",
-                "minecraft:deep_dark"
-            ]
-            .contains(&name.as_str())),
+            corrected
+                .iter()
+                .any(|name| super::super::terraforged_biome_registry::NON_SURFACE
+                    .contains(&name.as_str())),
             "{corrected:?}"
         );
     }

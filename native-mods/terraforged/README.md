@@ -127,12 +127,19 @@ don't generate, so they need none.
   away from rivers, and river cells above the river bed fill to sea level instead of their base
   height (where the ground is higher anyway). Deterministic either way, with `deterministic` on or
   off.
-- `corrected_biomes`: the climate pools leave out cave biomes (`deep_dark`, `lush_caves`,
-  `dripstone_caves`, `terraforged:cave`) and oceans, rivers and beaches, which TerraForged's own
-  overrides place where they belong, so `deep_dark` no longer spreads sculk over grass and
-  `deep_ocean` no longer covers dry land. Unique caves draw from the overworld's cave biomes instead of
-  every registered biome (the End's and the Nether's included). Structures still see every overworld
-  biome as possible.
+- `corrected_biomes`: TerraForged Reimagined's biome fixes (its `BiomeUtil.isClimateBiome` and
+  `CaveBiomeSampler`, MIT). TerraForged's climate pools take every overworld biome no climate file
+  names, so `deep_dark` spreads sculk over grass and `deep_ocean` covers dry land. With the setting
+  they leave out the cave biomes (Reimagined's `terraforged:non_surface` tag: `deep_dark`,
+  `dripstone_caves`, `lush_caves`, `sulfur_caves`, `terraforged:cave`, plus a data pack's additions to
+  that tag and any biome whose path starts with `cave/` or ends in `_caves`) and the oceans, rivers,
+  beaches and `stony_shore`, which TerraForged's own overrides place where they belong. A climate file
+  that names one of them still places it. Unique caves draw from those cave biomes (in registry order;
+  `terraforged:cave` alone if there are none) instead of every registered biome, the End's and the
+  Nether's included. Structures still see every overworld biome as possible. `/locate biome` finds
+  what the chunks' biome layer holds, so with the setting it no longer finds a cave biome (unique
+  caves write theirs into the chunk while carving, which it doesn't search); `/tf preview` colours by
+  climate and is the same either way. Off, generation is unchanged.
 
 ## Layers
 
