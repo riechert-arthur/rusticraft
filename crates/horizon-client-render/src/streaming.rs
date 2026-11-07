@@ -934,6 +934,7 @@ impl Streaming {
             self.light_views.remove(key);
             self.written.remove(key);
             self.decorated.remove(key);
+            self.light_snapshots.remove(key);
         }
         self.edge_decoration.extend(keys.iter().copied());
         self.generation_scan.exhausted = false;
@@ -1529,6 +1530,9 @@ impl Streaming {
                     Ok(r) => Box::new(r),
                     Err(_) => continue,
                 };
+                // A regenerated column with no finished neighbour decorates as
+                // any other.
+                self.edge_decoration.remove(&(x, z));
                 self.decorating += 1;
                 self.submit(Some((x, z)), 1, Job::Decorate(x, z, region));
             }
@@ -1813,6 +1817,9 @@ impl Streaming {
             let left = deadline.saturating_duration_since(std::time::Instant::now());
             match self.shared.done.recv_timeout(left) {
                 Some(Done::Decorated(x, z, region)) => self.receive_decorated(x, z, *region),
+                Some(Done::DecoratedEdge(x, z, region, writes)) => {
+                    self.receive_decorated_edge(world, x, z, *region, writes)
+                }
                 Some(Done::Generated(chunk)) => self.receive_generated(chunk, world),
                 Some(Done::Saved(protos)) => self.receive_saved(protos),
                 Some(other) => self.deferred.push(other),
