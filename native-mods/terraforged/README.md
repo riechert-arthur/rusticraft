@@ -69,9 +69,10 @@ Differences and gaps:
 - `/locateterrain`, `/tf export structures`, `/tf regen` and `/tf preview` exist only in TerraForged worlds
   (TerraForged registers its three everywhere); `/locateterrain`'s answer comes a moment later, and a radius
   above 100 answers "Unable to locate" where TerraForged's search never ends.
-- `/tf regen <radius>` deletes the area's entities too (TerraForged keeps them), takes a radius of at most
-  32, and brings the outermost ring back without ores, trees or plants (Horizon can't decorate a chunk next
-  to a finished one).
+- `/tf regen <radius>` deletes the area's entities too (TerraForged keeps them) and takes a radius of at
+  most 32. Its outermost ring is decorated against the chunks kept around it as they were generated, not as
+  they are: what it writes into them lands only where they still hold their generated blocks, without block
+  entities.
 - `/tf preview [size] [zoom]` is Horizon's: TerraForged has no in-game preview, only a developer window
   (`Previewer`, never opened by the game). The command draws that window's map of the player's own world to
   `terraforged-preview.png` in the world folder.
@@ -2998,7 +2999,8 @@ player's chunk (`(int) x >> 4`, Java's truncating cast) is deleted from the save
 on the region writer's queue, behind every earlier write, which loads see at once) and from memory (columns, proto
 chunks, block entities, scheduled ticks), and the level's own streaming and generator generate it again; players in the
 level forget the old chunks and are sent the new ones. A regenerated chunk whose neighbours were regenerated too is the
-same, block for block, as in a new world of that seed (checked in game). It answers "Deleting chunks", "Regenerating
+same as in a new world of that seed (checked in game), except where trees of neighbouring chunks collide: those depend
+on the order chunks are decorated in (see above; exact restoration is issue #257). It answers "Deleting chunks", "Regenerating
 chunks" and "Regen complete!" to the player and the operators (`sendSuccess(.., true)`). Differences:
 - Java keeps the area's entities and POIs (only the `region/` records are deleted, and loaded entities stay in the
   entity manager). Horizon loads entities only with a chunk read from the save and ticks them by ticket, where a missing
@@ -3007,9 +3009,12 @@ chunks" and "Regen complete!" to the player and the operators (`sendSuccess(.., 
   it. Players are not entities there and stay where they are, as in Java.
 - The radius is at most 32 (vanilla's largest view distance); TerraForged's `integer(1)` has no maximum, and a large
   radius holds its server thread until the deletes are queued.
-- Java decorates every regenerated chunk, writing its features into the neighbours outside the area. Horizon's streaming
-  does not decorate a proto chunk next to a finished one, so the outermost ring comes back without features (ores,
-  trees, plants, structure pieces), and the ring inside it lacks what they would have spread into it.
+- Java decorates every regenerated chunk, writing its features into the neighbours outside the area through its
+  `WorldGenRegion`. Horizon's `Streaming::regenerate` decorates the outermost ring too, but against copies of the kept
+  neighbours generated again (without their own decoration, their neighbours' or the players' changes), and writes
+  into a kept chunk only where it still holds the block it was generated with; block entities of those writes are not
+  carried over. As in Java, what the kept chunks' decoration once spread into the area (leaves of trees rooted next door)
+  is gone; Horizon's issue #239 replays it.
 - Nothing is deleted while a load or generation of the area is still running, or a decoration or save the flush waits
   for did not finish in 30 seconds: it answers "Regen failed" instead, as it does when the region writer has stopped.
   Unsaved changes in the area are dropped with it.
