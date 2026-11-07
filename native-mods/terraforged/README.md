@@ -34,9 +34,9 @@ operators get `/locateterrain <terrain> [radius]`, `/tf export structures`, `/tf
 The Nether and the End stay vanilla, as in TerraForged. Deliberate fidelity to the pinned source,
 including its quirks: JSON `Bias` nodes decode as 0 (Engine's spec reads a module as a float), cave
 and other non-surface overworld biomes stay in the climate pools (so `deep_dark` can reach the
-surface), unique caves draw from every registered biome (TerraForged's two included),
-`oak_forest` is in no climate pool, so it never generates on the surface, and outside the
-vegetation step each chunk is decorated with the one biome at its lowest corner.
+surface), unique caves draw from every registered biome (TerraForged's two included), `oak_forest`
+is in no climate pool (it lacks `minecraft:is_overworld`), so it never generates on the surface,
+and outside the vegetation step each chunk is decorated with the one biome at its lowest corner.
 
 Differences and gaps:
 
@@ -52,9 +52,9 @@ Differences and gaps:
 - TerraForged's biomes `terraforged:cave` and `terraforged:oak_forest` exist in TerraForged worlds
   only; vanilla worlds' biomes, synced registry and commands stay 26.3's. The bundle ships no
   vanilla biome file: the two are derived at runtime from the game's own 26.3 data, as 6dd607eb's
-  `ModBiome.create` derives them. As in 6dd607eb, `oak_forest` is not a surface biome (it has no
-  `minecraft:is_overworld` tag); TerraForged Reimagined tags it and copies forest instead of
-  plains, which this port does not follow.
+  `ModBiome.create` derives them. `oak_forest` copies plains with no `minecraft:` tag, as in 6dd607eb;
+  TerraForged Reimagined copies forest and tags it `minecraft:is_overworld` (a surface biome) and
+  `minecraft:is_forest`, which this port does not follow.
 - TerraForged's pack makes every overworld taller; here only TerraForged worlds get it.
 - Far terrain (Horizon's distant tiles; TerraForged has none) shows TerraForged's ground and biomes with
   the vanilla surface rule's top blocks, but from the un-eroded height: erosion's regions are too costly to
