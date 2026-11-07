@@ -74,6 +74,20 @@ impl<T: Clone + PartialEq> CarverChunk<T> {
     }
 }
 
+/// One cave config's cavern in a column, for `/locate biome` ([`NoiseCaveGenerator::column_caves`]).
+pub struct ColumnCave<T> {
+    top: i32,
+    bottom: i32,
+    biome: Option<T>,
+}
+
+impl<T> ColumnCave<T> {
+    /// The cave biome `carve` writes for this cave here (`None`: its pool is empty and the quarts keep theirs).
+    pub const fn biome(&self) -> Option<&T> {
+        self.biome.as_ref()
+    }
+}
+
 impl<T: Clone + PartialEq> NoiseCaveGenerator<T> {
     pub fn new(caves: Vec<NoiseCave>, biomes: CaveBiomeSampler<T>, world_seed: i64) -> Self {
         Self {
@@ -167,6 +181,125 @@ impl<T: Clone + PartialEq> NoiseCaveGenerator<T> {
                 .map_err(|_| TerrainError::InvalidState)?;
         }
         Ok(carver)
+    }
+
+    /// Whether a cave may hold `biome`.
+    pub fn may_hold(&self, biome: &T) -> bool
+    where
+        T: PartialEq,
+    {
+        self.biomes.may_hold(biome)
+    }
+
+    /// `/locate biome`'s first look at the column at block `x, z` (no Java counterpart: TerraForged's search reads
+    /// only `Source.getNoiseBiome`): `None` unless a cave config would carve a biome `wanted` accepts there, else
+    /// each cave config that opens a cavern there, in `carve`'s order, with its top (`y + cavern`) and bottom
+    /// (`y - floor`) before the surface clamps them, and the biome `carve` samples for it at this column. The cave
+    /// biomes' noise (one simplex per config) comes first, so a column no wanted biome reaches costs no cave noise.
+    /// `Err` where a noise fails (`carve` fails the chunk there).
+    pub fn column_caves(
+        &self,
+        seed: i32,
+        x: i32,
+        z: i32,
+        wanted: impl Fn(&T) -> bool,
+    ) -> Result<Option<Vec<ColumnCave<T>>>, &'static str> {
+        let biomes: Vec<Option<T>> = self
+            .caves
+            .iter()
+            .map(|config| {
+                self.biomes
+                    .get_underground_biome(
+                        self.source_seed.wrapping_add(config.seed()),
+                        x,
+                        z,
+                        config.cave_type(),
+                    )
+                    .map(|biome| T::clone(biome))
+            })
+            .collect();
+        if !biomes.iter().flatten().any(&wanted) {
+            return Ok(None);
+        }
+        let mut unique = None;
+        let mut caves = Vec::new();
+        for (config, biome) in self.caves.iter().zip(biomes) {
+            let value = match config.cave_type() {
+                CaveType::Global => 1.0,
+                CaveType::Unique => match unique {
+                    Some(value) => value,
+                    None => {
+                        *unique.insert(self.unique.try_value_seed_first(seed, x as f32, z as f32)?)
+                    }
+                },
+            };
+            let y = config.height(seed, x, z)?;
+            let cavern = config.cavern_size(seed, x, z, value)?;
+            if cavern == 0 {
+                continue;
+            }
+            let floor = config.floor_depth(seed, x, z, cavern)?;
+            caves.push(ColumnCave {
+                top: y.wrapping_add(cavern),
+                bottom: y.wrapping_sub(floor),
+                biome,
+            });
+        }
+        Ok(Some(caves))
+    }
+
+    /// Where [`Self::carve`] leaves a cave biome `wanted` accepts in the column whose caves are `caves`
+    /// ([`Self::column_caves`]) and whose first free block over the terrain (OCEAN_FLOOR_WG) is `first_free`: that
+    /// biome and a carved block of the lowest such quart (one above the cave's floor where the quart has it). The surface takes the river breach's mask as 1 (the
+    /// deepest surface `getSurface` gives, away from rivers), so a quart found here is written whatever the river
+    /// noise, and a later cave that would write over it does so here too. Other columns of the same quart (and
+    /// `CarverChunk`'s per-quart biome cache) are not replayed.
+    pub fn written_cave_biome(
+        caves: &[ColumnCave<T>],
+        first_free: i32,
+        sea_level: i32,
+        min_y: i32,
+        wanted: impl Fn(&T) -> bool,
+    ) -> Option<(T, i32)> {
+        let mut surface = first_free.wrapping_sub(2);
+        if surface > sea_level || surface < sea_level - 16 {
+            surface = surface.wrapping_add(9);
+        }
+        let surface = surface.wrapping_sub(16);
+        // `carve_column`: biomes go only to quarts below `(surface - 16) >> 2`.
+        let below = i64::from(surface.wrapping_sub(16) >> 2) * 4;
+        // Each writing cave's inclusive block range, in `carve`'s order (the last write wins).
+        let writes: Vec<(i64, i64, &T)> = caves
+            .iter()
+            .filter_map(|cave| {
+                let top = java_clamp(cave.top, min_y, surface);
+                let bottom = java_clamp(cave.bottom, min_y, surface);
+                let last = i64::from(top).min(below - 1);
+                (top - bottom >= 2 && i64::from(bottom) <= last).then_some((
+                    i64::from(bottom),
+                    last,
+                    cave.biome.as_ref()?,
+                ))
+            })
+            .collect();
+        let lowest = writes.iter().map(|w| w.0 >> 2).min()?;
+        let highest = writes.iter().map(|w| w.1 >> 2).max()?;
+        (lowest..=highest).find_map(|quart| {
+            let (bottom, last, biome) = writes
+                .iter()
+                .rev()
+                .find(|(bottom, last, _)| (bottom >> 2..=last >> 2).contains(&quart))?;
+            // The quart's lowest carved block, or the one above the cave's floor (decoration covers the floor) when
+            // that is still in the quart.
+            let lowest = (*bottom).max(quart * 4);
+            let above = lowest + 1;
+            let y = if lowest == *bottom && above <= (*last).min(quart * 4 + 3) {
+                above
+            } else {
+                lowest
+            };
+            wanted(biome).then(|| (T::clone(biome), y as i32))
+        })
     }
 
     /// `NoiseCaveCarver.getSurface`.

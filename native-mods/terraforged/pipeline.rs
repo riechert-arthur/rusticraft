@@ -49,7 +49,7 @@ use super::{
     terraforged_cave_biome_sampler::CaveBiomeSampler,
     terraforged_cave_carver::{CarverChunk, NoiseCaveGenerator},
     terraforged_current_surface_biomes::CurrentSurfaceBiomeSampler,
-    terraforged_generator_facade::{TerraForgedGenerator, register_live},
+    terraforged_generator_facade::{TerraForgedGenerator, TerraHeightmap, register_live},
     terraforged_generator_preset::{build as build_noise, terrain_levels},
     terraforged_live_biomes::LiveBiomeBindings,
     terraforged_settings::{self, Settings},
@@ -312,6 +312,44 @@ impl TerraForgedPipeline {
     /// The surface sampler [`Self::biome_at`] reads.
     pub(super) fn surface_sampler(&self) -> CurrentSurfaceBiomeSampler<'_, BiomeId> {
         self.biomes.surface_sampler(&self.generator)
+    }
+
+    /// The cave biome of `wanted` the noise caves leave in the column at block `x, z`, and a block of it, for
+    /// `/locate biome` (see [`NoiseCaveGenerator::written_cave_biome`]). The cave biomes' noise comes first, then the
+    /// caves' noise; only a column where a cave would carve a wanted biome reads its height: the un-eroded one first
+    /// (no erosion region), then, if that passes, the eroded height the chunk is filled to, which builds the column's
+    /// erosion region (a fraction of a second; the region the answer's chunks need) and answers. `None` where a noise
+    /// fails, as everywhere in the search.
+    fn cave_biome_at(&self, x: i32, z: i32, wanted: &BTreeSet<BiomeId>) -> Option<(BiomeId, i32)> {
+        if wanted.is_empty() {
+            return None;
+        }
+        let caves = self
+            .caves
+            .column_caves(self.generator.level_seed() as i32, x, z, |biome| {
+                wanted.contains(biome)
+            })
+            .ok()??;
+        if !caves
+            .iter()
+            .any(|cave| cave.biome().is_some_and(|biome| wanted.contains(biome)))
+        {
+            return None;
+        }
+        let (sea_level, min_y) = (self.generator.sea_level(), self.generator.min_y());
+        let written = |first_free: i32| {
+            NoiseCaveGenerator::written_cave_biome(&caves, first_free, sea_level, min_y, |biome| {
+                wanted.contains(biome)
+            })
+        };
+        // `far_heights`' terrain height is the top stone block; OCEAN_FLOOR_WG's first free block is above it.
+        let (height, _) = self.generator.far_heights(x, z).ok()?;
+        written(height.wrapping_add(1))?;
+        written(
+            self.generator
+                .base_height(x, z, TerraHeightmap::OceanFloorWorldgen)
+                .ok()?,
+        )
     }
 
     /// `Source.getNoiseBiome` at block column `x z` (a quart's corner) with the captured seed and no terrain-cache
@@ -960,7 +998,19 @@ impl SeededPipeline for TerraForgedPipeline {
             .map(|id| **id)
             .filter(|id| (search.allowed)(data.biome_name(*id)))
             .collect();
-        if candidates.is_empty() {
+        // Beyond TerraForged (its search never finds them): the biomes only caves hold (terraforged:cave, and the
+        // biomes unique caves draw that no climate pool holds: with `corrected_biomes` the cave biomes, which stay in
+        // `possibleBiomes`) are looked for where the noise caves carve them, column by column after the noise biome.
+        // A biome a climate pool holds is searched as a noise biome only, as before.
+        let underground: BTreeSet<BiomeId> = (0..data.biome_names().len())
+            .map(|id| BiomeId(id as u32))
+            .filter(|id| {
+                !self.biomes.map.pools.holds(id)
+                    && (search.allowed)(data.biome_name(*id))
+                    && self.caves.may_hold(id)
+            })
+            .collect();
+        if candidates.is_empty() && underground.is_empty() {
             return None;
         }
         let y = *super::out_from_origin(
@@ -978,9 +1028,14 @@ impl SeededPipeline for TerraForgedPipeline {
             let x = search.origin[0].wrapping_add(sx.wrapping_mul(search.horizontal));
             let z = search.origin[2].wrapping_add(sz.wrapping_mul(search.horizontal));
             // QuartPos.fromBlock, then `compute`'s `<< 2`: the quart's corner.
-            let biome = self.biome_at(&sampler, x & !3, z & !3);
-            if let Some(biome) = biome.filter(|biome| candidates.contains(biome)) {
-                return Some((data.biome_name(biome).to_owned(), [x, y, z]));
+            if !candidates.is_empty() {
+                let biome = self.biome_at(&sampler, x & !3, z & !3);
+                if let Some(biome) = biome.filter(|biome| candidates.contains(biome)) {
+                    return Some((data.biome_name(biome).to_owned(), [x, y, z]));
+                }
+            }
+            if let Some((biome, cave_y)) = self.cave_biome_at(x, z, &underground) {
+                return Some((data.biome_name(biome).to_owned(), [x, cave_y, z]));
             }
         }
         None
@@ -2077,8 +2132,9 @@ mod tests {
     }
 
     /// `/locate biome` (`findClosestBiome3d`) follows the spiral over TerraForged's noise biomes: it answers with the
-    /// first sampled column whose biome is allowed, at the first sample height, and finds no biome outside
-    /// `possibleBiomes`. Searching adds no terrain-cache entry.
+    /// first sampled column whose biome is allowed, at the first sample height. Outside `possibleBiomes` it finds
+    /// only what the noise caves carve (here, without `corrected_biomes`, any registered biome). Searching adds no
+    /// terrain-cache entry.
     #[test]
     fn locating_a_biome_follows_the_noise_biomes() {
         let Some(data) = data() else { return };
@@ -2133,9 +2189,18 @@ mod tests {
             worker.find_closest_biome(&search(&only_first, origin)),
             Some((first.clone(), [origin[0], y, origin[2]]))
         );
-        // A biome TerraForged's overworld never lists is not found.
+        // A biome TerraForged's overworld never lists is found only where a unique cave carves it (they draw every
+        // registered biome here), at a block of the cave; one no pool holds is not found.
         let nether = |name: &str| name == "minecraft:nether_wastes";
-        assert_eq!(worker.find_closest_biome(&search(&nether, origin)), None);
+        let found = worker.find_closest_biome(&search(&nether, origin));
+        assert!(
+            found.as_ref().is_some_and(
+                |(name, [_, cave_y, _])| name == "minecraft:nether_wastes" && *cave_y != y
+            ),
+            "{found:?}"
+        );
+        let missing = |name: &str| name == "minecraft:no_such_biome";
+        assert_eq!(worker.find_closest_biome(&search(&missing, origin)), None);
         assert_eq!(pipeline.generator.cached_chunks(), 0);
     }
     /// Distant tiles show the chunks' ground: the biome the chunk stores at the surface, the un-eroded height (within
@@ -2288,7 +2353,8 @@ mod tests {
 
     /// Seed 777's noise biomes over 4096 blocks around spawn, with `corrected_biomes` off and on. On, no column
     /// takes a cave biome, and the only biomes that aren't climate choices are the water biomes TerraForged's
-    /// overrides place; `/locate biome` finds no cave biome, and the chunks' biome layer is the noise biomes'.
+    /// overrides place; `/locate biome` finds no cave biome among the noise biomes (it finds them in caves, see
+    /// `locate_finds_cave_biomes_where_the_chunks_hold_them`), and the chunks' biome layer is the noise biomes'.
     #[test]
     fn corrected_biomes_keep_seed_777_s_surface_to_climate_biomes() {
         let Some(data) = data() else { return };
@@ -2369,10 +2435,94 @@ mod tests {
             );
         }
         assert!(faithful_dark.is_some() || !faithful.contains_key("minecraft:deep_dark"));
-        assert_eq!(corrected_dark, None);
+        // On, deep_dark is no noise biome: when `/locate biome` finds it, it is in a cave (not at the first height).
+        assert!(
+            corrected_dark
+                .as_ref()
+                .is_none_or(|(_, [_, y, _])| *y != 64),
+            "{corrected_dark:?}"
+        );
         assert_eq!(
             layer,
             noise.into_iter().map(Option::unwrap).collect::<Vec<_>>()
         );
+    }
+
+    /// `/locate biome` finds the biomes only caves hold, with `corrected_biomes` off and on, in seed 777's world with
+    /// TerraForged's pack: the chunk generated at each answer holds the biome at the answered block, in a carved
+    /// quart below the surface. Off, the cave biomes are noise biomes and are found as before (at the search's first
+    /// height), while `terraforged:cave` and the biomes unique caves draw from every registered one (`the_end`,
+    /// `oak_forest`) are found underground; on, every cave biome is, and `oak_forest`, which no climate and no cave
+    /// places then, is not found.
+    #[test]
+    fn locate_finds_cave_biomes_where_the_chunks_hold_them() {
+        let Some(vanilla) = data() else { return };
+        let data = data_with(&terraforged_biomes(&vanilla)).unwrap();
+        for corrected in [false, true] {
+            terraforged_settings::set_for_thread(Some(Settings {
+                corrected_biomes: corrected,
+                ..terraforged_settings::FAITHFUL
+            }));
+            let (pipeline, overworld) = terraforged(&data, 777, false);
+            terraforged_settings::set_for_thread(None);
+            assert_eq!(pipeline.settings.corrected_biomes, corrected);
+            let mut worker = overworld.worker();
+            let mut search = |name: &'static str| {
+                let allowed = move |candidate: &str| candidate == name;
+                let start = std::time::Instant::now();
+                let found = worker.find_closest_biome(&BiomeSearch {
+                    allowed: &allowed,
+                    origin: [0, 64, 0],
+                    radius: 6400,
+                    horizontal: 32,
+                    vertical: 64,
+                    min_y: -64,
+                    max_y: 959,
+                });
+                eprintln!("{corrected} {name}: {found:?} in {:?}", start.elapsed());
+                found
+            };
+            let mut underground = vec!["terraforged:cave"];
+            if corrected {
+                underground.extend([
+                    "minecraft:lush_caves",
+                    "minecraft:dripstone_caves",
+                    "minecraft:deep_dark",
+                ]);
+            } else {
+                underground.extend(["minecraft:the_end", "terraforged:oak_forest"]);
+                for name in [
+                    "minecraft:lush_caves",
+                    "minecraft:dripstone_caves",
+                    "minecraft:deep_dark",
+                ] {
+                    if let Some((_, [_, y, _])) = search(name) {
+                        assert_eq!(y, 64, "{name} is a noise biome");
+                    }
+                }
+            }
+            for name in underground {
+                let (found, [x, y, z]) =
+                    search(name).unwrap_or_else(|| panic!("{corrected} {name}"));
+                assert_eq!(found, name);
+                let chunk = overworld
+                    .worker()
+                    .generate_proto(ChunkPos::new(x >> 4, z >> 4))
+                    .unwrap();
+                assert_eq!(
+                    chunk.biome_at(x & 15, y, z & 15),
+                    name,
+                    "{corrected} {x} {y} {z}"
+                );
+                assert_eq!(
+                    chunk.block_name(x & 15, y, z & 15),
+                    "minecraft:air",
+                    "{corrected} {name} {x} {y} {z}"
+                );
+            }
+            if corrected {
+                assert_eq!(search("terraforged:oak_forest"), None);
+            }
+        }
     }
 }

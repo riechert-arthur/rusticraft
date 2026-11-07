@@ -77,6 +77,18 @@ impl<T> CaveBiomeSampler<T> {
         }
     }
 
+    /// Whether a cave may hold `biome` (it is in the global or the unique pool).
+    pub fn may_hold(&self, biome: &T) -> bool
+    where
+        T: PartialEq,
+    {
+        self.global
+            .values()
+            .iter()
+            .chain(self.unique.values())
+            .any(|value| **value == *biome)
+    }
+
     /// `getUnderGroundBiome(seed, x, z, type)`: `None` where Java returns null (empty pool, NaN noise).
     pub fn get_underground_biome(
         &self,
