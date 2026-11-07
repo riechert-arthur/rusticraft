@@ -39,7 +39,8 @@ is in no climate pool (it lacks `minecraft:is_overworld`), so it never generates
 and outside the vegetation step each chunk is decorated with the one biome at its lowest corner. Vegetation counts
 only the features that placed (`offset++`) to seed the next, so a tree blocked by a neighbour's
 leaves reseeds the rest of its chunk: the trees depend on the order chunks are decorated in, which
-varies with threads in Java and here alike (`/tf regen` included).
+varies with threads in Java and here alike (`/tf regen` included); Horizon's `deterministic` setting
+([Settings](#settings)) takes most of that away.
 
 Differences and gaps:
 
@@ -72,13 +73,39 @@ Differences and gaps:
 - `/tf regen <radius>` deletes the area's entities too (TerraForged keeps them) and takes a radius of at
   most 32. Its outermost ring is decorated against the chunks kept around it as they were generated, not as
   they are: what it writes into them lands only where they still hold their generated blocks, without block
-  entities.
+  entities. What the kept chunks' own decoration once spread into the area (leaves of trees rooted next door)
+  is replayed into it; TerraForged's regen loses it.
 - `/tf preview [size] [zoom]` is Horizon's: TerraForged has no in-game preview, only a developer window
   (`Previewer`, never opened by the game). The command draws that window's map of the player's own world to
   `terraforged-preview.png` in the world folder.
 - Not ported: TerraForged's dimension effects (clouds at y=300; the pack's Reimagined dimension type
   asks for the same height, but Horizon draws clouds at vanilla's height in every world) and the
   unregistered test volcano feature.
+
+## Settings
+
+Horizon's own additions to TerraForged (none of them is TerraForged's), every one off by default, which
+is the faithful port. A new TerraForged world takes them from `config/terraforged/settings.json` in the
+game folder, written with every setting off the first time, and keeps them in its overworld generator
+(`generator.horizon_settings` in `world_gen_settings.dat`, beside TerraForged's own generator fields),
+so changing the file later leaves existing worlds as they are; Re-Create keeps the world's own. A world
+made before the settings existed has every setting off. Vanilla worlds never get the block or the file. The game installs a world's
+settings as it opens it (also on a dedicated server running a TerraForged world); clients of a server
+don't generate, so they need none.
+
+- `deterministic`: the trees depend much less on the order the chunks decorate in. Vegetation seeds
+  each placement with how many features placed before it in the chunk (`offset++`), and reads the
+  ground from the heightmap, where a neighbour's overhanging leaves may already be: whether a
+  neighbour decorated first changes both, and with them every later tree of the chunk. With the
+  setting, each placement is seeded from a fixed slot (its kind, the biome's place in the chunk, its
+  column or grass pass, and the feature's place in its list), on the ground under any logs, leaves,
+  huge mushrooms, vines or bee nests. Decorating a wooded 3x3 in two orders, about 15% of its tree
+  blocks differ with the setting and 35% without. Not covered: trees that grow into each other
+  across a chunk border, a tree whose own placement (its `heightmap` modifier, which 6dd607eb keeps)
+  lands on a neighbour's leaves, and vanilla's underground blobs (ores, granite...) that overlap a
+  border, which depend on the order in every world. The terrain needs no setting: every noise sample
+  starts fresh (TerraForged's pooled samples carry river noise over from a worker's earlier chunks;
+  that is not reproduced), so heights, rivers and biomes never depend on threads or order.
 
 ## Layers
 
@@ -3015,8 +3042,10 @@ chunks" and "Regen complete!" to the player and the operators (`sendSuccess(.., 
   into a kept chunk only where it still holds the block it was generated with; block entities of those writes are not
   carried over. The copies' terrain-cache entries and carver records are dropped when their edge decoration comes back
   (a HEAD hook on `Streaming::receive_decorated_edge` calls `release_finished`), as a chunk's own decoration drops
-  its own. As in Java, what the kept chunks' decoration once spread into the area (leaves of trees rooted next door)
-  is gone; Horizon's issue #239 replays it.
+  its own. What the kept chunks' decoration once spread into the area (leaves of trees rooted next door), which Java
+  loses, is replayed: `Streaming::regenerate` decorates each kept neighbour that had decorated again, on a worker,
+  against copies of the columns outside the area, before the regenerated chunks beside it decorate, and keeps only
+  its writes into the area.
 - Nothing is deleted while a load or generation of the area is still running, or a decoration or save the flush waits
   for did not finish in 30 seconds: it answers "Regen failed" instead, as it does when the region writer has stopped.
   Unsaved changes in the area are dropped with it.

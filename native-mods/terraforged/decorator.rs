@@ -61,6 +61,13 @@ const EVERY_BIOME: &str = "terraforged:every_biome";
 /// `PositionSampler.BORDER`: how far past the chunk the tree grid reaches.
 const BORDER: f32 = 6.0;
 
+/// The `deterministic` setting's feature-seed slots ([`slot_index`]): a placement's kind in bits 28..31, past every
+/// running count the original reaches.
+const CORNER: i32 = 1;
+const SAMPLED: i32 = 2;
+const GRASS: i32 = 3;
+const OTHER: i32 = 4;
+
 type Random = WorldgenRandom<LegacyRandom>;
 
 /// The features TerraForged decorates with, built once per world. Every registered biome's features are known
@@ -78,6 +85,9 @@ pub(in crate::worldgen) struct TerraForgedFeatures {
     configs: Vec<VegetationConfig>,
     /// `BiomeVegetationManager.getVegetation`, by `BiomeId` (Java computes it lazily per biome; it never changes).
     vegetation: Vec<BiomeVegetation>,
+    /// By block state: what decoration grows above the ground (trees, huge mushrooms, vines, bee nests), which the
+    /// `deterministic` setting looks under for a column's ground ([`RegionPlanting`]'s `top`).
+    canopy: Vec<bool>,
 }
 
 /// `BiomeVegetation`: a biome's vegetation config and its vegetal features split by `VegetationFeatures.create`.
@@ -253,12 +263,21 @@ impl TerraForgedFeatures {
                 BiomeVegetation::new(&decoration, &configs, name, vegetal, river)
             })
             .collect();
+        let registry = data.registry();
+        let canopy = (0..registry.len() as u32)
+            .map(|id| {
+                registry
+                    .state(BlockStateId(id))
+                    .is_some_and(|state| is_canopy(&state.name))
+            })
+            .collect();
         Ok(Some(Self {
             decoration,
             steps,
             structures_per_step,
             configs,
             vegetation,
+            canopy,
         }))
     }
 
@@ -334,6 +353,9 @@ pub(in crate::worldgen) struct TerraForgedDecoration<'a> {
     /// `NoiseCaveGenerator.cache`: the carved chunks' `CarverChunk`s. The decorated chunk's is taken out once the
     /// region is checked; a chunk without one (carved by an earlier run) replays its caves without writing.
     pub carvers: &'a std::sync::Mutex<HashMap<ChunkPos, CarverChunk<BiomeId>>>,
+    /// The world's `deterministic` setting (`terraforged_settings`): the vegetation's fixed feature-seed slots and
+    /// ground under the trees.
+    pub deterministic: bool,
 }
 
 /// `Generator.applyBiomeDecoration`'s `BiomeGenerator.decorate` for the centre of a 3x3 region: `FeatureDecorator`
@@ -492,6 +514,7 @@ pub(in crate::worldgen) fn decorate(
                 decorator: &mut decorator,
                 world: &mut world,
                 context: TerrainViabilityContext(&terrain),
+                deterministic: tf.deterministic,
             },
             random: &mut random,
             seed: decoration_seed,
@@ -500,6 +523,7 @@ pub(in crate::worldgen) fn decorate(
             configs: &features.configs,
             sea_level: tf.generator.sea_level(),
             centre: (terrain.river().get(8, 8), terrain.height_at(8, 8)),
+            deterministic: tf.deterministic,
         }
         .place_vegetation(origin, biome)?;
         decorator.vanilla(
@@ -769,15 +793,36 @@ struct RegionPlanting<'d, 'w, 'a> {
     decorator: &'d mut Decorator<'a>,
     world: &'d mut World<'w>,
     context: TerrainViabilityContext<'d>,
+    /// The `deterministic` setting: a column's top is the ground under any trees.
+    deterministic: bool,
 }
 
 impl Planting for RegionPlanting<'_, '_, '_> {
-    /// `ChunkAccess.getHeight`: one under the region's first free block (`WorldGenRegion.getHeight` adds 1).
+    /// `ChunkAccess.getHeight`: one under the region's first free block (`WorldGenRegion.getHeight` adds 1). With
+    /// `deterministic`, the first block under that which no tree, huge mushroom, vine or bee nest placed (at most 64
+    /// down), so a neighbour's leaves over the column, there or not depending on which chunk decorated first, don't
+    /// move the ground.
     fn top(&mut self, x: i32, z: i32) -> Result<i32, GeneratorError> {
-        self.world
+        let mut y = self
+            .world
             .height(HeightmapType::OceanFloorWg, x, z)
             .map(|first_free| first_free.wrapping_sub(1))
-            .map_err(query_error)
+            .map_err(query_error)?;
+        if self.deterministic {
+            let canopy = &self.decorator.features.canopy;
+            for _ in 0..64 {
+                let state = super::super::placement::PlacementContext::block_state(
+                    &mut *self.world,
+                    [x, y, z],
+                )
+                .map_err(query_error)?;
+                if !canopy.get(state.0 as usize).copied().unwrap_or(false) {
+                    break;
+                }
+                y = y.wrapping_sub(1);
+            }
+        }
+        Ok(y)
     }
 
     fn biome(&mut self, pos: [i32; 3]) -> Result<BiomeId, GeneratorError> {
@@ -816,9 +861,20 @@ struct PositionSampler<'v, P> {
     sea_level: i32,
     /// The terrain data's `getRiver().get(8, 8)` and `getHeight(8, 8)`, for the grass passes.
     centre: (f32, i32),
+    /// The `deterministic` setting: each placement is seeded from a fixed slot ([`slot_index`]) in place of the
+    /// original's running count of placed features, so a tree a neighbour blocks no longer reseeds the rest of the
+    /// chunk.
+    deterministic: bool,
 }
 
 impl<P: Planting> PositionSampler<'_, P> {
+    /// `setFeatureSeed(seed, offset, VEGETAL)`, or with `deterministic` the slot `slot()`.
+    fn seed_feature(&mut self, offset: i32, slot: impl FnOnce() -> i32) {
+        let index = if self.deterministic { slot() } else { offset };
+        self.random
+            .set_feature_seed(self.seed, index, VEGETAL as i32);
+    }
+
     /// `placeVegetation`: `placeTreesAndGrass`, then `placeOther` from the offset it reached.
     fn place_vegetation(&mut self, origin: [i32; 3], biome: BiomeId) -> Result<(), GeneratorError> {
         let offset = self.trees_and_grass()?;
@@ -859,17 +915,18 @@ impl<P: Planting> PositionSampler<'_, P> {
             }
             offset = match vegetation.config {
                 None => {
-                    self.place_at_corner(offset.wrapping_add(i), [start_x, start_z], vegetation)?
+                    self.place_at_corner(offset.wrapping_add(i), i, [start_x, start_z], vegetation)?
                 }
                 Some(config) => {
                     let offset = self.sample(
                         offset.wrapping_add(i),
+                        i,
                         config,
                         biome,
                         vegetation,
                         &viability,
                     )?;
-                    self.grass(offset.wrapping_add(i), [start_x, start_z], vegetation)
+                    self.grass(offset.wrapping_add(i), i, [start_x, start_z], vegetation)
                 }
             };
         }
@@ -881,6 +938,7 @@ impl<P: Planting> PositionSampler<'_, P> {
     fn place_at_corner(
         &mut self,
         mut offset: i32,
+        biome_index: i32,
         [x, z]: [i32; 2],
         vegetation: &BiomeVegetation,
     ) -> Result<i32, GeneratorError> {
@@ -889,9 +947,8 @@ impl<P: Planting> PositionSampler<'_, P> {
             return Ok(offset);
         }
         let trees = vegetation.trees.iter().map(|tree| tree.id);
-        for id in trees.chain(vegetation.grass.iter().copied()) {
-            self.random
-                .set_feature_seed(self.seed, offset, VEGETAL as i32);
+        for (feature, id) in trees.chain(vegetation.grass.iter().copied()).enumerate() {
+            self.seed_feature(offset, || slot_index(CORNER, biome_index, 0, feature));
             if self.planting.place(self.random, id, None, [x, y, z]) {
                 offset = offset.wrapping_add(1);
             }
@@ -903,9 +960,11 @@ impl<P: Planting> PositionSampler<'_, P> {
     /// `placeAt`: a grid of `frequency` cells (rows squashed by `SQUASH_FACTOR`, odd rows shifted half a cell), each
     /// point jittered by its cell's hash; a point in the chunk, above the sea level, in this biome and whose column's
     /// fitness is not under `(1 - density) * rand(hash)` places every tree there.
+    #[allow(clippy::too_many_arguments)]
     fn sample(
         &mut self,
         mut offset: i32,
+        biome_index: i32,
         config: usize,
         biome: BiomeId,
         vegetation: &BiomeVegetation,
@@ -940,9 +999,9 @@ impl<P: Planting> PositionSampler<'_, P> {
                 if fitness < noise {
                     continue;
                 }
-                for tree in &vegetation.trees {
-                    self.random
-                        .set_feature_seed(self.seed, offset, VEGETAL as i32);
+                let column = (z & 15) * 16 + (x & 15);
+                for (feature, tree) in vegetation.trees.iter().enumerate() {
+                    self.seed_feature(offset, || slot_index(SAMPLED, biome_index, column, feature));
                     if self
                         .planting
                         .place(self.random, tree.id, tree.placement.as_deref(), pos)
@@ -957,12 +1016,19 @@ impl<P: Planting> PositionSampler<'_, P> {
 
     /// `placeGrassAt`: [`grass_passes`] passes of the grass features from the chunk's corner at y 0, each pass's
     /// features seeded from `offset + pass` (with the successes so far).
-    fn grass(&mut self, mut offset: i32, [x, z]: [i32; 2], vegetation: &BiomeVegetation) -> i32 {
+    fn grass(
+        &mut self,
+        mut offset: i32,
+        biome_index: i32,
+        [x, z]: [i32; 2],
+        vegetation: &BiomeVegetation,
+    ) -> i32 {
         let passes = grass_passes(self.centre.0, self.centre.1);
         for i in 0..passes {
-            for &id in &vegetation.grass {
-                self.random
-                    .set_feature_seed(self.seed, offset.wrapping_add(i), VEGETAL as i32);
+            for (feature, &id) in vegetation.grass.iter().enumerate() {
+                self.seed_feature(offset.wrapping_add(i), || {
+                    slot_index(GRASS, biome_index, i, feature)
+                });
                 if self.planting.place(self.random, id, None, [x, 0, z]) {
                     offset = offset.wrapping_add(1);
                 }
@@ -974,9 +1040,8 @@ impl<P: Planting> PositionSampler<'_, P> {
     /// `placeOther`: the origin biome's other vegetal features at the origin (`VegetationFeatures.create` never
     /// returns `NONE`, so Java's early return never happens).
     fn other(&mut self, mut offset: i32, origin: [i32; 3], biome: BiomeId) {
-        for &id in &self.vegetation[biome.0 as usize].other {
-            self.random
-                .set_feature_seed(self.seed, offset, VEGETAL as i32);
+        for (feature, &id) in self.vegetation[biome.0 as usize].other.iter().enumerate() {
+            self.seed_feature(offset, || slot_index(OTHER, 0, 0, feature));
             if self.planting.place(self.random, id, None, origin) {
                 offset = offset.wrapping_add(1);
             }
@@ -988,6 +1053,30 @@ impl<P: Planting> PositionSampler<'_, P> {
 /// round the exact root once).
 fn squash_factor() -> f32 {
     2.0 / 3.0_f32.sqrt()
+}
+
+/// Whether the block `name` is one the decoration grows above the ground: logs, wood and leaves (not stripped: no
+/// tree places those), huge mushroom blocks and stems, vines and bee nests.
+fn is_canopy(name: &str) -> bool {
+    [
+        "_leaves",
+        "_log",
+        "_wood",
+        "vine",
+        "mushroom_block",
+        "_stem",
+        "bee_nest",
+    ]
+    .iter()
+    .any(|part| name.contains(part))
+        && !name.starts_with("minecraft:stripped")
+}
+
+/// The `deterministic` setting's feature-seed index of a vegetation placement: its `kind` (bits 28..31), the biome's
+/// place in the chunk's first-met order (bits 20..27), its column or pass (bits 8..19) and the feature's place in its
+/// list (bits 0..7). Fields wrap at their width (no chunk meets 256 biomes; no list holds 256 features).
+fn slot_index(kind: i32, biome: i32, place: i32, feature: usize) -> i32 {
+    kind << 28 | (biome & 0xFF) << 20 | (place & 0xFFF) << 8 | (feature as i32 & 0xFF)
 }
 
 /// `sample(seed, offset, x, z, freq, ..)`'s cell bounds for the chunk whose lowest block is `(x, z)`: `x - BORDER`
@@ -1556,6 +1645,7 @@ G 123456789012345 -1 -1 3292 846005903824255357\n\
                             configs: &configs,
                             sea_level: 62,
                             centre,
+                            deterministic: false,
                         };
                         sampler.place_vegetation(origin, biome).unwrap();
                         planting = sampler.planting;
@@ -1595,6 +1685,100 @@ G 123456789012345 -1 -1 3292 846005903824255357\n\
             }
         }
         assert_eq!(lines.next(), None);
+    }
+
+    /// A stub world that records every placement's feature, position and first draw, and lets a placement succeed
+    /// by `succeeds` (not by the random, so the draws recorded are the seeds').
+    struct Recording {
+        succeeds: fn(usize) -> bool,
+        attempts: Vec<(u32, [i32; 3], i64)>,
+    }
+
+    impl Planting for Recording {
+        fn top(&mut self, x: i32, z: i32) -> Result<i32, GeneratorError> {
+            Ok(40 + (hash_2d(11, x, z) & 63))
+        }
+
+        fn biome(&mut self, [x, y, z]: [i32; 3]) -> Result<BiomeId, GeneratorError> {
+            Ok(BiomeId((hash_2d(12 ^ y, x >> 3, z >> 3) & 3) as u32))
+        }
+
+        fn fitness(&mut self, config: usize, x: i32, z: i32) -> Result<f32, GeneratorError> {
+            Ok(rand(hash_2d(20 + config as i32, x, z)))
+        }
+
+        fn place(
+            &mut self,
+            random: &mut Random,
+            feature: FeatureIdentity,
+            _: Option<&[PlacementModifier]>,
+            pos: [i32; 3],
+        ) -> bool {
+            self.attempts.push((feature.0, pos, random.next_long()));
+            (self.succeeds)(self.attempts.len())
+        }
+    }
+
+    /// With `deterministic`, every vegetation placement gets the same seed whichever placements before it succeed
+    /// (a neighbour's tree in the way, or not); the original's running count reseeds what follows a success, and its
+    /// seeds collide. The slots stay apart from each other.
+    #[test]
+    fn deterministic_seeds_ignore_earlier_placements() {
+        let vegetation = stub_vegetation();
+        let configs = [stub_config([0.2, 0.8, 0.6]), stub_config([0.1, 0.9, 0.9])];
+        let run = |deterministic: bool, succeeds: fn(usize) -> bool| {
+            let mut all = Vec::new();
+            for [cx, cz] in [[0, 0], [3, -2], [-7, 5]] {
+                let planting = Recording {
+                    succeeds,
+                    attempts: Vec::new(),
+                };
+                let mut random = Random::new(LegacyRandom::new(5));
+                let origin = [cx << 4, -64, cz << 4];
+                let mut sampler = PositionSampler {
+                    planting,
+                    random: &mut random,
+                    seed: 99,
+                    chunk: ChunkPos::new(cx, cz),
+                    vegetation: &vegetation,
+                    configs: &configs,
+                    sea_level: 62,
+                    centre: (0.75, 0),
+                    deterministic,
+                };
+                let biome = sampler.planting.biome(origin).unwrap();
+                sampler.place_vegetation(origin, biome).unwrap();
+                all.push(sampler.planting.attempts);
+            }
+            all
+        };
+        let (none, every_third, all) = (|_| false, |n| n % 3 == 0, |_| true);
+        let fixed = run(true, none);
+        assert!(fixed.iter().all(|chunk| !chunk.is_empty()), "{fixed:?}");
+        assert!(fixed.iter().map(Vec::len).sum::<usize>() > 20, "{fixed:?}");
+        assert_eq!(run(true, every_third), fixed);
+        assert_eq!(run(true, all), fixed);
+        for chunk in &fixed {
+            let mut draws: Vec<i64> = chunk.iter().map(|&(_, _, draw)| draw).collect();
+            draws.sort_unstable();
+            draws.dedup();
+            assert_eq!(draws.len(), chunk.len(), "two placements share a seed");
+        }
+        // The faithful port's seeds follow the successes.
+        assert_ne!(run(false, every_third), run(false, none));
+        assert_eq!(run(false, none)[0].len(), fixed[0].len());
+    }
+
+    #[test]
+    fn slot_indices_keep_their_fields_apart() {
+        assert_eq!(slot_index(CORNER, 0, 0, 0), 1 << 28);
+        assert_eq!(slot_index(OTHER, 0, 0, 3), (4 << 28) | 3);
+        assert_eq!(
+            slot_index(SAMPLED, 2, 255, 7),
+            (2 << 28) | (2 << 20) | (255 << 8) | 7
+        );
+        // Each field wraps at its width instead of reaching the next.
+        assert_eq!(slot_index(GRASS, 256, 4096, 256), 3 << 28);
     }
 
     /// `placeGrassAt`'s pass count: 2 + 2 (`maxViability` stays 0) + `floor(4 * river)` - `5 * height`, at least 2.

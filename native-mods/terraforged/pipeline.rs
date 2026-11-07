@@ -52,6 +52,7 @@ use super::{
     terraforged_generator_facade::{TerraForgedGenerator, register_live},
     terraforged_generator_preset::{build as build_noise, terrain_levels},
     terraforged_live_biomes::LiveBiomeBindings,
+    terraforged_settings::{self, Settings},
     terraforged_structure_queries::TfQueries,
     terraforged_structure_terrain::StructureTerrain,
     terraforged_surface_bindings::SurfaceBindings,
@@ -91,6 +92,8 @@ pub(super) struct TerraForgedPipeline {
     features: Option<TerraForgedFeatures>,
     /// `ChunkGenerator`'s structure placement, when the world generates structures.
     structures: Option<StructureState>,
+    /// Horizon's settings of the world (`terraforged_settings`) when the pipeline was built.
+    settings: Settings,
 }
 
 type Carvers = std::sync::Mutex<std::collections::HashMap<ChunkPos, CarverChunk<BiomeId>>>;
@@ -274,6 +277,7 @@ impl TerraForgedPipeline {
             carvers: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             features: TerraForgedFeatures::new(data)?,
             structures,
+            settings: terraforged_settings::current(),
         })
     }
 
@@ -788,6 +792,7 @@ impl SeededPipeline for TerraForgedPipeline {
                 surface: &self.surface,
                 air: self.air,
                 carvers: &self.carvers,
+                deterministic: self.settings.deterministic,
             },
         )?;
         // terrainCache.drop(Seeds.get(region.getSeed()), pos).
@@ -1715,6 +1720,169 @@ mod tests {
         pipeline.carvers.lock().unwrap().remove(&center);
         worker.decorate(&mut region).unwrap();
         assert!(region[4].is_decorated());
+    }
+
+    /// Every block of the middle 3x3 chunks of a fresh 5x5 around `center`, generated on `threads` workers and
+    /// decorated in `order` (offsets from `center`), on a pipeline built with `settings`.
+    fn decorated_in_order(
+        data: &Arc<GeneratorData>,
+        settings: Settings,
+        center: ChunkPos,
+        order: &[(i32, i32)],
+        threads: usize,
+    ) -> BTreeMap<(i32, i32), Vec<u32>> {
+        terraforged_settings::set_for_thread(Some(settings));
+        let (_, overworld) = terraforged(data, 777, false);
+        terraforged_settings::set_for_thread(None);
+        let level = overworld.level();
+        let all: Vec<(i32, i32)> = (-2..=2)
+            .flat_map(|x| (-2..=2).map(move |z| (x, z)))
+            .collect();
+        let made = std::sync::Mutex::new(BTreeMap::new());
+        std::thread::scope(|scope| {
+            for t in 0..threads {
+                let (overworld, all, made) = (&overworld, &all, &made);
+                scope.spawn(move || {
+                    let mut worker = overworld.worker();
+                    for &(x, z) in all.iter().skip(t).step_by(threads) {
+                        let at = ChunkPos::new(center.x + x, center.z + z);
+                        let chunk = worker.generate_proto(at).unwrap();
+                        made.lock().unwrap().insert((x, z), chunk);
+                    }
+                });
+            }
+        });
+        let mut protos = made.into_inner().unwrap();
+        let mut worker = overworld.worker();
+        for &(cx, cz) in order {
+            let keys: Vec<(i32, i32)> = (0..9).map(|i| (cx + i % 3 - 1, cz + i / 3 - 1)).collect();
+            let region: Vec<_> = keys.iter().map(|k| protos.remove(k).unwrap()).collect();
+            let mut region: [ProtoChunk; 9] = region.try_into().ok().unwrap();
+            worker.decorate(&mut region).unwrap();
+            for (key, chunk) in keys.into_iter().zip(region) {
+                protos.insert(key, chunk);
+            }
+        }
+        let (min_y, height) = level;
+        order
+            .iter()
+            .map(|&key| {
+                let chunk = &protos[&key];
+                let mut blocks = Vec::new();
+                for y in min_y..min_y + height {
+                    for z in 0..16 {
+                        for x in 0..16 {
+                            blocks.push(chunk.block(x, y, z).0);
+                        }
+                    }
+                }
+                (key, blocks)
+            })
+            .collect()
+    }
+
+    /// Tree blocks (logs and leaves) of `a` and `b` that differ, and tree blocks in `a`.
+    fn tree_differences(
+        data: &GeneratorData,
+        a: &BTreeMap<(i32, i32), Vec<u32>>,
+        b: &BTreeMap<(i32, i32), Vec<u32>>,
+    ) -> (usize, usize) {
+        let registry = data.registry();
+        let tree = |id: &u32| {
+            registry
+                .state(BlockStateId(*id))
+                .is_some_and(|s| s.name.ends_with("_log") || s.name.ends_with("_leaves"))
+        };
+        let (mut differing, mut trees) = (0, 0);
+        for (key, blocks) in a {
+            for (p, q) in blocks.iter().zip(&b[key]) {
+                trees += usize::from(tree(p));
+                differing += usize::from(p != q && (tree(p) || tree(q)));
+            }
+        }
+        (differing, trees)
+    }
+
+    /// With `deterministic`, the trees of a wooded 3x3 depend much less on the order its chunks decorate in (and on
+    /// how many threads generated them): no placement is reseeded by a neighbour's tree. What is left are trees
+    /// that grow into each other across a chunk border, or that their placement's own `heightmap` modifier puts on
+    /// a neighbour's leaves; vanilla's underground blobs (ores, granite...) overlapping a border depend on the order
+    /// too, as in every world.
+    #[test]
+    #[ignore = "generates and decorates 25 chunks four times (about a minute)"]
+    fn deterministic_trees_depend_less_on_the_decoration_order() {
+        let Some(data) = data() else { return };
+        let forest = {
+            let (_, overworld) = terraforged(&data, 777, false);
+            wooded_chunk(&mut overworld.worker())
+        };
+        let forward: Vec<(i32, i32)> = (-1..=1)
+            .flat_map(|z| (-1..=1).map(move |x| (x, z)))
+            .collect();
+        let backward: Vec<(i32, i32)> = forward.iter().rev().copied().collect();
+        let differences = |settings: Settings| {
+            let a = decorated_in_order(&data, settings, forest, &forward, 1);
+            let b = decorated_in_order(&data, settings, forest, &backward, 4);
+            tree_differences(&data, &a, &b)
+        };
+        let on = differences(Settings {
+            deterministic: true,
+        });
+        let off = differences(Settings::default());
+        eprintln!(
+            "tree blocks differing between the orders: {on:?} deterministic, {off:?} faithful"
+        );
+        assert!(on.1 > 1000, "no forest: {on:?}");
+        assert!(on.0 * 3 < off.0 * 2, "{on:?} vs {off:?}");
+    }
+
+    /// A chunk's terrain data (heights, rivers, gradients, base heights) is the same whichever thread computes it and
+    /// whatever it computed before: the eroded generator resets every sample (`ErodedNoiseGenerator::generate`), so
+    /// TerraForged's river-noise carry-over from a worker's earlier chunks never reaches the world.
+    #[test]
+    fn terrain_data_ignores_threads() {
+        let preset: Value =
+            serde_json::from_str(super::super::terraforged_world_preset::preset_json()).unwrap();
+        let levels = terrain_levels(Some(
+            &preset["dimensions"]["minecraft:overworld"]["generator"]["levels"],
+        ))
+        .unwrap();
+        let summary = |g: &TerraForgedGenerator, x: i32, z: i32| {
+            let handle = g.chunk_data(777, x, z);
+            let d = handle.read();
+            let mut v = Vec::new();
+            for lx in 0..16 {
+                for lz in 0..16 {
+                    v.push((
+                        d.height_at(lx, lz),
+                        d.river().get(lx, lz).to_bits(),
+                        d.normalized_gradient(lx, lz, 1.0).to_bits(),
+                        d.base_height_at(lx, lz),
+                    ));
+                }
+            }
+            v
+        };
+        let all: Vec<(i32, i32)> = (0..4).flat_map(|x| (0..4).map(move |z| (x, z))).collect();
+        let single = build_noise(levels).unwrap();
+        let a: Vec<_> = all.iter().map(|&(x, z)| summary(&single, x, z)).collect();
+        let threaded = build_noise(levels).unwrap();
+        let made = std::sync::Mutex::new(BTreeMap::new());
+        std::thread::scope(|scope| {
+            for t in 0..6 {
+                let (g, all, made) = (&threaded, &all, &made);
+                scope.spawn(move || {
+                    for &(x, z) in all.iter().rev().skip(t).step_by(6) {
+                        let s = summary(g, x, z);
+                        made.lock().unwrap().insert((x, z), s);
+                    }
+                });
+            }
+        });
+        let made = made.into_inner().unwrap();
+        for (i, key) in all.iter().enumerate() {
+            assert!(a[i] == made[key], "chunk {key:?} differs between threads");
+        }
     }
 
     /// TerraForged's decoration knows every registered biome's features, the nether's and the end's included (the

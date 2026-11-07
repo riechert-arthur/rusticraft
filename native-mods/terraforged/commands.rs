@@ -341,8 +341,8 @@ const MAX_REGEN_RADIUS: i32 = 32;
 ///   bring the old chunk back. It answers `Regen failed` instead.
 /// - The ring at the radius is decorated and writes into the kept chunks around it, as Java's `WorldGenRegion`
 ///   does (`Streaming::regenerate`), but it reads them as generated again, not as they are: its writes land only
-///   where a kept chunk still holds its generated block, without block entities. As in Java, what the kept
-///   chunks' own decoration once spread into the area is gone (Horizon's #239 replays it).
+///   where a kept chunk still holds its generated block, without block entities. What the kept chunks' own
+///   decoration once spread into the area, which Java loses, is replayed into it (`Streaming::regenerate`).
 fn regen(game: &mut Game<'_>, player: &NativeServerPlayer, radius: i32) {
     let italic = |text: &str| {
         Text::styled(
