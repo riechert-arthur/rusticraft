@@ -435,3 +435,191 @@ fn saved_proto_block_entities_keep_their_id() {
     drop(save);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Chunks deleted and generated again (`Streaming::regenerate`, TerraForged's
+/// `/tf regen`) decorate like vanilla's: the ring next to the finished columns
+/// is decorated too, against them, instead of counting as decorated already.
+#[test]
+fn regenerated_chunks_decorate_beside_finished_ones() {
+    let Some(root) = resources() else {
+        return;
+    };
+    let assets = Arc::new(Assets::load(&root).unwrap());
+    let render = Arc::new(assets.reload(&root).unwrap());
+    let facts = BlockFacts::load(&root, assets.registry).unwrap();
+    let visibility = models::load_visibility(&root, assets.registry).unwrap();
+    let context = Arc::new(WorkerContext {
+        tables: Arc::new(MeshTables::new(&assets, &render, &facts, visibility).unwrap()),
+        light: Arc::new(LightTables::load(&root, assets.registry, &facts).unwrap()),
+        biomes: horizon_client::biome::BiomeTable::new(Arc::new(Biomes::load(&root).unwrap())),
+        assets,
+        render: render.clone(),
+    });
+    let generator = Arc::new(Recorder::default());
+    let mut session = Session::new(generator.clone(), context);
+    session.settle_at((0, 0));
+    let keys: Vec<(i32, i32)> = (-1..=1)
+        .flat_map(|x| (-1..=1).map(move |z| (x, z)))
+        .collect();
+    for &key in &keys {
+        session.world.modified.remove(&key);
+        session.streaming.forget(&mut session.world, key.0, key.1);
+        generator.chunks.lock().unwrap().remove(&key);
+        generator.protos.lock().unwrap().remove(&key);
+        generator.finished.lock().unwrap().remove(&key);
+    }
+    session.streaming.regenerate(&keys);
+    session.settle_at((0, 0));
+    let finished = generator.finished.lock().unwrap();
+    for &(x, z) in &keys {
+        let finishes = finished
+            .get(&(x, z))
+            .unwrap_or_else(|| panic!("({x}, {z}) was not generated again"));
+        assert_eq!(finishes.len(), 1, "({x}, {z}) finished twice");
+        let column = &finishes[0];
+        assert!(column.decorated, "({x}, {z}) was finished undecorated");
+        // Its own decoration and that of each regenerated neighbour; the
+        // finished columns around wrote into it before it was deleted.
+        let mut writes = column.writes.clone();
+        writes.sort_unstable();
+        let mut expected: Vec<(i32, i32)> = keys
+            .iter()
+            .copied()
+            .filter(|k| (k.0 - x).abs() <= 1 && (k.1 - z).abs() <= 1)
+            .collect();
+        expected.sort_unstable();
+        assert_eq!(writes, expected, "({x}, {z})");
+    }
+}
+
+/// Generation whose proto chunks are columns: decorating a centre sets two
+/// blocks (`EDGE_YS`) in each of the nine, at the centre's own position in
+/// the chunk, so what it wrote into a neighbour can be told apart.
+#[derive(Default)]
+struct Writer {
+    /// How many times each column was finished.
+    finished: Mutex<HashMap<(i32, i32), usize>>,
+}
+const EDGE_YS: [i32; 2] = [1, 2];
+impl ChunkGenerator for Writer {
+    type Worker = ();
+    fn worker(&self) {}
+    fn proto(&self, _: &mut (), x: i32, z: i32) -> Proto {
+        Box::new((Chunk::empty(x, z), false))
+    }
+    fn decorates(&self) -> bool {
+        true
+    }
+    fn decorate(&self, _: &mut (), region: &mut [Proto; 9]) {
+        let center = &region[4].downcast_ref::<(Chunk, bool)>().unwrap().0;
+        let (lx, lz) = (center.x & 15, center.z & 15);
+        for proto in region.iter_mut() {
+            let chunk = &mut proto.downcast_mut::<(Chunk, bool)>().unwrap().0;
+            for y in EDGE_YS {
+                chunk.set(lx, chunk.min_y() + y, lz, 1);
+            }
+        }
+        region[4].downcast_mut::<(Chunk, bool)>().unwrap().1 = true;
+    }
+    fn finish(&self, proto: Proto) -> Chunk {
+        let (mut chunk, _) = *proto.downcast::<(Chunk, bool)>().unwrap();
+        *self
+            .finished
+            .lock()
+            .unwrap()
+            .entry((chunk.x, chunk.z))
+            .or_default() += 1;
+        chunk.fresh = true;
+        chunk
+    }
+    fn is_decorated(&self, proto: &Proto) -> bool {
+        proto.downcast_ref::<(Chunk, bool)>().unwrap().1
+    }
+    fn light_view(&self, proto: &Proto) -> Option<Chunk> {
+        Some(proto.downcast_ref::<(Chunk, bool)>().unwrap().0.clone())
+    }
+}
+
+/// What a regenerated column's decoration writes into a finished neighbour
+/// lands in the live column only where it still holds the generated block:
+/// a block the player changed stays, and the neighbour is not finished again.
+#[test]
+fn regenerated_edges_write_into_finished_neighbours() {
+    let Some(root) = resources() else {
+        return;
+    };
+    let assets = Arc::new(Assets::load(&root).unwrap());
+    let render = Arc::new(assets.reload(&root).unwrap());
+    let facts = BlockFacts::load(&root, assets.registry).unwrap();
+    let visibility = models::load_visibility(&root, assets.registry).unwrap();
+    let context = Arc::new(WorkerContext {
+        tables: Arc::new(MeshTables::new(&assets, &render, &facts, visibility).unwrap()),
+        light: Arc::new(LightTables::load(&root, assets.registry, &facts).unwrap()),
+        biomes: horizon_client::biome::BiomeTable::new(Arc::new(Biomes::load(&root).unwrap())),
+        assets,
+        render: render.clone(),
+    });
+    let generator = Arc::new(Writer::default());
+    let mut streaming = Streaming::new(generator.clone(), context, 3);
+    streaming.radius = 4;
+    let mut world = World::new(BlockStateId(0), 0);
+    let settle = |streaming: &mut Streaming, world: &mut World| {
+        let deadline = Instant::now() + Duration::from_secs(120);
+        let mut quiet = 0;
+        while quiet < 40 {
+            assert!(Instant::now() < deadline, "generation never settled");
+            let before = (streaming.generated_total, world.chunks.len());
+            streaming.update(world);
+            thread::sleep(Duration::from_millis(5));
+            let idle = streaming.pending() == 0
+                && before == (streaming.generated_total, world.chunks.len());
+            quiet = if idle { quiet + 1 } else { 0 };
+        }
+    };
+    settle(&mut streaming, &mut world);
+    // (1, 0) is regenerated; (2, 0) is kept. (1, 0)'s decoration wrote at
+    // x = 2 * 16 + 1, z = 0 in it. One of its two blocks is cleared (to be
+    // written again), the other changed by the player (to stay).
+    let min_y = world.chunks[&(2, 0)].min_y();
+    let (cleared, changed) = ((33, min_y + EDGE_YS[0], 0), (33, min_y + EDGE_YS[1], 0));
+    for (x, y, z) in [cleared, changed] {
+        assert_eq!(world.block(x, y, z), BlockStateId(1), "first decoration");
+    }
+    world
+        .set(cleared.0, cleared.1, cleared.2, BlockStateId(0))
+        .unwrap();
+    world
+        .set(changed.0, changed.1, changed.2, BlockStateId(2))
+        .unwrap();
+    let keys: Vec<(i32, i32)> = (-1..=1)
+        .flat_map(|x| (-1..=1).map(move |z| (x, z)))
+        .collect();
+    for &(x, z) in &keys {
+        streaming.forget(&mut world, x, z);
+    }
+    streaming.regenerate(&keys);
+    settle(&mut streaming, &mut world);
+    assert_eq!(
+        world.block(cleared.0, cleared.1, cleared.2),
+        BlockStateId(1)
+    );
+    assert_eq!(
+        world.block(changed.0, changed.1, changed.2),
+        BlockStateId(2)
+    );
+    let finished = generator.finished.lock().unwrap();
+    for x in -2..=2 {
+        for z in -2..=2 {
+            let again = keys.contains(&(x, z));
+            assert_eq!(finished[&(x, z)], 1 + again as usize, "({x}, {z})");
+        }
+    }
+    // The regenerated columns hold their own decoration again.
+    for &(x, z) in &keys {
+        let y = world.chunks[&(x, z)].min_y() + EDGE_YS[0];
+        assert_eq!(
+            world.block(x * 16 + (x & 15), y, z * 16 + (z & 15)),
+            BlockStateId(1)
+        );
+    }
+}

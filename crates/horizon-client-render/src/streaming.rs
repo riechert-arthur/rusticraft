@@ -179,6 +179,10 @@ struct MeshSettings {
 enum Job {
     Generate(i32, i32),
     Decorate(i32, i32, Box<[Proto; 9]>),
+    /// Decorate a column next to finished ones (`Streaming::regenerate`):
+    /// the finished neighbours (`None`) are generated again for the job, and
+    /// what decoration writes into them comes back as block writes.
+    DecorateEdge(i32, i32, Box<[Option<Proto>; 9]>),
     Finish(Proto),
     Light(i32, i32, Box<Region>, u64, bool),
     Mesh(i32, i32, i32, Box<Region>, u64, MeshSettings),
@@ -189,11 +193,23 @@ enum Job {
     /// is given back here, not in the frame.
     Free(Vec<((i32, i32, i32), SectionMesh)>),
 }
+/// A block decoration wrote into a finished column: x, y, z, the block the
+/// column was generated with there, and the new one.
+pub type EdgeWrite = (
+    i32,
+    i32,
+    i32,
+    horizon_world::registry::BlockStateId,
+    horizon_world::registry::BlockStateId,
+);
 pub enum Done {
     Generated(Chunk),
     /// A proto chunk, and whether it was decorated (loaded so from the save).
     Proto(i32, i32, Proto, bool),
     Decorated(i32, i32, Box<[Proto; 9]>),
+    /// A `Job::DecorateEdge`: the proto chunks it checked out, and the blocks
+    /// its decoration wrote into the finished neighbours.
+    DecoratedEdge(i32, i32, Box<[Option<Proto>; 9]>, Vec<EdgeWrite>),
     Lit(i32, i32, Vec<crate::chunk::Light>, u64),
     Meshed(i32, i32, i32, SectionMesh, u64),
     Saved(Vec<((i32, i32), Proto)>),
@@ -329,6 +345,9 @@ pub struct Streaming {
     /// the proto is checked out, replaced or removed.
     light_views: FxHashMap<(i32, i32), Arc<Chunk>>,
     decorated: FxHashSet<(i32, i32)>,
+    /// Columns that decorate even next to finished ones, writing into them
+    /// (`regenerate`).
+    edge_decoration: FxHashSet<(i32, i32)>,
     decorating: usize,
     /// Save jobs in flight.
     saving: usize,
@@ -657,6 +676,9 @@ impl Streaming {
                                     generator.decorate(&mut worker, &mut region);
                                     Done::Decorated(x, z, region)
                                 }
+                                Job::DecorateEdge(x, z, region) => {
+                                    decorate_edge(&*generator, &mut worker, x, z, *region)
+                                }
                                 Job::Finish(proto) => Done::Generated(generator.finish(proto)),
                                 Job::Save(protos) => {
                                     let refs: Vec<&Proto> = protos.iter().map(|(_, p)| p).collect();
@@ -736,6 +758,7 @@ impl Streaming {
             protos: Default::default(),
             light_views: Default::default(),
             decorated: Default::default(),
+            edge_decoration: Default::default(),
             decorating: 0,
             saving: 0,
             decoration_order: DecorationOrder::default(),
@@ -892,6 +915,62 @@ impl Streaming {
         self.queue_basis = (basis, self.extra.clone());
         let mut queue = self.shared.queue.lock().unwrap();
         rank_again(&mut queue, |x, z| self.distance(x, z));
+    }
+    /// Generate the columns at `keys` again (chunks deleted from the save and
+    /// forgotten): their proto chunks and decoration are dropped, and they
+    /// decorate even next to finished columns, writing into them as a
+    /// `WorldGenRegion` writes into its full neighbours. Otherwise a column
+    /// beside a finished one counts as decorated already (it was, before it
+    /// was saved).
+    ///
+    /// Unlike vanilla, decoration does not read the finished columns as they
+    /// are: it reads them generated again (without their own decoration, their
+    /// neighbours' or the player's changes), and its writes land only where
+    /// the live column still holds that generated block. Block entities of
+    /// what it writes there are not carried over.
+    pub fn regenerate(&mut self, keys: &[(i32, i32)]) {
+        for key in keys {
+            self.protos.remove(key);
+            self.light_views.remove(key);
+            self.written.remove(key);
+            self.decorated.remove(key);
+            self.light_snapshots.remove(key);
+        }
+        self.edge_decoration.extend(keys.iter().copied());
+        self.generation_scan.exhausted = false;
+        self.order_area = None;
+    }
+    fn receive_decorated_edge(
+        &mut self,
+        world: &mut World,
+        x: i32,
+        z: i32,
+        region: [Option<Proto>; 9],
+        writes: Vec<EdgeWrite>,
+    ) {
+        self.generation_scan.exhausted = false;
+        self.decorating -= 1;
+        self.decorated.insert((x, z));
+        for (i, proto) in region.into_iter().enumerate() {
+            let Some(proto) = proto else {
+                continue;
+            };
+            let key = (x + (i % 3) as i32 - 1, z + (i / 3) as i32 - 1);
+            self.light_views.remove(&key);
+            self.protos.insert(key, Some(proto));
+            self.written.insert(key);
+        }
+        for (bx, by, bz, generated, state) in writes {
+            // Only where the column still holds what generation put there: its
+            // own decoration and the player's changes win, as features check
+            // the blocks they replace. A column unloaded meanwhile keeps its
+            // saved blocks.
+            if world.chunks.contains_key(&(bx >> 4, bz >> 4))
+                && world.block(bx, by, bz) == generated
+            {
+                let _ = world.set(bx, by, bz, state);
+            }
+        }
     }
     fn receive_decorated(&mut self, x: i32, z: i32, region: [Proto; 9]) {
         self.generation_scan.exhausted = false;
@@ -1159,6 +1238,9 @@ impl Streaming {
                     }
                 }
                 Done::Decorated(x, z, region) => self.receive_decorated(x, z, *region),
+                Done::DecoratedEdge(x, z, region, writes) => {
+                    self.receive_decorated_edge(world, x, z, *region, writes)
+                }
                 Done::Generated(chunk) => self.receive_generated(chunk, world),
                 Done::Saved(protos) => self.receive_saved(protos),
                 Done::Lit(x, z, sections, seq) => {
@@ -1400,7 +1482,32 @@ impl Streaming {
                 // worlds saved before proto chunks were saved get here (their
                 // final chunks' neighbours are generated again).
                 if keys.iter().any(|k| world.chunks.contains_key(k)) {
-                    self.decorated.insert((x, z));
+                    if !self.edge_decoration.contains(&(x, z)) {
+                        self.decorated.insert((x, z));
+                        continue;
+                    }
+                    let ready = keys.iter().all(|k| {
+                        world.chunks.contains_key(k) || matches!(self.protos.get(k), Some(Some(_)))
+                    });
+                    if !ready {
+                        continue;
+                    }
+                    self.edge_decoration.remove(&(x, z));
+                    let region: Vec<Option<Proto>> = keys
+                        .iter()
+                        .map(|k| {
+                            if world.chunks.contains_key(k) {
+                                return None;
+                            }
+                            self.light_views.remove(k);
+                            self.protos.insert(*k, None).flatten()
+                        })
+                        .collect();
+                    let Ok(region) = <[Option<Proto>; 9]>::try_from(region) else {
+                        continue;
+                    };
+                    self.decorating += 1;
+                    self.submit(Some((x, z)), 1, Job::DecorateEdge(x, z, Box::new(region)));
                     continue;
                 }
                 if !keys
@@ -1423,6 +1530,9 @@ impl Streaming {
                     Ok(r) => Box::new(r),
                     Err(_) => continue,
                 };
+                // A regenerated column with no finished neighbour decorates as
+                // any other.
+                self.edge_decoration.remove(&(x, z));
                 self.decorating += 1;
                 self.submit(Some((x, z)), 1, Job::Decorate(x, z, region));
             }
@@ -1707,6 +1817,9 @@ impl Streaming {
             let left = deadline.saturating_duration_since(std::time::Instant::now());
             match self.shared.done.recv_timeout(left) {
                 Some(Done::Decorated(x, z, region)) => self.receive_decorated(x, z, *region),
+                Some(Done::DecoratedEdge(x, z, region, writes)) => {
+                    self.receive_decorated_edge(world, x, z, *region, writes)
+                }
                 Some(Done::Generated(chunk)) => self.receive_generated(chunk, world),
                 Some(Done::Saved(protos)) => self.receive_saved(protos),
                 Some(other) => self.deferred.push(other),
@@ -1735,6 +1848,9 @@ impl Streaming {
         while let Some(done) = self.shared.done.try_recv() {
             match done {
                 Done::Decorated(x, z, region) => self.receive_decorated(x, z, *region),
+                Done::DecoratedEdge(x, z, region, writes) => {
+                    self.receive_decorated_edge(world, x, z, *region, writes)
+                }
                 Done::Generated(chunk) => self.receive_generated(chunk, world),
                 Done::Saved(protos) => self.receive_saved(protos),
                 other => self.deferred.push(other),
@@ -2191,6 +2307,74 @@ fn nearest_first<T: Ord>(candidates: &mut Vec<T>, room: usize) {
         candidates.truncate(room);
     }
     candidates.sort_unstable();
+}
+/// `Job::DecorateEdge` on a worker: the finished neighbours are generated
+/// again for the region, and the blocks decoration changed in them are
+/// returned to be written into the finished columns.
+fn decorate_edge<G: ChunkGenerator>(
+    generator: &G,
+    worker: &mut G::Worker,
+    x: i32,
+    z: i32,
+    region: [Option<Proto>; 9],
+) -> Done {
+    let mut owned = [false; 9];
+    let mut filled: Vec<Proto> = Vec::with_capacity(9);
+    for (i, proto) in region.into_iter().enumerate() {
+        owned[i] = proto.is_some();
+        filled.push(proto.unwrap_or_else(|| {
+            generator.proto(worker, x + (i % 3) as i32 - 1, z + (i / 3) as i32 - 1)
+        }));
+    }
+    let before: Vec<Option<Chunk>> = filled
+        .iter()
+        .zip(owned)
+        .map(|(p, own)| if own { None } else { generator.light_view(p) })
+        .collect();
+    let mut filled: [Proto; 9] = match filled.try_into() {
+        Ok(r) => r,
+        Err(_) => unreachable!(),
+    };
+    generator.decorate(worker, &mut filled);
+    let mut writes = Vec::new();
+    for (i, proto) in filled.iter().enumerate() {
+        let (Some(old), Some(new)) = (
+            &before[i],
+            generator.light_view(proto).filter(|_| !owned[i]),
+        ) else {
+            continue;
+        };
+        let (cx, cz) = (x + (i % 3) as i32 - 1, z + (i / 3) as i32 - 1);
+        for (si, (a, b)) in old.sections.iter().zip(&new.sections).enumerate() {
+            if Arc::ptr_eq(a, b) {
+                continue;
+            }
+            let base = old.min_y() + si as i32 * 16;
+            for y in base..base + 16 {
+                for lz in 0..16 {
+                    for lx in 0..16 {
+                        let (generated, state) = (old.get(lx, y, lz), new.get(lx, y, lz));
+                        if generated != state {
+                            writes.push((
+                                cx * 16 + lx,
+                                y,
+                                cz * 16 + lz,
+                                horizon_world::registry::BlockStateId(generated),
+                                horizon_world::registry::BlockStateId(state),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut region = filled.map(Some);
+    for (slot, own) in region.iter_mut().zip(owned) {
+        if !own {
+            *slot = None;
+        }
+    }
+    Done::DecoratedEdge(x, z, Box::new(region), writes)
 }
 #[cfg(test)]
 mod tests {
