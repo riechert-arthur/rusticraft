@@ -1,8 +1,9 @@
 // Horizon's own TerraForged settings, beyond the original's. Every one is off by
 // default, which is the faithful port. A world keeps the settings it was created with
-// in its overworld stem (`generator.horizon_settings`), the way the original keeps
-// its own settings in the generator; the game sets them here when it opens the world,
-// before it builds the generator.
+// in its overworld stem (`generator.horizon_settings`), beside the generator's own
+// fields (6dd607eb's `levels`; Reimagined keeps its `settings` there too). The game sets
+// them here through `WorldGen::preset` (`terraforged_world_type::preset`) as it opens
+// the world, before it builds the world's generators, which read them once.
 
 use serde_json::{Map, Value};
 use std::sync::RwLock;
