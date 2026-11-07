@@ -355,7 +355,7 @@ pub struct Streaming {
     /// into them (`regenerate`), and those whose replay is in flight.
     spill: FxHashSet<(i32, i32)>,
     spilling: FxHashSet<(i32, i32)>,
-    /// The columns `regenerate` was given.
+    /// The columns `regenerate` was given, until they are finished.
     regenerated: FxHashSet<(i32, i32)>,
     /// Where vanilla's order (`vanilla_order`) put the regenerated columns and
     /// the replays around them when they were first decorated.
@@ -951,6 +951,8 @@ impl Streaming {
             self.written.remove(key);
             self.decorated.remove(key);
             self.light_snapshots.remove(key);
+            // Regenerated, it decorates itself again.
+            self.spill.remove(key);
         }
         self.edge_decoration.extend(keys.iter().copied());
         // The columns around keep what their decoration wrote into the deleted
@@ -1024,10 +1026,22 @@ impl Streaming {
     /// Replay the decoration of finished columns into the regenerated proto
     /// chunks beside them (`spill`), once those are generated and before they
     /// decorate. The replay's other neighbours are generated again for it.
-    fn schedule_spill(&mut self, workers: usize) {
+    fn schedule_spill(&mut self, world: &World, workers: usize) {
+        // Only a column that decorated already wrote into the deleted chunks.
+        // One still to decorate (a proto chunk at the edge of what was
+        // generated) writes into the new ones itself: replayed as well, its
+        // decoration would land twice. One not loaded or still loading waits
+        // until it is known, as its regenerated neighbours do.
+        let (protos, decorated) = (&self.protos, &self.decorated);
+        self.spill
+            .retain(|k| !protos.contains_key(k) || decorated.contains(k));
         let mut pending: Vec<(u64, (i32, i32))> = self
             .spill
             .iter()
+            .filter(|k| {
+                world.chunks.contains_key(k)
+                    || (self.protos.contains_key(k) && self.decorated.contains(k))
+            })
             .map(|&k| (self.regen_rank(k), k))
             .collect();
         pending.sort_unstable();
@@ -1039,9 +1053,10 @@ impl Streaming {
                 .flat_map(|dz| (-2..=2).map(move |dx| (x + dx, z + dz)))
                 .filter(|n| self.regenerated.contains(n))
                 .collect();
-            // Regenerated columns ranked before it decorate first, the rest after.
+            // Regenerated columns ranked before it decorate first, the rest after
+            // (those ranked with it, unranked ones, after: see `replaying`).
             let earlier_done = near.iter().all(|&n| {
-                self.regen_rank(n) > own || (self.decorated.contains(&n) && !self.decorating_at(n))
+                self.regen_rank(n) >= own || (self.decorated.contains(&n) && !self.decorating_at(n))
             });
             let later_waiting = near
                 .iter()
@@ -1129,6 +1144,9 @@ impl Streaming {
         self.generating.remove(&key);
         self.finishing.remove(&key);
         self.decorated.insert(key);
+        // Finished, a regenerated column is one like any other: a later
+        // `regenerate` beside it replays its decoration.
+        self.regenerated.remove(&key);
         // A column that finished after the player moved away is dropped
         // whole: its block entities and saved entities too, or they would
         // stay in the world (and the entities spawn again, duplicated, when
@@ -1581,20 +1599,22 @@ impl Streaming {
                 w.0 = self.decoration_order.rank_or_append(w.2, w.3);
             }
             wanted.sort_unstable();
-            self.schedule_spill(workers);
+            self.schedule_spill(world, workers);
             for (_, _, x, z) in wanted {
                 if self.decorating >= workers * 2 {
                     break;
                 }
                 // Replays ranked before it within two (their writes reach what it
-                // reads and writes) go first.
+                // reads and writes) go first, and those ranked with it: columns past
+                // `vanilla_order`'s area are all unranked, and a replay that waited
+                // for them would come too late.
                 let replaying = |s: &Self| {
                     let own = s.regen_rank((x, z));
                     (-2..=2).any(|dz| {
                         (-2..=2).any(|dx| {
                             let n = (x + dx, z + dz);
                             (s.spill.contains(&n) || s.spilling.contains(&n))
-                                && s.regen_rank(n) < own
+                                && s.regen_rank(n) <= own
                         })
                     })
                 };
