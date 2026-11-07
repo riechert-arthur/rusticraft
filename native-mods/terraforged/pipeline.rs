@@ -2285,4 +2285,94 @@ mod tests {
             "{corrected:?}"
         );
     }
+
+    /// Seed 777's noise biomes over 4096 blocks around spawn, with `corrected_biomes` off and on. On, no column
+    /// takes a cave biome, and the only biomes that aren't climate choices are the water biomes TerraForged's
+    /// overrides place; `/locate biome` finds no cave biome, and the chunks' biome layer is the noise biomes'.
+    #[test]
+    fn corrected_biomes_keep_seed_777_s_surface_to_climate_biomes() {
+        let Some(data) = data() else { return };
+        let entries = registry_entries(&data);
+        let entry = |name: &str| entries.iter().find(|e| *e.name == *name).unwrap();
+        let overrides = [
+            "minecraft:deep_cold_ocean",
+            "minecraft:deep_frozen_ocean",
+            "minecraft:deep_lukewarm_ocean",
+            "minecraft:deep_ocean",
+            "minecraft:cold_ocean",
+            "minecraft:frozen_ocean",
+            "minecraft:warm_ocean",
+            "minecraft:ocean",
+            "minecraft:snowy_beach",
+            "minecraft:stony_shore",
+            "minecraft:beach",
+            "minecraft:frozen_river",
+            "minecraft:river",
+        ];
+        let quarts: Vec<[i32; 3]> = (-64..64)
+            .flat_map(|x| (-64..64).map(move |z| [x * 8, 0, z * 8]))
+            .collect();
+        let run = |corrected| {
+            terraforged_settings::set_for_thread(Some(Settings {
+                corrected_biomes: corrected,
+                ..terraforged_settings::FAITHFUL
+            }));
+            let (pipeline, overworld) = terraforged(&data, 777, false);
+            terraforged_settings::set_for_thread(None);
+            assert_eq!(pipeline.settings.corrected_biomes, corrected);
+            let mut worker = overworld.worker();
+            let biomes = worker.noise_biomes(&quarts);
+            let mut counts = BTreeMap::<String, usize>::new();
+            for biome in biomes.iter().flatten() {
+                *counts.entry(biome.clone()).or_default() += 1;
+            }
+            let mut search = |name: &'static str| {
+                let allowed = move |candidate: &str| candidate == name;
+                worker.find_closest_biome(&BiomeSearch {
+                    allowed: &allowed,
+                    origin: [0, 64, 0],
+                    radius: 2_048,
+                    horizontal: 32,
+                    vertical: 64,
+                    min_y: -64,
+                    max_y: 319,
+                })
+            };
+            let deep_dark = search("minecraft:deep_dark");
+            let chunk = overworld
+                .worker()
+                .generate_proto(ChunkPos::new(3, -5))
+                .unwrap();
+            let layer: Vec<_> = (0..4)
+                .flat_map(|x| (0..4).map(move |z| [x, z]))
+                .map(|[x, z]| chunk.biome_at(x * 4, 300, z * 4).to_owned())
+                .collect();
+            let noise: Vec<_> = (0..4)
+                .flat_map(|x| (0..4).map(move |z| [12 + x, 0, -20 + z]))
+                .collect();
+            let noise = overworld.worker().noise_biomes(&noise);
+            (counts, deep_dark, layer, noise)
+        };
+        let (faithful, faithful_dark, _, _) = run(false);
+        let (corrected, corrected_dark, layer, noise) = run(true);
+        eprintln!("faithful {faithful:?}\ncorrected {corrected:?}");
+        assert!(
+            faithful
+                .keys()
+                .any(|name| !entry(name).is_climate_biome() && !overrides.contains(&name.as_str())),
+            "{faithful:?}"
+        );
+        for name in corrected.keys() {
+            assert!(
+                entry(name).is_climate_biome() || overrides.contains(&name.as_str()),
+                "{name} in {corrected:?}"
+            );
+        }
+        assert!(faithful_dark.is_some() || !faithful.contains_key("minecraft:deep_dark"));
+        assert_eq!(corrected_dark, None);
+        assert_eq!(
+            layer,
+            noise.into_iter().map(Option::unwrap).collect::<Vec<_>>()
+        );
+    }
 }
