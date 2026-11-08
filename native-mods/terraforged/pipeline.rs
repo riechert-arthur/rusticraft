@@ -97,6 +97,8 @@ pub(super) struct TerraForgedPipeline {
     features: Option<TerraForgedFeatures>,
     /// `ChunkGenerator`'s structure placement, when the world generates structures.
     structures: Option<StructureState>,
+    /// The blocks of `erosion_deposits` when the world has it on (`terraforged_deposits`).
+    deposits: Option<super::terraforged_deposits::DepositBlocks>,
     /// Horizon's settings of the world (`terraforged_settings`) when the pipeline was built.
     settings: Settings,
 }
@@ -302,6 +304,11 @@ impl TerraForgedPipeline {
             carvers: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             features: TerraForgedFeatures::new(data)?,
             structures,
+            // `erosion_deposits`' blocks (Horizon's setting); None without it.
+            deposits: settings
+                .erosion_deposits
+                .then(|| super::terraforged_deposits::DepositBlocks::new(data.registry))
+                .flatten(),
             settings,
         })
     }
@@ -783,6 +790,16 @@ impl SeededPipeline for TerraForgedPipeline {
                 self.generator.sea_level(),
             )
             .map_err(stage("surface"))?;
+        // Horizon's `erosion_deposits`: erosion's sediment on the natural surface (no height changes).
+        if let Some(blocks) = &self.deposits {
+            super::terraforged_deposits::apply(
+                self.generator.seed(),
+                &terrain.read(),
+                &mut chunk,
+                blocks,
+            )
+            .map_err(stage("deposits"))?;
+        }
 
         // applyCarvers: TerraForged's noise caves with `(int)` of the level seed; no vanilla carvers run (6dd607eb's
         // `applyCarvers` replaces them). The CarverChunk (the biomes each cave passed through) is kept for the
@@ -2639,5 +2656,82 @@ mod tests {
                 assert_eq!(search("terraforged:oak_forest"), None);
             }
         }
+    }
+
+    /// `erosion_deposits` lays gravel, clay and cobblestone over the natural surface where erosion deposited, and
+    /// changes nothing else: every surface height is the same, every changed block was natural ground and is now a
+    /// deposit block, within three blocks of the top, and no column of the sea or its beaches changes. Off, the
+    /// pipeline is the faithful one (its digest is unchanged, see the review notes of #247).
+    #[test]
+    fn erosion_deposits_change_only_the_natural_surface() {
+        let Some(data) = data() else { return };
+        let worker = |deposits| {
+            terraforged_settings::set_for_thread(Some(Settings {
+                erosion_deposits: deposits,
+                ..terraforged_settings::FAITHFUL
+            }));
+            let (pipeline, overworld) = terraforged(&data, 98765, false);
+            terraforged_settings::set_for_thread(None);
+            assert_eq!(pipeline.deposits.is_some(), deposits);
+            overworld
+        };
+        let (off, on) = (worker(false), worker(true));
+        let (mut off, mut on) = (off.worker(), on.worker());
+        let natural = [
+            "minecraft:grass_block",
+            "minecraft:dirt",
+            "minecraft:coarse_dirt",
+            "minecraft:podzol",
+            "minecraft:sand",
+            "minecraft:red_sand",
+            "minecraft:stone",
+            "minecraft:mud",
+        ];
+        let deposits = [
+            "minecraft:gravel",
+            "minecraft:clay",
+            "minecraft:cobblestone",
+        ];
+        let mut changed = std::collections::BTreeMap::<String, usize>::new();
+        for cx in -4..=4 {
+            for cz in -4..=4 {
+                let a = off.generate_proto(ChunkPos::new(cx, cz)).unwrap();
+                let b = on.generate_proto(ChunkPos::new(cx, cz)).unwrap();
+                for x in 0..16 {
+                    for z in 0..16 {
+                        let top = a.surface_height(x, z);
+                        assert_eq!(top, b.surface_height(x, z), "{cx} {cz} {x} {z}");
+                        // The top solid block, under any water.
+                        let mut floor = top - 1;
+                        while floor > -64
+                            && ["minecraft:water", "minecraft:air"]
+                                .contains(&a.block_name(x, floor, z))
+                        {
+                            floor -= 1;
+                        }
+                        // Deposits never reach below the floor's third block; look further.
+                        for y in floor - 8..top {
+                            let (before, after) = (a.block_name(x, y, z), b.block_name(x, y, z));
+                            if before == after {
+                                continue;
+                            }
+                            let biome = b.biome_at(x, top, z);
+                            assert!(
+                                natural.contains(&before)
+                                    && deposits.contains(&after)
+                                    && (floor - 2..=floor).contains(&y)
+                                    && !biome.contains("ocean")
+                                    && !biome.contains("beach"),
+                                "{cx} {cz} {x} {y} {z}: {before} -> {after} in {biome}"
+                            );
+                            *changed.entry(after.to_owned()).or_default() += 1;
+                        }
+                    }
+                }
+            }
+        }
+        eprintln!("deposits {changed:?}");
+        assert!(changed.values().sum::<usize>() > 500, "{changed:?}");
+        assert!(changed.contains_key("minecraft:clay"), "{changed:?}");
     }
 }

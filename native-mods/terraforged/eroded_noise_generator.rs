@@ -55,8 +55,25 @@ pub struct ErodedNoiseGenerator {
     erosion: ErosionFilter,
     generator: NoiseGenerator,
     smoothing: HeightmapSmoothingSettings,
-    regions: ErosionRegionCache<Vec<f32>>,
+    regions: ErosionRegionCache<ErodedRegion>,
     river_start: RiverStart,
+    deposits: bool,
+}
+
+/// One cached erosion region: the eroded heights (`buildRegion`'s map, which indexing reads) and, with the
+/// `erosion_deposits` setting (Horizon's, not Java's), erosion's change to each block of the map: its height noise
+/// after erosion (and smoothing, off in TerraForged's presets) minus its raw height noise.
+pub struct ErodedRegion {
+    heights: Vec<f32>,
+    change: Option<Vec<f32>>,
+}
+
+impl std::ops::Index<usize> for ErodedRegion {
+    type Output = f32;
+
+    fn index(&self, index: usize) -> &f32 {
+        &self.heights[index]
+    }
 }
 
 /// What every chunk sample's river noise starts at in [`ErodedNoiseGenerator::generate`], before the rivers carve it.
@@ -112,8 +129,20 @@ impl ErodedNoiseGenerator {
             smoothing,
             regions: ErosionRegionCache::new(),
             river_start: RiverStart::for_settings(super::terraforged_settings::current()),
+            deposits: super::terraforged_settings::current().erosion_deposits,
         }
     }
+
+    /// The same generator recording erosion's deposits in its chunks ([`Self::generate`]) or not.
+    pub fn with_deposits(mut self, deposits: bool) -> Self {
+        self.deposits = deposits;
+        self
+    }
+
+    /// Blocks around a column (in a square, 7x7) whose mean change from erosion the column's own is measured against
+    /// for `erosion_deposits`: erosion lowers nearly all ground a little, so sediment is where a column lost less than
+    /// the ground around it, or gained.
+    pub const DEPOSIT_RADIUS: i32 = 3;
 
     /// The same generator with chunk samples' river noise starting at `start`.
     pub fn with_river_start(mut self, start: RiverStart) -> Self {
@@ -187,7 +216,12 @@ impl ErodedNoiseGenerator {
 
     /// `getRegion(seed, chunkX, chunkZ)`: the eroded map of the chunk's region, built on this thread by
     /// [`Self::build_region`] when the cache has none for this seed.
-    fn region(&self, seed: i32, chunk_x: i32, chunk_z: i32) -> Result<Arc<Vec<f32>>, &'static str> {
+    fn region(
+        &self,
+        seed: i32,
+        chunk_x: i32,
+        chunk_z: i32,
+    ) -> Result<Arc<ErodedRegion>, &'static str> {
         self.regions
             .try_get_or_build(seed, chunk_x, chunk_z, |region_x, region_z| {
                 self.build_region(seed, region_x, region_z)
@@ -252,6 +286,15 @@ impl ErodedNoiseGenerator {
                     self.generator
                         .sample_river(seed, noise_x, noise_z, &mut sample);
                     chunk.set_noise(dx, dz, &sample);
+                    if let Some(change) = &region.change {
+                        // Not Java's (`erosion_deposits`): the column's change from erosion against the mean of
+                        // the 7x7 around it, all read from the region's map, so neighbouring chunks agree.
+                        chunk.set_deposit(
+                            dx,
+                            dz,
+                            relative_change(change, offset_x + dx, offset_z + dz),
+                        );
+                    }
                 }
             }
             consumer(&chunk);
@@ -291,13 +334,15 @@ impl ErodedNoiseGenerator {
     /// map as in Java; only its height is read) of every block of the region's map, rows (`z`) then columns, from the
     /// origin chunk's first block (`int` wrap), then [`ErosionFilter::apply_region`] over its
     /// [`ErosionRegionLayout::TOTAL_CHUNKS`] chunks from the origin chunk, then [`HeightmapSmoothing::apply`]. `Err`
-    /// on the first failing sample.
+    /// on the first failing sample. With `erosion_deposits` (Horizon's) the region also keeps erosion's change to
+    /// every block of the map (the map after erosion and smoothing minus the raw heights); the heights are the same
+    /// either way.
     fn build_region(
         &self,
         seed: i32,
         region_x: i32,
         region_z: i32,
-    ) -> Result<Vec<f32>, &'static str> {
+    ) -> Result<ErodedRegion, &'static str> {
         let (origin_chunk_x, origin_chunk_z) =
             ErosionRegionLayout::origin_chunk(region_x, region_z);
         let start_x = origin_chunk_x.wrapping_shl(4);
@@ -317,6 +362,7 @@ impl ErodedNoiseGenerator {
                 map.push(height);
             }
         }
+        let raw = self.deposits.then(|| map.clone());
         self.erosion.apply_region(
             seed,
             origin_chunk_x,
@@ -327,8 +373,32 @@ impl ErodedNoiseGenerator {
             &mut map,
         );
         HeightmapSmoothing::apply(&mut map, map_size, self.smoothing);
-        Ok(map)
+        let change = raw.map(|raw| {
+            map.iter()
+                .zip(raw)
+                .map(|(eroded, raw)| eroded - raw)
+                .collect()
+        });
+        Ok(ErodedRegion {
+            heights: map,
+            change,
+        })
     }
+}
+
+/// The change at map block `(x, z)` minus the mean change of the square of [`ErodedNoiseGenerator::DEPOSIT_RADIUS`]
+/// around it (a chunk's blocks and border sit at least 60 blocks inside the map, so the square never leaves it).
+fn relative_change(change: &[f32], x: i32, z: i32) -> f32 {
+    let size = ErosionRegionLayout::MAP_SIZE;
+    let radius = ErodedNoiseGenerator::DEPOSIT_RADIUS;
+    let mut sum = 0.0f32;
+    for nz in z - radius..=z + radius {
+        for nx in x - radius..=x + radius {
+            sum += change[(nz * size + nx) as usize];
+        }
+    }
+    let side = (2 * radius + 1) as f32;
+    change[(z * size + x) as usize] - sum / (side * side)
 }
 
 /// Reimagined's `INoiseGenerator` methods that `TerrainGenerator` calls. `getLevels`/`getTerrainLevels` and
@@ -463,7 +533,10 @@ h 5 192 131 3e301f6e
             CASES.iter().enumerate()
         {
             let eroded = eroded(variant, set, droplets, lifetime, smoothing);
-            let map = eroded.build_region(seed, region_x, region_z).unwrap();
+            let map = eroded
+                .build_region(seed, region_x, region_z)
+                .unwrap()
+                .heights;
             assert_eq!(map.len(), 256 * 256);
             lines.push(format!(
                 "r {case} {variant} {set} {seed} {region_x} {region_z} {:016x}",
@@ -505,7 +578,8 @@ h 5 192 131 3e301f6e
     fn cached_heights_equal_uncached_builds_across_threads() {
         let eroded = eroded(0, 0, 50, 25, 1);
         let seed = 42;
-        let direct = [(0, 0), (-1, 0)].map(|(x, z)| eroded.build_region(seed, x, z).unwrap());
+        let direct =
+            [(0, 0), (-1, 0)].map(|(x, z)| eroded.build_region(seed, x, z).unwrap().heights);
         let columns: Vec<(i32, i32)> = (0..64)
             .map(|i: i32| (i * 37 % 256 - 128, i * 53 % 128))
             .collect();
@@ -666,6 +740,69 @@ chunk 2 2147483647 -3 5 3fba3fdd57ea00f8";
         assert_eq!(lines, JAVA_CHUNKS.lines().collect::<Vec<_>>());
     }
 
+    /// `erosion_deposits` (Horizon's) changes no field Java fills: with it the chunks still match Reimagined's Java
+    /// bit for bit, and the regions' heights are the uncached build's. Its deposits are read from the region's map, so
+    /// a chunk's border holds what the neighbouring chunk of the same region holds at that block (no seams at chunk
+    /// borders), and without the setting they stay 0.
+    #[test]
+    fn deposits_change_no_height_and_agree_across_chunks() {
+        let mut lines = Vec::new();
+        for (group, &(variant, set, seed, droplets, lifetime, smoothing, chunks)) in
+            CHUNK_GROUPS.iter().enumerate()
+        {
+            let eroded = eroded(variant, set, droplets, lifetime, smoothing)
+                .with_river_start(RiverStart::Fresh)
+                .with_deposits(true);
+            for &(chunk_x, chunk_z) in chunks {
+                let hash = chunk_digest(&eroded, seed, chunk_x, chunk_z);
+                lines.push(format!(
+                    "chunk {group} {seed} {chunk_x} {chunk_z} {hash:016x}"
+                ));
+            }
+        }
+        assert_eq!(lines, JAVA_CHUNKS.lines().collect::<Vec<_>>());
+        let deposits = |eroded: &ErodedNoiseGenerator, chunk_x, chunk_z| {
+            let mut out = Vec::new();
+            eroded
+                .generate(7, chunk_x, chunk_z, |data| {
+                    for dz in NoiseData::MIN..NoiseData::MAX {
+                        for dx in NoiseData::MIN..NoiseData::MAX {
+                            out.push(data.deposit().get(dx, dz));
+                        }
+                    }
+                })
+                .unwrap();
+            out
+        };
+        let at = |values: &[f32], dx: i32, dz: i32| values[((dz + 1) * 18 + dx + 1) as usize];
+        let on = eroded(0, 1, 50, 12, 0).with_deposits(true);
+        let off = eroded(0, 1, 50, 12, 0).with_deposits(false);
+        assert!(
+            deposits(&off, 2, 3)
+                .iter()
+                .all(|value| value.to_bits() == 0)
+        );
+        let (middle, east, south) = (
+            deposits(&on, 2, 3),
+            deposits(&on, 3, 3),
+            deposits(&on, 2, 4),
+        );
+        assert!(middle.iter().any(|value| *value > 0.0) && middle.iter().any(|value| *value < 0.0));
+        for d in NoiseData::MIN..NoiseData::MAX {
+            assert_eq!(at(&middle, 16, d).to_bits(), at(&east, 0, d).to_bits());
+            assert_eq!(at(&middle, 15, d).to_bits(), at(&east, -1, d).to_bits());
+            assert_eq!(at(&middle, d, 16).to_bits(), at(&south, d, 0).to_bits());
+        }
+        for (dx, dz) in [(0, 0), (5, 9), (15, 15)] {
+            let x = 2 * 16 + dx;
+            let z = 3 * 16 + dz;
+            assert_eq!(
+                on.eroded_height(7, x, z).unwrap().to_bits(),
+                off.eroded_height(7, x, z).unwrap().to_bits()
+            );
+        }
+    }
+
     /// A chunk is, position by position, a new sample's raw terrain with the uncached region build's height at the
     /// chunk's offset (the border reading the region's margin), then the rivers carving a river noise that starts at
     /// the generator's [`RiverStart`] (both are checked); the consumer runs once. Its 16x16 interior equals
@@ -685,7 +822,10 @@ chunk 2 2147483647 -3 5 3fba3fdd57ea00f8";
         // (-1, 0) and (-8, 7) sit on the edges of region (-1, 0): their borders read its margin.
         for (chunk_x, chunk_z) in [(-1, 0), (-8, 7), (-3, 5)] {
             let (region_x, region_z) = ErosionRegionLayout::region(chunk_x, chunk_z);
-            let region = eroded.build_region(seed, region_x, region_z).unwrap();
+            let region = eroded
+                .build_region(seed, region_x, region_z)
+                .unwrap()
+                .heights;
             let (offset_x, offset_z) = (
                 ErosionRegionLayout::chunk_offset(chunk_x),
                 ErosionRegionLayout::chunk_offset(chunk_z),

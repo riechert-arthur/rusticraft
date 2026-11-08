@@ -233,6 +233,9 @@ pub struct NoiseData {
     river: FloatMap,
     base: FloatMap,
     terrain: ObjectMap<Terrain>,
+    /// `erosion_deposits` (Horizon's): erosion's change to the column against the 7x7 around it, as height noise; 0
+    /// without the setting.
+    deposit: FloatMap,
 }
 
 impl NoiseData {
@@ -247,6 +250,7 @@ impl NoiseData {
             river: FloatMap::bordered(Self::BORDER),
             base: FloatMap::bordered(Self::BORDER),
             terrain: ObjectMap::bordered(Self::BORDER),
+            deposit: FloatMap::bordered(Self::BORDER),
         }
     }
 
@@ -258,6 +262,13 @@ impl NoiseData {
     /// `getSample`.
     pub const fn sample(&self) -> &NoiseSample {
         &self.sample
+    }
+
+    /// The column's deposit for the `erosion_deposits` setting (not TerraForged's): `ErodedNoiseGenerator.generate`'s
+    /// change from erosion against the mean of the 7x7 around it, as height noise.
+    pub fn set_deposit(&mut self, x: i32, z: i32, deposit: f32) {
+        let index = self.height.index().slot(x, z);
+        self.deposit.set_index(index, deposit);
     }
 
     pub fn sample_mut(&mut self) -> &mut NoiseSample {
@@ -278,6 +289,11 @@ impl NoiseData {
 
     pub const fn terrain(&self) -> &ObjectMap<Terrain> {
         &self.terrain
+    }
+
+    /// The deposits [`Self::set_deposit`] wrote (0 elsewhere).
+    pub const fn deposit(&self) -> &FloatMap {
+        &self.deposit
     }
 
     pub fn set_noise(&mut self, x: i32, z: i32, sample: &NoiseSample) {
@@ -307,6 +323,8 @@ pub struct TerrainData {
     river: FloatMap,
     base_height: FloatMap,
     terrain: ObjectMap<Terrain>,
+    /// [`NoiseData`]'s deposits in blocks (`erosion_deposits`; 0 without it).
+    deposit: FloatMap,
     min: f32,
     max: f32,
     max_base: f32,
@@ -321,6 +339,7 @@ impl TerrainData {
             river: FloatMap::new(),
             base_height: FloatMap::new(),
             terrain: ObjectMap::new(),
+            deposit: FloatMap::new(),
             min: f32::MAX,
             max: f32::from_bits(1),
             max_base: f32::from_bits(1),
@@ -329,6 +348,12 @@ impl TerrainData {
 
     pub fn min(&self) -> i32 {
         self.levels.height(self.min)
+    }
+
+    /// Blocks the column came out higher from erosion than the 7x7 around it (negative where it was worn down more):
+    /// `erosion_deposits`' measure of the sediment there, 0 without the setting.
+    pub fn deposit_at(&self, x: i32, z: i32) -> f32 {
+        self.deposit.get(x, z)
     }
 
     pub fn max(&self) -> i32 {
@@ -417,6 +442,11 @@ impl TerrainData {
                 self.height.set(x, z, scaled_height);
                 self.base_height.set(x, z, scaled_base_level);
                 self.river.set(x, z, noise_data.river.get(x, z));
+                self.deposit.set(
+                    x,
+                    z,
+                    self.levels.scaled_height(noise_data.deposit.get(x, z)),
+                );
                 self.max = java_max(self.max, scaled_height);
                 self.min = java_min(self.min, scaled_height);
                 self.max_base = java_max(self.max_base, scaled_base_level);

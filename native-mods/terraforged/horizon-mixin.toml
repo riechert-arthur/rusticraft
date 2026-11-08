@@ -441,6 +441,13 @@ source = "cave_assets.rs"
 visibility = "pub"
 
 [[module]]
+id = "deposits"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_deposits"
+source = "deposits.rs"
+visibility = "pub"
+
+[[module]]
 id = "settings"
 file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_settings"
