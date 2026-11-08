@@ -177,15 +177,16 @@ don't generate, so they need none.
   (its eroded height minus its raw one) against the mean of the 7x7 columns around it, measured on
   the erosion region's map, so neighbouring chunks agree. Erosion lowers nearly all ground a little;
   where a column came out at least as high as that mean (it lost less than its surroundings, or
-  gained), one to three blocks of the natural surface (grass, dirt, podzol, sand, stone, mud, from
-  the top down to the first other block) turn into gravel and clay in river and lake beds, gravel on
-  the banks beside them, and scree (gravel, some cobblestone) at the foot of slopes, where ground
-  within two blocks stands four or more higher. Only blocks change, never a height, so water,
-  rivers, structures, spawn and everything that reads heights are as without it. The sea floor and
-  its shores keep their blocks (vanilla's surface rules already give them sand, gravel and clay);
-  snow from decoration still covers deposits on cold slopes. Distant tiles don't show them, `/tf
-  preview` neither. Whether a column is a bank or the foot of a slope is judged inside its chunk,
-  so a bank whose water lies in the next chunk stays bare. Off, generation is unchanged.
+  gained), one to three blocks of the natural surface (grass, dirt, coarse dirt, podzol, sand, red
+  sand, stone, mud, from the top down to the first other block) turn into gravel and clay in river
+  and lake beds, gravel on the banks beside them, and scree (gravel, some cobblestone) at the foot
+  of slopes, where ground within two blocks stands four or more higher. Only blocks change, never a
+  height, so water, rivers, structures, spawn and everything that reads heights are as without it.
+  The sea floor and its shores keep their blocks (vanilla's surface rules already give them sand,
+  gravel and clay); snow from decoration still covers deposits on cold slopes. Distant tiles don't
+  show them, `/tf preview` neither. Whether a column is a bank or the foot of a slope is judged
+  inside its chunk, so a bank whose water lies in the next chunk stays bare. Off, generation is
+  unchanged.
 
 ## Layers
 
