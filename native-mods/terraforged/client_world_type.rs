@@ -576,6 +576,7 @@ mod tests {
                     ("eroded_far_terrain", Tag::Byte(0)),
                     ("erosion_deposits", Tag::Byte(0)),
                     ("height_scale", Tag::Float(1.0f32.to_bits())),
+                    ("realistic_vegetation", Tag::Byte(0)),
                     ("sparse_forests", Tag::Byte(0)),
                 ]),
             );
@@ -700,6 +701,7 @@ mod tests {
             height_scale: 1.5,
             erosion_deposits: true,
             eroded_far_terrain: true,
+            realistic_vegetation: true,
         };
         let dir = scratch("settings");
         write_terraforged(&dir, 3, WorldGen::default(), None, on).unwrap();
@@ -712,6 +714,7 @@ mod tests {
                 ("eroded_far_terrain", Tag::Byte(1)),
                 ("erosion_deposits", Tag::Byte(1)),
                 ("height_scale", Tag::Float(1.5f32.to_bits())),
+                ("realistic_vegetation", Tag::Byte(1)),
                 ("sparse_forests", Tag::Byte(1)),
             ]))
         );
@@ -729,11 +732,11 @@ mod tests {
         assert_eq!(settings_file(&file), Settings::default());
         assert_eq!(
             std::fs::read_to_string(&file).unwrap(),
-            "{\n  \"corrected_biomes\": false,\n  \"deterministic\": false,\n  \"eroded_far_terrain\": false,\n  \"erosion_deposits\": false,\n  \"height_scale\": 1.0,\n  \"sparse_forests\": false\n}\n"
+            "{\n  \"corrected_biomes\": false,\n  \"deterministic\": false,\n  \"eroded_far_terrain\": false,\n  \"erosion_deposits\": false,\n  \"height_scale\": 1.0,\n  \"realistic_vegetation\": false,\n  \"sparse_forests\": false\n}\n"
         );
         std::fs::write(
             &file,
-            "{\"deterministic\": true, \"sparse_forests\": true, \"corrected_biomes\": true, \"height_scale\": 1.5, \"erosion_deposits\": true, \"eroded_far_terrain\": true}",
+            "{\"deterministic\": true, \"sparse_forests\": true, \"corrected_biomes\": true, \"height_scale\": 1.5, \"erosion_deposits\": true, \"eroded_far_terrain\": true, \"realistic_vegetation\": true}",
         )
         .unwrap();
         assert_eq!(settings_file(&file), on);
@@ -747,6 +750,7 @@ mod tests {
                 height_scale: 1.0,
                 erosion_deposits: false,
                 eroded_far_terrain: false,
+                realistic_vegetation: false,
                 ..on
             }
         );

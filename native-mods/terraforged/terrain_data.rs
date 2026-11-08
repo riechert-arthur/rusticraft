@@ -198,6 +198,12 @@ pub struct NoiseSample {
     pub height_noise: f32,
     pub river_noise: f32,
     pub terrain_type: Terrain,
+    /// Not TerraForged's (Horizon's `realistic_vegetation`): how far the position is from water, 0 in the sea, on a
+    /// river or lake bed and 1 from the edge of their valleys or well inland ([`RiverCarver::carve_with_erosion`]
+    /// sets it). Nothing TerraForged computes reads it.
+    ///
+    /// [`RiverCarver::carve_with_erosion`]: super::terraforged_continent_carver::RiverCarver::carve_with_erosion
+    pub water_distance: f32,
 }
 
 impl NoiseSample {
@@ -210,6 +216,7 @@ impl NoiseSample {
             height_noise: 0.0,
             river_noise: 1.0,
             terrain_type: terrains.get_by_id(0),
+            water_distance: 1.0,
         }
     }
 
@@ -236,6 +243,8 @@ pub struct NoiseData {
     /// `erosion_deposits` (Horizon's): erosion's change to the column against the 7x7 around it, as height noise; 0
     /// without the setting.
     deposit: FloatMap,
+    /// The samples' [`NoiseSample::water_distance`] (Horizon's `realistic_vegetation`).
+    water: FloatMap,
 }
 
 impl NoiseData {
@@ -251,6 +260,7 @@ impl NoiseData {
             base: FloatMap::bordered(Self::BORDER),
             terrain: ObjectMap::bordered(Self::BORDER),
             deposit: FloatMap::bordered(Self::BORDER),
+            water: FloatMap::bordered(Self::BORDER),
         }
     }
 
@@ -291,6 +301,11 @@ impl NoiseData {
         &self.terrain
     }
 
+    /// The samples' distances to water ([`NoiseSample::water_distance`]; 0 where none was set).
+    pub const fn water(&self) -> &FloatMap {
+        &self.water
+    }
+
     /// The deposits [`Self::set_deposit`] wrote (0 elsewhere).
     pub const fn deposit(&self) -> &FloatMap {
         &self.deposit
@@ -305,10 +320,43 @@ impl NoiseData {
         self.height.set_index(index, sample.height_noise);
         self.base.set_index(index, sample.base_noise);
         self.river.set_index(index, sample.river_noise);
+        self.water.set_index(index, sample.water_distance);
     }
 
     pub fn is_inside_chunk(x: i32, z: i32) -> bool {
         (-1..=16).contains(&x) && (-1..=16).contains(&z)
+    }
+}
+
+/// A compass direction of the ground's slope ([`TerrainData::facing`]); north is -z, as in Minecraft.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Facing {
+    North,
+    East,
+    South,
+    West,
+}
+
+impl Facing {
+    /// The direction as a unit `[x, z]` vector.
+    pub const fn vector(self) -> [f32; 2] {
+        match self {
+            Self::North => [0.0, -1.0],
+            Self::East => [1.0, 0.0],
+            Self::South => [0.0, 1.0],
+            Self::West => [-1.0, 0.0],
+        }
+    }
+
+    /// The direction's lowercase English name (`"north"`...).
+    pub fn named(name: &str) -> Option<Self> {
+        Some(match name {
+            "north" => Self::North,
+            "east" => Self::East,
+            "south" => Self::South,
+            "west" => Self::West,
+            _ => return None,
+        })
     }
 }
 
@@ -325,6 +373,12 @@ pub struct TerrainData {
     terrain: ObjectMap<Terrain>,
     /// [`NoiseData`]'s deposits in blocks (`erosion_deposits`; 0 without it).
     deposit: FloatMap,
+    /// Not TerraForged's (Horizon's `realistic_vegetation`): the ground's rise in blocks per block eastward (+x) and
+    /// southward (+z), from the heights either side in [`NoiseData`]'s bordered map, as the gradient is.
+    slope_x: FloatMap,
+    slope_z: FloatMap,
+    /// [`NoiseData`]'s distances to water (Horizon's `realistic_vegetation`).
+    water: FloatMap,
     min: f32,
     max: f32,
     max_base: f32,
@@ -340,6 +394,9 @@ impl TerrainData {
             base_height: FloatMap::new(),
             terrain: ObjectMap::new(),
             deposit: FloatMap::new(),
+            slope_x: FloatMap::new(),
+            slope_z: FloatMap::new(),
+            water: FloatMap::new(),
             min: f32::MAX,
             max: f32::from_bits(1),
             max_base: f32::from_bits(1),
@@ -354,6 +411,22 @@ impl TerrainData {
     /// `erosion_deposits`' measure of the sediment there, 0 without the setting.
     pub fn deposit_at(&self, x: i32, z: i32) -> f32 {
         self.deposit.get(x, z)
+    }
+
+    /// How much the column's ground faces `facing` (Horizon's `realistic_vegetation`, not TerraForged's): the
+    /// downhill direction's share along `facing` times the sine of the slope, the topographic "northness" (or
+    /// eastness...) `cos(aspect - facing) * sin(slope)`. -1 to 1: 0 on flat ground and across the slope, towards 1 on
+    /// ground falling steeply towards `facing`, towards -1 on ground rising steeply towards it.
+    pub fn facing(&self, x: i32, z: i32, facing: Facing) -> f32 {
+        let (sx, sz) = (self.slope_x.get(x, z), self.slope_z.get(x, z));
+        let [fx, fz] = facing.vector();
+        // Downhill is -s, so cos(aspect - facing) = -(s . f) / |s| and sin(slope) = |s| / sqrt(1 + |s|^2).
+        -(sx * fx + sz * fz) / (1.0 + sx * sx + sz * sz).sqrt()
+    }
+
+    /// The column's distance to water, 0 to 1 (Horizon's `realistic_vegetation`): [`NoiseSample::water_distance`].
+    pub fn water_distance(&self, x: i32, z: i32) -> f32 {
+        self.water.get(x, z)
     }
 
     pub fn max(&self) -> i32 {
@@ -447,6 +520,13 @@ impl TerrainData {
                     z,
                     self.levels.scaled_height(noise_data.deposit.get(x, z)),
                 );
+                // Horizon's `realistic_vegetation`: the slope in blocks, over the two blocks between the neighbours.
+                let rise = |a: f32, b: f32| {
+                    (self.levels.scaled_height(a) - self.levels.scaled_height(b)) * 0.5
+                };
+                self.slope_x.set(x, z, rise(east, west));
+                self.slope_z.set(x, z, rise(south, north));
+                self.water.set(x, z, noise_data.water.get(x, z));
                 self.max = java_max(self.max, scaled_height);
                 self.min = java_min(self.min, scaled_height);
                 self.max_base = java_max(self.max_base, scaled_base_level);
@@ -739,5 +819,56 @@ mod tests {
     #[should_panic]
     fn reads_outside_a_bordered_map_panic_like_java() {
         FloatMap::bordered(1).get(-2, -1);
+    }
+
+    /// Horizon's `realistic_vegetation` data: on a plane rising `rise` blocks per block to the south (and nothing to the
+    /// east) every column faces north by `rise / sqrt(1 + rise^2)` (the sine of its slope), south by minus that, east
+    /// and west not at all; flat ground faces nowhere; the samples' distances to water pass through.
+    #[test]
+    fn a_plane_faces_away_from_its_rise() {
+        let terrains = TerrainRegistry::new();
+        let levels = TerrainLevels::default();
+        let max_y = levels.max_y as f32;
+        for rise in [0.0_f32, 0.5, 1.0, -2.0] {
+            let mut noise = NoiseData::new(&terrains);
+            for z in NoiseData::MIN..NoiseData::MAX {
+                for x in NoiseData::MIN..NoiseData::MAX {
+                    let mut sample = NoiseSample::new(&terrains);
+                    // Heights in blocks, whole numbers so the plane is exact.
+                    sample.height_noise = (100.0 + rise * z as f32) / max_y;
+                    sample.water_distance = (x + z + 2) as f32 / 34.0;
+                    noise.set_noise(x, z, &sample);
+                }
+            }
+            let mut data = TerrainData::new(levels);
+            data.accept(&noise);
+            let north = rise / (1.0 + rise * rise).sqrt();
+            for (x, z) in [(0, 0), (15, 15), (7, 3)] {
+                let close = |a: f32, b: f32| (a - b).abs() < 1e-5;
+                assert!(
+                    close(data.facing(x, z, Facing::North), north),
+                    "{rise} {x} {z}"
+                );
+                assert!(close(data.facing(x, z, Facing::South), -north), "{rise}");
+                assert!(close(data.facing(x, z, Facing::East), 0.0), "{rise}");
+                assert!(close(data.facing(x, z, Facing::West), 0.0), "{rise}");
+                assert_eq!(data.water_distance(x, z), (x + z + 2) as f32 / 34.0);
+            }
+        }
+        // A slope falling to the east faces east.
+        let mut noise = NoiseData::new(&terrains);
+        for z in NoiseData::MIN..NoiseData::MAX {
+            for x in NoiseData::MIN..NoiseData::MAX {
+                let mut sample = NoiseSample::new(&terrains);
+                sample.height_noise = (200.0 - x as f32) / max_y;
+                noise.set_noise(x, z, &sample);
+            }
+        }
+        let mut data = TerrainData::new(levels);
+        data.accept(&noise);
+        assert!((data.facing(4, 4, Facing::East) - 0.5_f32.sqrt()).abs() < 1e-5);
+        assert_eq!(data.facing(4, 4, Facing::North), 0.0);
+        assert_eq!(Facing::named("south"), Some(Facing::South));
+        assert_eq!(Facing::named("South"), None);
     }
 }

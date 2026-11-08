@@ -111,6 +111,8 @@ pub(super) struct TerraForgedPipeline {
     structures: Option<StructureState>,
     /// The blocks of `erosion_deposits` when the world has it on (`terraforged_deposits`).
     deposits: Option<super::terraforged_deposits::DepositBlocks>,
+    /// The ground cover's blocks when the world has `realistic_vegetation` on (`terraforged_realistic_vegetation`).
+    ground_cover: Option<super::terraforged_realistic_vegetation::CoverBlocks>,
     /// Horizon's settings of the world (`terraforged_settings`) when the pipeline was built.
     settings: Settings,
 }
@@ -395,12 +397,18 @@ impl TerraForgedPipeline {
             air: block("minecraft:air")?,
             caves,
             carvers: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-            features: TerraForgedFeatures::new(data)?,
+            // Horizon's `realistic_vegetation` weighs every vegetation config's fitness by aspect and water.
+            features: TerraForgedFeatures::new(data)?
+                .map(|features| features.with_realistic_vegetation(settings.realistic_vegetation)),
             structures,
             // `erosion_deposits`' blocks (Horizon's setting); None without it.
             deposits: settings
                 .erosion_deposits
                 .then(|| super::terraforged_deposits::DepositBlocks::new(data.registry))
+                .flatten(),
+            ground_cover: settings
+                .realistic_vegetation
+                .then(|| super::terraforged_realistic_vegetation::CoverBlocks::new(data.registry))
                 .flatten(),
             settings,
         })
@@ -901,6 +909,16 @@ impl SeededPipeline for TerraForgedPipeline {
             )
             .map_err(stage("deposits"))?;
         }
+        // Horizon's `realistic_vegetation`: podzol, moss and coarse dirt by aspect and water (no height changes).
+        if let Some(blocks) = &self.ground_cover {
+            super::terraforged_realistic_vegetation::ground_cover(
+                self.generator.seed(),
+                &terrain.read(),
+                &mut chunk,
+                blocks,
+            )
+            .map_err(stage("ground cover"))?;
+        }
 
         // applyCarvers: TerraForged's noise caves with `(int)` of the level seed; no vanilla carvers run (6dd607eb's
         // `applyCarvers` replaces them). The CarverChunk (the biomes each cave passed through) is kept for the
@@ -1241,6 +1259,7 @@ impl SeededPipeline for TerraForgedPipeline {
 mod tests {
     use super::super::terraforged_generator_facade::TerraHeightmap;
     use super::super::terraforged_mod_biomes::mod_biomes;
+    use super::super::terraforged_terrain_data::Facing;
     use super::*;
     use std::path::{Path, PathBuf};
 
@@ -2125,7 +2144,8 @@ mod tests {
         assert!(on.0 * 3 < off.0 * 2, "{on:?} vs {off:?}");
     }
 
-    /// A chunk's terrain data (heights, rivers, gradients, base heights) is the same whichever thread computes it and
+    /// A chunk's terrain data (heights, rivers, gradients, base heights, and Horizon's aspects and distances to water)
+    /// is the same whichever thread computes it and
     /// whatever it computed before, by default and with `sparse_forests`: the eroded generator resets every sample and
     /// starts its river noise at the same constant (`RiverStart`, `ErodedNoiseGenerator::generate`), so TerraForged's
     /// river-noise carry-over from a worker's earlier chunks never reaches the world.
@@ -2148,6 +2168,10 @@ mod tests {
                         d.river().get(lx, lz).to_bits(),
                         d.normalized_gradient(lx, lz, 1.0).to_bits(),
                         d.base_height_at(lx, lz),
+                        // Horizon's `realistic_vegetation` data.
+                        d.facing(lx, lz, Facing::North).to_bits(),
+                        d.facing(lx, lz, Facing::East).to_bits(),
+                        d.water_distance(lx, lz).to_bits(),
                     ));
                 }
             }
@@ -3255,5 +3279,136 @@ mod tests {
         eprintln!("deposits {changed:?}");
         assert!(changed.values().sum::<usize>() > 500, "{changed:?}");
         assert!(changed.contains_key("minecraft:clay"), "{changed:?}");
+    }
+
+    /// `realistic_vegetation` overlays every vegetation config (off, they are TerraForged's), and on seed 98765's
+    /// terrain it moves the fitness the way the light and the water say: up on north-facing slopes and near water,
+    /// down on south-facing slopes and far from it. The data behind it is real: plenty of columns face each way and
+    /// lie near and far from water.
+    #[test]
+    fn realistic_vegetation_follows_aspect_and_water() {
+        use super::super::terraforged_biome_viability::TerrainViabilityContext;
+        let Some(data) = data() else { return };
+        let pipeline = |on| {
+            terraforged_settings::set_for_thread(Some(Settings {
+                realistic_vegetation: on,
+                ..terraforged_settings::FAITHFUL
+            }));
+            let (pipeline, _) = terraforged(&data, 98765, false);
+            terraforged_settings::set_for_thread(None);
+            pipeline
+        };
+        let (off, on) = (pipeline(false), pipeline(true));
+        let (off_configs, on_configs) = (
+            off.features.as_ref().unwrap().configs(),
+            on.features.as_ref().unwrap().configs(),
+        );
+        // [north, south, wet, dry]: columns and summed fitness change.
+        let mut groups = [(0_usize, 0.0_f64); 4];
+        let seed = off.generator.seed();
+        // Chunks spread over 2,000 blocks: spawn lies by water, the land around it mostly doesn't.
+        for cx in (-2..=2).map(|i| i * 23) {
+            for cz in (-2..=2).map(|i| i * 19) {
+                let handle = off.generator.chunk_data(seed, cx, cz);
+                let terrain = handle.read();
+                let context = TerrainViabilityContext(&terrain);
+                for (x, z) in (0..16).flat_map(|x| (0..16).map(move |z| (x, z))) {
+                    if terrain.height_at(x, z) <= 63 {
+                        continue;
+                    }
+                    let (bx, bz) = ((cx << 4) + x, (cz << 4) + z);
+                    for (a, b) in off_configs.iter().zip(on_configs) {
+                        let before = a.viability.try_fitness(bx, bz, &context).unwrap();
+                        let after = b.viability.try_fitness(bx, bz, &context).unwrap();
+                        let change = f64::from(after - before);
+                        let north = terrain.facing(x, z, Facing::North);
+                        let water = terrain.water_distance(x, z);
+                        for (group, member) in
+                            [north > 0.2, north < -0.2, water < 0.25, water > 0.75]
+                                .into_iter()
+                                .enumerate()
+                        {
+                            if member {
+                                groups[group].0 += 1;
+                                groups[group].1 += change;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let mean = |(count, sum): (usize, f64)| sum / count.max(1) as f64;
+        eprintln!("[north, south, wet, dry] (columns x configs, total change): {groups:?}");
+        for (count, _) in groups {
+            assert!(count > 8 * 100, "{groups:?}");
+        }
+        assert!(mean(groups[0]) > mean(groups[1]) + 0.1, "{groups:?}");
+        assert!(mean(groups[2]) > mean(groups[3]) + 0.1, "{groups:?}");
+    }
+
+    /// `realistic_vegetation`'s ground cover turns some grass blocks open to the sky into podzol and moss on shaded
+    /// ground and coarse dirt on sunny ground, and changes nothing else (not a height, nor any other block).
+    #[test]
+    fn realistic_ground_cover_changes_only_grass_by_its_slope() {
+        let Some(data) = data() else { return };
+        let worker = |on| {
+            terraforged_settings::set_for_thread(Some(Settings {
+                realistic_vegetation: on,
+                ..terraforged_settings::FAITHFUL
+            }));
+            let (pipeline, overworld) = terraforged(&data, 98765, false);
+            terraforged_settings::set_for_thread(None);
+            assert_eq!(pipeline.ground_cover.is_some(), on);
+            (pipeline, overworld)
+        };
+        let ((pipeline, off), (_, on)) = (worker(false), worker(true));
+        let (mut off, mut on) = (off.worker(), on.worker());
+        // Per cover block: columns, and their summed northness.
+        let mut changed = BTreeMap::<String, (usize, f32)>::new();
+        for cx in (-2..=2).map(|i| i * 23) {
+            for cz in (-2..=2).map(|i| i * 19) {
+                let a = off.generate_proto(ChunkPos::new(cx, cz)).unwrap();
+                let b = on.generate_proto(ChunkPos::new(cx, cz)).unwrap();
+                let handle = pipeline
+                    .generator
+                    .chunk_data(pipeline.generator.seed(), cx, cz);
+                let terrain = handle.read();
+                for (x, z) in (0..16).flat_map(|x| (0..16).map(move |z| (x, z))) {
+                    let top = a.surface_height(x, z);
+                    assert_eq!(top, b.surface_height(x, z), "{cx} {cz} {x} {z}");
+                    for y in top - 12..top + 4 {
+                        let (before, after) = (a.block_name(x, y, z), b.block_name(x, y, z));
+                        if before == after {
+                            continue;
+                        }
+                        assert!(
+                            before == "minecraft:grass_block"
+                                && y == top - 1
+                                && [
+                                    "minecraft:podzol",
+                                    "minecraft:moss_block",
+                                    "minecraft:coarse_dirt"
+                                ]
+                                .contains(&after),
+                            "{cx} {cz} {x} {y} {z}: {before} -> {after}"
+                        );
+                        let entry = changed.entry(after.to_owned()).or_default();
+                        entry.0 += 1;
+                        entry.1 += terrain.facing(x, z, Facing::North);
+                    }
+                }
+            }
+        }
+        eprintln!("ground cover (columns, summed northness): {changed:?}");
+        let podzol = changed.get("minecraft:podzol").copied().unwrap_or_default();
+        let coarse = changed
+            .get("minecraft:coarse_dirt")
+            .copied()
+            .unwrap_or_default();
+        assert!(podzol.0 > 50 && coarse.0 > 50, "{changed:?}");
+        assert!(
+            podzol.1 / (podzol.0 as f32) > 0.2 && coarse.1 / (coarse.0 as f32) < -0.2,
+            "{changed:?}"
+        );
     }
 }

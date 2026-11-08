@@ -24,7 +24,7 @@
 
 use super::{
     terraforged::{Module, clamp},
-    terraforged_terrain_data::TerrainData,
+    terraforged_terrain_data::{Facing, TerrainData},
 };
 
 /// TerraForged 1.18.2-0.3.1's `Viability.Context`, flattened to the queries the rules make: `max_y` is
@@ -44,6 +44,15 @@ pub trait ViabilityContext {
     fn normalized_gradient(&self, x: i32, z: i32, norm: f32) -> f32;
     fn river(&self, x: i32, z: i32) -> f32;
     fn climate_shape(&self, seed: i32, x: i32, z: i32) -> f32;
+    /// Not TerraForged's (Horizon's `realistic_vegetation`): [`TerrainData::facing`]; 0, flat ground, by default.
+    fn facing(&self, _x: i32, _z: i32, _facing: Facing) -> f32 {
+        0.0
+    }
+    /// Not TerraForged's (Horizon's `realistic_vegetation`): [`TerrainData::water_distance`]; 1, far from water, by
+    /// default.
+    fn water_distance(&self, _x: i32, _z: i32) -> f32 {
+        1.0
+    }
 }
 
 /// The jar's (and 6dd607eb's) `ViabilityContext` class over one chunk's [`TerrainData`] (its `terrainData` future, already
@@ -85,12 +94,21 @@ impl ViabilityContext for TerrainViabilityContext<'_> {
     fn climate_shape(&self, _seed: i32, _x: i32, _z: i32) -> f32 {
         0.0
     }
+
+    fn facing(&self, x: i32, z: i32, facing: Facing) -> f32 {
+        self.0.facing(x, z, facing)
+    }
+
+    fn water_distance(&self, x: i32, z: i32) -> f32 {
+        self.0.water_distance(x, z)
+    }
 }
 
 /// TerraForged 1.18.2-0.3.1's viability rules (`worldgen.biome.viability`): `Viability.NONE` and the
 /// `BiomeEdgeViability`, `HeightViability`, `MultViability`, `NoiseViability`, `SaturationViability`,
 /// `SlopeViability` and `SumViability` records. Comparisons keep Java's NaN behaviour (a NaN never passes a
-/// threshold test). Their Cereal specs and `ViabilityCodec` are not ported.
+/// threshold test). Their Cereal specs and `ViabilityCodec` are not ported. `Aspect` and `WaterDistance` are Horizon's
+/// (`horizon:Aspect` and `horizon:WaterDistance` in a config), in neither TerraForged tree.
 #[derive(Clone)]
 pub enum Viability {
     None,
@@ -110,6 +128,18 @@ pub enum Viability {
     },
     Slope {
         normalize: f32,
+        max: f32,
+    },
+    /// Horizon's: how much the ground faces `facing` ([`TerrainData::facing`], -1 to 1), 0 below `min`, 1 above
+    /// `max` and linear between, as `Saturation` ramps.
+    Aspect {
+        facing: Facing,
+        min: f32,
+        max: f32,
+    },
+    /// Horizon's: the column's distance to water ([`TerrainData::water_distance`], 0 to 1), ramped as `Aspect`.
+    WaterDistance {
+        min: f32,
         max: f32,
     },
     /// Weighted sum: `amounts[i]` weighs `rules[i]`. Extra amounts are ignored; fewer amounts than rules panic
@@ -205,6 +235,8 @@ impl Viability {
                     (saturation - min) / (max - min)
                 }
             }
+            Self::Aspect { facing, min, max } => ramp(context.facing(x, z, *facing), *min, *max),
+            Self::WaterDistance { min, max } => ramp(context.water_distance(x, z), *min, *max),
             Self::Slope { normalize, max } => {
                 let gradient =
                     context.normalized_gradient(x, z, normalize * scaler(context.max_y()));
@@ -298,6 +330,18 @@ pub fn ranged_falloff(value: f32, minimum: f32, midpoint: f32, maximum: f32) -> 
         1.0 - (value - midpoint) / (maximum - midpoint)
     } else {
         0.0
+    }
+}
+
+/// Horizon's rules' ramp, `SaturationViability`'s: 0 below `min`, 1 above `max`, linear between (NaN passes
+/// through, as there).
+fn ramp(value: f32, min: f32, max: f32) -> f32 {
+    if value < min {
+        0.0
+    } else if value > max {
+        1.0
+    } else {
+        (value - min) / (max - min)
     }
 }
 

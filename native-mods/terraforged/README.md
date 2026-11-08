@@ -24,13 +24,15 @@ TerraForged (vanilla world types keep 26.3's overworld):
   and `terraforged:oak_forest` (`ModBiomes`), derived from the player's own 26.3 dripstone caves
   and plains;
 - surfaces: the vanilla surface rules over TerraForged's preliminary heights, then `Surface`; the
-  `erosion_deposits` setting lays erosion's sediment over them;
+  `erosion_deposits` setting lays erosion's sediment over them, `realistic_vegetation` podzol, moss and
+  coarse dirt by slope and water;
 - caves: TerraForged's five noise caves and their biomes (global caves write `terraforged:cave`);
   no vanilla carvers run;
 - structures: vanilla placement over TerraForged's (eroded) base heights and biomes, with terrain
   adapted under beardified structures' pieces (`StructureTerrain`);
 - decoration: `FeatureDecorator` with TerraForged's vegetation (jittered, fitness-gated trees, as
-  dense as TerraForged's worlds are in play; `sparse_forests` thins them), cave decoration, water
+  dense as TerraForged's worlds are in play; `sparse_forests` thins them, `realistic_vegetation` weighs
+  them by aspect and water), cave decoration, water
   smoothing and snow.
 
 In TerraForged worlds, a player's boat rises to a river's stepped water surface (`BoatHook`), and
@@ -219,6 +221,32 @@ don't generate, so they need none.
   show them, `/tf preview` neither. Whether a column is a bank or the foot of a slope is judged
   inside its chunk, so a bank whose water lies in the next chunk stays bare. Off, generation is
   unchanged.
+- `realistic_vegetation`: trees and ground cover follow the light and the water, which no
+  TerraForged tree models (its vegetation weighs slope, height, noise and "saturation", 1 − river
+  noise, the same everywhere inland in play). Two pointwise measures come with every column: its
+  aspect, as the topographic northness `cos(aspect) · sin(slope)` (−1 to 1, from the heights either
+  side of it in the chunk's bordered noise map, as TerraForged's gradient; `TerrainData::facing`), and
+  its distance to water (0 to 1: the least of the nearest river's and lake's, 0 on the bed and 1 at
+  the valley's edge, and the coast's, 0 at the beach and 1 from `INLAND` on; `RiverCarver::water_distance`,
+  from the carver's own node sample). Every vegetation config's fitness becomes
+  `clamp(fitness + 0.4 · aspect − 0.3 · water − 0.05, 0, 1)` through two Horizon rules, `horizon:Aspect`
+  (northness ramped from 0 at −0.5 to 1 at 0.5) and `horizon:WaterDistance` (ramped 0 to 1), so level
+  ground half-way out from water keeps TerraForged's fitness, shaded slopes by water gain up to 0.35
+  and sunny slopes far from water lose as much. A data pack's vegetation config may use the two rules
+  itself (`{"type": "horizon:Aspect", "facing": "north", "min": -1, "max": 1}`, `facing` one of the
+  four compass names; `{"type": "horizon:WaterDistance", "min": 0, "max": 1}`); NaN passes through
+  them as through `Saturation`. Then, after `Surface`, grass blocks open to the sky on slopes facing
+  north by more than 0.15 (about 9 degrees due north) turn, in 2x2 patches, to podzol (and, a third of
+  them within 0.3 of water, moss): a share growing with the shade up to a northness of 0.5, from 40%
+  far from water to all of them at it. On slopes facing south as much, a share growing the same way,
+  from 40% at the water to all far from it, turns to coarse dirt. Only those top blocks change, never a
+  height. Across a wide area about two thirds of the land lies 0.9 or more from water (seeds 777 and
+  98765); spawn, by water, is wetter than most. North is shaded by the convention of the Northern Hemisphere's
+  mid latitudes, where north-facing slopes get less sun and keep more moisture and forest
+  (topographic insolation, e.g. Holland and Steyn 1975, "Vegetational responses to latitudinal
+  variations in slope angle and aspect", J. Biogeography 2; riparian forests along water courses):
+  Minecraft's sun stands overhead at noon, so its sky casts no such shade. Distant tiles and `/tf
+  preview` don't show the ground cover. Off, generation is unchanged.
 
 ## Layers
 

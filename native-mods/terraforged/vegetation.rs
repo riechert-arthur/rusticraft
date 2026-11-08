@@ -39,6 +39,7 @@
 use super::terraforged::Module;
 use super::terraforged_biome_viability::Viability;
 use super::terraforged_terrain_asset::{Data, Obj, codec_float, data_of, identifier};
+use super::terraforged_terrain_data::Facing;
 use serde_json::value::RawValue;
 use std::collections::{BTreeSet, HashMap};
 
@@ -234,6 +235,9 @@ fn tag_members(tag: &str) -> Result<BTreeSet<String>, String> {
 /// Defaults: `BiomeEdgeViability` distance 1; `Height` min 0, mid 0.5, max 1; `Saturation` 0..1; `Slope` normalize
 /// 1, max 1; `Sum` initial 1.
 ///
+/// Horizon adds `horizon:Aspect` (`facing` north, east, south or west, default north; `min` -1, `max` 1) and
+/// `horizon:WaterDistance` (`min` 0, `max` 1).
+///
 /// Differences: a spec name that is not a viability's is an error, where Cereal, for a name no spec registers,
 /// tries every viability spec whose default fields the object has with the same value types, in hash order
 /// (ambiguous for, e.g., a nameless `min`/`mid`/`max` object, which `Height` and `Saturation` both fit); and a `Sum`
@@ -278,6 +282,20 @@ pub(super) fn decode_viability(object: &Obj) -> Result<Viability, String> {
                 amounts,
             }
         }
+        // Horizon's rules (`realistic_vegetation`), under their own namespace so TerraForged's configs never meet them.
+        "horizon:Aspect" => Viability::Aspect {
+            facing: match o.scalar("facing") {
+                Some(Data::Str(name)) => Facing::named(name)
+                    .ok_or_else(|| format!("horizon:Aspect facing {name:?} is not a direction"))?,
+                _ => Facing::North,
+            },
+            min: o.float("min", -1.0),
+            max: o.float("max", 1.0),
+        },
+        "horizon:WaterDistance" => Viability::WaterDistance {
+            min: o.float("min", 0.0),
+            max: o.float("max", 1.0),
+        },
         other => return Err(format!("no viability spec {other:?}")),
     })
 }
@@ -518,6 +536,12 @@ case noise_unknown err
             }
             Viability::Slope { normalize, max } => {
                 format!("slope({},{})", hex(*normalize), hex(*max))
+            }
+            Viability::Aspect { facing, min, max } => {
+                format!("aspect({facing:?},{},{})", hex(*min), hex(*max))
+            }
+            Viability::WaterDistance { min, max } => {
+                format!("water({},{})", hex(*min), hex(*max))
             }
             Viability::Sum {
                 initial,

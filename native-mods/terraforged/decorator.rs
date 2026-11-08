@@ -281,6 +281,30 @@ impl TerraForgedFeatures {
         }))
     }
 
+    /// The same features with Horizon's `realistic_vegetation` (`terraforged_realistic_vegetation::overlay`) over
+    /// every vegetation config's fitness when `on`.
+    pub(in crate::worldgen) fn with_realistic_vegetation(mut self, on: bool) -> Self {
+        if on {
+            for config in &mut self.configs {
+                let viability = std::mem::replace(
+                    &mut config.viability,
+                    crate::worldgen::generator::terraforged_biome_viability::Viability::None,
+                );
+                config.viability =
+                    crate::worldgen::generator::terraforged_realistic_vegetation::overlay(
+                        viability,
+                    );
+            }
+        }
+        self
+    }
+
+    /// The bound vegetation configs, in registry order.
+    #[cfg(test)]
+    pub(in crate::worldgen) fn configs(&self) -> &[VegetationConfig] {
+        &self.configs
+    }
+
     /// Whether every feature of `biome`'s lists is one `BiomeFilter` lets `biome` place.
     #[cfg(test)]
     pub(in crate::worldgen) fn knows_every_feature_of(&self, biome: BiomeId) -> bool {
