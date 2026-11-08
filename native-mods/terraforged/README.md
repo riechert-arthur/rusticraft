@@ -20,7 +20,8 @@ TerraForged (vanilla world types keep 26.3's overworld):
   river and lake overrides, also for `/locate biome`, plus TerraForged's own `terraforged:cave`
   and `terraforged:oak_forest` (`ModBiomes`), derived from the player's own 26.3 dripstone caves
   and plains;
-- surfaces: the vanilla surface rules over TerraForged's preliminary heights, then `Surface`;
+- surfaces: the vanilla surface rules over TerraForged's preliminary heights, then `Surface`; the
+  `erosion_deposits` setting lays erosion's sediment over them;
 - caves: TerraForged's five noise caves and their biomes (global caves write `terraforged:cave`);
   no vanilla carvers run;
 - structures: vanilla placement over TerraForged's (eroded) base heights and biomes, with terrain
@@ -169,11 +170,22 @@ don't generate, so they need none.
   `levels` (where `auto_scale` widens the land too), and TerraForged Reimagined's
   `globalVerticalScale` multiplies only the land terrain's noise through terrain overrides, which this
   port, following 6dd607eb, doesn't apply.
-- `erosion_deposits`: shows what the erosion pass deposited. Each column's change from erosion is
-  compared with the 7x7 around it; where it came out at least as high (it lost less than its
-  surroundings, so their sediment settles there) up to three blocks of the natural surface turn into
-  gravel and clay in river and lake beds, gravel on the banks beside them, and scree (gravel and
-  cobblestone) at the foot of slopes. Snow from decoration still covers it on cold slopes.
+- `erosion_deposits`: shows where the erosion pass left sediment. Neither TerraForged tree places
+  any: Engine 0.3.0's `Erosion` keeps a column's deposits in `Cell.sediment`, but nothing reads it,
+  and the erosion this port runs (6dd607eb's, over Reimagined's regions) works on a bare height map
+  that keeps only the result. So the setting reads that result: each column's change from erosion
+  (its eroded height minus its raw one) against the mean of the 7x7 columns around it, measured on
+  the erosion region's map, so neighbouring chunks agree. Erosion lowers nearly all ground a little;
+  where a column came out at least as high as that mean (it lost less than its surroundings, or
+  gained), one to three blocks of the natural surface (grass, dirt, podzol, sand, stone, mud, from
+  the top down to the first other block) turn into gravel and clay in river and lake beds, gravel on
+  the banks beside them, and scree (gravel, some cobblestone) at the foot of slopes, where ground
+  within two blocks stands four or more higher. Only blocks change, never a height, so water,
+  rivers, structures, spawn and everything that reads heights are as without it. The sea floor and
+  its shores keep their blocks (vanilla's surface rules already give them sand, gravel and clay);
+  snow from decoration still covers deposits on cold slopes. Distant tiles don't show them, `/tf
+  preview` neither. Whether a column is a bank or the foot of a slope is judged inside its chunk,
+  so a bank whose water lies in the next chunk stays bare. Off, generation is unchanged.
 
 ## Layers
 

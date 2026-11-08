@@ -233,7 +233,8 @@ pub struct NoiseData {
     river: FloatMap,
     base: FloatMap,
     terrain: ObjectMap<Terrain>,
-    /// What erosion deposited (its height noise above the terrain's), when known.
+    /// `erosion_deposits` (Horizon's): erosion's change to the column against the 7x7 around it, as height noise; 0
+    /// without the setting.
     deposit: FloatMap,
 }
 
@@ -263,8 +264,8 @@ impl NoiseData {
         &self.sample
     }
 
-    /// Erosion's change to the column ([`ErodedNoiseGenerator::generate`]: its eroded height noise minus its raw
-    /// one), for the `erosion_deposits` setting; not TerraForged's.
+    /// The column's deposit for the `erosion_deposits` setting (not TerraForged's): `ErodedNoiseGenerator.generate`'s
+    /// change from erosion against the mean of the 7x7 around it, as height noise.
     pub fn set_deposit(&mut self, x: i32, z: i32, deposit: f32) {
         let index = self.height.index().slot(x, z);
         self.deposit.set_index(index, deposit);
@@ -288,6 +289,11 @@ impl NoiseData {
 
     pub const fn terrain(&self) -> &ObjectMap<Terrain> {
         &self.terrain
+    }
+
+    /// The deposits [`Self::set_deposit`] wrote (0 elsewhere).
+    pub const fn deposit(&self) -> &FloatMap {
+        &self.deposit
     }
 
     pub fn set_noise(&mut self, x: i32, z: i32, sample: &NoiseSample) {
@@ -317,7 +323,7 @@ pub struct TerrainData {
     river: FloatMap,
     base_height: FloatMap,
     terrain: ObjectMap<Terrain>,
-    /// Blocks erosion deposited over the terrain (negative where it wore it away).
+    /// [`NoiseData`]'s deposits in blocks (`erosion_deposits`; 0 without it).
     deposit: FloatMap,
     min: f32,
     max: f32,
@@ -344,8 +350,8 @@ impl TerrainData {
         self.levels.height(self.min)
     }
 
-    /// Blocks erosion deposited at the column over the terrain it eroded (negative where
-    /// it wore the terrain away).
+    /// Blocks the column came out higher from erosion than the 7x7 around it (negative where it was worn down more):
+    /// `erosion_deposits`' measure of the sediment there, 0 without the setting.
     pub fn deposit_at(&self, x: i32, z: i32) -> f32 {
         self.deposit.get(x, z)
     }

@@ -97,6 +97,8 @@ pub(super) struct TerraForgedPipeline {
     features: Option<TerraForgedFeatures>,
     /// `ChunkGenerator`'s structure placement, when the world generates structures.
     structures: Option<StructureState>,
+    /// The blocks of `erosion_deposits` when the world has it on (`terraforged_deposits`).
+    deposits: Option<super::terraforged_deposits::DepositBlocks>,
     /// Horizon's settings of the world (`terraforged_settings`) when the pipeline was built.
     settings: Settings,
 }
@@ -302,6 +304,11 @@ impl TerraForgedPipeline {
             carvers: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             features: TerraForgedFeatures::new(data)?,
             structures,
+            // `erosion_deposits`' blocks (Horizon's setting); None without it.
+            deposits: settings
+                .erosion_deposits
+                .then(|| super::terraforged_deposits::DepositBlocks::new(data.registry))
+                .flatten(),
             settings,
         })
     }
@@ -783,11 +790,15 @@ impl SeededPipeline for TerraForgedPipeline {
                 self.generator.sea_level(),
             )
             .map_err(stage("surface"))?;
-        if self.settings.erosion_deposits
-            && let Some(blocks) = super::terraforged_deposits::DepositBlocks::new(data.registry)
-        {
-            super::terraforged_deposits::apply(&terrain.read(), &mut chunk, &blocks)
-                .map_err(stage("deposits"))?;
+        // Horizon's `erosion_deposits`: erosion's sediment on the natural surface (no height changes).
+        if let Some(blocks) = &self.deposits {
+            super::terraforged_deposits::apply(
+                self.generator.seed(),
+                &terrain.read(),
+                &mut chunk,
+                blocks,
+            )
+            .map_err(stage("deposits"))?;
         }
 
         // applyCarvers: TerraForged's noise caves with `(int)` of the level seed; no vanilla carvers run (6dd607eb's

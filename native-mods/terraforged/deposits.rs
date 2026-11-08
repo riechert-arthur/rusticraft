@@ -1,18 +1,19 @@
-// The `erosion_deposits` setting: what TerraForged's erosion pass deposited shows on
-// the surface. Where erosion left a column higher than the ground around it (relative
-// to the terrain before erosion), the sediment settles as
-// gravel and clay in river and lake beds, gravel on the banks beside them, and scree
-// (gravel and cobblestone) at the foot of steeper ground. Not in the original, which
-// only keeps the eroded heights.
+// The `erosion_deposits` setting (Horizon's, in neither TerraForged tree): what TerraForged's
+// erosion pass deposited shows on the surface. Erosion lowers nearly all ground a little; where a
+// column came out at least as high as the 7x7 around it (it lost less than its surroundings, or
+// gained: `ErodedNoiseGenerator::generate` measures it on the erosion region's map), the sediment
+// settles as gravel and clay in river and lake beds, gravel on their banks, and scree (gravel and
+// cobblestone) at the foot of steeper ground. It only changes the blocks of the natural surface,
+// never a height: the sea, beaches and everything above the ground are left as they are.
 
 use super::super::terrain::{TerrainBlockStates, TerrainChunk, TerrainError};
+use super::terraforged_engine::TerrainProperties;
 use super::terraforged_terrain_data::TerrainData;
 use crate::heightmap::{HeightmapState, HeightmapType};
 use crate::registry::{BlockRegistry, BlockStateId};
 
-/// How much higher than the ground around it (in blocks, after erosion against before)
-/// a column must come out to hold sediment: where it was worn down no more than its
-/// surroundings, what was washed off them settles.
+/// How much higher than the ground around it (in blocks, erosion's change against the 7x7's mean)
+/// a column must come out to hold sediment.
 const MIN_DEPTH: f32 = 0.0;
 /// Blocks of sediment per block a column stands out by.
 const THICKNESS: f32 = 5.0;
@@ -30,6 +31,7 @@ pub struct DepositBlocks {
 }
 
 impl DepositBlocks {
+    /// `None` where the registry lacks gravel, clay or cobblestone.
     pub fn new(registry: &BlockRegistry) -> Option<Self> {
         let state = |name: &str| registry.default_state(name);
         Some(Self {
@@ -53,8 +55,9 @@ impl DepositBlocks {
     }
 }
 
-/// Lay the chunk's deposits over its surface.
+/// Lay the chunk's deposits over its surface; `seed` picks the material of each column.
 pub fn apply<B: TerrainBlockStates>(
+    seed: i32,
     terrain: &TerrainData,
     chunk: &mut TerrainChunk<'_, B>,
     blocks: &DepositBlocks,
@@ -71,43 +74,54 @@ pub fn apply<B: TerrainBlockStates>(
         }
     }
     let top = |dx: i32, dz: i32| tops[(dz * 16 + dx) as usize];
-    let underwater = |chunk: &TerrainChunk<'_, B>, dx: i32, dz: i32| {
+    // A river or lake column under water (the sea's floor and shores keep their own blocks).
+    let inland_water = |chunk: &TerrainChunk<'_, B>, dx: i32, dz: i32| {
+        terrain
+            .terrain()
+            .get(dx, dz)
+            .is_some_and(|terrain| terrain.is_river() || terrain.is_lake())
+            && chunk
+                .block_properties(chunk.block(dx, top(dx, dz) + 1, dz))
+                .has_fluid()
+    };
+    let wet = |chunk: &TerrainChunk<'_, B>, dx: i32, dz: i32| {
         chunk
             .block_properties(chunk.block(dx, top(dx, dz) + 1, dz))
             .has_fluid()
     };
     for dz in 0..16 {
         for dx in 0..16 {
-            // Erosion lowers nearly everything a little: sediment settles where a column
-            // came out higher than the ground around it.
-            let deposit = terrain.deposit_at(dx, dz) - local_mean(terrain, dx, dz);
-            if deposit < MIN_DEPTH {
+            let deposit = terrain.deposit_at(dx, dz);
+            if deposit.is_nan() || deposit < MIN_DEPTH {
                 continue;
             }
             let y = top(dx, dz);
-            let (x, z) = (position.x * 16 + dx, position.z * 16 + dz);
-            let roll = hash(x, z);
-            let neighbours = || {
-                (-2..=2)
-                    .flat_map(move |oz| (-2..=2).map(move |ox| (dx + ox, dz + oz)))
+            let (x, z) = (
+                position.x.wrapping_shl(4).wrapping_add(dx),
+                position.z.wrapping_shl(4).wrapping_add(dz),
+            );
+            let roll = hash(seed, x, z);
+            let neighbours = |radius: i32| {
+                (-radius..=radius)
+                    .flat_map(move |oz| (-radius..=radius).map(move |ox| (dx + ox, dz + oz)))
                     .filter(|&(nx, nz)| (0..16).contains(&nx) && (0..16).contains(&nz))
             };
-            let material = if underwater(chunk, dx, dz) {
+            let material = if wet(chunk, dx, dz) {
+                if !inland_water(chunk, dx, dz) {
+                    continue;
+                }
                 // River and lake beds.
                 if roll % 3 == 0 {
                     blocks.clay
                 } else {
                     blocks.gravel
                 }
-            } else if neighbours().any(|(nx, nz)| {
-                (nx - dx).abs() <= 1
-                    && (nz - dz).abs() <= 1
-                    && underwater(chunk, nx, nz)
-                    && top(nx, nz) >= y - 2
-            }) {
+            } else if neighbours(1)
+                .any(|(nx, nz)| inland_water(chunk, nx, nz) && top(nx, nz) >= y - 2)
+            {
                 // Banks.
                 blocks.gravel
-            } else if neighbours().any(|(nx, nz)| top(nx, nz) - y >= SLOPE) {
+            } else if neighbours(2).any(|(nx, nz)| top(nx, nz) - y >= SLOPE) {
                 // Scree at the foot of a slope.
                 if roll % 4 == 0 {
                     blocks.cobblestone
@@ -118,31 +132,23 @@ pub fn apply<B: TerrainBlockStates>(
                 continue;
             };
             let depth = (1 + (deposit * THICKNESS) as i32).clamp(1, MAX_DEPTH);
-            for down in 0..depth {
-                let at = y - down;
-                if blocks.natural.contains(&chunk.block(dx, at, dz)) {
-                    chunk.set_block_worldgen(dx, at, dz, material)?;
+            // Down from the surface block, through natural ground only.
+            for at in (y - depth + 1..=y).rev() {
+                if !blocks.natural.contains(&chunk.block(dx, at, dz)) {
+                    break;
                 }
+                chunk.set_block_worldgen(dx, at, dz, material)?;
             }
         }
     }
     Ok(())
 }
 
-/// The mean erosion change over the 7x7 columns around one, within the chunk.
-fn local_mean(terrain: &TerrainData, dx: i32, dz: i32) -> f32 {
-    let (mut sum, mut count) = (0.0, 0.0);
-    for nz in (dz - 3).max(0)..=(dz + 3).min(15) {
-        for nx in (dx - 3).max(0)..=(dx + 3).min(15) {
-            sum += terrain.deposit_at(nx, nz);
-            count += 1.0;
-        }
-    }
-    sum / count
-}
-
-fn hash(x: i32, z: i32) -> u32 {
-    let mut h = (x as u32).wrapping_mul(0x9E37_79B1) ^ (z as u32).wrapping_mul(0x85EB_CA77);
+/// A well-mixed hash of the world's seed and a column.
+fn hash(seed: i32, x: i32, z: i32) -> u32 {
+    let mut h = (x as u32).wrapping_mul(0x9E37_79B1)
+        ^ (z as u32).wrapping_mul(0x85EB_CA77)
+        ^ (seed as u32).wrapping_mul(0xC2B2_AE3D);
     h ^= h >> 15;
     h = h.wrapping_mul(0x2C1B_3C6D);
     h ^ (h >> 12)
