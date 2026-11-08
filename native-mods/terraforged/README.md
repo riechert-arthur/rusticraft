@@ -7,7 +7,9 @@ An exact Rust translation of [TerraForged](https://github.com/TerraForged/TerraF
 ## Status
 
 Still for development only (see [Status: development only](#status-development-only)). Choose
-**World Type: TerraForged** on Create World's World tab (after Single Biome). The world
+**World Type: TerraForged** on Create World's World tab (after Single Biome). The tab then shows,
+under the seed box, the map `/tf preview` gives of the new world: the 4096 blocks around spawn for the
+typed seed, redrawn as the seed changes (a blank seed is random: the map shows once one is typed). The world
 saves TerraForged's overworld stem and a `datapacks/terraforged` pack with TerraForged's
 1024-block overworld (y −64 to 959) and TerraForged's biomes, and generates its overworld with
 TerraForged (vanilla world types keep 26.3's overworld):
@@ -103,6 +105,9 @@ Differences and gaps:
 - `/tf preview [size] [zoom]` is Horizon's: TerraForged has no in-game preview, only a developer window
   (`Previewer`, never opened by the game). The command draws that window's map of the player's own world to
   `terraforged-preview.png` in the world folder.
+- The Create World map is Horizon's: neither TerraForged tree shows a map on that screen (TerraForged
+  Reimagined draws its own `PreviewWidget`, with relief shading, render modes and zoom, on its settings
+  screen, which is not ported). It is `/tf preview`'s picture, 64 pixels over 4096 blocks.
 - Not ported: TerraForged's dimension effects (clouds at y=300; the pack's Reimagined dimension type
   asks for the same height, but Horizon draws clouds at vanilla's height in every world) and the
   unregistered test volcano feature.
@@ -113,7 +118,8 @@ Horizon's own additions to TerraForged (none of them is TerraForged's), every on
 is the faithful port. A new TerraForged world takes them from `config/terraforged/settings.json` in the
 game folder, written with every setting off the first time, and keeps them in its overworld generator
 (`generator.horizon_settings` in `world_gen_settings.dat`, beside TerraForged's own generator fields),
-so changing the file later leaves existing worlds as they are; Re-Create keeps the world's own. A world
+so changing the file later leaves existing worlds as they are; Re-Create keeps the world's own. The
+Create World map is drawn with the settings the new world will get, though none of them changes it. A world
 made before the settings existed has every setting off. Vanilla worlds never get the block or the file. The game installs a world's
 settings as it opens it (also on a dedicated server running a TerraForged world); clients of a server
 don't generate, so they need none.
@@ -3118,6 +3124,24 @@ its own thread over all processors but one, one preview at a time (about 0.5 s f
 optimized build; the server keeps ticking), and the answer reaches the player at a later server tick. The tests
 compare colours and whole pictures against 6dd607eb's `ColorUtil` and the real `Sampler`, in
 `.local/terraforged/oracles/preview/` (out of Git).
+
+The Create World screen's map (`create_preview.rs`, over `terraforged_preview::new_world_map`) is Horizon's: the 1.18.2-0.3.1
+jar and 6dd607eb show nothing on that screen, and TerraForged Reimagined's `PreviewWidget` (160 pixels over 38400 blocks
+at its first zoom, relief shading and seven render modes) belongs to its settings screen, which is not ported. With
+TerraForged as the world type, the World tab draws `/tf preview`'s picture of the world the screen would make: 64×64
+pixels at 64 blocks per pixel centred on 0, 0 (around spawn: the continent's spawn offset puts a valid spawn cell
+there), shown up to 128 GUI pixels under the seed box and hidden on screens too short for 32. The seed is the text
+Create World turns into the level seed (a number, else the text's Java `hashCode`, trimmed), and the generator is built
+as the world's pipeline builds it: the preset's levels with `height_scale`, the settings the new world gets (Re-Create's
+source world's, else `config/terraforged/settings.json`), and `Seeds.get` of the level seed. Its colours read only the
+climate, continent and river noise, so no setting changes the map (the tests check every setting). A blank seed shows
+"the map shows once a seed is typed". The picture renders on a thread of its own, never the screen's, in well under a second:
+one render at a time for the latest seed, and a render for a seed already replaced, or for a screen no
+longer drawing the map, stops at its next pixel (TerraForged Reimagined's `PreviewWidget` takes the latest request the
+same way). While it renders, the previous seed's picture stays, dimmed. It goes to the screen through a world-list icon
+slot, which the world list fills again each frame it draws, so it holds no texture of its own. In game, seed 777's map
+equals `/tf preview 64 64` taken from 0.0, 0.0 pixel for pixel (from a centred `/tp 0 ~ 0`, `NoiseUtil.floor` takes the
+row below on the negative side, as Java does).
 
 `/tf regen <radius>` follows 6dd607eb's `Regenerator.regenerateChunks`: the square of chunks within the radius of the
 player's chunk (`(int) x >> 4`, Java's truncating cast) is deleted from the save (`chunkMap.write(pos, null)` = a delete

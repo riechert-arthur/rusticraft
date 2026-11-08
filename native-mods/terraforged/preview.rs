@@ -40,7 +40,11 @@ use super::{
     terraforged::{floor, lerp},
     terraforged_biome_sampler::{BEACH, ClimateSample, SHALLOW_OCEAN},
     terraforged_current_biome_sampler::CurrentBiomeSampler,
+    terraforged_generator_preset::{build, scale_heights, terrain_levels},
+    terraforged_settings::{Settings, set_for_thread},
+    terraforged_world_preset::preset_json,
 };
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// `getBiomeColor`'s shade strength in `ContinentPreview`.
 pub const STRENGTH: f32 = 0.2;
@@ -113,6 +117,43 @@ impl View {
 /// (`NoiseUtil.floor`, as ContinentPreview floors its continent coordinates), coloured by [`biome_color`].
 pub fn world_color(sampler: &CurrentBiomeSampler<'_>, seed: i32, x: f32, y: f32) -> u32 {
     biome_color(&sampler.get_sample(seed, floor(x), floor(y)), STRENGTH)
+}
+
+/// Horizon's Create World map (neither TerraForged tree has one there: 6dd607eb and the 1.18.2-0.3.1 jar show nothing,
+/// TerraForged Reimagined draws its own `PreviewWidget` on its settings screen): `view` of the world that `level_seed`
+/// and `settings` will generate, drawn as `/tf preview` draws a made world ([`world_color`] at the world's runtime
+/// seed, `Seeds.get` of the level seed). The generator is built as the world's pipeline builds it, from TerraForged's
+/// preset levels with the `height_scale` setting and with `settings` for this thread, so the picture is the one
+/// `/tf preview` gives once the world is made. `cancelled` is asked before each pixel: once it says yes, the rest of
+/// the picture is skipped and the result is `None`. `Err` where the bundled preset or a resource does not decode.
+pub fn new_world_map(
+    level_seed: i64,
+    settings: Settings,
+    view: View,
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<Option<Vec<u32>>, String> {
+    let preset: serde_json::Value =
+        serde_json::from_str(preset_json()).map_err(|error| error.to_string())?;
+    let levels = scale_heights(
+        terrain_levels(preset["dimensions"]["minecraft:overworld"]["generator"].get("levels"))?,
+        settings.height_scale,
+    );
+    set_for_thread(Some(settings));
+    let generator = build(levels);
+    set_for_thread(None);
+    let generator = generator?;
+    generator.capture_seed(level_seed);
+    let sampler = CurrentBiomeSampler::new(generator.noise_generator());
+    let seed = generator.seed();
+    let stopped = AtomicBool::new(false);
+    let pixels = view.render(|x, y| {
+        if stopped.load(Ordering::Relaxed) || cancelled() {
+            stopped.store(true, Ordering::Relaxed);
+            return 0;
+        }
+        world_color(&sampler, seed, x, y)
+    });
+    Ok((!stopped.into_inner()).then_some(pixels))
 }
 
 /// `ColorUtil.getBiomeColor(sample, strength)`: [`color`] shaded by `lerp(1, biomeNoise, strength)`.
@@ -311,5 +352,82 @@ render -2147483648 16 16 3f400000 c1080000 40400000 5d3612e4c3b7ce25 12x12
             .label(),
             "0x0"
         );
+    }
+
+    /// The Create World map of seed 777 is `/tf preview`'s picture of the same world: the generator its pipeline
+    /// builds (preset levels, `height_scale`), at its runtime seed. The bundled preset's map reads only climate,
+    /// continent and river noise, so no setting changes it (`height_scale` stretches heights, not the map).
+    #[test]
+    fn new_world_maps_are_the_world_s_preview() {
+        let view = View {
+            width: 32,
+            height: 32,
+            zoom: 128.0,
+            x: 0.0,
+            y: 0.0,
+        };
+        let preset: serde_json::Value = serde_json::from_str(preset_json()).unwrap();
+        let levels =
+            terrain_levels(preset["dimensions"]["minecraft:overworld"]["generator"].get("levels"))
+                .unwrap();
+        let world = build(levels).unwrap();
+        world.capture_seed(777);
+        let sampler = CurrentBiomeSampler::new(world.noise_generator());
+        let made = view.render(|x, y| world_color(&sampler, world.seed(), x, y));
+        let start = std::time::Instant::now();
+        let map = new_world_map(777, Settings::default(), view, &|| false)
+            .unwrap()
+            .unwrap();
+        eprintln!("new world map: {:?}", start.elapsed());
+        assert_eq!(map, made);
+        for settings in [
+            Settings {
+                height_scale: 1.85,
+                ..Settings::default()
+            },
+            Settings {
+                height_scale: 0.5,
+                deterministic: true,
+                sparse_forests: true,
+                corrected_biomes: true,
+                erosion_deposits: true,
+            },
+        ] {
+            assert_eq!(
+                new_world_map(777, settings, view, &|| false).unwrap(),
+                Some(made.clone()),
+                "{settings:?}"
+            );
+        }
+        // A long seed keeps its low 32 bits (`Seeds.get`), as the world's generator does.
+        assert_eq!(
+            new_world_map(777 + (5 << 32), Settings::default(), view, &|| false).unwrap(),
+            Some(made.clone())
+        );
+        assert_ne!(
+            new_world_map(778, Settings::default(), view, &|| false).unwrap(),
+            Some(made)
+        );
+    }
+
+    #[test]
+    fn cancelled_new_world_maps_stop() {
+        let asked = std::sync::atomic::AtomicUsize::new(0);
+        let map = new_world_map(
+            777,
+            Settings::default(),
+            View {
+                width: 64,
+                height: 64,
+                zoom: 64.0,
+                x: 0.0,
+                y: 0.0,
+            },
+            &|| asked.fetch_add(1, Ordering::Relaxed) >= 10,
+        )
+        .unwrap();
+        assert_eq!(map, None);
+        // Every thread stops at its next pixel: far fewer asks than the 4096 pixels.
+        assert!(asked.into_inner() < 200);
     }
 }

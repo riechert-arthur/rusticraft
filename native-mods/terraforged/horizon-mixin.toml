@@ -732,3 +732,22 @@ bindings = [
   { name = "world", ty = "Option<&Path>", value = "world" },
   { name = "value", ty = "Vec<(String, Value)>", value = "$value" },
 ]
+
+[[module]]
+id = "create_preview"
+file = "crates/horizon-client/src/title/create_world.rs"
+name = "terraforged_create_preview"
+source = "create_preview.rs"
+
+[[injection]]
+id = "create-world-preview"
+target = "horizon_client::title::create_world::Title::draw_create"
+kind = "RETURN"
+helper = "hooks/create_preview.rs"
+bindings = [
+  { name = "atlas", ty = "&HudAtlas", value = "atlas" },
+  { name = "batch", ty = "&mut HudBatch", value = "batch" },
+  { name = "seed", ty = "&str", value = "seed" },
+  { name = "options", ty = "&WorldOptions", value = "o" },
+  { name = "value", ty = "()", value = "$value" },
+]

@@ -215,17 +215,27 @@ pub fn write(
     if !CREATING.take() || options.preset != WorldPreset::Normal {
         return ControlFlow::Continue(());
     }
-    // Re-Create's world keeps its source's settings. Tests never read or write the game
-    // folder's settings file.
+    ControlFlow::Break(write_terraforged(
+        dir,
+        seed,
+        options,
+        flat.clone(),
+        creating_settings(),
+    ))
+}
+
+/// The Horizon settings the Create screen's TerraForged world gets (and its map shows):
+/// Re-Create's world keeps its source's, a fresh one takes the settings file's. Tests never
+/// read or write the game folder's settings file.
+pub fn creating_settings() -> Settings {
     let recreated = *CHOSEN_SETTINGS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let horizon = match recreated {
+    match recreated {
         Some(settings) => settings,
         None if cfg!(test) => Settings::default(),
         None => new_world_settings(),
-    };
-    ControlFlow::Break(write_terraforged(dir, seed, options, flat.clone(), horizon))
+    }
 }
 
 /// Vanilla's settings for `options`, with TerraForged's overworld stem, whose generator
