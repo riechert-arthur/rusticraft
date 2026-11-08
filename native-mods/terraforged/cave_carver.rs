@@ -183,6 +183,12 @@ impl<T: Clone + PartialEq> NoiseCaveGenerator<T> {
         Ok(carver)
     }
 
+    /// The caves' biome pools.
+    #[cfg(test)]
+    pub(crate) const fn biome_sampler(&self) -> &CaveBiomeSampler<T> {
+        &self.biomes
+    }
+
     /// Whether a cave may hold `biome`.
     pub fn may_hold(&self, biome: &T) -> bool
     where

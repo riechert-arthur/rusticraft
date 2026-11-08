@@ -2302,6 +2302,69 @@ mod tests {
         ov
     }
 
+    /// #269: a TerraForged world made before its pack held TerraForged's biomes (its pack: the dimension type only)
+    /// builds a generator whose GLOBAL caves hold `terraforged:cave` and whose UNIQUE pool holds both, from the biomes
+    /// its table holds (the `finish` hook); a new world's pack is kept as it is, and a vanilla world gets neither.
+    #[test]
+    fn an_older_worlds_generator_takes_its_tables_biomes() {
+        use super::super::terraforged_cave_noise::CaveType;
+        use super::super::terraforged_mod_biomes::{MOD_BIOMES, remember_root};
+        use super::super::terraforged_world_preset::overworld_type_json;
+        use crate::worldgen::overrides::WorldgenOverrides;
+        let Some(vanilla) = data() else { return };
+        let root = std::env::var_os("HORIZON_TEST_RESOURCES")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.local/horizon-client/26.3")
+            });
+        remember_root(&root);
+        // A TerraForged world's table: vanilla's biomes and TerraForged's (the `native_biome_files` hook).
+        let table: Vec<String> = vanilla
+            .biome_names()
+            .iter()
+            .map(|name| name.to_string())
+            .chain(MOD_BIOMES.iter().map(|(id, _)| id.to_string()))
+            .collect();
+        let known = |id: &str| table.iter().any(|name| name == id);
+        let pack = |biomes: Option<WorldgenOverrides>| {
+            let mut ov = biomes.unwrap_or_default();
+            ov.set(
+                "dimension_types",
+                "minecraft:overworld",
+                overworld_type_json().to_owned(),
+            );
+            ov
+        };
+        let mut older = pack(None);
+        assert!(older.finish(known).is_empty());
+        let data = data_with(&older).unwrap();
+        let cave = data.biome_id("terraforged:cave").unwrap();
+        let oak = data.biome_id("terraforged:oak_forest").unwrap();
+        let stem = terraforged_stem(&data, PRESET, "minecraft:overworld").unwrap();
+        let pipeline = TerraForgedPipeline::new(&data, 7, &stem, false).unwrap();
+        let sampler = pipeline.caves.biome_sampler();
+        let global: Vec<_> = sampler.pool(CaveType::Global).values().to_vec();
+        assert_eq!(global.iter().map(|id| **id).collect::<Vec<_>>(), [cave]);
+        let unique = sampler.pool(CaveType::Unique).values();
+        assert!(unique.iter().any(|id| **id == cave) && unique.iter().any(|id| **id == oak));
+        // A new world's pack holds the same biomes: `finish` keeps it as it is.
+        let mut fresh = pack(Some(terraforged_biomes(&vanilla)));
+        let written = fresh.clone();
+        assert!(fresh.finish(known).is_empty());
+        assert_eq!(fresh, written);
+        let parse = |ov: &WorldgenOverrides| -> Vec<(String, serde_json::Value)> {
+            ov.entries("biomes")
+                .map(|(id, json)| (id.to_owned(), serde_json::from_str(json).unwrap()))
+                .collect()
+        };
+        assert_eq!(parse(&older), parse(&fresh));
+        // A vanilla world's table holds neither: its packs gain no biome.
+        let mut plain = pack(None);
+        let vanilla_table = |id: &str| vanilla.biome_id(id).is_some();
+        assert!(plain.finish(vanilla_table).is_empty());
+        assert_eq!(plain.entries("biomes").count(), 0);
+    }
+
     /// With the world's pack the generator has TerraForged's biomes where 6dd607eb places them: GLOBAL noise caves
     /// write `terraforged:cave` (in carved quarts only), neither is a surface biome (no `minecraft:is_overworld` tag,
     /// as in 6dd607eb; UNIQUE caves can still draw either, as they draw any registered biome), and `trees/patchy`

@@ -3076,7 +3076,15 @@ The parents are read from the resources folder the game reads vanilla's biomes f
 RETURN hook on Horizon's `world_biomes::native_biome_files`, for TerraForged worlds only (and, for a client of another
 server, as far as that server's registry names them); the generator reads them from the world's pack, so GLOBAL caves
 get `terraforged:cave` and the UNIQUE pool (every registered biome) holds both. A TerraForged world made before the
-pack held the biomes has them in its table but not in its generator, so its GLOBAL caves keep the biomes above them. TerraForged's `DatapackHook.injectDatapack` copies that pack into every world the Create screen makes,
+pack held the biomes (or before it had a pack) gets them in its generator too: a HEAD hook on Horizon's
+`WorldgenOverrides::finish` (`mod_biomes.rs`, `join_table_biomes`) adds each of TerraForged's biomes the world's biome
+table holds and its packs lack to the packs' worldgen entries, built from the 26.3 parents as the table's copy is, so
+the table and the generator always agree: GLOBAL caves get `terraforged:cave` and the UNIQUE pool holds both, in the
+chunks such a world generates from now on (its saved chunks keep their biomes). Nothing is written to the world and
+its pack stays as it is (Re-Create writes the current one); a pack's own file for a biome is kept; a new world's
+entries are unchanged, and a vanilla world's table holds neither biome, so its packs gain none. TerraForged's
+`DatapackHook` copies its pack only into the worlds the Create screen makes, so Java worlds of older mod versions lack
+its newer files the same way; this is a Horizon-side fix, not parity, and never writes a world as it loads. TerraForged's `DatapackHook.injectDatapack` copies that pack into every world the Create screen makes,
 whatever the preset; here only TerraForged worlds get it (Arthur's choice), so vanilla world types keep 26.3's
 overworld. Worlds made before this keep their height; disabling the pack gives the overworld 26.3's height again. The screen copies the packs its Data Packs screen showed into the world first: a `datapacks/terraforged`
 folder holding exactly this pack (Re-Create's copy) is kept, and any other (the player's own pack of that name) is left
