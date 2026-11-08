@@ -2580,15 +2580,16 @@ mod tests {
         }
     }
 
-    /// What twelve far-decoration pipelines cost beside the level's: each thread builds its pipeline and decorates a
-    /// far 3x3, as `vanillagen/lod.rs`'s threads do. `TF_FAR_SHARED=0` builds each with its own noise (before #267),
+    /// What far-decoration pipelines cost beside the level's: each of `TF_FAR_THREADS` (12) threads builds its pipeline
+    /// and decorates a far 3x3, as `vanillagen/lod.rs`'s threads do. `TF_FAR_SHARED=0` builds each with its own noise (before #267),
     /// otherwise they share the level's. Run each mode in its own process (`--ignored --nocapture`, optimized): the
-    /// RSS lines are the process's.
+    /// RSS lines are the process's. The level pipeline decorates three 3x3s of its own meanwhile.
     #[test]
     #[ignore = "benchmark; run by hand with --ignored --nocapture"]
     fn far_pipelines_benchmark() {
         let Some(data) = data() else { return };
         let shared = std::env::var("TF_FAR_SHARED").map_or(true, |v| v != "0");
+        let threads: i32 = std::env::var("TF_FAR_THREADS").map_or(12, |v| v.parse().unwrap());
         let rss = || {
             let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
             let field = |name: &str| {
@@ -2620,7 +2621,7 @@ mod tests {
         };
         let start = std::time::Instant::now();
         let level = live_pipeline(&data, SEED, &stem, OVERWORLD, true).unwrap();
-        let _level = region(level, ChunkPos::new(0, 0));
+        let level = region(level, ChunkPos::new(0, 0));
         eprintln!(
             "level pipeline and its first 3x3: {:?}, RSS {}",
             start.elapsed(),
@@ -2628,7 +2629,7 @@ mod tests {
         );
         let start = std::time::Instant::now();
         let far: Vec<_> = std::thread::scope(|scope| {
-            let threads: Vec<_> = (0..12)
+            let threads: Vec<_> = (0..threads)
                 .map(|t| {
                     let (data, stem) = (&data, &stem);
                     scope.spawn(move || {
@@ -2643,13 +2644,24 @@ mod tests {
                     })
                 })
                 .collect();
+            // The level's own chunks while the far pipelines run (gameplay's generation beside far decoration).
+            let mut worker = level.worker();
+            let gameplay = std::time::Instant::now();
+            for k in 0..3 {
+                let mut region = region_around(&mut worker, ChunkPos::new(-30, 3 * k));
+                worker.decorate(&mut region).unwrap();
+            }
+            eprintln!(
+                "level: three 3x3s beside the far pipelines in {:?}",
+                gameplay.elapsed()
+            );
             threads.into_iter().map(|t| t.join().unwrap()).collect()
         });
         let built = far.iter().map(|f| f.0).max().unwrap();
         let first = far.iter().map(|f| f.1).min().unwrap();
         let last = far.iter().map(|f| f.1).max().unwrap();
         eprintln!(
-            "12 far pipelines ({}): built by {built:?}, first decorated 3x3 at {first:?}, all at {last:?}, RSS {}",
+            "{threads} far pipelines ({}): built by {built:?}, first decorated 3x3 at {first:?}, all at {last:?}, RSS {}",
             if shared {
                 "sharing the level's noise"
             } else {
