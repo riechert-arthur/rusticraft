@@ -32,8 +32,8 @@ TerraForged (vanilla world types keep 26.3's overworld):
   adapted under beardified structures' pieces (`StructureTerrain`);
 - decoration: `FeatureDecorator` with TerraForged's vegetation (jittered, fitness-gated trees, as
   dense as TerraForged's worlds are in play; `sparse_forests` thins them, `realistic_vegetation` weighs
-  them by aspect and water), cave decoration, water
-  smoothing and snow.
+  them by aspect and water, `altitude_climate` by height), cave decoration, water
+  smoothing and snow (with `altitude_climate`, down to a snow line).
 
 In TerraForged worlds, a player's boat rises to a river's stepped water surface (`BoatHook`), and
 operators get `/locateterrain <terrain> [radius]`, `/tf export structures`, `/tf regen <radius>` and
@@ -186,7 +186,7 @@ don't generate, so they need none.
   counts them in `1 / max_y` units), so the valleys through the taller land get deeper; caves keep
   their own heights, so tall mountains have no caves near their tops; the climate ignores height, as
   TerraForged's does, so a taller summit keeps its biome (vanilla's height-adjusted temperature still
-  snows on it). Neither TerraForged tree has this setting: their heights change only with a pack's
+  snows on it, and `altitude_climate` cools it further). Neither TerraForged tree has this setting: their heights change only with a pack's
   `levels` (where `auto_scale` widens the land too), and TerraForged Reimagined's
   `globalVerticalScale` multiplies only the land terrain's noise through terrain overrides, which this
   port, following 6dd607eb, doesn't apply.
@@ -247,6 +247,39 @@ don't generate, so they need none.
   variations in slope angle and aspect", J. Biogeography 2; riparian forests along water courses):
   Minecraft's sun stands overhead at noon, so its sky casts no such shade. Distant tiles and `/tf
   preview` don't show the ground cover. Off, generation is unchanged.
+- `altitude_climate` (with `altitude_climate_strength`, a number, 1 by default, held to 0–2): the
+  climate cools with height. TerraForged picks a column's biome from 2D temperature and moisture noise
+  alone, so a summit keeps its lowland's climate: at `height_scale` 1.85 seed 777's highest warm land, y 443
+  at (1024, 2208), is sparse jungle. Only vanilla's height-adjusted temperature (`Biome.getHeightAdjustedTemperature`,
+  0.00125 colder per block above sea level + 17, with a little noise) cools it, which snows on plains
+  (0.8) only 520 blocks above that. With the setting each block above sea level + 17 cools by
+  `0.00275 × strength` more per block (0.004 in all at strength 1, about three times vanilla's: the
+  environmental lapse rate, about 6.5 °C per km, steepened for Minecraft's short mountains; at strength 0
+  the climate is vanilla's). The biomes stay where TerraForged puts them (moving them would reshuffle every
+  biome border on relief; see the issue), and `/locate biome` and `/tf preview` are unchanged. Two things
+  follow the cooled air:
+  - the snow line: after the decoration, the decorator runs vanilla's `freeze_top_layer` again over the
+    chunk with each block's cooled temperature: open water freezes and the top gets a snow layer (the block
+    under it `snowy`) where vanilla's own `shouldFreeze` and `shouldSnow` pass (under 0.15). Short grass,
+    ferns and their tall forms are cleared where it snows, or TerraForged's grass passes would keep the
+    snow off most columns. TerraForged's `Surface.applyPost` then smooths that snow on gentle ground and
+    strips it to stone on steep slopes, as on every snowy mountain, so steep summits turn stony. At
+    strength 1 snow lies from about 140 blocks above sea level + 17 in a forest (0.7), 160 in plains
+    (0.8), 200 in a jungle (0.95); a desert or savanna (2.0) needs 460, more than TerraForged's land
+    reaches at `height_scale` 1.
+  - the treeline: a tree's fitness is multiplied by a share that falls from 1 to 0 as the cooled
+    temperature drops through 0.35–0.25 (just warmer than the snow line: plains thin out about 50 blocks
+    under their snow line and stop 25 under it), or, in a biome colder than 0.55, through the band 0.3 under its
+    own temperature, so a taiga or snowy plain keeps its lowland forest and stops about 75 blocks above
+    sea level + 17. A biome without a TerraForged vegetation config grows no trees at its chunk corner past
+    the band's middle. With `realistic_vegetation` the share multiplies that setting's fitness, so shaded
+    slopes are still wooded up to the treeline, not beyond it.
+
+  The lapse counts blocks above the sea, not a share of the land's height, so with `height_scale` the
+  taller land reaches further into the cold, as real mountains do. Every value is a function of the block's
+  biome and position, so chunks agree at their borders. Weather in play stays the biome's: rain, not snow,
+  falls on a warm biome's snowy summit, and its snow and ice don't melt (only block light melts them).
+  Distant tiles don't show the snow line. Off, generation is unchanged.
 
 ## Layers
 

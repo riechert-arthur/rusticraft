@@ -993,6 +993,9 @@ impl SeededPipeline for TerraForgedPipeline {
                 air: self.air,
                 carvers: &self.carvers,
                 deterministic: self.settings.deterministic,
+                altitude_climate: super::terraforged_altitude_climate::AltitudeClimate::of(
+                    self.settings,
+                ),
             },
         )?;
         // terrainCache.drop(Seeds.get(region.getSeed()), pos).
@@ -3435,5 +3438,185 @@ mod tests {
             podzol.1 / (podzol.0 as f32) > 0.2 && coarse.1 / (coarse.0 as f32) < -0.2,
             "{changed:?}"
         );
+    }
+
+    /// What a decorated chunk holds on top: per column, its top block (first not air from the level's top down), the
+    /// y of that block, and whether a log stands anywhere in the column.
+    fn tops(chunk: &ProtoChunk) -> Vec<(String, i32, bool)> {
+        let (min_y, height) = (chunk.terrain.min_y(), chunk.terrain.height());
+        (0..256)
+            .map(|i| {
+                let (x, z) = (i & 15, i >> 4);
+                let y = (min_y..min_y + height)
+                    .rev()
+                    .find(|&y| chunk.block_name(x, y, z) != "minecraft:air")
+                    .unwrap_or(min_y);
+                let log =
+                    (min_y..min_y + height).any(|y| chunk.block_name(x, y, z).ends_with("_log"));
+                (chunk.block_name(x, y, z).to_owned(), y, log)
+            })
+            .collect()
+    }
+
+    /// `altitude_climate` on seed 777 at height scale 1.85 (the tall overworld), on its highest warm land (biomes of
+    /// vanilla temperature 0.7 or more, which vanilla's own height-adjusted temperature doesn't snow on; the highest
+    /// is sparse jungle at y 443): the summits are snowed over, except a savanna's (2.0, too warm even there), while
+    /// the land keeps its heights and biomes; with `realistic_vegetation` as well they are as snowy. On wooded slopes
+    /// at y 195 to 225 (forests and plains, through their treeline) the trees thin out. The chunks are spread out:
+    /// four points of a 32-block grid at least 600 blocks apart for each.
+    #[test]
+    fn altitude_climate_snows_on_summits_and_thins_their_trees() {
+        let mut ov = crate::worldgen::overrides::WorldgenOverrides::default();
+        ov.set(
+            crate::worldgen::overrides::DIMENSION_TYPES,
+            "minecraft:overworld",
+            super::super::terraforged_world_preset::overworld_type_json().to_owned(),
+        );
+        let Some(data) = data_with(&ov) else { return };
+        let build = |climate, vegetation| {
+            terraforged_settings::set_for_thread(Some(Settings {
+                height_scale: 1.85,
+                altitude_climate: climate,
+                realistic_vegetation: vegetation,
+                ..terraforged_settings::FAITHFUL
+            }));
+            let (pipeline, overworld) = terraforged(&data, 777, false);
+            terraforged_settings::set_for_thread(None);
+            (pipeline, overworld)
+        };
+        let (off_pipeline, off) = build(false, false);
+        // Heights and biomes every 32 blocks over 6,400 x 6,400 blocks, in warm biomes (vanilla temperature 0.7 or
+        // more: forests, plains, jungles...), highest first.
+        let sampler = off_pipeline.surface_sampler();
+        let mut grid: Vec<(i32, i32, i32, f32)> = (-100..100)
+            .flat_map(|i| (-100..100).map(move |j| (i * 32, j * 32)))
+            .filter_map(|(x, z)| {
+                let biome = off_pipeline.biome_at(&sampler, x, z)?;
+                let temperature = data.temperatures[biome.0 as usize].base_temperature;
+                (temperature >= 0.7).then(|| {
+                    let height = off_pipeline.generator.far_heights(x, z).unwrap().0;
+                    (height, x, z, temperature)
+                })
+            })
+            .collect();
+        grid.sort_unstable_by(|a, b| b.0.cmp(&a.0).then((a.1, a.2).cmp(&(b.1, b.2))));
+        // Four points of the grid that `keep` keeps, highest first, at least 600 blocks apart.
+        let spread = |keep: &dyn Fn(i32, f32) -> bool| {
+            let mut points: Vec<(i32, i32, i32)> = Vec::new();
+            for &(height, x, z, temperature) in &grid {
+                if points.len() < 4
+                    && keep(height, temperature)
+                    && points
+                        .iter()
+                        .all(|s| (s.1 - x).abs().max((s.2 - z).abs()) >= 600)
+                {
+                    points.push((height, x, z));
+                }
+            }
+            points
+        };
+        let summits = spread(&|_, _| true);
+        // Wooded slopes under the snow line, through plains' and forests' treeline (y 190 to 220 at strength 1).
+        let slopes =
+            spread(&|height, temperature| (195..=225).contains(&height) && temperature <= 0.8);
+        let (on, both) = (build(true, false).1, build(true, true).1);
+        let registry = data.registry();
+        let snowy = |chunk: &ProtoChunk| {
+            (0..256)
+                .filter(|i| {
+                    let (x, z) = (i & 15, i >> 4);
+                    let y = chunk.terrain.min_y() + chunk.terrain.height() - 1;
+                    let y = (chunk.terrain.min_y()..=y)
+                        .rev()
+                        .find(|&y| chunk.block_name(x, y, z) == "minecraft:snow")
+                        .unwrap_or(y);
+                    registry
+                        .state(chunk.block(x, y - 1, z))
+                        .and_then(|s| s.properties.get("snowy"))
+                        .is_some_and(|v| v == "true")
+                })
+                .count()
+        };
+        // [off, on, on with realistic_vegetation]: snow tops, logs, snowy blocks under the snow, over every summit.
+        let mut totals = [(0, 0, 0); 3];
+        // [off, on, on with realistic_vegetation]: log columns on the slopes.
+        let mut slope_logs = [0; 3];
+        for (slope, &(height, x, z)) in summits
+            .iter()
+            .map(|s| (false, s))
+            .chain(slopes.iter().map(|s| (true, s)))
+        {
+            let center = ChunkPos::new(x >> 4, z >> 4);
+            let mut decorated = Vec::new();
+            for (k, overworld) in [&off, &on, &both].into_iter().enumerate() {
+                let mut worker = overworld.worker();
+                let mut region = region_around(&mut worker, center);
+                worker.decorate(&mut region).unwrap();
+                let top = tops(&region[4]);
+                if slope {
+                    slope_logs[k] += top.iter().filter(|t| t.2).count();
+                    decorated.push((region, top));
+                    continue;
+                }
+                totals[k].0 += top.iter().filter(|t| t.0 == "minecraft:snow").count();
+                totals[k].1 += top.iter().filter(|t| t.2).count();
+                totals[k].2 += snowy(&region[4]);
+                decorated.push((region, top));
+            }
+            let biome = decorated[0].0[4].biome_at(8, height, 8).to_owned();
+            eprintln!(
+                "{} {x} {z} y {height} {biome}: snow tops {:?}, log columns {:?}",
+                if slope { "slope" } else { "summit" },
+                decorated
+                    .iter()
+                    .map(|d| d.1.iter().filter(|t| t.0 == "minecraft:snow").count())
+                    .collect::<Vec<_>>(),
+                decorated
+                    .iter()
+                    .map(|d| d.1.iter().filter(|t| t.2).count())
+                    .collect::<Vec<_>>(),
+            );
+            // The ground and the biomes are the same: only the decoration's top differs.
+            let (a, b) = (&decorated[0].0[4], &decorated[1].0[4]);
+            for (lx, lz) in (0..16).flat_map(|x| (0..16).map(move |z| (x, z))) {
+                for y in (height - 40..height + 10).step_by(4) {
+                    assert_eq!(a.biome_at(lx, y, lz), b.biome_at(lx, y, lz));
+                }
+            }
+            assert_eq!(
+                (0..256)
+                    .map(|i| a
+                        .terrain
+                        .heightmap(HeightmapType::OceanFloorWg)
+                        .unwrap()
+                        .first_available(i & 15, i >> 4)
+                        .unwrap())
+                    .collect::<Vec<_>>(),
+                (0..256)
+                    .map(|i| b
+                        .terrain
+                        .heightmap(HeightmapType::OceanFloorWg)
+                        .unwrap()
+                        .first_available(i & 15, i >> 4)
+                        .unwrap())
+                    .collect::<Vec<_>>(),
+            );
+        }
+        eprintln!(
+            "summits {summits:?}; [off, on, on + vegetation] (snow tops, log columns, snowy under snow): {totals:?}"
+        );
+        assert!(summits.len() == 4 && summits[0].0 > 280, "{summits:?}");
+        assert!(totals[1].0 > totals[0].0 + 4 * 64, "{totals:?}");
+        assert!(totals[2].0 > totals[0].0 + 4 * 64, "{totals:?}");
+        assert!(totals[1].1 * 2 <= totals[0].1, "{totals:?}");
+        assert!(totals[2].1 * 2 <= totals[0].1, "{totals:?}");
+        assert!(totals[1].2 > totals[0].2, "{totals:?}");
+        eprintln!("slopes {slopes:?}; log columns [off, on, on + vegetation]: {slope_logs:?}");
+        assert!(
+            slopes.len() == 4 && slope_logs[0] > 20,
+            "{slopes:?} {slope_logs:?}"
+        );
+        assert!(slope_logs[1] * 2 <= slope_logs[0], "{slope_logs:?}");
+        assert!(slope_logs[2] * 2 <= slope_logs[0], "{slope_logs:?}");
     }
 }

@@ -44,6 +44,13 @@ pub struct Settings {
     /// slopes and dry ground far from water; podzol and moss on shaded slopes, coarse dirt on
     /// sunny ones (`terraforged_realistic_vegetation`). Changes no height.
     pub realistic_vegetation: bool,
+    /// The climate cools with height: snow and ice reach down to a snow line and trees thin out
+    /// to a treeline, both lower in colder biomes and on taller land
+    /// (`terraforged_altitude_climate`). The biomes stay where TerraForged puts them.
+    pub altitude_climate: bool,
+    /// How fast `altitude_climate` cools with height, as a multiple of Horizon's lapse rate
+    /// ([`ALTITUDE_CLIMATE_STRENGTHS`]; 0 keeps vanilla's own, 1 is the default).
+    pub altitude_climate_strength: f32,
 }
 
 impl Default for Settings {
@@ -61,6 +68,8 @@ pub const FAITHFUL: Settings = Settings {
     erosion_deposits: false,
     eroded_far_terrain: false,
     realistic_vegetation: false,
+    altitude_climate: false,
+    altitude_climate_strength: 1.0,
 };
 
 /// The range `height_scale` is held to. TerraForged's land reaches at most 476 blocks above
@@ -69,6 +78,9 @@ pub const FAITHFUL: Settings = Settings {
 /// nothing is cut flat; at 0.5 the base range (64) still clears the sea level, which
 /// `TerrainLevels` holds it above.
 pub const HEIGHT_SCALES: std::ops::RangeInclusive<f32> = 0.5..=1.85;
+
+/// The range `altitude_climate_strength` is held to.
+pub const ALTITUDE_CLIMATE_STRENGTHS: std::ops::RangeInclusive<f32> = 0.0..=2.0;
 
 static CURRENT: RwLock<Settings> = RwLock::new(FAITHFUL);
 
@@ -112,6 +124,16 @@ impl Settings {
             erosion_deposits: flag("erosion_deposits", FAITHFUL.erosion_deposits),
             eroded_far_terrain: flag("eroded_far_terrain", FAITHFUL.eroded_far_terrain),
             realistic_vegetation: flag("realistic_vegetation", FAITHFUL.realistic_vegetation),
+            altitude_climate: flag("altitude_climate", FAITHFUL.altitude_climate),
+            altitude_climate_strength: value["altitude_climate_strength"].as_f64().map_or(
+                FAITHFUL.altitude_climate_strength,
+                |strength| {
+                    (strength as f32).clamp(
+                        *ALTITUDE_CLIMATE_STRENGTHS.start(),
+                        *ALTITUDE_CLIMATE_STRENGTHS.end(),
+                    )
+                },
+            ),
         }
     }
 
@@ -126,6 +148,11 @@ impl Settings {
         map.insert(
             "realistic_vegetation".into(),
             self.realistic_vegetation.into(),
+        );
+        map.insert("altitude_climate".into(), self.altitude_climate.into());
+        map.insert(
+            "altitude_climate_strength".into(),
+            f64::from(self.altitude_climate_strength).into(),
         );
         Value::Object(map)
     }
@@ -145,8 +172,23 @@ mod tests {
             erosion_deposits: true,
             eroded_far_terrain: true,
             realistic_vegetation: true,
+            altitude_climate: true,
+            altitude_climate_strength: 1.5,
         };
         assert_eq!(Settings::from_json(&on.to_json()), on);
+        let strength = |value: Value| Settings::from_json(&value).altitude_climate_strength;
+        assert_eq!(
+            strength(serde_json::json!({"altitude_climate_strength": 5})),
+            2.0
+        );
+        assert_eq!(
+            strength(serde_json::json!({"altitude_climate_strength": -1})),
+            0.0
+        );
+        assert_eq!(
+            strength(serde_json::json!({"altitude_climate_strength": "1"})),
+            1.0
+        );
         assert_eq!(Settings::from_json(&serde_json::json!({})), FAITHFUL);
         assert_eq!(
             Settings::from_json(&serde_json::json!({"height_scale": 9})).height_scale,

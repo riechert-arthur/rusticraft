@@ -38,6 +38,7 @@ use super::super::placement::PlacementModifier;
 use super::*;
 use crate::worldgen::generator::{
     terraforged::{floor, hash, hash_2d},
+    terraforged_altitude_climate::AltitudeClimate,
     terraforged_biome_viability::TerrainViabilityContext,
     terraforged_cave_carver::{CarverChunk, NoiseCaveGenerator},
     terraforged_generator_facade::TerraForgedGenerator,
@@ -380,6 +381,9 @@ pub(in crate::worldgen) struct TerraForgedDecoration<'a> {
     /// The world's `deterministic` setting (`terraforged_settings`): the vegetation's fixed feature-seed slots and
     /// ground under the trees.
     pub deterministic: bool,
+    /// The world's `altitude_climate` (`terraforged_altitude_climate`), when it has it on: the treeline and the snow
+    /// line.
+    pub altitude_climate: Option<AltitudeClimate>,
 }
 
 /// `Generator.applyBiomeDecoration`'s `BiomeGenerator.decorate` for the centre of a 3x3 region: `FeatureDecorator`
@@ -539,6 +543,7 @@ pub(in crate::worldgen) fn decorate(
                 world: &mut world,
                 context: TerrainViabilityContext(&terrain),
                 deterministic: tf.deterministic,
+                climate: tf.altitude_climate,
             },
             random: &mut random,
             seed: decoration_seed,
@@ -576,6 +581,11 @@ pub(in crate::worldgen) fn decorate(
                     decorator.place(&mut world, &mut random, id, pos);
                 }
             }
+        }
+        // Horizon's `altitude_climate`: snow and ice down to the cooled air's snow line, before `applyPost` smooths
+        // and erodes the snow.
+        if let Some(climate) = tf.altitude_climate {
+            altitude_snow(&mut world, center, climate)?;
         }
         Ok(())
     })();
@@ -632,6 +642,110 @@ pub(in crate::worldgen) fn decorate(
         .set_generation_stage(PreLightChunkStage::Features);
     region[4].set_decorated();
     Ok(stats)
+}
+
+/// The plants Horizon's `altitude_climate` clears where its snow falls: the grass and ferns TerraForged's grass passes
+/// plant everywhere, which would keep the snow off every other column (vanilla's cold biomes grow none).
+const SNOWED_UNDER: [&str; 4] = [
+    "minecraft:short_grass",
+    "minecraft:fern",
+    "minecraft:tall_grass",
+    "minecraft:large_fern",
+];
+
+/// Horizon's `altitude_climate` snow line over the centre chunk, after every feature: vanilla's
+/// `SnowAndFreezeFeature` (`freeze_top_layer`, which the decoration has already run with the biomes' own climate)
+/// again, column by column at the MOTION_BLOCKING height, with each block's temperature cooled by
+/// `AltitudeClimate::cooling`: open water under the cooled snow line freezes, and the column's top gets a snow layer
+/// where vanilla's `shouldSnow` passes, the block under it turning `snowy`. Grass and ferns ([`SNOWED_UNDER`]) on a
+/// top where it snows are cleared first. Every test reads only the block's biome and position, so neighbouring
+/// chunks agree.
+fn altitude_snow(
+    world: &mut World<'_>,
+    center: ChunkPos,
+    climate: AltitudeClimate,
+) -> Result<(), GeneratorError> {
+    let decoration = world.decoration;
+    let Some(weather) = decoration.weather.as_ref() else {
+        return Ok(());
+    };
+    let registry = decoration.bindings.registry();
+    let state = |name: &str| {
+        registry
+            .default_state(name)
+            .ok_or_else(|| resource(format!("no {name} for the snow line")))
+    };
+    let (ice, snow, air) = (
+        state("minecraft:ice")?,
+        state("minecraft:snow")?,
+        state("minecraft:air")?,
+    );
+    let plant = |id: BlockStateId| {
+        registry
+            .state(id)
+            .filter(|state| SNOWED_UNDER.contains(&state.name.as_str()))
+            .map(|state| {
+                state
+                    .properties
+                    .get("half")
+                    .is_some_and(|half| half == "lower")
+            })
+    };
+    let snowy = |id: BlockStateId| {
+        let state = registry.state(id)?;
+        (state.properties.get("snowy")? == "false").then(|| {
+            let mut snowy = state.clone();
+            snowy
+                .properties
+                .insert("snowy".to_owned(), "true".to_owned());
+            registry.id(&snowy)
+        })?
+    };
+    let write = |e: RegionError| resource(e.to_string());
+    let sea_level = PlacementContext::sea_level(world).map_err(query_error)?;
+    let (start_x, start_z) = (center.x.wrapping_shl(4), center.z.wrapping_shl(4));
+    for dx in 0..16 {
+        for dz in 0..16 {
+            let (x, z) = (start_x.wrapping_add(dx), start_z.wrapping_add(dz));
+            let y = PlacementContext::height(world, HeightmapType::MotionBlocking, x, z)
+                .map_err(query_error)?;
+            let (top, below) = ([x, y, z], [x, y.wrapping_sub(1), z]);
+            let biome = PlacementContext::biome_identity(world, top).map_err(query_error)?;
+            let settings = world
+                .temperatures
+                .get(biome.0 as usize)
+                .ok_or_else(|| resource("no temperature for the biome"))?
+                .settings();
+            let cooled = |pos| BiomeTemperature::new(climate.at(settings, pos, sea_level));
+            if weather
+                .should_freeze(world, &mut cooled(below), below, false)
+                .map_err(query_error)?
+            {
+                FeatureWorld::set_block(world, below, ice, 2).map_err(write)?;
+            }
+            let mut at_top = cooled(top);
+            if settings.has_precipitation
+                && at_top.cold_enough_to_snow(BlockPos::new(x, y, z), sea_level)
+                && let Some(lower) = plant(FeatureWorld::block(world, top).map_err(write)?)
+            {
+                FeatureWorld::set_block(world, top, air, 2).map_err(write)?;
+                if lower {
+                    FeatureWorld::set_block(world, [x, y.wrapping_add(1), z], air, 2)
+                        .map_err(write)?;
+                }
+            }
+            if weather
+                .should_snow(world, &mut at_top, top)
+                .map_err(query_error)?
+            {
+                FeatureWorld::set_block(world, top, snow, 2).map_err(write)?;
+                if let Some(state) = snowy(FeatureWorld::block(world, below).map_err(write)?) {
+                    FeatureWorld::set_block(world, below, state, 2).map_err(write)?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// `FeatureDecorator.getOrigin`: `SectionPos.of(chunkPos, level.getMinSection()).origin()`.
@@ -800,6 +914,11 @@ trait Planting {
     fn biome(&mut self, pos: [i32; 3]) -> Result<BiomeId, GeneratorError>;
     /// `configs[config].viability().getFitness(x, z, viabilityContext)`.
     fn fitness(&mut self, config: usize, x: i32, z: i32) -> Result<f32, GeneratorError>;
+    /// Horizon's `altitude_climate`: the share of a tree's fitness ground at `pos` in `biome` keeps under the
+    /// treeline (`AltitudeClimate::trees`); `None` without the setting.
+    fn treeline(&mut self, _biome: BiomeId, _pos: [i32; 3]) -> Result<Option<f32>, GeneratorError> {
+        Ok(None)
+    }
     /// `feature.placeWithBiomeCheck(region, generator, random, pos)`, with `placement` in place of the feature's own
     /// when it is `Some` (an unwrapped tree).
     fn place(
@@ -819,6 +938,8 @@ struct RegionPlanting<'d, 'w, 'a> {
     context: TerrainViabilityContext<'d>,
     /// The `deterministic` setting: a column's top is the ground under any trees.
     deterministic: bool,
+    /// The `altitude_climate` setting: the treeline.
+    climate: Option<AltitudeClimate>,
 }
 
 impl Planting for RegionPlanting<'_, '_, '_> {
@@ -858,6 +979,20 @@ impl Planting for RegionPlanting<'_, '_, '_> {
             .viability
             .try_fitness(x, z, &self.context)
             .map_err(|e| GeneratorError::Stage("features", e.to_owned()))
+    }
+
+    fn treeline(&mut self, biome: BiomeId, pos: [i32; 3]) -> Result<Option<f32>, GeneratorError> {
+        let Some(climate) = self.climate else {
+            return Ok(None);
+        };
+        let sea_level = self.world.sea_level().map_err(query_error)?;
+        let settings = self
+            .world
+            .temperatures
+            .get(biome.0 as usize)
+            .ok_or_else(|| resource("no temperature for the biome"))?
+            .settings();
+        Ok(Some(climate.trees(settings, pos, sea_level)))
     }
 
     fn place(
@@ -921,7 +1056,14 @@ impl<P: Planting> PositionSampler<'_, P> {
                 let biome = self.planting.biome([x, y, z])?;
                 viability[(dz * 16 + dx) as usize] = match self.vegetation[biome.0 as usize].config
                 {
-                    Some(config) => self.planting.fitness(config, x, z)?,
+                    // Horizon's `altitude_climate` thins the trees towards the treeline.
+                    Some(config) => {
+                        let fitness = self.planting.fitness(config, x, z)?;
+                        match self.planting.treeline(biome, [x, y, z])? {
+                            Some(share) => fitness * share,
+                            None => fitness,
+                        }
+                    }
                     None => 1.0,
                 };
                 if !biomes.contains(&biome) {
@@ -938,9 +1080,13 @@ impl<P: Planting> PositionSampler<'_, P> {
                 continue;
             }
             offset = match vegetation.config {
-                None => {
-                    self.place_at_corner(offset.wrapping_add(i), i, [start_x, start_z], vegetation)?
-                }
+                None => self.place_at_corner(
+                    offset.wrapping_add(i),
+                    i,
+                    [start_x, start_z],
+                    biome,
+                    vegetation,
+                )?,
                 Some(config) => {
                     let offset = self.sample(
                         offset.wrapping_add(i),
@@ -964,14 +1110,21 @@ impl<P: Planting> PositionSampler<'_, P> {
         mut offset: i32,
         biome_index: i32,
         [x, z]: [i32; 2],
+        biome: BiomeId,
         vegetation: &BiomeVegetation,
     ) -> Result<i32, GeneratorError> {
         let y = self.planting.top(x, z)?;
         if y <= self.sea_level {
             return Ok(offset);
         }
+        // Horizon's `altitude_climate`: no trees at a corner past the middle of the treeline's band (the grass
+        // still grows).
+        let bare = matches!(self.planting.treeline(biome, [x, y, z])?, Some(share) if share < 0.5);
         let trees = vegetation.trees.iter().map(|tree| tree.id);
         for (feature, id) in trees.chain(vegetation.grass.iter().copied()).enumerate() {
+            if bare && feature < vegetation.trees.len() {
+                continue;
+            }
             self.seed_feature(offset, || slot_index(CORNER, biome_index, 0, feature));
             if self.planting.place(self.random, id, None, [x, y, z]) {
                 offset = offset.wrapping_add(1);
