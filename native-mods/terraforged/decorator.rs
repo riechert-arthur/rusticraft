@@ -919,6 +919,16 @@ trait Planting {
     fn treeline(&mut self, _biome: BiomeId, _pos: [i32; 3]) -> Result<Option<f32>, GeneratorError> {
         Ok(None)
     }
+    /// Horizon's `altitude_climate`: whether the column's ground lies past the middle of the treeline's band for
+    /// `biome` (never without the setting).
+    fn above_treeline(
+        &mut self,
+        _biome: BiomeId,
+        _x: i32,
+        _z: i32,
+    ) -> Result<bool, GeneratorError> {
+        Ok(false)
+    }
     /// `feature.placeWithBiomeCheck(region, generator, random, pos)`, with `placement` in place of the feature's own
     /// when it is `Some` (an unwrapped tree).
     fn place(
@@ -995,6 +1005,16 @@ impl Planting for RegionPlanting<'_, '_, '_> {
         Ok(Some(climate.trees(settings, pos, sea_level)))
     }
 
+    fn above_treeline(&mut self, biome: BiomeId, x: i32, z: i32) -> Result<bool, GeneratorError> {
+        if self.climate.is_none() {
+            return Ok(false);
+        }
+        let y = self.top(x, z)?;
+        Ok(self
+            .treeline(biome, [x, y, z])?
+            .is_some_and(|share| share < 0.5))
+    }
+
     fn place(
         &mut self,
         random: &mut Random,
@@ -1034,10 +1054,15 @@ impl<P: Planting> PositionSampler<'_, P> {
             .set_feature_seed(self.seed, index, VEGETAL as i32);
     }
 
-    /// `placeVegetation`: `placeTreesAndGrass`, then `placeOther` from the offset it reached.
+    /// `placeVegetation`: `placeTreesAndGrass`, then `placeOther` from the offset it reached. With Horizon's
+    /// `altitude_climate`, `placeOther` is skipped where the chunk's corner lies past the middle of the treeline's
+    /// band: the biome's other plants, some of them trees too (a bamboo jungle's `bamboo_vegetation` grows jungle
+    /// trees, which no tree keyword names), stop with the trees.
     fn place_vegetation(&mut self, origin: [i32; 3], biome: BiomeId) -> Result<(), GeneratorError> {
         let offset = self.trees_and_grass()?;
-        self.other(offset, origin, biome);
+        if !self.planting.above_treeline(biome, origin[0], origin[2])? {
+            self.other(offset, origin, biome);
+        }
         Ok(())
     }
 
@@ -1119,7 +1144,7 @@ impl<P: Planting> PositionSampler<'_, P> {
         }
         // Horizon's `altitude_climate`: no trees at a corner past the middle of the treeline's band (the grass
         // still grows).
-        let bare = matches!(self.planting.treeline(biome, [x, y, z])?, Some(share) if share < 0.5);
+        let bare = self.planting.above_treeline(biome, x, z)?;
         let trees = vegetation.trees.iter().map(|tree| tree.id);
         for (feature, id) in trees.chain(vegetation.grass.iter().copied()).enumerate() {
             if bare && feature < vegetation.trees.len() {

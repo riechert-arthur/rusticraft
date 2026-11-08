@@ -269,11 +269,13 @@ don't generate, so they need none.
     reaches at `height_scale` 1.
   - the treeline: a tree's fitness is multiplied by a share that falls from 1 to 0 as the cooled
     temperature drops through 0.35–0.25 (just warmer than the snow line: plains thin out about 50 blocks
-    under their snow line and stop 25 under it), or, in a biome colder than 0.55, through the band 0.3 under its
-    own temperature, so a taiga or snowy plain keeps its lowland forest and stops about 75 blocks above
-    sea level + 17. A biome without a TerraForged vegetation config grows no trees at its chunk corner past
-    the band's middle. With `realistic_vegetation` the share multiplies that setting's fitness, so shaded
-    slopes are still wooded up to the treeline, not beyond it.
+    under their snow line and stop 25 under it), or, in a biome colder than 0.55, through the band 0.3
+    under its own temperature, so a taiga or snowy plain keeps its lowland forest and stops about 75 blocks above
+    sea level + 17. Past the band's middle (at the chunk's corner) a biome without a TerraForged vegetation
+    config grows no trees there, and no biome grows its other plants (bamboo, bushes, flowers, huge
+    mushrooms), some of which are trees too: a bamboo jungle's `bamboo_vegetation` grows jungle trees.
+    With `realistic_vegetation` the share multiplies that setting's fitness, so shaded slopes are still
+    wooded up to the treeline, not beyond it.
 
   The lapse counts blocks above the sea, not a share of the land's height, so with `height_scale` the
   taller land reaches further into the cold, as real mountains do. Every value is a function of the block's
