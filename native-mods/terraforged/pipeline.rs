@@ -78,6 +78,15 @@ use std::sync::Arc;
 const FULL_PAINT: i32 = 8;
 const REDUCED_PAINT: i32 = 2;
 
+/// The widest far cells that read eroded heights with `eroded_far_terrain`: the cells of Horizon's finest far tiles
+/// (`lod.rs`'s `DETAIL_LEVEL`, cells of up to 4 blocks), which it keeps within its far-decoration radius (about 1024
+/// blocks around the player at Full far detail, 512 at Reduced) and which the chunks replace as the player walks.
+/// Wider cells lie farther out, where erosion's few blocks don't show and eroding would cost a region per 128 blocks.
+const ERODED_FAR_WIDTH: i32 = 4;
+
+/// The name of Horizon's far-decoration threads (`vanillagen/lod.rs`), which run at idle priority.
+const FAR_DECORATION_THREAD: &str = "Far decoration";
+
 pub(super) struct TerraForgedPipeline {
     /// `VanillaGen`: the `minecraft:overworld` noise settings' surface rule, fluids, features and carvers, with
     /// the vanilla overworld's biome source. It runs without structures: TerraForged's own placement
@@ -214,6 +223,15 @@ fn live_pipeline(
         settings,
         generator,
     )?;
+    // The world's far erosion thread (`eroded_far_terrain`) is started by the first far-decoration pipeline, on its
+    // thread: a new thread inherits its creator's scheduling class on Linux (and its quality of service on macOS), so
+    // it runs at idle priority as they do. Without far decoration nothing builds far regions and far tiles keep the
+    // un-eroded heights.
+    if pipeline.settings.eroded_far_terrain
+        && std::thread::current().name() == Some(FAR_DECORATION_THREAD)
+    {
+        pipeline.generator.start_far_erosion();
+    }
     register_live(
         seed,
         dimension,
@@ -507,11 +525,17 @@ impl TerraForgedPipeline {
     /// at the surface block's zoomed quart). Like vanilla's far sampling it skips the surface rule's slope reads and
     /// column extensions, and `Surface.apply`, the carvers and the decoration. A failed height or biome sample is an
     /// `Err` (the chunk would fail to generate there too).
+    ///
+    /// With `erode` (the `eroded_far_terrain` setting, in the finest tiles) a column reads the ERODED height instead
+    /// where its erosion region is built already, so it stands exactly on the chunk's ground
+    /// ([`TerraForgedGenerator::far_eroded_heights`]); an unbuilt region is queued for the world's far erosion thread,
+    /// which builds it into a cache of its own, never the fill's, and the column keeps the un-eroded height.
     fn far_columns(
         &self,
         worker: &mut WorkerState,
         columns: &[(i32, i32)],
         paint_depth: i32,
+        erode: bool,
     ) -> Result<Vec<LodColumn>, GeneratorError> {
         let vanilla = &self.vanilla;
         let (min_y, level_height) = (vanilla.settings.level_min_y, vanilla.settings.level_height);
@@ -523,11 +547,13 @@ impl TerraForgedPipeline {
         // (`(y - 2) >> 2` and the next quart on each axis): the first column to claim a quart keeps it.
         let mut heights = BTreeMap::new();
         let mut quarts: BTreeMap<(i32, i32), BiomeId> = BTreeMap::new();
+        let mut eroded = erode.then(|| self.generator.far_eroded_heights());
         for &(x, z) in columns {
-            let (height, surface) = self
-                .generator
-                .far_heights(x, z)
-                .map_err(stage("far terrain"))?;
+            let (height, surface) = match &mut eroded {
+                Some(eroded) => eroded.heights(x, z).map(|(heights, _)| heights),
+                None => self.generator.far_heights(x, z),
+            }
+            .map_err(stage("far terrain"))?;
             heights.entry(column_key(x & !3, z & !3)).or_insert(height);
             // The stone and water tops, clipped as the fill clips them (cut flat at the top block).
             let stone = height.min(top);
@@ -977,7 +1003,7 @@ impl SeededPipeline for TerraForgedPipeline {
         spans: Option<&mut Vec<(i32, i32, BlockStateId)>>,
     ) -> Option<SurfaceSample> {
         let (sample, column) = self
-            .far_columns(worker, &[(x, z)], FULL_PAINT)
+            .far_columns(worker, &[(x, z)], FULL_PAINT, false)
             .ok()?
             .pop()?;
         if let Some(spans) = spans {
@@ -1013,7 +1039,8 @@ impl SeededPipeline for TerraForgedPipeline {
         } else {
             FULL_PAINT
         };
-        self.far_columns(worker, &columns, paint)
+        let erode = self.settings.eroded_far_terrain && width <= ERODED_FAR_WIDTH;
+        self.far_columns(worker, &columns, paint, erode)
     }
     fn structure_starts(
         &self,
@@ -2544,6 +2571,119 @@ mod tests {
         );
     }
 
+    /// A pipeline of seed 7 with `eroded_far_terrain` on.
+    fn eroding(data: &Arc<GeneratorData>) -> (Arc<TerraForgedPipeline>, OverworldGenerator) {
+        terraforged_settings::set_for_thread(Some(Settings {
+            eroded_far_terrain: true,
+            ..terraforged_settings::FAITHFUL
+        }));
+        let built = terraforged(data, 7, false);
+        terraforged_settings::set_for_thread(None);
+        built
+    }
+
+    /// The finest far tile (4-block cells) over chunks 3..=4, -2..=-1 (all in erosion region 0, -1): 64 columns.
+    fn fine_tile(worker: &mut super::super::GeneratorWorker) -> Vec<LodColumn> {
+        worker.lod_grid(50, -30, 4, 8, false).unwrap()
+    }
+
+    /// `eroded_far_terrain`: the finest far tiles stand on the chunks' ground once their erosion region is built, by the
+    /// chunks (read from the fill's cache without building or evicting) or by the world's far erosion thread (into its
+    /// own cache), and keep the un-eroded heights until then; wider cells never erode. At 64 columns a refined tile's
+    /// heights are the chunks' OCEAN_FLOOR_WG and WORLD_SURFACE_WG heights, and both ways give the same tile.
+    #[test]
+    fn eroded_far_tiles_stand_on_the_chunks() {
+        let Some(data) = data() else { return };
+        let column = |index: usize| (50 + (index % 8) as i32 * 4, -30 + (index / 8) as i32 * 4);
+        // The far thread: the first tile is un-eroded and queues the region, the thread builds it.
+        let (far, far_overworld) = eroding(&data);
+        let mut far_worker = far_overworld.worker();
+        let first = fine_tile(&mut far_worker);
+        for (index, (sample, _)) in first.iter().enumerate() {
+            let (x, z) = column(index);
+            let raw = far.generator.far_heights(x, z).unwrap();
+            assert_eq!(sample.unwrap().height, raw.0 + 1, "{x} {z}");
+        }
+        assert_eq!(far.generator.cached_far_regions(), (0, 1));
+        far_worker.lod_grid(4104, -2040, 16, 4, false).unwrap();
+        far_worker.lod_grid(50, -30, 8, 4, false).unwrap();
+        assert_eq!(
+            far.generator.cached_far_regions(),
+            (0, 1),
+            "wide cells queue nothing"
+        );
+        far.generator.start_far_erosion();
+        let start = std::time::Instant::now();
+        while !far
+            .generator
+            .far_eroded_heights()
+            .heights(50, -30)
+            .unwrap()
+            .1
+        {
+            assert!(
+                start.elapsed().as_secs() < 900,
+                "the far region was never built"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let refined = fine_tile(&mut far_worker);
+        assert_eq!(far.generator.cached_far_regions().0, 1);
+        assert_eq!(
+            far.generator.cached_regions(),
+            0,
+            "far terrain built no fill region"
+        );
+        // The chunks: their own fill builds the region, which far tiles of their pipeline then read.
+        let (level, level_overworld) = eroding(&data);
+        let mut level_worker = level_overworld.worker();
+        let chunks: Vec<ProtoChunk> = [(3, -2), (4, -2), (3, -1), (4, -1)]
+            .into_iter()
+            .map(|(x, z)| level_worker.generate_proto(ChunkPos::new(x, z)).unwrap())
+            .collect();
+        assert!(level.generator.cached_regions() >= 1);
+        let peeked = fine_tile(&mut level_worker);
+        assert_eq!(
+            level.generator.cached_far_regions(),
+            (0, 0),
+            "a built fill region queues nothing"
+        );
+        // SurfaceSample has no PartialEq: compare its debug form.
+        assert_eq!(
+            format!("{peeked:?}"),
+            format!("{refined:?}"),
+            "the far thread's region is the fill's"
+        );
+        let mut moved = 0;
+        for (index, (sample, spans)) in refined.iter().enumerate() {
+            let (x, z) = column(index);
+            let sample = sample.unwrap();
+            let chunk = &chunks[((x >> 4) - 3 + ((z >> 4) + 2) * 2) as usize];
+            let height = |kind| {
+                chunk
+                    .terrain
+                    .heightmap(kind)
+                    .unwrap()
+                    .first_available(x & 15, z & 15)
+                    .unwrap()
+            };
+            assert_eq!(
+                sample.height,
+                height(HeightmapType::OceanFloorWg),
+                "{x} {z}"
+            );
+            let surface = sample.water.map_or(sample.height, |(top, _)| top);
+            assert_eq!(surface, height(HeightmapType::WorldSurfaceWg), "{x} {z}");
+            assert_eq!(spans.first().unwrap().1, surface);
+            moved += usize::from(sample.height != first[index].0.unwrap().height);
+        }
+        eprintln!("erosion moved {moved} of 64 far columns");
+        assert!(
+            moved > 0,
+            "erosion moved no column: the test proves nothing here"
+        );
+    }
+
     /// Far terrain's cost, by part and per tile (run with `--ignored --nocapture` in an optimized build).
     #[test]
     #[ignore = "benchmark; run by hand with --ignored --nocapture"]
@@ -2677,6 +2817,80 @@ mod tests {
                 "each with its own noise"
             },
             rss()
+        );
+    }
+
+    /// What `eroded_far_terrain` costs (`--ignored --nocapture`, optimized): the finest far tiles (16x16 cells of 4
+    /// blocks, as Horizon samples them) without the setting, with it before their regions are built (the first pass)
+    /// and after; the far thread's time per region; and the level's 3x3s with the far thread idle and while it builds
+    /// (here at the test's normal priority, not the idle priority of a far-decoration thread: the worst case).
+    #[test]
+    #[ignore = "benchmark; run by hand with --ignored --nocapture"]
+    fn eroded_far_terrain_benchmark() {
+        let Some(data) = data() else { return };
+        const TILES: i32 = 48;
+        const AT: i32 = 100_000;
+        let tile = |t: i32| (20_000 + AT + (t % 8) * 1024, 20_000 + (t / 8) * 1024);
+        let pass = |worker: &mut super::super::GeneratorWorker| {
+            let start = std::time::Instant::now();
+            for t in 0..TILES {
+                let (x, z) = tile(t);
+                std::hint::black_box(worker.lod_grid(x, z, 4, 16, false).unwrap());
+            }
+            start.elapsed() / TILES as u32
+        };
+        let with = |on: bool| {
+            terraforged_settings::set_for_thread(Some(Settings {
+                eroded_far_terrain: on,
+                ..terraforged_settings::FAITHFUL
+            }));
+            let built = terraforged(&data, 98765, false);
+            terraforged_settings::set_for_thread(None);
+            built
+        };
+        // Each pipeline has its own noise, so every pass starts from cold caches over the same tiles.
+        let off = pass(&mut with(false).1.worker());
+        let (pipeline, overworld) = with(true);
+        let mut worker = overworld.worker();
+        let first = pass(&mut worker);
+        let off_again = pass(&mut with(false).1.worker());
+        let queued = pipeline.generator.cached_far_regions().1;
+        eprintln!(
+            "finest far tiles: {off:?} and {off_again:?} per tile without the setting, {first:?} on its first pass ({queued} regions queued)"
+        );
+        let mut level = overworld.worker();
+        let mut decorate = |x: i32| {
+            let start = std::time::Instant::now();
+            let mut region = region_around(&mut level, ChunkPos::new(x, 40));
+            level.decorate(&mut region).unwrap();
+            start.elapsed()
+        };
+        decorate(-100);
+        let idle: Vec<_> = (1..=3).map(|k| decorate(-100 - 10 * k)).collect();
+        let start = std::time::Instant::now();
+        pipeline.generator.start_far_erosion();
+        let busy: Vec<_> = (4..=6).map(|k| decorate(-100 - 10 * k)).collect();
+        let left = pipeline.generator.cached_far_regions().1;
+        eprintln!(
+            "level 3x3s: {idle:?} beside the idle far thread, {busy:?} while it builds ({left} regions still queued after)"
+        );
+        let (last_x, last_z) = tile(TILES - 1);
+        // The last region taken may still be building when the queue is empty.
+        while pipeline.generator.cached_far_regions().1 > 0
+            || !pipeline
+                .generator
+                .far_eroded_heights()
+                .heights(last_x, last_z)
+                .unwrap()
+                .1
+        {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let built = start.elapsed();
+        let refined = pass(&mut worker);
+        eprintln!(
+            "far thread: {queued} regions in {built:?} ({:?} each, the 3x3s beside it included); refined tiles {refined:?} per tile",
+            built / queued.max(1) as u32
         );
     }
 
