@@ -51,6 +51,10 @@ pub struct Settings {
     /// How fast `altitude_climate` cools with height, as a multiple of Horizon's lapse rate
     /// ([`ALTITUDE_CLIMATE_STRENGTHS`]; 0 keeps vanilla's own, 1 is the default).
     pub altitude_climate_strength: f32,
+    /// Bands of granite, diorite, andesite and stone underground (TerraForged Reimagined's strata, blended between
+    /// regions), whose hardness slows the erosion: soft bands wear back into benches under hard ledges
+    /// (`terraforged_rock_strata`).
+    pub rock_strata: bool,
 }
 
 impl Default for Settings {
@@ -70,6 +74,7 @@ pub const FAITHFUL: Settings = Settings {
     realistic_vegetation: false,
     altitude_climate: false,
     altitude_climate_strength: 1.0,
+    rock_strata: false,
 };
 
 /// The range `height_scale` is held to. TerraForged's land reaches at most 476 blocks above
@@ -134,6 +139,7 @@ impl Settings {
                     )
                 },
             ),
+            rock_strata: flag("rock_strata", FAITHFUL.rock_strata),
         }
     }
 
@@ -154,6 +160,7 @@ impl Settings {
             "altitude_climate_strength".into(),
             f64::from(self.altitude_climate_strength).into(),
         );
+        map.insert("rock_strata".into(), self.rock_strata.into());
         Value::Object(map)
     }
 }
@@ -174,6 +181,7 @@ mod tests {
             realistic_vegetation: true,
             altitude_climate: true,
             altitude_climate_strength: 1.5,
+            rock_strata: true,
         };
         assert_eq!(Settings::from_json(&on.to_json()), on);
         let strength = |value: Value| Settings::from_json(&value).altitude_climate_strength;

@@ -113,6 +113,8 @@ pub(super) struct TerraForgedPipeline {
     deposits: Option<super::terraforged_deposits::DepositBlocks>,
     /// The ground cover's blocks when the world has `realistic_vegetation` on (`terraforged_realistic_vegetation`).
     ground_cover: Option<super::terraforged_realistic_vegetation::CoverBlocks>,
+    /// The bands' blocks when the world has `rock_strata` on (`terraforged_rock_strata`).
+    strata: Option<super::terraforged_rock_strata::StrataBlocks>,
     /// Horizon's settings of the world (`terraforged_settings`) when the pipeline was built.
     settings: Settings,
 }
@@ -409,6 +411,10 @@ impl TerraForgedPipeline {
             ground_cover: settings
                 .realistic_vegetation
                 .then(|| super::terraforged_realistic_vegetation::CoverBlocks::new(data.registry))
+                .flatten(),
+            strata: settings
+                .rock_strata
+                .then(|| super::terraforged_rock_strata::StrataBlocks::new(data.registry))
                 .flatten(),
             settings,
         })
@@ -842,6 +848,11 @@ impl SeededPipeline for TerraForgedPipeline {
                 &adaptation,
             )
             .map_err(stage("noise"))?;
+        // Horizon's `rock_strata`: Reimagined's `StrataDecorator` (blended), at the end of its `fillFromNoise`.
+        if let Some(blocks) = &self.strata {
+            super::terraforged_rock_strata::apply(self.generator.seed(), &mut chunk, blocks)
+                .map_err(stage("strata"))?;
+        }
 
         // buildSurface: SurfaceDecorator.decorate, then decoratePost.
         let generation = self.generation();
@@ -3486,6 +3497,81 @@ mod tests {
         assert!(
             podzol.1 / (podzol.0 as f32) > 0.2 && coarse.1 / (coarse.0 as f32) < -0.2,
             "{changed:?}"
+        );
+    }
+
+    /// `rock_strata` on seed 777, 25 chunks spread over 2,000 blocks: the bands (granite, diorite, andesite) fill
+    /// the stone from y 9 up to 8 blocks under the floor, where faithful chunks have nearly none; the hardness
+    /// changes the eroded heights of some columns, by a few blocks at most. Decorated, the banded region keeps its
+    /// ores.
+    #[test]
+    #[ignore = "slow in debug: run with --profile fast --include-ignored"]
+    fn rock_strata_band_the_stone_and_keep_the_ores() {
+        let Some(data) = data() else { return };
+        let worker = |on| {
+            terraforged_settings::set_for_thread(Some(Settings {
+                rock_strata: on,
+                ..terraforged_settings::FAITHFUL
+            }));
+            let (pipeline, overworld) = terraforged(&data, 777, false);
+            terraforged_settings::set_for_thread(None);
+            assert_eq!(pipeline.strata.is_some(), on);
+            overworld
+        };
+        let (off, on) = (worker(false), worker(true));
+        let (mut off, mut on) = (off.worker(), on.worker());
+        let banded = [
+            "minecraft:granite",
+            "minecraft:diorite",
+            "minecraft:andesite",
+        ];
+        let (mut bands, mut changed, mut largest) = (0usize, 0usize, 0i32);
+        let (mut wrong, mut own) = (Vec::new(), 0usize);
+        for cx in (-2..=2).map(|i| i * 25) {
+            for cz in (-2..=2).map(|i| i * 25) {
+                let a = off.generate_proto(ChunkPos::new(cx, cz)).unwrap();
+                let b = on.generate_proto(ChunkPos::new(cx, cz)).unwrap();
+                for (x, z) in (0..16).flat_map(|x| (0..16).map(move |z| (x, z))) {
+                    let (top_a, top_b) = (a.surface_height(x, z), b.surface_height(x, z));
+                    changed += usize::from(top_a != top_b);
+                    largest = largest.max((top_a - top_b).abs());
+                    for y in a.terrain.min_y()..top_a.max(top_b) {
+                        // Faithful chunks have a few of these blocks of their own (surface rules).
+                        let before = banded.contains(&a.block_name(x, y, z));
+                        own += usize::from(before);
+                        if !before && banded.contains(&b.block_name(x, y, z)) {
+                            bands += 1;
+                            if !(9..=top_b - 8).contains(&y) {
+                                wrong.push(format!("on {cx} {cz} {x} {y} {z} under {top_b}"));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        eprintln!(
+            "banded blocks {bands} (faithful's own {own}), columns whose height changed {changed}, largest \
+             change {largest}"
+        );
+        wrong.truncate(20);
+        assert!(wrong.is_empty(), "{wrong:?}");
+        assert!(bands > 25 * 256 * 20 && own * 100 < bands, "{bands} {own}");
+        assert!(changed > 100 && largest <= 8, "{changed} {largest}");
+        let ores = |worker: &mut super::super::GeneratorWorker| {
+            let mut region = region_around(worker, ChunkPos::new(3, -2));
+            worker.decorate(&mut region).unwrap();
+            let chunk = &region[4];
+            let (min_y, height) = (chunk.terrain.min_y(), chunk.terrain.height());
+            (min_y..min_y + height)
+                .flat_map(|y| (0..256).map(move |i| (i & 15, y, i >> 4)))
+                .filter(|&(x, y, z)| chunk.block_name(x, y, z).ends_with("_ore"))
+                .count()
+        };
+        let (ores_off, ores_on) = (ores(&mut off), ores(&mut on));
+        eprintln!("ores off {ores_off}, on {ores_on}");
+        assert!(
+            ores_on * 10 >= ores_off * 8 && ores_off > 0,
+            "{ores_off} {ores_on}"
         );
     }
 
