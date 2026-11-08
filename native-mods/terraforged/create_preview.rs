@@ -8,6 +8,11 @@
 // latest seed (a render for a seed already replaced stops at its next pixel, so typing quickly costs
 // one render), and only while the screen shows the map. It is drawn through a world-list icon slot,
 // which the screen doesn't use and the world list fills again each frame it draws.
+//
+// The render thread's handling (one render at a time, the latest request wins, a dark placeholder until the
+// first picture) is adapted from TerraForged Reimagined a24d450's `PreviewWidget`
+// (https://github.com/Romoslayer/TerraForged-Reimagined/tree/a24d4503064780790e975cd17495866ae13eef11), MIT,
+// Copyright (c) 2020 TerraForged, (c) 2026 Romoslayer (`LICENSE-TERRAFORGED-REIMAGINED`).
 
 use super::{FOOTER, grid};
 use crate::{
