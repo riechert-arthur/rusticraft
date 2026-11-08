@@ -356,7 +356,8 @@ render -2147483648 16 16 3f400000 c1080000 40400000 5d3612e4c3b7ce25 12x12
 
     /// The Create World map of seed 777 is `/tf preview`'s picture of the same world: the generator its pipeline
     /// builds (preset levels, `height_scale`), at its runtime seed. The bundled preset's map reads only climate,
-    /// continent and river noise, so no setting changes it (`height_scale` stretches heights, not the map).
+    /// continent and river noise, so no setting but `flow_rivers` (its channels) changes it (`height_scale` stretches
+    /// heights, not the map).
     #[test]
     fn new_world_maps_are_the_world_s_preview() {
         let view = View {
@@ -398,6 +399,7 @@ render -2147483648 16 16 3f400000 c1080000 40400000 5d3612e4c3b7ce25 12x12
                 rock_strata: true,
                 coastal_landforms: true,
                 glacial_landforms: true,
+                flow_rivers: false,
             },
         ] {
             assert_eq!(

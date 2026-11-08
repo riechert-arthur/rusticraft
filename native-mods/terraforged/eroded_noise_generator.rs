@@ -175,7 +175,8 @@ impl ErodedNoiseGenerator {
 
     /// `sampleRiver` for block `(x, z)` at noise coordinates `(noise_x, noise_z)`: with Horizon's `glacial_landforms`
     /// the valleys become troughs by the glaciation over the column's height before the carve
-    /// ([`NoiseGenerator::sample_river_glacial`]), else Java's [`NoiseGenerator::sample_river`].
+    /// ([`NoiseGenerator::sample_river_glacial`]), else Java's [`NoiseGenerator::sample_river`]; then Horizon's
+    /// `flow_rivers` channels ([`NoiseGenerator::carve_flow_rivers`], nothing without the setting).
     fn carve_rivers(
         &self,
         seed: i32,
@@ -194,6 +195,7 @@ impl ErodedNoiseGenerator {
                     });
             }
         }
+        self.generator.carve_flow_rivers(seed, x, z, sample);
     }
 
     /// A generator over the same noise and erosion filter (shared, not copied), with the same settings and an empty

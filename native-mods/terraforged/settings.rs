@@ -61,6 +61,10 @@ pub struct Settings {
     /// Glaciers' valleys: where the air over the land is cold enough for ice (the climate's temperature, cooled with
     /// height), river valleys widen into U-shaped troughs (`terraforged_glacial_landforms`).
     pub glacial_landforms: bool,
+    /// Streams and rivers where water collects on the drainage map (`terraforged_drainage`),
+    /// carved down its valleys into the sea or into TerraForged's own rivers, which stay
+    /// (`terraforged_flow_rivers`).
+    pub flow_rivers: bool,
 }
 
 impl Default for Settings {
@@ -83,6 +87,7 @@ pub const FAITHFUL: Settings = Settings {
     rock_strata: false,
     coastal_landforms: false,
     glacial_landforms: false,
+    flow_rivers: false,
 };
 
 /// The range `height_scale` is held to. TerraForged's land reaches at most 476 blocks above
@@ -150,6 +155,7 @@ impl Settings {
             rock_strata: flag("rock_strata", FAITHFUL.rock_strata),
             coastal_landforms: flag("coastal_landforms", FAITHFUL.coastal_landforms),
             glacial_landforms: flag("glacial_landforms", FAITHFUL.glacial_landforms),
+            flow_rivers: flag("flow_rivers", FAITHFUL.flow_rivers),
         }
     }
 
@@ -173,6 +179,7 @@ impl Settings {
         map.insert("rock_strata".into(), self.rock_strata.into());
         map.insert("coastal_landforms".into(), self.coastal_landforms.into());
         map.insert("glacial_landforms".into(), self.glacial_landforms.into());
+        map.insert("flow_rivers".into(), self.flow_rivers.into());
         Value::Object(map)
     }
 }
@@ -196,6 +203,7 @@ mod tests {
             rock_strata: true,
             coastal_landforms: true,
             glacial_landforms: true,
+            flow_rivers: true,
         };
         assert_eq!(Settings::from_json(&on.to_json()), on);
         let strength = |value: Value| Settings::from_json(&value).altitude_climate_strength;

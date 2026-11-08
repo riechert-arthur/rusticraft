@@ -490,6 +490,13 @@ source = "drainage.rs"
 visibility = "pub"
 
 [[module]]
+id = "flow_rivers"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_flow_rivers"
+source = "flow_rivers.rs"
+visibility = "pub"
+
+[[module]]
 id = "settings"
 file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_settings"

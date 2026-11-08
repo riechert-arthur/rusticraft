@@ -134,7 +134,7 @@ game folder (a dedicated server's own folder, beside `server.properties`, for th
 `level-type=terraforged:normal` makes), written with every setting off the first time, and keeps them in its overworld generator
 (`generator.horizon_settings` in `world_gen_settings.dat`, beside TerraForged's own generator fields),
 so changing the file later leaves existing worlds as they are; Re-Create keeps the world's own. The
-Create World map is drawn with the settings the new world will get, though none of them changes it. A world
+Create World map is drawn with the settings the new world will get; only `flow_rivers` changes it (its channels show as rivers). A world
 made before the settings existed has every setting off. Vanilla worlds never get the block or the file. The game installs a world's
 settings as it opens it (also on a dedicated server running a TerraForged world); clients of a server
 don't generate, so they need none.
@@ -378,13 +378,19 @@ don't generate, so they need none.
   don't change. Rivers carve after `coastal_landforms`, so a trough that reaches a cliff coast cuts a notch
   down to its floor. Not yet: cirques at river sources, fjords where troughs meet the sea, moraines at the
   glaciers' lower limit, and a "past ice age" field for temperate mountains. Off, generation is unchanged.
+- `flow_rivers`: streams and rivers where the drainage map (below) collects water, as well as
+  TerraForged's own rivers, which stay as they are. A channel starts where 0.6 km² drains through a
+  16-block cell, follows the water down its valley, joins other channels and ends in the sea or in one
+  of TerraForged's rivers or lakes. It is 2 blocks wide at its head and widens with the area it drains
+  (as its square root, to 20 blocks), its bed 2 to 7 blocks under the water (as the area to the 0.4).
+  See "Flow-routed rivers" below. Off, generation is unchanged.
 
 ## Drainage map
 
 Horizon's, in neither TerraForged tree (`drainage.rs`): where water flows over the terrain, the base
-the realistic-terrain settings (flow-routed rivers, basin erosion, rain shadow) build on. Nothing in
-generation reads it yet, so it changes no world and has no setting of its own; each feature that uses
-it comes with its own setting, off by default.
+the realistic-terrain settings (flow-routed rivers, basin erosion, rain shadow) build on. It has no
+setting of its own and changes no world by itself; each feature that uses it comes with its own
+setting, off by default (`flow_rivers` is the first).
 
 - The source is TerraForged's un-eroded terrain height without its rivers (`drainage_height`: the
   continent and land noise of `sampleTerrain`, unfloored), with the sea below the sea level. It is
@@ -419,6 +425,47 @@ it comes with its own setting, off by default.
   surface never rises downstream inside a tile, but two tiles may fill a depression by their
   border to different levels (0.3 blocks on the synthetic valley), so a channel built on it should
   clamp its profile downstream. Water that leaves an L1 window and comes back in is counted twice.
+
+## Flow-routed rivers
+
+Horizon's `flow_rivers` setting, in neither TerraForged tree (`flow_rivers.rs`). TerraForged's rivers
+run node to node across a continent cell, whatever lies between; these follow the drainage map, so
+they run down valleys and join as a network. TerraForged's main rivers stay, and the new channels
+drain into them: the map's source for this setting is TerraForged's un-eroded terrain with its rivers
+carved, where a river or lake bed is an outlet at its water level, like the sea.
+
+- Network: a channel runs through every L1 cell (16 blocks) that at least 0.6 km² drains through, that
+  flows on to a neighbour, and that lies outside a filled depression (filled height at most a block
+  over the terrain). This is the constant support-area threshold of channel heads (Montgomery &
+  Dietrich 1988; O'Callaghan & Mark 1984). Its line is a quadratic B-spline through the D8 path's cell
+  centres (Chaikin's corner cutting: each curve runs from the middle of one step to the middle of the
+  next, bending through the cell between), each centre moved by up to 5 blocks, seeded per cell, so
+  channels don't follow the grid. The last curve into the sea or one of TerraForged's rivers runs
+  straight to that cell's centre.
+- Size, as downstream hydraulic geometry (Leopold & Maddock 1953), discharge taken as proportional to
+  the drained area A: width 2·(A / 0.6 km²)^0.5 blocks, 2 to 20; bed depth 1 + (A / 0.6 km²)^0.4
+  blocks, at most 7. The valley reaches 4 blocks plus twice the width from the line. Width and depth
+  read `Drainage::flow`'s blended area, so they change smoothly where a channel crosses a tile border.
+- Water: the stepped surface of TerraForged's rivers (each column one level, its base height), 1.5
+  blocks under the map's filled height, never under the sea level. That height is the highest filled
+  height over the cell and the next 8 cells downstream, so the water never rises downstream where two
+  drainage tiles fill a depression by their border to different levels.
+- Cross-section, after TerraForged's `RiverCarver`: a parabolic bed at least a block under the water;
+  beyond the water the ground is lowered towards a block over it, less with the square of the distance,
+  back to the terrain at the valley's edge. A bank within 2 blocks of the water that dips under it (by
+  less than 4 blocks) is raised level with the water, so no water stands beside a lower column. The
+  channel's columns become TerraForged's river terrain with river noise 0 (river biomes, river water,
+  `/tf preview`'s river colour); across the valley the river noise is multiplied by TerraForged's
+  valley noise. The sea, beaches and TerraForged's own rivers and lakes are left as they are.
+- Everything that samples the terrain sees the channels: chunks, distant tiles, structures, biomes,
+  `/tf preview` and the Create World map. `/locateterrain`'s search (TerraForged's `find`) doesn't:
+  it samples rivers at unscaled coordinates, as TerraForged does.
+- Purity: the channels near a 128-block patch are extracted together from the drainage map and kept in
+  a lossy cache (1024 patches); every value is a function of the seed and the position. The map
+  samples its own copy of the noise, built the same way.
+- Not yet: meanders (sine-generated curves along the channel), deltas and estuaries where a channel
+  reaches the sea, lakes in large filled depressions (a channel stops where it enters one and starts
+  again past its spill point), and sloped water, which needs flowing water.
 
 ## Layers
 
@@ -3405,7 +3452,8 @@ there), shown up to 128 GUI pixels under the seed box and hidden on screens too 
 Create World turns into the level seed (a number, else the text's Java `hashCode`, trimmed), and the generator is built
 as the world's pipeline builds it: the preset's levels with `height_scale`, the settings the new world gets (Re-Create's
 source world's, else `config/terraforged/settings.json`), and `Seeds.get` of the level seed. Its colours read only the
-climate, continent and river noise, so no setting changes the map (the tests check every setting). A blank seed shows
+climate, continent and river noise, so no setting changes the map but `flow_rivers`, whose channels are river noise
+(the tests check the others). A blank seed shows
 "the map shows once a seed is typed". The picture renders on a thread of its own, never the screen's, in well under a second:
 one render at a time for the latest seed, and a render for a seed already replaced, or for a screen no
 longer drawing the map, stops at its next pixel (TerraForged Reimagined's `PreviewWidget` takes the latest request the

@@ -1,6 +1,6 @@
 // Horizon's drainage map (in neither TerraForged tree), for the realistic-terrain settings (#277): where water
-// flows over the un-eroded terrain, on two fixed grids. Nothing in generation reads it yet; the settings built on
-// it (flow-routed rivers, basin erosion, rain shadow) do, each behind its own setting.
+// flows over the un-eroded terrain, on two fixed grids. Only the settings built on it read it (flow-routed rivers,
+// `terraforged_flow_rivers`; basin erosion and rain shadow to come), each behind its own setting.
 //
 // Clean-room, from published methods: depressions are filled and flats routed by priority-flood (Barnes, Lehman &
 // Mulla 2014, "Priority-Flood: An optimal depression-filling and watershed-labeling algorithm"), directions are
@@ -11,8 +11,9 @@
 
 use super::terraforged_generator_facade::TerraForgedGenerator;
 use super::terraforged_lossy_cache::ConcurrentLossyCache;
+use std::cell::RefCell;
 use std::cmp::Reverse;
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, HashMap};
 use std::sync::Arc;
 
 /// The D8 neighbours, by direction index: east, then clockwise in Minecraft's axes (+z is south).
@@ -480,6 +481,14 @@ fn tile_key(x: i32, z: i32) -> i64 {
     (i64::from(x) << 32) | i64::from(z as u32)
 }
 
+/// The tiles one caller has already looked up, by tile: a lossy cache slot can hold one of two tiles that a build
+/// or a run of queries keeps alternating between (L0's 16 tiles share 8 buckets of 2 slots), which would rebuild a
+/// tile at every alternation. Holding the caller's own `Arc`s costs nothing and keeps the values identical.
+#[derive(Default)]
+pub struct TileMemo {
+    tiles: HashMap<(i32, i32), Arc<FlowTile>>,
+}
+
 impl<S: Fn(i32, i32) -> Column> Drainage<S> {
     /// L0 tiles cached (about 190 KB each).
     pub const L0_TILES: i32 = 16;
@@ -511,8 +520,27 @@ impl<S: Fn(i32, i32) -> Column> Drainage<S> {
     pub fn l1_tile(&self, x: i32, z: i32) -> Arc<FlowTile> {
         self.l1
             .compute_if_absent(self.seed, tile_key(x, z), |_, _| {
-                FlowTile::l1(x, z, &self.source, &|cx, cz| self.l0_cell(cx, cz))
+                // An L1 window's ring often spans two L0 tiles: look each up once.
+                let memo = RefCell::new(HashMap::new());
+                FlowTile::l1(x, z, &self.source, &|cx, cz| {
+                    let key = (L0.tile_of(cx), L0.tile_of(cz));
+                    let tile = Arc::clone(
+                        memo.borrow_mut()
+                            .entry(key)
+                            .or_insert_with(|| self.l0_tile(key.0, key.1)),
+                    );
+                    tile.cell(cx, cz)
+                })
             })
+    }
+
+    /// [`Self::l1_tile`] through `memo`.
+    pub fn l1_tile_in(&self, memo: &mut TileMemo, x: i32, z: i32) -> Arc<FlowTile> {
+        Arc::clone(
+            memo.tiles
+                .entry((x, z))
+                .or_insert_with(|| self.l1_tile(x, z)),
+        )
     }
 
     /// L1 cell (`x`, `z`), from the tile whose core holds it.
@@ -528,9 +556,14 @@ impl<S: Fn(i32, i32) -> Column> Drainage<S> {
     /// windows hold it), half and half at the border: a river's width and phase change smoothly where its owner
     /// does. Direction, height and filled height are the owner's. Away from borders it is [`Self::l1_cell`].
     pub fn flow(&self, x: i32, z: i32) -> FlowCell {
+        self.flow_in(&mut TileMemo::default(), x, z)
+    }
+
+    /// [`Self::flow`] with the L1 tiles looked up through `memo`, for a caller that asks about many cells.
+    pub fn flow_in(&self, memo: &mut TileMemo, x: i32, z: i32) -> FlowCell {
         let (cx, cz) = (L1.cell_of(x), L1.cell_of(z));
         let (tx, tz) = (L1.tile_of(cx), L1.tile_of(cz));
-        let mut cell = self.l1_cell(cx, cz);
+        let mut cell = self.l1_tile_in(memo, tx, tz).cell(cx, cz);
         let (mut accumulation, mut distance) = (0.0f64, 0.0f64);
         for (ox, wx) in blend_weights(cx - tx * L1.core) {
             for (oz, wz) in blend_weights(cz - tz * L1.core) {
@@ -539,7 +572,7 @@ impl<S: Fn(i32, i32) -> Column> Drainage<S> {
                     let view = if (ox, oz) == (0, 0) {
                         cell
                     } else {
-                        self.l1_tile(tx + ox, tz + oz).cell(cx, cz)
+                        self.l1_tile_in(memo, tx + ox, tz + oz).cell(cx, cz)
                     };
                     accumulation += weight * view.accumulation;
                     distance += weight * f64::from(view.distance);
