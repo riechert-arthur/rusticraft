@@ -766,4 +766,20 @@ mod tests {
         assert_eq!(back.properties["spawn-protection"], toml::Value::Integer(4));
         std::fs::remove_dir_all(&dir).unwrap();
     }
+
+    /// `level-type` has no typed setting: `[properties]` passes a mod's preset
+    /// (a native mod's `native_level_type_world_gen`) through as it is written.
+    #[test]
+    fn a_mods_level_type_passes_through() {
+        let dir =
+            std::env::temp_dir().join(format!("horizon-server-level-type-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let c = Config::parse("[properties]\nlevel-type = \"terraforged:normal\"\n").unwrap();
+        c.write_properties(&dir).unwrap();
+        let p = read_properties(&dir.join(PROPERTIES)).unwrap();
+        assert_eq!(p.get("level-type"), Some("terraforged:normal"));
+        let game = ServerProperties::new(p, &mut SystemEntropy::default()).unwrap();
+        assert_eq!(game.level_type, "terraforged:normal");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }
