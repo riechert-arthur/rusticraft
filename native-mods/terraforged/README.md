@@ -91,7 +91,11 @@ Differences and gaps:
   columns show stone under them (grey stripes on distant badlands slopes, which Full far detail paints in
   terracotta bands); heights, top blocks, water and biomes are unchanged. It saves 10–35% of a far tile's
   sampling; most of Reduced's speed comes from Horizon merging far tiles. Decorated far chunks
-  (Horizon's far decoration) are generated in full, eroded.
+  (Horizon's far decoration) are generated in full, eroded. Each far-decoration thread runs its own pipeline (its
+  structure pieces' placement flags can't be shared), but the pipelines of one world share the first one's noise
+  (terrain graphs, climate, continent and river caches; TerraForged has one `Generator` per level), each with its own
+  terrain cache, task threads and erosion regions, so far decoration never evicts the regions the level's chunks
+  read. Results are the same either way: the noise is a pure function of seed and position.
 - The boat hook (boats float up small water steps) works only in TerraForged worlds (Arthur's
   choice); TerraForged's mixin works in every world.
 - `/locateterrain`, `/tf export structures`, `/tf regen` and `/tf preview` exist only in TerraForged worlds
@@ -3108,7 +3112,8 @@ Commands (`commands.rs`, on Horizon's native command hooks) follow 6dd607eb's `T
 `/locateterrain <terrain> [radius]`, `/tf export structures` and `/tf regen <radius>`. They are registered only when the open world is a
 TerraForged one (its saved overworld generator), so other worlds keep vanilla's command tree; TerraForged registers them
 in every world. `/locateterrain` finds the player's level's generator as `GeneratorPreset.getGenerator` does: each
-TerraForged pipeline records its generator by level seed and dimension (`live_generator`), so the Nether and the End
+TerraForged pipeline records its generator by level seed and dimension (`live_generator`, which answers with the
+world's first pipeline, the level's, before the far-decoration ones sharing its noise), so the Nether and the End
 answer nothing, as in Java. The terrain is looked up with `TerrainType.get` (ignoring case), then `NoiseGenerator.find`
 searches from the player's block with the radius and `min(100, radius + 50)`; the answer (`Found terrain: … Distance: ….
 Teleport`, `Invalid terrain: …`, `Unable to locate terrain: …`) uses TerraForged's literal texts and colours, and the

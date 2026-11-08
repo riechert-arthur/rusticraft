@@ -49,7 +49,9 @@ use super::{
     terraforged_cave_biome_sampler::CaveBiomeSampler,
     terraforged_cave_carver::{CarverChunk, NoiseCaveGenerator},
     terraforged_current_surface_biomes::CurrentSurfaceBiomeSampler,
-    terraforged_generator_facade::{TerraForgedGenerator, TerraHeightmap, register_live},
+    terraforged_generator_facade::{
+        TerraForgedGenerator, TerraHeightmap, register_live, shareable_generator,
+    },
     terraforged_generator_preset::{build as build_noise, scale_heights, terrain_levels},
     terraforged_live_biomes::LiveBiomeBindings,
     terraforged_settings::{self, Settings},
@@ -57,6 +59,7 @@ use super::{
     terraforged_structure_terrain::StructureTerrain,
     terraforged_surface_bindings::SurfaceBindings,
     terraforged_surface_height_cache::column_key,
+    terraforged_terrain_levels::TerrainLevels,
     terraforged_world_preset::{GENERATOR_TYPE, PRESET},
 };
 use crate::heightmap::HeightmapType;
@@ -176,13 +179,43 @@ pub(super) fn build(
     let Some(stem) = stem else {
         return OverworldGenerator::build(data, seed, preset, dimension, with_structures);
     };
-    let pipeline = TerraForgedPipeline::new(&data, seed, &stem, with_structures)?;
-    register_live(seed, dimension, &pipeline.generator);
+    let pipeline = live_pipeline(&data, seed, &stem, dimension, with_structures)?;
     hold(&pipeline);
     Ok(OverworldGenerator {
         pipeline: Arc::new(pipeline),
         noise_clamped: None,
     })
+}
+
+/// A TerraForged pipeline of `stem`, registered as live. Horizon's far-decoration threads each build a pipeline of the
+/// level's world (`vanillagen/lod.rs`, which can't share the level's: its structure pieces' one-shot flags). A pipeline
+/// of a world whose generator is already alive shares that root's noise and keeps its own caches
+/// (`TerraForgedGenerator::sharing`), so the world has one TerraForged noise (graphs, climate, continent and river
+/// caches) however many pipelines it runs; the first builds the noise and is the root `live_generator` answers with.
+fn live_pipeline(
+    data: &Arc<GeneratorData>,
+    seed: i64,
+    stem: &Value,
+    dimension: &str,
+    with_structures: bool,
+) -> Result<TerraForgedPipeline, GeneratorError> {
+    let settings = terraforged_settings::current();
+    let levels = TerraForgedPipeline::levels(stem, settings)?;
+    let root = shareable_generator(seed, dimension, levels, settings);
+    let generator = match &root {
+        Some(root) => Arc::new(root.sharing()),
+        None => TerraForgedPipeline::generator(levels, seed)?,
+    };
+    let pipeline =
+        TerraForgedPipeline::with_generator(data, seed, stem, with_structures, generator)?;
+    register_live(
+        seed,
+        dimension,
+        pipeline.settings,
+        root.is_none(),
+        &pipeline.generator,
+    );
+    Ok(pipeline)
 }
 
 /// `GeneratorData::prepare_decoration` (the world screens' preload) for TerraForged's preset: its overworld stem has
@@ -221,22 +254,55 @@ fn terraforged_stem(data: &GeneratorData, preset: &str, dimension: &str) -> Opti
 }
 
 impl TerraForgedPipeline {
-    /// `Generator.CODEC` over `stem` (its `levels`, then `GeneratorPreset.build`) with the level seed captured as
-    /// `createState` does, the registry biome bindings and the surface passes' block bindings. The build range is
-    /// the stem's dimension type's; TerraForged's levels are not mapped onto it: the fill clips them to it.
+    /// [`Self::with_generator`] over a new generator of its own.
+    #[cfg(test)]
     fn new(
         data: &Arc<GeneratorData>,
         seed: i64,
         stem: &Value,
         with_structures: bool,
     ) -> Result<Self, GeneratorError> {
-        let settings = terraforged_settings::current();
-        let levels = scale_heights(
+        let levels = Self::levels(stem, terraforged_settings::current())?;
+        Self::with_generator(
+            data,
+            seed,
+            stem,
+            with_structures,
+            Self::generator(levels, seed)?,
+        )
+    }
+
+    /// The stem's `levels` (strict `TerrainLevels.CODEC`), scaled by the world's `height_scale`.
+    fn levels(stem: &Value, settings: Settings) -> Result<TerrainLevels, GeneratorError> {
+        Ok(scale_heights(
             terrain_levels(stem["generator"].get("levels")).map_err(resource)?,
             settings.height_scale,
-        );
+        ))
+    }
+
+    /// `GeneratorPreset.build(levels)` with `createState`'s seed capture: a new generator over its own noise.
+    fn generator(
+        levels: TerrainLevels,
+        seed: i64,
+    ) -> Result<Arc<TerraForgedGenerator>, GeneratorError> {
         let generator = Arc::new(build_noise(levels).map_err(resource)?);
         generator.capture_seed(seed);
+        Ok(generator)
+    }
+
+    /// `Generator.CODEC` over `stem` (its `levels`, then `GeneratorPreset.build`) with the level seed captured as
+    /// `createState` does, the registry biome bindings and the surface passes' block bindings. The build range is
+    /// the stem's dimension type's; TerraForged's levels are not mapped onto it: the fill clips them to it.
+    /// `generator` is `GeneratorPreset.build`'s: a new one ([`Self::generator`]) or one sharing a live root's noise,
+    /// built from the same stem and settings.
+    fn with_generator(
+        data: &Arc<GeneratorData>,
+        seed: i64,
+        stem: &Value,
+        with_structures: bool,
+        generator: Arc<TerraForgedGenerator>,
+    ) -> Result<Self, GeneratorError> {
+        let settings = terraforged_settings::current();
         let biomes =
             LiveBiomeBindings::from_generator_data_with(data, &[], settings.corrected_biomes)
                 .map_err(|error| resource(error.to_string()))?;
@@ -1829,6 +1895,85 @@ mod tests {
         assert!(region[4].is_decorated());
     }
 
+    /// A second live pipeline of a world (a far-decoration thread's) shares the first's noise, not its caches, while
+    /// `live_generator` keeps answering with the first; another seed builds its own. The far pipelines' chunks,
+    /// generated on one thread or six and decorated, are the level pipeline's, block for block and height for height.
+    #[test]
+    fn far_pipelines_share_the_level_noise_and_make_its_chunks() {
+        use super::super::terraforged_generator_facade::live_generator;
+        let Some(data) = data() else { return };
+        // A seed no other test builds a live pipeline of.
+        const SEED: i64 = 267_000_267;
+        const OVERWORLD: &str = "minecraft:overworld";
+        let stem = terraforged_stem(&data, PRESET, OVERWORLD).unwrap();
+        let live =
+            |seed: i64| Arc::new(live_pipeline(&data, seed, &stem, OVERWORLD, true).unwrap());
+        let level = live(SEED);
+        let (far, far_threaded) = (live(SEED), live(SEED));
+        for other in [&far, &far_threaded] {
+            assert!(other.generator.shares_noise_with(&level.generator));
+            assert!(!Arc::ptr_eq(&other.generator, &level.generator));
+        }
+        let found = live_generator(SEED, OVERWORLD).unwrap();
+        assert!(Arc::ptr_eq(&found, &level.generator));
+        drop(found);
+        let other_seed = live(SEED.wrapping_add(1));
+        assert!(!other_seed.generator.shares_noise_with(&level.generator));
+        drop(other_seed);
+
+        let center = ChunkPos::new(5, -3);
+        let decorated = |pipeline: &Arc<TerraForgedPipeline>, threads: usize| {
+            let overworld = OverworldGenerator {
+                pipeline: Arc::clone(pipeline) as Arc<dyn SeededPipeline>,
+                noise_clamped: None,
+            };
+            let made = std::sync::Mutex::new(BTreeMap::new());
+            std::thread::scope(|scope| {
+                for t in 0..threads {
+                    let (overworld, made) = (&overworld, &made);
+                    scope.spawn(move || {
+                        let mut worker = overworld.worker();
+                        for i in (t..9).step_by(threads) {
+                            let at = ChunkPos::new(
+                                center.x + i as i32 % 3 - 1,
+                                center.z + i as i32 / 3 - 1,
+                            );
+                            made.lock()
+                                .unwrap()
+                                .insert(i, worker.generate_proto(at).unwrap());
+                        }
+                    });
+                }
+            });
+            let mut made = made.into_inner().unwrap();
+            let mut region: [ProtoChunk; 9] = std::array::from_fn(|i| made.remove(&i).unwrap());
+            overworld.worker().decorate(&mut region).unwrap();
+            assert!(region[4].is_decorated());
+            let mut out = digest(&region, overworld.level());
+            for chunk in &region {
+                for z in 0..16 {
+                    for x in 0..16 {
+                        out.push(chunk.surface_height(x, z) as u32);
+                    }
+                }
+            }
+            out
+        };
+        let expected = decorated(&level, 1);
+        // The level's erosion regions stay its own: a far pipeline starts with none and builds its own.
+        assert!(level.generator.cached_regions() > 0);
+        assert_eq!(far.generator.cached_regions(), 0);
+        assert!(
+            decorated(&far, 1) == expected,
+            "a far pipeline on one thread"
+        );
+        assert!(
+            decorated(&far_threaded, 6) == expected,
+            "a far pipeline on six threads"
+        );
+        assert!(far.generator.cached_regions() > 0);
+    }
+
     /// Every block of the middle 3x3 chunks of a fresh 5x5 around `center`, generated on `threads` workers and
     /// decorated in `order` (offsets from `center`), on a pipeline built with `settings`.
     fn decorated_in_order(
@@ -2433,6 +2578,85 @@ mod tests {
                 start.elapsed() / tiles.len() as u32
             );
         }
+    }
+
+    /// What twelve far-decoration pipelines cost beside the level's: each thread builds its pipeline and decorates a
+    /// far 3x3, as `vanillagen/lod.rs`'s threads do. `TF_FAR_SHARED=0` builds each with its own noise (before #267),
+    /// otherwise they share the level's. Run each mode in its own process (`--ignored --nocapture`, optimized): the
+    /// RSS lines are the process's.
+    #[test]
+    #[ignore = "benchmark; run by hand with --ignored --nocapture"]
+    fn far_pipelines_benchmark() {
+        let Some(data) = data() else { return };
+        let shared = std::env::var("TF_FAR_SHARED").map_or(true, |v| v != "0");
+        let rss = || {
+            let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+            let field = |name: &str| {
+                status
+                    .lines()
+                    .find_map(|line| line.strip_prefix(name))
+                    .map_or(0, |kb| {
+                        kb.trim()
+                            .trim_end_matches(" kB")
+                            .parse::<u64>()
+                            .unwrap_or(0)
+                            / 1024
+                    })
+            };
+            format!("{} MiB (peak {} MiB)", field("VmRSS:"), field("VmHWM:"))
+        };
+        const SEED: i64 = 777;
+        const OVERWORLD: &str = "minecraft:overworld";
+        let stem = terraforged_stem(&data, PRESET, OVERWORLD).unwrap();
+        let region = |pipeline: TerraForgedPipeline, center: ChunkPos| {
+            let overworld = OverworldGenerator {
+                pipeline: Arc::new(pipeline),
+                noise_clamped: None,
+            };
+            let mut worker = overworld.worker();
+            let mut region = region_around(&mut worker, center);
+            worker.decorate(&mut region).unwrap();
+            overworld
+        };
+        let start = std::time::Instant::now();
+        let level = live_pipeline(&data, SEED, &stem, OVERWORLD, true).unwrap();
+        let _level = region(level, ChunkPos::new(0, 0));
+        eprintln!(
+            "level pipeline and its first 3x3: {:?}, RSS {}",
+            start.elapsed(),
+            rss()
+        );
+        let start = std::time::Instant::now();
+        let far: Vec<_> = std::thread::scope(|scope| {
+            let threads: Vec<_> = (0..12)
+                .map(|t| {
+                    let (data, stem) = (&data, &stem);
+                    scope.spawn(move || {
+                        let pipeline = if shared {
+                            live_pipeline(data, SEED, stem, OVERWORLD, true).unwrap()
+                        } else {
+                            TerraForgedPipeline::new(data, SEED, stem, true).unwrap()
+                        };
+                        let built = start.elapsed();
+                        let overworld = region(pipeline, ChunkPos::new(40 + 6 * t, -40));
+                        (built, start.elapsed(), overworld)
+                    })
+                })
+                .collect();
+            threads.into_iter().map(|t| t.join().unwrap()).collect()
+        });
+        let built = far.iter().map(|f| f.0).max().unwrap();
+        let first = far.iter().map(|f| f.1).min().unwrap();
+        let last = far.iter().map(|f| f.1).max().unwrap();
+        eprintln!(
+            "12 far pipelines ({}): built by {built:?}, first decorated 3x3 at {first:?}, all at {last:?}, RSS {}",
+            if shared {
+                "sharing the level's noise"
+            } else {
+                "each with its own noise"
+            },
+            rss()
+        );
     }
 
     /// Seed 98765's chunk (-9, -128) holds a unique cave the original fills with
