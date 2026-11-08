@@ -443,7 +443,8 @@ impl SyncData {
 }
 
 /// The vanilla dimension type `name` (its JSON `json`) with the shape the
-/// world gives the level of that name, if its data packs changed it.
+/// world gives the level of that name, if its data packs changed it: the build
+/// range, sky light and `visual/cloud_height` (the attribute only when changed).
 fn changed_dimension_type(name: &str, json: &Value, levels: &LevelShapes) -> Option<Value> {
     if !matches!(
         name,
@@ -460,6 +461,9 @@ fn changed_dimension_type(name: &str, json: &Value, levels: &LevelShapes) -> Opt
     json["height"] = shape.height.into();
     json["logical_height"] = shape.logical_height.into();
     json["has_skylight"] = shape.sky_light.into();
+    if shape.cloud_height != LevelShapes::VANILLA.get(name).cloud_height {
+        json["attributes"]["minecraft:visual/cloud_height"] = f64::from(shape.cloud_height).into();
+    }
     Some(json)
 }
 
@@ -588,6 +592,44 @@ mod tests {
             changed_dimension_type("minecraft:overworld_caves", &vanilla, &levels),
             None
         );
+        assert!(
+            sent.get("attributes").is_none(),
+            "the cloud height is vanilla's"
+        );
+    }
+
+    #[test]
+    fn a_changed_cloud_height_is_sent_with_the_type() {
+        let vanilla: Value = serde_json::from_str(
+            r##"{"min_y":-64,"height":384,"logical_height":384,"has_skylight":true,
+                "attributes":{"minecraft:visual/cloud_height":192.33,"minecraft:visual/sky_color":"#78a7ff"}}"##,
+        )
+        .unwrap();
+        let mut levels = LevelShapes::VANILLA;
+        // TerraForged's world: the tall overworld with clouds at 300.
+        levels.overworld = crate::chunk::LevelShape::new(-64, 1024, 1024, true)
+            .unwrap()
+            .with_cloud_height(300.0);
+        let sent = changed_dimension_type("minecraft:overworld", &vanilla, &levels).unwrap();
+        let attributes = &sent["attributes"];
+        assert_eq!(
+            attributes["minecraft:visual/cloud_height"].as_f64(),
+            Some(300.0)
+        );
+        assert_eq!(attributes["minecraft:visual/sky_color"], "#78a7ff");
+        // The cloud height alone changes the type too, and reaches the client's.
+        levels.overworld = crate::chunk::LevelShape::OVERWORLD.with_cloud_height(250.5);
+        let sent = changed_dimension_type("minecraft:overworld", &vanilla, &levels).unwrap();
+        assert_eq!(sent["height"].as_i64(), Some(384));
+        let mut dynamic = horizon_protocol::registry::Dynamic::default();
+        dynamic.add(horizon_protocol::packets::configuration::RegistryData {
+            registry: "minecraft:dimension_type".into(),
+            entries: vec![horizon_protocol::packets::configuration::RegistryEntry {
+                id: "minecraft:overworld".into(),
+                data: Some(json_to_nbt(&sent)),
+            }],
+        });
+        assert_eq!(dynamic.dimension(0).cloud_height, 250.5);
     }
 }
 

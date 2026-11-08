@@ -172,6 +172,15 @@ impl Game<'_> {
             None => self.world.shape.min_y,
         }
     }
+    /// `EnvironmentAttributes.CLOUD_HEIGHT` (LevelExtractor.extract): the
+    /// current dimension type's `visual/cloud_height`, the world's data packs'
+    /// over vanilla's 192.33.
+    pub(super) fn cloud_height(&self) -> f32 {
+        match self.remote.as_ref() {
+            Some(r) => r.dimension.cloud_height,
+            None => self.world.shape.cloud_height,
+        }
+    }
     /// `SkyRenderer.shouldRenderDarkDisc`: eye below the horizon and not under
     /// water. `ClientLevelData.getHorizonHeight`: the bottom of a flat world,
     /// otherwise y 63.

@@ -187,6 +187,19 @@ impl Dynamic {
                 },
                 _ => d.default_clock,
             };
+            // EnvironmentAttributes.CLOUD_HEIGHT, a float the codec reads from
+            // any number.
+            if let Some(Tag::Compound(attributes)) = map.get(&JavaString::from("attributes")) {
+                match attributes.get(&JavaString::from("minecraft:visual/cloud_height")) {
+                    Some(Tag::Float(v)) => d.cloud_height = f32::from_bits(*v),
+                    Some(Tag::Double(v)) => d.cloud_height = f64::from_bits(*v) as f32,
+                    Some(Tag::Int(v)) => d.cloud_height = *v as f32,
+                    Some(Tag::Long(v)) => d.cloud_height = *v as f32,
+                    Some(Tag::Short(v)) => d.cloud_height = f32::from(*v),
+                    Some(Tag::Byte(v)) => d.cloud_height = f32::from(*v),
+                    _ => {}
+                }
+            }
         }
         d
     }
@@ -202,8 +215,14 @@ pub struct DimensionType {
     /// `DimensionType.defaultClock`: the `minecraft:world_clock` this level
     /// samples for day time (`None` in the Nether).
     pub default_clock: Option<String>,
+    /// The type's `minecraft:visual/cloud_height` attribute
+    /// (`EnvironmentAttributes.CLOUD_HEIGHT`): where the clouds' bottom is.
+    pub cloud_height: f32,
 }
 impl DimensionType {
+    /// `EnvironmentAttributes.CLOUD_HEIGHT`'s default, which vanilla's
+    /// Overworld type also names.
+    pub const DEFAULT_CLOUD_HEIGHT: f32 = 192.33;
     pub fn vanilla(name: &str) -> Self {
         let (min_y, height, logical_height, has_skylight, default_clock) = match name {
             "minecraft:the_nether" => (0, 256, 128, false, None),
@@ -217,6 +236,7 @@ impl DimensionType {
             logical_height,
             has_skylight,
             default_clock: default_clock.map(str::to_owned),
+            cloud_height: Self::DEFAULT_CLOUD_HEIGHT,
         }
     }
     pub fn sections(&self) -> usize {
@@ -299,5 +319,33 @@ mod tests {
         let dim = d.dimension(0);
         assert_eq!(dim.name, "pack:custom");
         assert_eq!(dim.default_clock.as_deref(), Some("minecraft:overworld"));
+        assert_eq!(dim.cloud_height, DimensionType::DEFAULT_CLOUD_HEIGHT);
+    }
+
+    #[test]
+    fn dimension_reads_the_cloud_height_attribute() {
+        let mut d = Dynamic::default();
+        let typed = |id: &str, height: Tag| RegistryEntry {
+            id: id.into(),
+            data: Some(Tag::compound([(
+                "attributes",
+                Tag::compound([("minecraft:visual/cloud_height", height)]),
+            )])),
+        };
+        d.add(RegistryData {
+            registry: "minecraft:dimension_type".into(),
+            entries: vec![
+                typed("minecraft:overworld", Tag::Double(300.0f64.to_bits())),
+                typed("a:float", Tag::Float(250.5f32.to_bits())),
+                typed("a:int", Tag::Int(128)),
+                typed("a:text", Tag::String("high".into())),
+            ],
+        });
+        let heights: Vec<f32> = (0..4).map(|i| d.dimension(i).cloud_height).collect();
+        assert_eq!(heights, [300.0, 250.5, 128.0, 192.33]);
+        assert_eq!(
+            DimensionType::vanilla("minecraft:the_nether").cloud_height,
+            192.33
+        );
     }
 }

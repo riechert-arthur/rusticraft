@@ -260,11 +260,33 @@ impl WorldgenOverrides {
     pub fn level_height(&self, level: &str) -> Option<LevelHeight> {
         let none = BTreeMap::new();
         let types = self.entries.get(DIMENSION_TYPES).unwrap_or(&none);
-        let ty = match self.entries.get(DIMENSIONS).and_then(|d| d.get(level)) {
-            Some(stem) => serde_json::from_str::<Value>(stem).ok()?["type"].clone(),
-            None => Value::String(level.to_owned()),
+        LevelHeight::of_type(&self.level_type(level)?, types)
+    }
+    /// The `type` of the vanilla level `level`'s stem: a pack's stem's, else
+    /// the level's own name (the preset's stem names its type so).
+    fn level_type(&self, level: &str) -> Option<Value> {
+        Some(
+            match self.entries.get(DIMENSIONS).and_then(|d| d.get(level)) {
+                Some(stem) => serde_json::from_str::<Value>(stem).ok()?["type"].clone(),
+                None => Value::String(level.to_owned()),
+            },
+        )
+    }
+    /// The `minecraft:visual/cloud_height` attribute
+    /// (`EnvironmentAttributes.CLOUD_HEIGHT`) of the dimension type the vanilla
+    /// level `level` has with these packs, resolved as [`level_height`](Self::level_height)
+    /// resolves it. `None` when no pack gives the level a type, or the packs' type
+    /// leaves the attribute out (or gives it a value that is no number): the level
+    /// keeps the vanilla type's value.
+    pub fn level_cloud_height(&self, level: &str) -> Option<f32> {
+        let ty = match self.level_type(level)? {
+            Value::String(id) => {
+                serde_json::from_str(self.entries.get(DIMENSION_TYPES)?.get(&id)?).ok()?
+            }
+            inline @ Value::Object(_) => inline,
+            _ => return None,
         };
-        LevelHeight::of_type(&ty, types)
+        Some(ty["attributes"]["minecraft:visual/cloud_height"].as_f64()? as f32)
     }
     /// The entries packs give `bundle`.
     pub fn entries(&self, bundle: &str) -> impl Iterator<Item = (&str, &str)> {
@@ -448,6 +470,42 @@ mod tests {
         ] {
             o.set(DIMENSION_TYPES, "minecraft:overworld", bad.into());
             assert_eq!(o.level_height("minecraft:overworld"), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn levels_take_their_cloud_height_from_the_packs_dimension_types() {
+        let mut o = WorldgenOverrides::default();
+        assert_eq!(o.level_cloud_height("minecraft:overworld"), None);
+        // TerraForged's world pack (Reimagined's `dimension_type/overworld.json`).
+        o.set(
+            DIMENSION_TYPES,
+            "minecraft:overworld",
+            r#"{"min_y":-64,"height":1024,"attributes":{"minecraft:visual/cloud_height":300.0}}"#
+                .into(),
+        );
+        assert_eq!(o.level_cloud_height("minecraft:overworld"), Some(300.0));
+        assert_eq!(o.level_cloud_height("minecraft:the_end"), None);
+        // A stem naming that type, and one with an inline type.
+        o.set(
+            DIMENSIONS,
+            "minecraft:the_end",
+            r#"{"type":"minecraft:overworld"}"#.into(),
+        );
+        assert_eq!(o.level_cloud_height("minecraft:the_end"), Some(300.0));
+        o.set(
+            DIMENSIONS,
+            "minecraft:the_nether",
+            r#"{"type":{"attributes":{"minecraft:visual/cloud_height":128}}}"#.into(),
+        );
+        assert_eq!(o.level_cloud_height("minecraft:the_nether"), Some(128.0));
+        // A type without the attribute, or with a value that is no number.
+        for json in [
+            r#"{"min_y":-64,"height":384}"#,
+            r#"{"attributes":{"minecraft:visual/cloud_height":"high"}}"#,
+        ] {
+            o.set(DIMENSION_TYPES, "minecraft:overworld", json.into());
+            assert_eq!(o.level_cloud_height("minecraft:overworld"), None, "{json}");
         }
     }
 
