@@ -134,7 +134,7 @@ game folder (a dedicated server's own folder, beside `server.properties`, for th
 `level-type=terraforged:normal` makes), written with every setting off the first time, and keeps them in its overworld generator
 (`generator.horizon_settings` in `world_gen_settings.dat`, beside TerraForged's own generator fields),
 so changing the file later leaves existing worlds as they are; Re-Create keeps the world's own. The
-Create World map is drawn with the settings the new world will get; only `flow_rivers` changes it (its channels show as rivers). A world
+Create World map is drawn with the settings the new world will get, though none of them changes it. A world
 made before the settings existed has every setting off. Vanilla worlds never get the block or the file. The game installs a world's
 settings as it opens it (also on a dedicated server running a TerraForged world); clients of a server
 don't generate, so they need none.
@@ -454,12 +454,16 @@ carved, where a river or lake bed is an outlet at its water level, like the sea.
   beyond the water the ground is lowered towards a block over it, less with the square of the distance,
   back to the terrain at the valley's edge. A bank within 2 blocks of the water that dips under it (by
   less than 4 blocks) is raised level with the water, so no water stands beside a lower column. The
-  channel's columns become TerraForged's river terrain with river noise 0 (river biomes, river water,
-  `/tf preview`'s river colour); across the valley the river noise is multiplied by TerraForged's
-  valley noise. The sea, beaches and TerraForged's own rivers and lakes are left as they are.
-- Everything that samples the terrain sees the channels: chunks, distant tiles, structures, biomes,
-  `/tf preview` and the Create World map. `/locateterrain`'s search (TerraForged's `find`) doesn't:
-  it samples rivers at unscaled coordinates, as TerraForged does.
+  channel's columns become TerraForged's river terrain with river noise 0 (so they fill with water to
+  the channel's level and get river surfaces); across the valley the river noise is multiplied by
+  TerraForged's valley noise. The sea, beaches and TerraForged's own rivers and lakes are left as they are.
+- Everything that samples the terrain's heights sees the channels: chunks, distant tiles and
+  structures. The climate doesn't: biomes, the spawn search, `/locate biome`, `/tf preview` and the
+  Create World map read TerraForged's climate sample, which the setting leaves alone, so a channel
+  keeps the biome around it (no river biome) and the maps don't show it. Carving the climate sample
+  too made every biome query build drainage tiles: the spawn search alone took minutes. Neither does
+  `/locateterrain`'s search (TerraForged's `find`), which samples rivers at unscaled coordinates, as
+  TerraForged does.
 - Purity: the channels near a 128-block patch are extracted together from the drainage map and kept in
   a lossy cache (1024 patches); every value is a function of the seed and the position. The map
   samples its own copy of the noise, built the same way.
@@ -3452,8 +3456,7 @@ there), shown up to 128 GUI pixels under the seed box and hidden on screens too 
 Create World turns into the level seed (a number, else the text's Java `hashCode`, trimmed), and the generator is built
 as the world's pipeline builds it: the preset's levels with `height_scale`, the settings the new world gets (Re-Create's
 source world's, else `config/terraforged/settings.json`), and `Seeds.get` of the level seed. Its colours read only the
-climate, continent and river noise, so no setting changes the map but `flow_rivers`, whose channels are river noise
-(the tests check the others). A blank seed shows
+climate, continent and river noise, so no setting changes the map (the tests check every setting). A blank seed shows
 "the map shows once a seed is typed". The picture renders on a thread of its own, never the screen's, in well under a second:
 one render at a time for the latest seed, and a render for a seed already replaced, or for a screen no
 longer drawing the map, stops at its next pixel (TerraForged Reimagined's `PreviewWidget` takes the latest request the

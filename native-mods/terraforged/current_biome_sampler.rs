@@ -81,15 +81,12 @@ impl<'a> CurrentBiomeSampler<'a> {
     }
 
     /// `getSample(seed, x, z)`: continent, rivers, then climate, into a fresh sample.
-    pub fn get_sample(&self, seed: i32, block_x: i32, block_z: i32) -> ClimateSample {
-        let (x, z) = self.coordinates(block_x, block_z);
+    pub fn get_sample(&self, seed: i32, x: i32, z: i32) -> ClimateSample {
+        let (x, z) = self.coordinates(x, z);
         let continent = self.noise.continent();
         let mut sample = ClimateSample::new(&continent.context().terrain);
         continent.sample_continent(seed, x, z, &mut sample.noise);
         continent.sample_river(seed, x, z, &mut sample.noise);
-        // Horizon's `flow_rivers`: its channels are rivers to the biomes too (their height here is meaningless).
-        self.noise
-            .carve_flow_rivers(seed, block_x, block_z, &mut sample.noise);
         self.climate.sample(seed, x, z, &mut sample);
         sample
     }
