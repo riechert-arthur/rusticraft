@@ -119,6 +119,8 @@ Differences and gaps:
   as its `minecraft:visual/cloud_height` attribute, which Horizon honours. So TerraForged worlds draw their
   clouds at y=300, on their server thread, for LAN guests and for a dedicated server's players; other worlds
   keep vanilla's 192.33.
+- A data pack's climate files (`data/terraforged/worldgen/climate/*.json`, TerraForged's `ClimateType`
+  registry) are not read: the climate pools are built as from TerraForged's own eleven empty files.
 - Not ported: the unregistered test volcano feature.
 
 ## Settings
@@ -220,8 +222,29 @@ don't generate, so they need none.
 
 ## Layers
 
-The layers were added in this order; later notes supersede earlier ones. The first ports the
-deterministic Noise2D primitives.
+The layers were added in this order; later notes supersede earlier ones, and [Status](#status) is the only
+statement of what TerraForged worlds get and what is missing today. Where an early note said a layer was "not ported
+yet" or that nothing called it yet and a later layer changed that, the note now names the later layer.
+
+Engine layers not on 6dd607eb's path: 6dd607eb links Engine 0.3.0 but generates with its own `ContinentNoise`
+(`continent_noise.rs`), whose `RiverGenerator` (`river_network.rs`) lays rivers and lakes and whose `RiverCarver`
+(`continent_carver.rs`) carves them, with its own climate noise (`current_climate.rs`) and bundled terrain noises.
+These Engine layers are ported and parity-tested, but no TerraForged world calls them; they stay as reference:
+
+- Engine's `LandForms` (`landforms.rs`), which only 6dd607eb's data generator `ModTerrains` calls (the bundle ships
+  the terrain noises it generated), its `RegionModule`, populators, `StandardTerrainProvider` and heightmap blenders
+  (`region.rs`, `populator.rs`, `provider.rs`, `blend.rs`);
+- Engine's simple, advanced and fancy continents (`continent.rs`, `advanced_continent.rs`, `fancy.rs`);
+- Engine's river stack (`river.rs`): `GenWarp`, `River`, `RiverCarver`, `LakeCarver`, `WetlandCarver`, networks,
+  river maps, `BaseRiverGenerator` and the simple and fancy river generators, and their river caches. 6dd607eb has
+  no wetlands, so TerraForged worlds have none;
+- Engine's `Heightmap` (`heightmap.rs`), its tiles, tile generator and tile cache (`tile.rs`, `tile_generator.rs`),
+  `WorldFilters` with Engine's own `Erosion`, smoothing, steepness and beach filters (`filters.rs`; the world's
+  erosion is Reimagined's, `erosion.rs`, which takes only `FastRandom` from it), and Engine's climate stage
+  (`ClimateModule`, `climate.rs`; the world's climate, `current_climate.rs`, takes only its settings, `ClimateRange`, `Moisture`,
+  `Temperature` and `perlin_warp`).
+
+The first layer ports the deterministic Noise2D primitives.
 
 On top of them sit TerraForged's octave sources (Perlin, Perlin2, legacy simplex, improved simplex and
 cubic) with their configuration, output bounds and the original explicit-seed behavior.
@@ -243,7 +266,8 @@ raw bits, including Engine's quirks: `DirectionWarp` reads `NoiseUtil`'s 4096-en
 constant axis to NaN, and `CumulativeWarp` returns the second warp's coordinate rather than its offset. `CacheWarp`
 (`Domain.cache()`) is not ported: Engine never sets its `cached` flag, so it only passes samples through. The seed/scale
 shorthands that build noise warps (`Domain.warp(seed, scale, octaves, strength)`, `Module.warp(seed, ...)`...) are not
-ported yet either.
+part of `noise.rs`: the layers that need them build the same warps (`landforms::noise_warp`, `GenWarp` in `river.rs`,
+and `ContinentNoise`'s inlined warps).
 
 The selector layer adds Engine's `Base`, `Blend`, `VariableBlend` (`blendVar`) and `Select` modules, with the bounds
 Engine reports for them: `Base` keeps its base's minimum and the larger maximum, the others the smaller minimum and
@@ -459,8 +483,9 @@ double and the other two products in float. Its test checks the water level, the
 against a Java oracle for Engine's default levels (256 high, sea level 63), TerraForged's continent levels (480 and
 62), ModTerrains' swapped `new Levels(63, 255)` (a water level of 1), a negative and a zero water level and a sea
 level whose `- 1` wraps, with start seeds where the increments and the warp's second axis seed wrap. The other
-landforms and TerraForged's `RandSeed` (ModTerrains builds its landforms from a `SplittableRandom` seed rather than
-Engine's counter) are not ported yet.
+landforms come with the LandForms layers below. TerraForged's `RandSeed` (ModTerrains builds its landforms from a
+`SplittableRandom` seed rather than Engine's counter) is not ported: only 6dd607eb's data generators (`ModTerrains`,
+`ModVegetations`) use it, and the bundle ships the terrain noise and vegetation files they generated.
 
 The erosion Ridge layer adds Engine's `Ridge` (`com.terraforged.engine.module.Ridge`, `ErosionRidge` in `noise.rs`;
 not the `RidgeNoise` source) and its `Ridge.Noise` module (`ErosionRidge::wrap`, `Module::erosion_ridge`). For each
@@ -577,8 +602,8 @@ inside it both apply to the same cell in turn and `value` is lerped (`ContinentL
 `ContinentLerper3` with Curve3, `Blender` always linearly). `Blender` keeps the lower populator's terrain while its
 select is below the midpoint the split sets; the lerpers leave the terrain the last populator wrote. NaN selects fall
 through to the blend, as in Java. A `Blender` controlled by a populator reads it as Engine's `getValue` does, on a fresh
-cell of the world's registry; its tag threshold is stored and, as in Engine, never read. Nothing wires them into world
-generation yet. Their tests check every cell field and `getValue` at each boundary, one ulp either side, signed zeros,
+cell of the world's registry; its tag threshold is stored and, as in Engine, never read. Engine's `Heightmap` (below) chains
+them; 6dd607eb's world generation doesn't (see the Engine layers not on 6dd607eb's path, above). Their tests check every cell field and `getValue` at each boundary, one ulp either side, signed zeros,
 NaN and infinities, degenerate and reversed ranges, populators that read the cell, and Heightmap's root chain over a
 grid, against a Java oracle running Engine's classes on Engine cells; the oracle lives outside Git, in
 `.local/terraforged/oracles/blend/`.
@@ -674,8 +699,8 @@ continent to carve lakes and river channels. The lake warp adds a Perlin `Domain
 strength 300 to one with scale 50, 2 octaves and strength 50; the river warp adds scale 95, 1 octave, strength 25 to
 scale 16, 1 octave, strength 5. As in Engine, the four warps take seeds `seed + 1` to `seed + 4` (wrapping as Java
 `int`s), each warp's y noise uses its seed + 1, the continent scale argument is ignored and `GenWarp.EMPTY` is
-`GenWarp::direct()`. Engine's private, unused `scaleMegaWarp` is kept as `scale_mega_warp`. Only the river maps use these
-warps, and nothing builds river maps yet. Its tests fold every warp's offsets and coordinates over a grid with
+`GenWarp::direct()`. Engine's private, unused `scaleMegaWarp` is kept as `scale_mega_warp`. Only Engine's river maps (below) use
+these warps; 6dd607eb's world generation builds none. Its tests fold every warp's offsets and coordinates over a grid with
 -0, huge, infinite and NaN coordinates for eight seeds (the `int` edges among them) against a Java oracle running
 Engine's `GenWarp`, `GenWarpOracle.java` in `.local/terraforged/oracles/river/`.
 
@@ -686,8 +711,8 @@ nodes), and samples positions, angles, segment intersections (optionally extende
 and shortened copies (`NoiseUtil.round`). A `RiverWarp` bends a river sideways by simplex noise, faded in over
 `0..lower` and out over `upper..1`, plus a wiggle of 2 to 45 blocks faded in over the first 7.5% of the river;
 its `create` and `createChild` draw from `java.util.Random` in Engine's order. Engine compares `RiverWarp.NONE` by
-identity; the port marks it with a flag. Only the river generators below use them, and nothing in world generation
-calls those yet. Its tests
+identity; the port marks it with a flag. Only Engine's river generators below use them, and 6dd607eb's world generation
+calls none of those. Its tests
 fold every field and method over 2560 segments (zero-length, NaN, infinite and -0 ends, odd radii), every pair's
 intersections and overlaps, and warps with degenerate and NaN fades over distances outside 0..1, against a Java
 oracle running Engine's classes, `RiverGeometryOracle.java` in `.local/terraforged/oracles/river/`.
@@ -699,8 +724,8 @@ cell's continent edge is below 0.5) and then the bed lower `value` to the bed he
 level, the world registry's `river` terrain, except over wetland-style terrains that override rivers outside
 bed-to-water heights. Widths and depths taper in over the first `fade` of the river. `createForkConfig` sizes a fork
 from the bed and banks at a point, `getValleyType` and `create` draw from `java.util.Random` in Engine's order. Its
-`TerrainPopulator` base (an empty `apply`) and its unused `compareTo` are not ported. Only the river networks below use the
-carver, and nothing in world generation calls them yet. Its tests fold every cell field over 337920 carves of fresh and filled cells
+`TerrainPopulator` base (an empty `apply`) and its unused `compareTo` are not ported. Only Engine's river networks below use the
+carver; 6dd607eb's world generation carves with its own continent `RiverCarver` (`continent_carver.rs`). Its tests fold every cell field over 337920 carves of fresh and filled cells
 (river, wetland, lake and mountain terrains, NaN values, masks and edges) at points on, beside, before and past
 four rivers (zero-length and NaN among them), for degenerate configs (wrapping widths, NaN heights, zero and NaN
 fades), plus fork configs and random draws, against a Java oracle running Engine's class, `RiverCarverOracle.java`
@@ -712,8 +737,9 @@ valley, a cell at or above the bank height (the config's bank range, interpolate
 toward it and its `riverMask` lowered; in the bed, `value` is capped at the bank height, lowered toward the lake
 depth and tagged with the world registry's `lake` terrain. `recordBounds` adds the valley's square widened by 20% to
 a `Boundsf.Builder`, whose maxima start at `Float.MIN_VALUE` as in Engine, and `overlaps` tests a point against the
-squared lake radius plus a margin. Engine's `TerrainPopulator` base is not ported, as for the river carver. Nothing
-uses lakes yet but the river networks, which nothing uses yet either. Its tests fold every cell field over 561600
+squared lake radius plus a margin. Engine's `TerrainPopulator` base is not ported, as for the river carver. Only
+Engine's river networks use `LakeCarver`; TerraForged worlds get their lakes from 6dd607eb's continent instead
+(`river_network.rs` lays lake nodes at river sources, `continent_carver.rs` carves them). Its tests fold every cell field over 561600
 applies of fresh and filled cells (NaN, infinite and -0 values and masks) at points inside, on the edge of and outside 30 lakes (zero,
 negative, NaN and infinite sizes), for eight lake configs (wrapping `int` settings, NaN and infinite heights) and three
 `Levels` (TerraForged's swapped `Levels(63, 255)` among them), plus bounds built from NaN, -0 and infinite records,
@@ -725,8 +751,8 @@ height (`ground(3)`) is lowered toward it and its `riverMask` lowered; past 65% 
 and the banks is lowered toward the bed, the innermost part sets `erosionMask`, cells where the pool alpha beats an
 edge noise are tagged with the world registry's `wetland` terrain, and cells from the bed up to the mound top move
 toward seeded mound noise, sampled at the terrain coordinates. `recordBounds` adds the segment's box widened by the
-radius. Engine's `TerrainPopulator` base is not ported, as for the river carver and lakes. Nothing uses wetlands yet
-but the river networks. Its tests fold every cell field over 1927800 applies of fresh and filled cells
+radius. Engine's `TerrainPopulator` base is not ported, as for the river carver and lakes. Only Engine's river networks use
+wetlands, and 6dd607eb has none: TerraForged worlds have no wetlands. Its tests fold every cell field over 1927800 applies of fresh and filled cells
 (NaN, infinite and -0 values and masks) at points inside, on the edge of and outside wetlands (degenerate, NaN and
 infinite segments; zero, negative, NaN and infinite radii; seeds that wrap) for three `Levels` (TerraForged's swapped
 `Levels(63, 255)` among them), with both plain and warped coordinates, against a Java oracle running Engine's class,
@@ -738,8 +764,8 @@ carver's warp (where it applies along the river), carves the river, then applies
 offset) and the children (at the warped coordinates, so each branch warps again). `build` gives the root the bounds of
 every river, lake and wetland in the tree and each child `Boundsf.NONE`, as Engine does. The builder's overlap test
 (against a branch's own parent, or any other network) and the network's are ported as is; the builder's own
-`addBounds` box is kept although Engine never reads it. Only the river maps use river networks, and the river generators that
-build both are not ported. Its tests fold every cell field over 532575 carves of fresh and filled cells at a grid of points
+`addBounds` box is kept although Engine never reads it. Only the river maps use river networks; Engine's river generators that
+build both come in the layers below. Its tests fold every cell field over 532575 carves of fresh and filled cells at a grid of points
 (plus -0, NaN and infinite ones) with three lake offsets (one NaN), for three networks (warped and unwarped carvers,
 overlapping lakes and wetlands, branches nested three deep, NaN and infinite rivers, lakes and wetlands) and three
 `Levels` (TerraForged's swapped `Levels(63, 255)` among them), plus every builder and network overlap test and the
@@ -750,7 +776,7 @@ continent cell (`x`, `z`) it belongs to. `apply` warps a point with the river wa
 warped point and carves, in order, every network whose bounds contain the warped point. The timestamp is
 `System.currentTimeMillis()` at creation, as Engine's river cache (below) reads it; Engine's static `Rivermap.get`
 comes with the rivermap-reuse layer below. Only the base, fancy and simple river
-generators below build river maps, and nothing calls them yet. Its tests fold every cell field over 304380 applies of fresh and filled cells at a grid of
+generators below build river maps; Engine's `Heightmap` (below) reads them, 6dd607eb's world generation doesn't. Its tests fold every cell field over 304380 applies of fresh and filled cells at a grid of
 points (plus -0, NaN, infinite and huge ones) for `NetworkOracle`'s networks, four `GenWarp`s (one whose seeds wrap,
 and `GenWarp.EMPTY`) and three `Levels`, plus direct samples, against a Java oracle running Engine's class,
 `RivermapOracle.java` in `.local/terraforged/oracles/river/`.
@@ -792,7 +818,7 @@ so each map is made once. Maps expire once they are more than five minutes old; 
 thread every minute, the port sweeps on a miss at most once a minute (a regenerated map is the same, so this changes
 nothing but memory). `FancyContinentGenerator` now takes what Engine's `FancyContinent` builds its river generator
 from: the context's seed root, river settings, levels and the world's terrain registry. The simple and advanced
-continents' caches come with the continent-river-cache layer below; nothing calls the caches yet. Its tests check the ids, the single
+continents' caches come with the continent-river-cache layer below; Engine's `Heightmap` river stage (below) calls them. Its tests check the ids, the single
 generation and the cached instance for negative and extreme cells, and fold the fancy continent's river maps for five
 settings variants and six cells, against a Java oracle running Engine's classes, `RiverCacheOracle.java` in
 `.local/terraforged/oracles/river/`, plus the expiry.
@@ -815,8 +841,8 @@ The continent-river-cache layer wires `getRivermap` into the simple and advanced
 `advanced_continent.rs`): the multi and single continents keep a `LegacyRiverCache` (ids `NoiseUtil.seed(x, z)`),
 the advanced continent a `RiverCache` (ids `PosUtil.pack(x, z)`), each over the continent's own
 `SimpleRiverGenerator`. Like `FancyContinentGenerator`, their constructors now take what Engine builds that
-generator from: the context's seed root, river settings, levels and the world's terrain registry. Nothing calls the
-caches yet. Its tests fold the river maps of the three continents through their caches for five settings variants
+generator from: the context's seed root, river settings, levels and the world's terrain registry. The heightmap-river layer
+below calls them. Its tests fold the river maps of the three continents through their caches for five settings variants
 and nine cells each (six fixed cells, among them extreme and negative ones, plus the centres nearest three points),
 checking that a second lookup returns the cached map, against `RiverCacheOracle.java` in
 `.local/terraforged/oracles/river/`, which calls Engine's `getRivermap`; the simple-river layer's extreme-cell test
@@ -1507,7 +1533,7 @@ wrapping (`rangeY = maxY - minY`; a range of 0 or less gives 0), and `with_seed`
 `Module::with_seed` while keeping the cave's own seed. `UniqueCaveDistributor` places jittered cells on staggered
 rows and zeroes cells above its density; `module()` makes it a `Module` with `Noise`'s default 0..1 bounds, as
 `NoiseCaveGenerator` uses it (`Module::seeded_custom`, a custom module with a seed-first sample too). The carver
-is `cave_carver.rs` (below); the cave decorator is not ported yet. `CaveNoiseOracle.java`
+is `cave_carver.rs` and the cave decorator `NoiseCaveDecorator` in `decorator.rs` (both below). `CaveNoiseOracle.java`
 (`.local/terraforged/oracles/cave_noise/`) runs the jar's own classes on 12 names, 8 distributors (and
 `NoiseCaveGenerator`'s clamp, map and warp graph over each) at 217 points (signed zeros, negative, huge, infinite
 and NaN), and 6 caves (TerraForged's `mega` cave and `int` wrap, NaN and overflow cases) over 72 block positions
@@ -2416,9 +2442,10 @@ that a rerun of the structure stage (also four at once on four threads) leaves t
 that a plain fill after a structure stage gives the plain blocks and heights again. Each step has its own Java oracle (the terrain stage
 oracle and `ChunkAdapterOracle`, below); the composition is Java's three calls in order, so it has no oracle of its
 own. Heights the structure edits write come from the clipped chunk (its OCEAN_FLOOR_WG), while unedited columns
-keep TerraForged's unclipped heights; with terrain above the build range the two differ, which the world-height
-decision (below) has to settle. Not yet ported: Deep Caves, Strata, the surface step (apart from its erosion, water smoothing and snow passes and its preliminary surface-height cache, below), the carver step, and the
-registration that would let Horizon call the stage.
+keep TerraForged's unclipped heights; with terrain above the build range the two differ, which TerraForged's taller
+overworld (y −64 to 959, below) settles. The surface step, the carver step (`cave_carver.rs`) and the registration
+that lets Horizon call the stage (`world_preset.rs`, `generator_preset.rs`) come later, below. Deep Caves and Strata
+are TerraForged Reimagined's (`DeepCaves`, `StrataDecorator`): 6dd607eb has neither, so they are not ported.
 
 The surface erosion pass (`surface.rs`, `apply`) is TerraForged 6dd607eb's `worldgen.biome.surface.Surface.apply`
 with `findSolid` (MIT, as above). On columns at or above sea level whose gradient (normalised by `55 * genDepth /
@@ -2752,7 +2779,9 @@ decide snow per position, so the port takes TerraForged Reimagined a24d450's pos
 (MIT, as above): precipitation and a base temperature below 0.15, vanilla's own threshold. Every list and pool holds
 the same `Arc` per biome. Not ported: climate files named after no climate type (Java adds their biomes to the
 overworld list, and throws on an unknown one, but gives them no pool), and the codec's own checks (an invalid key or a
-non-number weight throws in Java; nothing decodes climate files yet). Reimagined's version of the manager (its `terraforged:non_surface`/`wetland`/`highland` tags,
+non-number weight throws in Java). The pipeline decodes no climate files: it builds the pools with none
+(`pipeline.rs` passes `&[]` to `LiveBiomeBindings::from_generator_data_with`), the same pools as TerraForged's eleven
+empty files, so a data pack's climate files (`data/terraforged/worldgen/climate/*.json`) are not read. Reimagined's version of the manager (its `terraforged:non_surface`/`wetland`/`highland` tags,
 cave and water filters, climate lookup for untagged biomes, `fillEmptyClimates` borrowing and dry and highland pools)
 is not followed; 6dd607eb's sampler reads none of it.
 
@@ -3236,7 +3265,7 @@ rustc --edition 2024 --test native-mods/terraforged/engine.rs -o /tmp/terraforge
 /tmp/terraforged-engine-tests
 ```
 
-The mixin pins Rusticraft commit `a446cdd041b4d411919d7181a3313c3bf6490a79` (#288's merge), a `main` commit rather than a Nightly:
+The mixin pins Rusticraft commit `a446cdd041b4d411919d7181a3313c3bf6490a79` (#288's merge; `horizon_revision` in `horizon-mixin.toml`), a `main` commit rather than a Nightly:
 no Nightly is close enough (the nearest earlier one, `nightly-source/2026-10-31-d91cab6`, is 1941 commits older and
 `generator.rs` differs by 73 lines). The pin moves to a Nightly when the series is rebased onto one.
 
