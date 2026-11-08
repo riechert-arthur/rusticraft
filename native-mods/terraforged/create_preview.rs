@@ -80,16 +80,22 @@ pub fn forget() {
     REQUEST.fetch_add(1, Ordering::AcqRel);
 }
 
-/// The World tab's map, below its controls.
-pub fn draw(atlas: &HudAtlas, batch: &mut HudBatch, seed: &str) {
-    let (w, h) = (batch.width.ceil(), batch.height.ceil());
+/// Where the map goes on a `w` x `h` screen: its left edge, the top of its title line and its side,
+/// below the World tab's controls and above the footer, at most 128 wide; `None` where less than 32
+/// would fit (the screen then shows nothing).
+fn place(w: f32, h: f32) -> Option<(f32, f32, f32)> {
     let (_, gy) = grid(w, h, 1);
     let top = gy + 117.0 + 10.0;
     let size = (h - FOOTER - 10.0 - top - 12.0).min(128.0).floor();
-    if size < 32.0 {
+    (size >= 32.0).then(|| (((w - size) / 2.0).floor(), top, size))
+}
+
+/// The World tab's map, below its controls.
+pub fn draw(atlas: &HudAtlas, batch: &mut HudBatch, seed: &str) {
+    let (w, h) = (batch.width.ceil(), batch.height.ceil());
+    let Some((x, top, size)) = place(w, h) else {
         return;
-    }
-    let x = ((w - size) / 2.0).floor();
+    };
     let centred = |batch: &mut HudBatch, text: &Text, y: f32, colour: u32| {
         let width = atlas.font.width_text(text).floor();
         batch.text_styled(atlas, text, ((w - width) / 2.0).floor(), y, colour, true);
@@ -235,6 +241,42 @@ mod tests {
     /// The screen's side of the map, frame by frame: seeds typed quickly cost one render and end on the
     /// last one's picture; a blank seed renders nothing; leaving the screen ends the render thread; a
     /// new screen draws its pictures again. One test, as the map's state is the program's.
+    /// At every screen size the game allows (320x240 GUI pixels and up), the title line and the map
+    /// stay on the screen, clear of the tab bar, the World tab's buttons, the seed box and the footer.
+    #[test]
+    fn the_map_fits_between_the_controls_and_the_footer() {
+        let options = super::super::WorldOptions {
+            tab: 1,
+            ..Default::default()
+        };
+        let mut shown = 0;
+        for w in (320..=1920).step_by(7) {
+            for h in (240..=1080).step_by(5) {
+                let (w, h) = (w as f32, h as f32);
+                let Some((x, top, size)) = place(w, h) else {
+                    continue;
+                };
+                shown += 1;
+                let map = [x.min((w - 300.0) / 2.0), top, x + size, top + 12.0 + size];
+                assert!(map[0] >= 0.0 && map[2] <= w, "{w}x{h}: {map:?}");
+                assert!(map[1] >= 24.0 && map[3] <= h - FOOTER, "{w}x{h}: {map:?}");
+                let clear = |[x0, y0, x1, y1]: [f32; 4]| {
+                    x1 <= map[0] || x0 >= map[2] || y1 <= map[1] || y0 >= map[3]
+                };
+                for b in super::super::buttons(w, h, false, &options) {
+                    assert!(
+                        clear([b.x, b.y, b.x + b.w, b.y + 20.0]),
+                        "{w}x{h}: {}",
+                        b.label
+                    );
+                }
+                let (_, [fx, fy, fw, fh]) = super::super::field_rect(w, h, 1).unwrap();
+                assert!(clear([fx, fy, fx + fw, fy + fh]), "{w}x{h}: seed box");
+            }
+        }
+        assert!(shown > 1000);
+    }
+
     #[test]
     fn maps_follow_the_typed_seed_off_the_screen_s_thread() {
         forget();
