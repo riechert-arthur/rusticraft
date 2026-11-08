@@ -74,7 +74,6 @@ Differences and gaps:
   noise 0), and on land the noise caves' ceiling stays 8 to 17 blocks under the ground (their
   carving mask, `1 - breach noise * river noise`, stays 1), so they don't breach it.
   `sparse_forests` starts at 1 instead.
-- A dedicated server's `level-type=terraforged:normal` is not recognized.
 - TerraForged's biomes `terraforged:cave` and `terraforged:oak_forest` exist in TerraForged worlds
   only; vanilla worlds' biomes, synced registry and commands stay 26.3's. The bundle ships no
   vanilla biome file: the two are derived at runtime from the game's own 26.3 data, as 6dd607eb's
@@ -118,7 +117,8 @@ Differences and gaps:
 
 Horizon's own additions to TerraForged (none of them is TerraForged's), every one off by default, which
 is the faithful port. A new TerraForged world takes them from `config/terraforged/settings.json` in the
-game folder, written with every setting off the first time, and keeps them in its overworld generator
+game folder (a dedicated server's own folder, beside `server.properties`, for the world its
+`level-type=terraforged:normal` makes), written with every setting off the first time, and keeps them in its overworld generator
 (`generator.horizon_settings` in `world_gen_settings.dat`, beside TerraForged's own generator fields),
 so changing the file later leaves existing worlds as they are; Re-Create keeps the world's own. The
 Create World map is drawn with the settings the new world will get, though none of them changes it. A world
@@ -3038,7 +3038,7 @@ shows `generator.terraforged.normal` (vanilla's `toLanguageKey("generator")`), w
 `en_us.json` is "TerraForged" (6dd607eb; Reimagined has the same entry). Customize stays off, as 6dd607eb has no
 preset editor. Creating the world (`WorldOptions::world_gen` arms the `write_world_gen_settings_with` that takes its
 result) saves vanilla's `world_gen_settings` with the preset's TerraForged overworld stem. Every other write (a world
-opened without settings, a legacy world, a dedicated server's new world) stays vanilla. The new world also gets its own
+opened without settings, a legacy world, a dedicated server's new world of a vanilla `level-type`) stays vanilla. The new world also gets its own
 data pack, `datapacks/terraforged`, holding TerraForged's taller overworld dimension type (TerraForged Reimagined's
 built-in `dimension_type/overworld.json`, bundled unchanged; 6dd607eb's has the same range in 1.18's format): from y
 -64, 1024 blocks and logical height. Horizon enables a world's packs unless `datapacks.json` disables them, so the
@@ -3068,8 +3068,12 @@ TerraForged's own over every biome. As TerraForged's `CreateWorldScreen.init` ho
 cycles the button to its preset, a fresh screen opens on TerraForged (`reset`, at `WorldOptions::default`), so one
 press goes to Normal; Re-Create opens on the world's own type. Differences: that hook runs at every `init` of 1.19's
 screen, so in TerraForged a Re-Created vanilla world and a resized screen go back to TerraForged; here only a fresh
-screen starts there, and the player's choice stays. A dedicated server's `level-type=terraforged:normal` is not
-recognized (Horizon falls back to `minecraft:normal` with its usual warning). A game built without this bundle opens a TerraForged world as a Normal one
+screen starts there, and the player's choice stays. A dedicated server's new world is TerraForged's when
+server.properties says `level-type=terraforged:normal` (`horizon-server`'s `server.toml`: under `[properties]`), as on a
+Java server with the mod, where `level-type` names any world preset and `DatapackHook` adds the built-in pack: Horizon's
+`native_level_type_world_gen` hook (before the server reads `level-type` itself) writes it as the Create screen does,
+with the stem, the pack and the server's own settings file, and the world then opens, registers `/locateterrain` and `/tf`,
+and syncs its taller overworld as any TerraForged world. Other level types, unknown ones included, are left to Horizon. A game built without this bundle opens a TerraForged world as a Normal one
 and generates new chunks with vanilla terrain. With the bundle applied, Horizon's own test
 `create_world_tabs_follow_vanilla_and_their_choices_reach_the_action` fails, because the screen opens on TerraForged
 and the cycle has a sixth preset where the test expects vanilla's five,

@@ -63,7 +63,8 @@ thread_local! {
     /// Set by `WorldOptions::world_gen` when the screen's choice is TerraForged, for the
     /// `write_world_gen_settings_with` that takes its result on the same thread. Other
     /// writes (`Level::write` for a world without settings, a dedicated server's new world)
-    /// stay vanilla whatever the screen last showed.
+    /// stay vanilla whatever the screen last showed: a server's TerraForged world comes from
+    /// its `level-type` ([`write_level_type`]).
     static CREATING: Cell<bool> = const { Cell::new(false) };
 }
 
@@ -216,6 +217,28 @@ fn settings_file(path: &Path) -> Settings {
             defaults
         }
     }
+}
+
+/// Whether a dedicated server's `level-type` (lower-cased, as vanilla reads it) names TerraForged's
+/// world preset, [`PRESET`]: 6dd607eb registers it as a `world_preset`, and vanilla's
+/// `DedicatedServerProperties` takes any preset's id.
+pub fn is_level_type(level_type: &str) -> bool {
+    level_type == PRESET
+}
+
+/// A dedicated server's new world for `level-type=terraforged:normal` (the
+/// `native_level_type_world_gen` hook): written as the Create screen writes a TerraForged world
+/// ([`write_terraforged`]: the stem, the built-in pack, `DatapackHook`'s job on a Java server), with
+/// the Horizon settings of the file `settings`, the server's `config/terraforged/settings.json`
+/// (written with every setting off when missing, as the game folder's is). A server has no bonus
+/// chest; `structures` is `generate-structures`.
+pub fn write_level_type(dir: &Path, seed: i64, structures: bool, settings: &Path) -> Result<()> {
+    let options = WorldGen {
+        preset: WorldPreset::Normal,
+        structures,
+        bonus_chest: false,
+    };
+    write_terraforged(dir, seed, options, None, settings_file(settings))
 }
 
 /// `write_world_gen_settings_with` for the Create screen's TerraForged world, with TerraForged's
@@ -786,6 +809,67 @@ mod tests {
             &biome_bytes()
         ));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A dedicated server's `level-type=terraforged:normal` world is the Create screen's for the
+    /// same seed (settings and pack), with the Horizon settings of the server's settings file;
+    /// other level types are left to the server.
+    #[test]
+    fn a_servers_level_type_writes_the_create_screens_world() {
+        vanilla_biomes();
+        assert!(is_level_type("terraforged:normal"));
+        for other in [
+            "minecraft:normal",
+            "normal",
+            "terraforged:large",
+            "flat",
+            "",
+        ] {
+            assert!(!is_level_type(other), "{other}");
+        }
+        let screen = scratch("level-type-screen");
+        CREATING.set(true);
+        let options = WorldGen {
+            preset: WorldPreset::Normal,
+            structures: true,
+            bonus_chest: false,
+        };
+        assert!(matches!(
+            write(&screen, 777, options, &None),
+            ControlFlow::Break(Ok(()))
+        ));
+        let server = scratch("level-type-server");
+        let file = server
+            .join("config")
+            .join("terraforged")
+            .join("settings.json");
+        write_level_type(&server.join("world"), 777, true, &file).unwrap();
+        let world = server.join("world");
+        assert_eq!(world_gen_settings(&world), world_gen_settings(&screen));
+        assert!(is_terraforged(&world));
+        assert!(is_this_pack(
+            &world.join("datapacks/terraforged"),
+            &pack_meta(),
+            &biome_bytes()
+        ));
+        // The missing file was written with every setting off.
+        assert_eq!(settings_file(&file), Settings::default());
+        // The file's settings go into the world, and `generate-structures` too.
+        std::fs::write(&file, "{\"sparse_forests\": true, \"height_scale\": 1.5}").unwrap();
+        let tuned = server.join("tuned");
+        write_level_type(&tuned, 777, false, &file).unwrap();
+        let generator = terraforged_generator(&tuned).unwrap();
+        assert_eq!(
+            saved_settings(&generator),
+            Settings {
+                sparse_forests: true,
+                height_scale: 1.5,
+                ..Settings::default()
+            }
+        );
+        assert!(!WorldGen::read(&tuned).unwrap().structures);
+        std::fs::remove_dir_all(&screen).unwrap();
+        std::fs::remove_dir_all(&server).unwrap();
     }
 
     #[test]
