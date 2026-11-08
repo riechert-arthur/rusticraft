@@ -379,6 +379,46 @@ don't generate, so they need none.
   down to its floor. Not yet: cirques at river sources, fjords where troughs meet the sea, moraines at the
   glaciers' lower limit, and a "past ice age" field for temperate mountains. Off, generation is unchanged.
 
+## Drainage map
+
+Horizon's, in neither TerraForged tree (`drainage.rs`): where water flows over the terrain, the base
+the realistic-terrain settings (flow-routed rivers, basin erosion, rain shadow) build on. Nothing in
+generation reads it yet, so it changes no world and has no setting of its own; each feature that uses
+it comes with its own setting, off by default.
+
+- The source is TerraForged's un-eroded terrain height without its rivers (`drainage_height`: the
+  continent and land noise of `sampleTerrain`, unfloored), with the sea below the sea level. It is
+  one noise sample per column (about 1.3 µs), never the eroded height. An L0 cell is the mean of 2x2
+  columns, one every 64 blocks.
+- Two fixed grids: L0 tiles of 8192 blocks at 128-block cells (64x64, plus a 2048-block halo on
+  every side) and L1 tiles of 1024 blocks at 16-block cells (64x64, plus 128 blocks, one L0 cell).
+  Each tile is routed on its own window: depressions are filled and flats routed by priority-flood
+  (Barnes, Lehman & Mulla 2014), each cell flows to its steepest-descent D8 neighbour on the filled
+  surface (O'Callaghan & Mark 1984), and accumulation (upstream area in square blocks) and distance
+  to the sea follow the flood's order. Water leaves an L0 window through the sea or anywhere
+  on its outer ring, an L1 window through the sea or the ring cells whose L0 cell flows out of it.
+- A cell's value comes from the one tile whose core holds it, so every value is a pure function of
+  the seed and the tile: no order, thread or cache dependence (tiles are memoised in lossy caches,
+  16 L0 and 64 L1 tiles, about 3 and 8 MB; in release an L0 tile over TerraForged takes about
+  170 ms, an L1 tile 7.5 ms). An L1 tile takes its boundary from L0: every L0 cell
+  just outside the window that flows into it brings its accumulation in at the lowest L1 cell of
+  the side it enters by (just inside the window's edge), and water leaving the window carries on
+  with the L0 distance to the sea. No L1 tile reads another.
+- Two L1 tiles can still see a big river by their border differently, by a tributary that L0 and
+  L1 join a cell apart (7 to 9% on the tests' synthetic valley). So `Drainage::flow(x, z)`, the
+  query the features use, blends a cell's accumulation and distance with the neighbouring tile's
+  view of the same cell over the 8 cells (128 blocks) before each border, half and half at the
+  border: on that valley the step across a border drops from 5 or 6 million square blocks to
+  0.2 to 0.4 million, and from 224 blocks of distance to 30. Its direction, height and filled height are the
+  owner's; `l1_cell` gives the unblended cell.
+- Limits: L0's halo stands in for the rest of the world (the tiling of Barnes 2016's parallel
+  priority-flood, without its global spill graph, which an endless world has no room for), so a
+  basin wider than about 2 km beyond an L0 tile's core can drain out of its window's edge rather
+  than to its real outlet, and two L0 tiles may then disagree near their shared border. The filled
+  surface never rises downstream inside a tile, but two tiles may fill a depression by their
+  border to different levels (0.3 blocks on the synthetic valley), so a channel built on it should
+  clamp its profile downstream. Water that leaves an L1 window and comes back in is counted twice.
+
 ## Layers
 
 The layers were added in this order; later notes supersede earlier ones, and [Status](#status) sums up what

@@ -50,6 +50,7 @@ use super::{
     terraforged_structure_terrain::StructureTerrain,
     terraforged_surface_height_cache,
     terraforged_terrain_cache::{TerrainCache, TerrainDataHandle, TerrainTask},
+    terraforged_terrain_data::NoiseSample,
     terraforged_terrain_levels::TerrainLevels,
 };
 use crate::registry::BlockStateId;
@@ -570,6 +571,22 @@ impl TerraForgedGenerator {
     #[cfg(test)]
     pub(crate) fn cached_far_regions(&self) -> (usize, usize) {
         self.terrain.noise_generator().far_regions()
+    }
+
+    /// Horizon's drainage map (`drainage.rs`): the un-eroded terrain height without TerraForged's rivers
+    /// (`sampleTerrain` only), unfloored, in blocks.
+    pub fn drainage_height(&self, x: i32, z: i32) -> Result<f32, &'static str> {
+        let noise = self.noise_generator();
+        let mut sample = NoiseSample::new(&noise.continent().context().terrain);
+        let frequency = self.levels.noise_levels.frequency;
+        noise.sample_terrain(
+            self.seed(),
+            x as f32 * frequency,
+            z as f32 * frequency,
+            &mut sample,
+            &mut noise.blender_resource(),
+        )?;
+        Ok(self.levels.scaled_height(sample.height_noise))
     }
 
     /// The base noise of the un-eroded sample, then the eroded height noise, in Reimagined's `getBaseHeight` order.
