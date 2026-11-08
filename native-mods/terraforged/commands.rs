@@ -331,10 +331,12 @@ const MAX_REGEN_RADIUS: i32 = 32;
 ///
 /// Departures from Java, where Horizon's server differs:
 /// - Java keeps the entities and POIs: only `region/` records are written as null, and the loaded entities stay
-///   in the entity manager. Horizon loads entities only with a chunk read from the save and ticks them by ticket
-///   (a missing chunk reads as air), so kept entities would fall through the area until it is generated again,
-///   and those of unloaded chunks would be orphaned. The area's entities are deleted with it instead (memory,
-///   `entities/` and `poi/`), players excepted.
+///   in the entity manager until their chunks are back. Here the area's loaded entities are saved to
+///   `entities/` and leave the level, as when their chunks unload, and come back with the chunks generated in
+///   their place (Horizon's `Persistent::finish` loads a generated chunk's saved entities), same UUID and
+///   position, as do those of the area's chunks that were not loaded. A mob may come back inside the new
+///   terrain, as in Java. POIs stay in `poi/` and are revalidated when the new chunks save. Players stay where
+///   they are.
 /// - Java's `save(true)` writes every chunk first. Here the deletes are queued behind every earlier write, which
 ///   is what the flush is for; unsaved changes in the area are dropped with it.
 /// - Nothing is deleted while a load or generation of the area is still running (`settle`): its result would
@@ -374,21 +376,36 @@ fn regen(game: &mut Game<'_>, player: &NativeServerPlayer, radius: i32) {
         failed(game, "chunk generation is busy, try again");
         return;
     }
-    if let Err(error) = horizon_client::save::terraforged_regen::delete_chunks(&game.save, &keys) {
-        // Nothing was deleted: the area stays as it is.
+    // The area's entities leave the level, saved to `entities/` as their chunks unloading would: Java keeps
+    // them, and the regenerated chunks load them again. Those waiting in `loaded_entities` join first.
+    game.spawn_loaded_entities();
+    let held = game.entity_chunks(&set, true);
+    let restore = |game: &mut Game<'_>, held: Vec<((i32, i32), Vec<horizon_world::nbt::Tag>)>| {
+        // Nothing was deleted: the entities go back into the level with their chunks.
+        game.world
+            .loaded_entities
+            .extend(held.into_iter().filter(|(_, tags)| !tags.is_empty()));
+    };
+    let chunks = &game.world.chunks;
+    if let Err(error) =
+        horizon_client::save::terraforged_regen::keep_entities(&game.save, held.clone(), |key| {
+            chunks.contains_key(&key)
+        })
+    {
+        restore(game, held);
         failed(game, &error.to_string());
         return;
     }
-    let data = horizon_client::save::terraforged_regen::delete_chunk_data(&game.save, &keys);
-    // The save no longer has the area: memory follows, whatever happened to its entities' records. The
-    // streaming generates it again, its edge decorated against the chunks kept around it, which that
-    // decoration writes into, as Java's WorldGenRegion does with full neighbours.
+    if let Err(error) = horizon_client::save::terraforged_regen::delete_chunks(&game.save, &keys) {
+        // Nothing was deleted: the area stays as it is.
+        restore(game, held);
+        failed(game, &error.to_string());
+        return;
+    }
+    // The save no longer has the area: memory follows. The streaming generates it again, its edge decorated
+    // against the chunks kept around it, which that decoration writes into, as Java's WorldGenRegion does with
+    // full neighbours.
     game.streaming.regenerate(&keys);
-    // Entities read with a column that loaded since the last tick wait in `loaded_entities`: theirs go too.
-    game.world
-        .loaded_entities
-        .retain(|(key, _)| !set.contains(key));
-    let _ = game.entity_chunks(&set, true);
     for &(x, z) in &keys {
         game.world.modified.remove(&(x, z));
         game.world.inhabited.remove(&(x, z));
@@ -400,9 +417,6 @@ fn regen(game: &mut Game<'_>, player: &NativeServerPlayer, radius: i32) {
     game.world
         .block_names
         .retain(|p, _| !set.contains(&(p.0 >> 4, p.2 >> 4)));
-    if let Err(error) = data {
-        failed(game, &error.to_string());
-    }
     game.feedback(italic("Regenerating chunks"));
     if let Some(host) = &mut game.lan {
         let hub = &mut host.hub;
