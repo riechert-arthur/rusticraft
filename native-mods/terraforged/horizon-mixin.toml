@@ -497,6 +497,13 @@ source = "flow_rivers.rs"
 visibility = "pub"
 
 [[module]]
+id = "basin_erosion"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_basin_erosion"
+source = "basin_erosion.rs"
+visibility = "pub"
+
+[[module]]
 id = "settings"
 file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_settings"

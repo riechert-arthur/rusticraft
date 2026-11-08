@@ -24,6 +24,7 @@
 
 use super::{
     terraforged::{Module, Source, SourceConfig, SourceKind, floor, lerp},
+    terraforged_basin_erosion::{BasinErosion, BasinMemo, with_thread_memo},
     terraforged_continent_noise::ContinentNoise,
     terraforged_continent_points::{BEACH, COAST, SHALLOW_OCEAN},
     terraforged_engine::{ControlPoints, Terrain, TerrainProperties},
@@ -80,6 +81,8 @@ pub struct NoiseGenerator {
     /// Horizon's `flow_rivers` carver and the registry's river terrain it marks channels with; `None` without the
     /// setting.
     flow: Option<(Arc<FlowRivers>, Terrain)>,
+    /// Horizon's `basin_erosion`; `None` without the setting.
+    basins: Option<Arc<BasinErosion>>,
 }
 
 impl NoiseGenerator {
@@ -96,6 +99,34 @@ impl NoiseGenerator {
             control_points,
             deep_ocean,
             flow: None,
+            basins: None,
+        }
+    }
+
+    /// The same generator lowering its raw terrain by Horizon's basin erosion ([`Self::lower_basins`]).
+    pub fn with_basin_erosion(mut self, basins: Arc<BasinErosion>) -> Self {
+        self.basins = Some(basins);
+        self
+    }
+
+    /// Whether Horizon's `basin_erosion` is on.
+    pub fn has_basin_erosion(&self) -> bool {
+        self.basins.is_some()
+    }
+
+    /// Horizon's `basin_erosion` (not TerraForged's): lowers block (`x`, `z`)'s raw terrain `sample`
+    /// ([`Self::sample_terrain`]'s, before the rivers and the droplet erosion) along the valleys of the drainage map;
+    /// nothing without the setting. `memo` keeps the tiles a caller sampling many blocks has looked up.
+    pub fn lower_basins(
+        &self,
+        memo: &mut BasinMemo,
+        seed: i32,
+        x: i32,
+        z: i32,
+        sample: &mut NoiseSample,
+    ) {
+        if let Some(basins) = &self.basins {
+            basins.lower(memo, seed, x, z, self.levels, sample);
         }
     }
 
@@ -249,8 +280,8 @@ impl NoiseGenerator {
         Ok(0)
     }
 
-    /// `sample(seed, x, z, sample, blender)`: [`Self::sample_terrain`] then [`Self::sample_river`] (then Horizon's
-    /// [`Self::carve_flow_rivers`] at the block) at
+    /// `sample(seed, x, z, sample, blender)`: [`Self::sample_terrain`] (then Horizon's [`Self::lower_basins`]) then
+    /// [`Self::sample_river`] (then Horizon's [`Self::carve_flow_rivers`] at the block) at
     /// `x * frequency`, `z * frequency` (int to float, then a float multiply). `Err` when a terrain noise the blender
     /// picks has no seed-first form (a custom module): the sample is then partly written (continent fields set).
     /// Panics where Java throws (the blender's cell search on NaN, infinite or huge noise coordinates).
@@ -266,6 +297,9 @@ impl NoiseGenerator {
         let noise_x = x as f32 * frequency;
         let noise_z = z as f32 * frequency;
         self.sample_terrain(seed, noise_x, noise_z, sample, blender)?;
+        if let Some(basins) = &self.basins {
+            with_thread_memo(|memo| basins.lower(memo, seed, x, z, self.levels, sample));
+        }
         self.sample_river(seed, noise_x, noise_z, sample);
         self.carve_flow_rivers(seed, x, z, sample);
         Ok(sample)

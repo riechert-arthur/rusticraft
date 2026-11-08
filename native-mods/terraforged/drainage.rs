@@ -1,6 +1,7 @@
 // Horizon's drainage map (in neither TerraForged tree), for the realistic-terrain settings (#277): where water
 // flows over the un-eroded terrain, on two fixed grids. Only the settings built on it read it (flow-routed rivers,
-// `terraforged_flow_rivers`; basin erosion and rain shadow to come), each behind its own setting.
+// `terraforged_flow_rivers`; basin erosion, `terraforged_basin_erosion`; rain shadow to come), each behind its own
+// setting.
 //
 // Clean-room, from published methods: depressions are filled and flats routed by priority-flood (Barnes, Lehman &
 // Mulla 2014, "Priority-Flood: An optimal depression-filling and watershed-labeling algorithm"), directions are
@@ -267,6 +268,8 @@ pub const L1: TileGrid = TileGrid {
     halo: 8,
 };
 const _: () = assert!(L1.halo * L1.cell == L0.cell && (L1.core * L1.cell) % L0.cell == 0);
+// `blend_weights` serves both levels (basin erosion blends L0 too): the same core, and a halo at least `BLEND` wide.
+const _: () = assert!(L0.core == L1.core && L0.halo >= L1.halo);
 /// Samples per L0 cell side: an L0 cell is the mean of a 2x2 grid of source columns (one every 64 blocks), so a
 /// landform narrower than a cell weighs less in it than a single sample would give; under the sea where most of
 /// them are. (4x4 costs four times as much, 0.66 s per L0 tile over TerraForged in release, for no gain on the
@@ -590,7 +593,7 @@ pub const BLEND: i32 = L1.halo;
 
 /// The owner's and one neighbour's weights along one axis for core position `local` (0..core): the neighbour's
 /// falls linearly from 1/2 at the border to 0 [`BLEND`] cells in.
-fn blend_weights(local: i32) -> [(i32, f64); 2] {
+pub fn blend_weights(local: i32) -> [(i32, f64); 2] {
     let from_border = |cells: i32| 0.5 - (f64::from(cells) + 0.5) / f64::from(2 * BLEND);
     if local < BLEND {
         let w = from_border(local);

@@ -384,13 +384,19 @@ don't generate, so they need none.
   of TerraForged's rivers or lakes. It is 2 blocks wide at its head and widens with the area it drains
   (as its square root, to 20 blocks), its bed 2 to 7 blocks under the water (as the area to the 0.4).
   See "Flow-routed rivers" below. Off, generation is unchanged.
+- `basin_erosion`: valleys cut along the drainage map before TerraForged's droplet erosion, which
+  adds its detail on top: trunk valleys reach far into the mountains, tributaries branch off them,
+  big rivers get wide floors and every cut has walls at a critical slope. Heights only: chunks,
+  distant tiles, structures and the spawn search see the valleys, the climate and the maps don't.
+  With `flow_rivers` too, the channels' water follows the eroded valleys. See "Basin erosion" below.
+  Off, generation is unchanged.
 
 ## Drainage map
 
 Horizon's, in neither TerraForged tree (`drainage.rs`): where water flows over the terrain, the base
 the realistic-terrain settings (flow-routed rivers, basin erosion, rain shadow) build on. It has no
 setting of its own and changes no world by itself; each feature that uses it comes with its own
-setting, off by default (`flow_rivers` is the first).
+setting, off by default (`flow_rivers` and `basin_erosion` so far).
 
 - The source is TerraForged's un-eroded terrain height without its rivers (`drainage_height`: the
   continent and land noise of `sampleTerrain`, unfloored), with the sea below the sea level. It is
@@ -477,6 +483,52 @@ carved, where a river or lake bed is an outlet at its water level, like the sea.
 - Not yet: meanders (sine-generated curves along the channel), deltas and estuaries where a channel
   reaches the sea, lakes in large filled depressions (a channel stops where it enters one and starts
   again past its spill point), and sloped water, which needs flowing water.
+
+## Basin erosion
+
+Horizon's `basin_erosion` setting, in neither TerraForged tree (`basin_erosion.rs`). TerraForged's
+erosion runs droplets of twelve steps over one 256-block region, so it roughens slopes by a few
+blocks but never cuts a valley longer than a region. This setting cuts them at the scale of whole
+basins, from the drainage map, then lets the droplets work on the result.
+
+- Incision: the detachment-limited stream-power law, dz/dt = U − K·A^m·S^n (Howard 1994; Whipple &
+  Tucker 1999), with no uplift, n = 1 and m = 0.5 (a concavity of 0.5, in the range rivers show),
+  solved implicitly along the drainage tree, receivers first (Braun & Willett 2013, "A very
+  efficient O(n), implicit and parallel method to solve the stream power equation"): each cell
+  becomes (h + F·h_r) / (1 + F), F = K·Δt·A^0.5 / L, over 8 steps, never rising (a pit stays). The
+  routing is the drainage map's and stays fixed. Only channels incise: cells that at least 0.05 km²
+  drains through (a constant critical support area, Montgomery & Dietrich 1988); the slopes between
+  them come down only by the walls below. The surface that erodes is the map's filled one, so a
+  depression erodes from its spill level (cutting that drains the lake) and never digs a pit beside
+  itself; the change is the eroded surface against the terrain's own height. With n = 1 a knickpoint
+  retreats upstream at K·A^m, so K·t = 3 (`PARAMS.erosion`) sends one about 9 km up a 10 km² valley
+  and some 670 blocks up from a channel's head: trunk valleys reach deep into the hills, tributaries
+  branch off them, ridges and plateaus between them stay. Water cuts towards the sea level, or the water of TerraForged's rivers and
+  lakes (the map's source is the one `flow_rivers` uses, where they are outlets).
+- Valley floors: around a river, nothing stands higher than the river plus 1 in 20 within a
+  half-width of 0.015·A^0.5 blocks, at most 72 (valley width growing with drainage area, as
+  Montgomery & Gran 2001 and Tomkin et al. 2003 measured): wide floors downstream, none upstream.
+- Walls: the cut spreads out of the channels at a critical slope of 0.4 (the threshold-hillslope
+  model: Burbank et al. 1996; Roering et al. 1999), over the terrain's own slope, so the valleys
+  are V-shaped above their floors and the mountains away from them keep TerraForged's shape. A cut
+  of d blocks is softly limited to d / (1 + d/72).
+- Hierarchy and seams: L0 tiles (128-block cells) are eroded with their window's edge fixed; an L1
+  tile (16-block cells) is eroded with the cells water leaves its window by fixed at the terrain
+  lowered by L0's erosion there, so a river crossing L1 tiles is cut to the same coarse profile on
+  both sides. A cell's change is its owner tile's, blended with the neighbouring tile's view of it
+  over the 8 cells before a border (as `Drainage::flow` blends); a block's is the bilinear mix of
+  the four nearest cell centres. Every value is a function of the seed and the position: no seam
+  at chunks, regions or tiles, whatever the order or the thread. Tiles are memoised in lossy caches
+  (16 L0 and 64 L1 tiles, about 2 MB more than the drainage map's).
+- Application: the raw terrain height (TerraForged's `sampleTerrain`) of every column is lowered by
+  the change there, never below a block over the land's base level (where TerraForged's rivers
+  stand) or the sea, and never raised. That happens in the plain sample (distant tiles, structures,
+  the spawn search) and in the erosion region's map before the droplets, so both agree. Then
+  TerraForged's rivers carve as usual, and with `flow_rivers` the channels' water level follows
+  the eroded cells (filled height plus the change). The climate sample is left alone (see
+  "Flow-routed rivers"), so biomes and the maps are as without the setting.
+- Not yet: rock hardness modulating K (#274), recomputing the routing as the valleys deepen, lateral
+  erosion and sediment (an alluvial fill of the floors), and tuning on more seeds.
 
 ## Layers
 
