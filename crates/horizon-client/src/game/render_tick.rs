@@ -101,17 +101,20 @@ impl Game<'_> {
         } else {
             (0.0, 0.0)
         };
-        let title_fog = horizon_client::fog::FogTables::default();
-        let tables = if self.title.is_some() {
-            &title_fog
+        // The title world's biomes keep the dimension's water fog end.
+        let water_fog_end = if self.title.is_some() {
+            1.0
         } else {
-            self.res.fog()
+            self.world_biomes
+                .list
+                .get(usize::from(biome))
+                .map_or(1.0, |b| b.water_fog_end)
         };
         let input = FogInputs {
             fog_type,
             sky,
             water_fog_color,
-            biome,
+            water_fog_end,
             render_distance_chunks: self.terrain_distance(),
             distant_terrain: self.lod.is_some(),
             cloud_range_chunks: self.settings.cloud_range,
@@ -136,7 +139,7 @@ impl Game<'_> {
             fire_resistance: self.potions.effects.get("fire_resistance").is_some(),
             night_vision: self.fog_night_vision(),
         };
-        let mut fog = horizon_client::fog::setup_fog(tables, &self.fog, &input);
+        let mut fog = horizon_client::fog::setup_fog(&self.fog, &input);
         if !self.settings.horizon.fog {
             horizon_client::fog::clear_distance_fog(&mut fog, &input);
         }

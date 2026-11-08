@@ -1769,7 +1769,7 @@ impl Game<'_> {
                 Arc::new(ChunkFormat::new(&r.dimension, biomes, bits).in_column(column));
             r.registries = registries;
         }
-        self.world_biomes = self.res.biomes();
+        self.adopt_world_biomes();
         self.set_biome_ids();
     }
     /// Switch to a (possibly new) dimension: a fresh client level.

@@ -3,12 +3,10 @@
 //! (`Camera.getFluidInCamera`) and the fog colour (`computeFogColor`: sunrise
 //! tint, sky-colour mix, void darkness, water-vision brightening).
 use crate::{
-    biome::Biomes,
     blocks::{BlockFacts, Fluid},
     environment::Sky,
     world::World,
 };
-use std::path::Path;
 
 /// `FogType` of the camera position.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -29,37 +27,6 @@ pub struct FogData {
     pub render_distance_end: f32,
     pub sky_end: f32,
     pub cloud_end: f32,
-}
-
-/// Per-biome water fog end multipliers (`visual/water_fog_end_distance`).
-#[derive(Default)]
-pub struct FogTables {
-    water_fog_end: Vec<f32>,
-}
-impl FogTables {
-    pub fn load(root: &Path, biomes: &Biomes) -> Self {
-        let mut water_fog_end = vec![1.0; biomes.list.len()];
-        for (name, &id) in &biomes.index {
-            let path = root.join(format!(
-                "data/minecraft/worldgen/biome/{}.json",
-                name.trim_start_matches("minecraft:")
-            ));
-            let Ok(bytes) = std::fs::read(path) else {
-                continue;
-            };
-            let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-                continue;
-            };
-            let v = &json["attributes"]["minecraft:visual/water_fog_end_distance"];
-            if v["modifier"].as_str() == Some("multiply")
-                && let (Some(f), Some(slot)) =
-                    (v["argument"].as_f64(), water_fog_end.get_mut(id as usize))
-            {
-                *slot = f as f32;
-            }
-        }
-        Self { water_fog_end }
-    }
 }
 
 /// Fog state that evolves over time.
@@ -179,7 +146,9 @@ pub struct FogInputs<'a> {
     pub sky: &'a Sky,
     /// Biome water fog colour (`visual/water_fog_color`).
     pub water_fog_color: [f32; 3],
-    pub biome: u16,
+    /// The camera biome's water fog end multiplier (`visual/water_fog_end_distance`,
+    /// `BiomeInfo::water_fog_end`).
+    pub water_fog_end: f32,
     pub render_distance_chunks: i32,
     /// Extend ordinary Overworld atmosphere for terrain beyond vanilla's range.
     pub distant_terrain: bool,
@@ -213,7 +182,7 @@ pub struct FogInputs<'a> {
 }
 
 /// `FogRenderer.setupFog` + `computeFogColor`.
-pub fn setup_fog(tables: &FogTables, state: &FogState, input: &FogInputs) -> FogData {
+pub fn setup_fog(state: &FogState, input: &FogInputs) -> FogData {
     let rd = input.render_distance_chunks as f32 * 16.0;
     let sky = input.sky;
     let eye_in_water = input.fog_type == FogType::Water;
@@ -343,12 +312,7 @@ pub fn setup_fog(tables: &FogTables, state: &FogState, input: &FogInputs) -> Fog
         }
         FogType::Water => {
             fog.environmental_start = -8.0;
-            let factor = tables
-                .water_fog_end
-                .get(input.biome as usize)
-                .copied()
-                .unwrap_or(1.0);
-            fog.environmental_end = 96.0 * factor * water_vision.max(0.25);
+            fog.environmental_end = 96.0 * input.water_fog_end * water_vision.max(0.25);
             fog.sky_end = fog.environmental_end;
             fog.cloud_end = fog.environmental_end;
         }
@@ -427,7 +391,7 @@ mod tests {
             fog_type: FogType::Atmospheric,
             sky,
             water_fog_color: [0.0, 0.0, 0.2],
-            biome: 0,
+            water_fog_end: 1.0,
             render_distance_chunks: 12,
             distant_terrain: false,
             cloud_range_chunks: 128,
@@ -455,12 +419,9 @@ mod tests {
             cloud_fog_end: 2048.0,
             ..Sky::default()
         };
-        let tables = FogTables {
-            water_fog_end: vec![1.0],
-        };
         let mut input = inputs(&sky);
         input.boss_world_fog = true;
-        let fog = setup_fog(&tables, &FogState::default(), &input);
+        let fog = setup_fog(&FogState::default(), &input);
         assert_eq!(
             (fog.environmental_start, fog.environmental_end),
             (0.0, 96.0)
@@ -468,7 +429,7 @@ mod tests {
         assert_eq!((fog.sky_end, fog.cloud_end), (96.0, 96.0));
         // Under water the water environment applies instead.
         input.fog_type = FogType::Water;
-        let water = setup_fog(&tables, &FogState::default(), &input);
+        let water = setup_fog(&FogState::default(), &input);
         assert_eq!(water.environmental_start, -8.0);
     }
     #[test]
@@ -480,12 +441,9 @@ mod tests {
             fog_end: 96.0,
             ..Sky::default()
         };
-        let tables = FogTables {
-            water_fog_end: vec![1.0],
-        };
         let mut input = inputs(&nether);
         input.skybox = false;
-        let mut fog = setup_fog(&tables, &FogState::default(), &input);
+        let mut fog = setup_fog(&FogState::default(), &input);
         assert_eq!(fog.environmental_end, 96.0);
         clear_distance_fog(&mut fog, &input);
         assert!(fog.environmental_start >= 1e9 && fog.render_distance_start >= 1e9);
@@ -497,11 +455,8 @@ mod tests {
             fog_end: 96.0,
             ..Sky::default()
         };
-        let tables = FogTables {
-            water_fog_end: vec![1.0],
-        };
         let kept = |input: &FogInputs| {
-            let mut fog = setup_fog(&tables, &FogState::default(), input);
+            let mut fog = setup_fog(&FogState::default(), input);
             let before = fog;
             clear_distance_fog(&mut fog, input);
             fog == before
@@ -529,13 +484,10 @@ mod tests {
             sky_color: [1.0, 1.0, 1.0],
             ..Sky::default()
         };
-        let tables = FogTables {
-            water_fog_end: vec![1.0],
-        };
         let mut input = inputs(&sky);
         input.skybox = false;
         input.darken_world = 1.0;
-        let fog = setup_fog(&tables, &FogState::default(), &input);
+        let fog = setup_fog(&FogState::default(), &input);
         assert!((fog.color[0] - 0.7).abs() < 1.0e-5);
         assert!((fog.color[1] - 0.6).abs() < 1.0e-5);
         assert!((fog.color[2] - 0.6).abs() < 1.0e-5);
@@ -548,20 +500,14 @@ mod tests {
             sky_color: [0.5; 3],
             ..Sky::default()
         };
-        let tables = FogTables {
-            water_fog_end: vec![1.0],
-        };
         let mut input = inputs(&sky);
         // The End's floor is y 0: y 16 is halfway into the darkness.
         input.min_y = 0;
         input.camera_y = 16.0;
-        let fog = setup_fog(&tables, &FogState::default(), &input);
+        let fog = setup_fog(&FogState::default(), &input);
         assert_eq!(fog.color[0], 0.5 * 0.25);
         input.camera_y = 32.0;
-        assert_eq!(
-            setup_fog(&tables, &FogState::default(), &input).color[0],
-            0.5
-        );
+        assert_eq!(setup_fog(&FogState::default(), &input).color[0], 0.5);
     }
     #[test]
     fn render_distance_fog_span() {
@@ -571,10 +517,7 @@ mod tests {
             sky_color: [0.5; 3],
             ..Sky::default()
         };
-        let tables = FogTables {
-            water_fog_end: vec![1.0],
-        };
-        let fog = setup_fog(&tables, &FogState::default(), &inputs(&sky));
+        let fog = setup_fog(&FogState::default(), &inputs(&sky));
         // 12 chunks = 192 blocks, span clamp(19.2, 4, 64).
         assert!((fog.render_distance_start - (192.0 - 19.2)).abs() < 1e-4);
         assert_eq!(fog.render_distance_end, 192.0);
@@ -586,29 +529,26 @@ mod tests {
             fog_end: 1024.,
             ..Sky::default()
         };
-        let tables = FogTables {
-            water_fog_end: vec![1.],
-        };
         let mut input = inputs(&sky);
         input.render_distance_chunks = 1024;
         input.distant_terrain = true;
-        let fog = setup_fog(&tables, &FogState::default(), &input);
+        let fog = setup_fog(&FogState::default(), &input);
         assert_eq!(fog.environmental_end, 16384.);
         input.fog_type = FogType::Water;
         assert_eq!(
-            setup_fog(&tables, &FogState::default(), &input).environmental_end,
+            setup_fog(&FogState::default(), &input).environmental_end,
             24.
         );
         input.fog_type = FogType::Atmospheric;
         input.darkness = Some(1.);
         assert_eq!(
-            setup_fog(&tables, &FogState::default(), &input).environmental_end,
+            setup_fog(&FogState::default(), &input).environmental_end,
             15.
         );
         input.darkness = None;
         input.boss_world_fog = true;
         assert_eq!(
-            setup_fog(&tables, &FogState::default(), &input).environmental_end,
+            setup_fog(&FogState::default(), &input).environmental_end,
             96.
         );
     }
@@ -619,21 +559,12 @@ mod tests {
             cloud_fog_end: 2048.0,
             ..Sky::default()
         };
-        let tables = FogTables {
-            water_fog_end: vec![1.0],
-        };
         let mut input = inputs(&sky);
         input.render_distance_chunks = 2;
         input.cloud_range_chunks = 64;
-        assert_eq!(
-            setup_fog(&tables, &FogState::default(), &input).cloud_end,
-            1024.0
-        );
+        assert_eq!(setup_fog(&FogState::default(), &input).cloud_end, 1024.0);
         input.cloud_range_chunks = 128;
-        assert_eq!(
-            setup_fog(&tables, &FogState::default(), &input).cloud_end,
-            2048.0
-        );
+        assert_eq!(setup_fog(&FogState::default(), &input).cloud_end, 2048.0);
     }
     #[test]
     fn water_vision_ramps() {
@@ -649,19 +580,26 @@ mod tests {
         assert_eq!(s.water_vision(false), 0.0);
     }
     #[test]
+    fn biome_water_fog_end_multiplies_the_water_fog() {
+        // WaterFogEnvironment.setupFog: 96 * the biome's WATER_FOG_END_DISTANCE multiplier.
+        let sky = Sky::default();
+        let mut input = inputs(&sky);
+        input.fog_type = FogType::Water;
+        input.water_fog_end = 0.85;
+        let fog = setup_fog(&FogState::default(), &input);
+        assert_eq!(fog.environmental_end, 96.0 * 0.85 * 0.25);
+    }
+    #[test]
     fn rain_fog_pulls_fog_in() {
         let sky = Sky {
             fog_end: 1024.0,
             ..Sky::default()
         };
-        let tables = FogTables {
-            water_fog_end: vec![1.0],
-        };
         let state = FogState {
             rain_fog_multiplier: 1.0,
             ..FogState::default()
         };
-        let fog = setup_fog(&tables, &state, &inputs(&sky));
+        let fog = setup_fog(&state, &inputs(&sky));
         assert_eq!(fog.environmental_start, -160.0);
         assert_eq!(fog.environmental_end, 768.0);
     }

@@ -321,13 +321,11 @@ pub struct AnimateTables {
     pale_oak_logs: Vec<bool>,
     /// `FireBlock.canBurn`: states with ignite odds above zero (none waterlogged).
     burnable: Vec<bool>,
-    /// Biome id -> ambient particles and probabilities (`minecraft:visual/ambient_particles`).
-    ambient: Vec<Vec<(T, f32)>>,
     /// Per state: 1 for a pointed dripstone, 2 for one whose tip points down.
     dripstone: Vec<u8>,
 }
 impl AnimateTables {
-    pub fn load(root: &Path, registry: &BlockRegistry, biomes: &Biomes) -> crate::Result<Self> {
+    pub fn load(root: &Path, registry: &BlockRegistry) -> crate::Result<Self> {
         let kinds = (0..registry.len() as u32)
             .map(|id| {
                 registry.state(BlockStateId(id)).map_or(Animate::None, |s| {
@@ -368,28 +366,6 @@ impl AnimateTables {
                 })
             })
             .collect();
-        let mut ambient = vec![Vec::new(); biomes.list.len()];
-        for (name, &id) in &biomes.index {
-            let path = root.join(format!(
-                "data/minecraft/worldgen/biome/{}.json",
-                name.trim_start_matches("minecraft:")
-            ));
-            let Ok(bytes) = std::fs::read(path) else {
-                continue;
-            };
-            let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-                continue;
-            };
-            let list = &json["attributes"]["minecraft:visual/ambient_particles"];
-            let entries = list["argument"].as_array().or_else(|| list.as_array());
-            for entry in entries.into_iter().flatten() {
-                let ty = entry["particle"]["type"].as_str().and_then(T::from_name);
-                let probability = entry["probability"].as_f64().unwrap_or(0.0) as f32;
-                if let (Some(ty), Some(slot)) = (ty, ambient.get_mut(id as usize)) {
-                    slot.push((ty, probability));
-                }
-            }
-        }
         let dripstone = (0..registry.len() as u32)
             .map(|id| {
                 registry.state(BlockStateId(id)).map_or(0, |s| {
@@ -421,7 +397,6 @@ impl AnimateTables {
             terracotta: by_state("minecraft:terracotta"),
             pale_oak_logs: by_state("minecraft:pale_oak_logs"),
             burnable,
-            ambient,
         })
     }
     fn kind(&self, state: BlockStateId) -> Animate {
@@ -608,7 +583,9 @@ fn do_animate_tick(
             .chunks
             .get(&(x >> 4, z >> 4))
             .map_or(0, |c| c.biome(x, y, z));
-        for &(ty, probability) in tables.ambient.get(biome as usize).into_iter().flatten() {
+        // The biome's `visual/ambient_particles`, from the world's table (mod biomes included).
+        let particles = ctx.biomes.list.get(usize::from(biome));
+        for &(ty, probability) in particles.into_iter().flat_map(|b| &b.ambient_particles) {
             // AmbientParticle.canSpawn: random.nextFloat() <= probability.
             let random = engine.random();
             if random.next_float() <= probability {

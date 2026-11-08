@@ -179,6 +179,18 @@ impl MusicTables {
             biomes: read("worldgen/biome"),
         }
     }
+    /// These tables for a world whose native mods add `native` (`(id, biome JSON)`, the
+    /// world's table's `Biomes::native`): each of those biomes' music attributes beside
+    /// vanilla's, which they never replace (`Biomes::with_native` keeps vanilla's ids too).
+    pub fn with_native(&self, native: &[(String, Value)]) -> Self {
+        let mut out = self.clone();
+        for (id, json) in native {
+            out.biomes
+                .entry(id.clone())
+                .or_insert_with(|| Layer::parse(json));
+        }
+        out
+    }
     /// `EnvironmentAttributes.BACKGROUND_MUSIC` at a position.
     pub fn background(&self, dimension: &str, biome: &str) -> BackgroundMusic {
         self.biomes
@@ -428,7 +440,7 @@ impl MusicManager {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::sound_engine::{Bound, test_backend::Null};
     use crate::sound_events::SoundRegistry;
@@ -534,5 +546,68 @@ mod tests {
         assert_eq!(bg.select(true, true).unwrap().sound, "c");
         assert_eq!(bg.select(true, false).unwrap().sound, "b");
         assert_eq!(bg.select(false, false).unwrap().sound, "a");
+    }
+
+    /// The prepared resources (`HORIZON_TEST_RESOURCES`), when there are some.
+    pub(crate) fn resources() -> Option<std::path::PathBuf> {
+        let root = std::env::var_os("HORIZON_TEST_RESOURCES")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../.local/horizon-client")
+                    .join(horizon_core::VANILLA_VERSION)
+            });
+        root.join("data/minecraft/worldgen/biome/dripstone_caves.json")
+            .is_file()
+            .then_some(root)
+    }
+
+    #[test]
+    fn a_native_biome_plays_its_own_music_and_never_replaces_vanilla() {
+        let cave = serde_json::json!({"attributes": {"minecraft:audio/background_music": {
+            "default": {"sound": "minecraft:music.overworld.dripstone_caves",
+                        "min_delay": 12000, "max_delay": 24000}}}});
+        let mut vanilla = MusicTables::default();
+        vanilla.biomes.insert(
+            "minecraft:plains".to_owned(),
+            Layer::parse(&serde_json::json!({"attributes": {
+                "minecraft:audio/music_volume": 0.5}})),
+        );
+        let world = vanilla.with_native(&[
+            ("mod:cave".to_owned(), cave.clone()),
+            ("minecraft:plains".to_owned(), cave),
+        ]);
+        let music = world.background("minecraft:overworld", "mod:cave");
+        assert_eq!(
+            music.default.as_ref().map(|m| m.sound.as_str()),
+            Some("minecraft:music.overworld.dripstone_caves")
+        );
+        // Vanilla's biome keeps its own attributes; the table without mods has no mod biome.
+        assert_eq!(world.volume("minecraft:overworld", "minecraft:plains"), 0.5);
+        assert!(world.background("", "minecraft:plains").default.is_none());
+        assert!(vanilla.background("", "mod:cave").default.is_none());
+    }
+
+    #[test]
+    fn a_copy_of_dripstone_caves_plays_dripstone_caves_music() {
+        let Some(root) = resources() else {
+            eprintln!("no prepared resources: skipped");
+            return;
+        };
+        let dripstone = "data/minecraft/worldgen/biome/dripstone_caves.json";
+        let json: Value = serde_json::from_slice(&fs::read(root.join(dripstone)).unwrap()).unwrap();
+        let vanilla = MusicTables::load(&root);
+        let world = vanilla.with_native(&[("terraforged:cave".to_owned(), json)]);
+        let (dim, ours, theirs) = (
+            "minecraft:overworld",
+            "terraforged:cave",
+            "minecraft:dripstone_caves",
+        );
+        assert_eq!(world.background(dim, ours), vanilla.background(dim, theirs));
+        assert_eq!(world.volume(dim, ours), vanilla.volume(dim, theirs));
+        assert_eq!(
+            world.background(dim, ours).default.map(|m| m.sound),
+            Some("minecraft:music.overworld.dripstone_caves".to_owned())
+        );
     }
 }
