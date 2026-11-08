@@ -79,7 +79,9 @@ Differences and gaps:
   vanilla biome file: the two are derived at runtime from the game's own 26.3 data, as 6dd607eb's
   `ModBiome.create` derives them. `oak_forest` copies plains with no `minecraft:` tag, as in 6dd607eb;
   TerraForged Reimagined copies forest and tags it `minecraft:is_overworld` (a surface biome) and
-  `minecraft:is_forest`, which this port does not follow.
+  `minecraft:is_forest`, which this port does not follow. As in Java, a mod biome keeps its parent's
+  music, ambient sounds, water fog and ambient particles: `terraforged:cave` plays dripstone caves'
+  `music.overworld.dripstone_caves` (Horizon reads those from the world's biome table, #266).
 - TerraForged's pack makes every overworld taller; here only TerraForged worlds get it.
 - Far terrain (Horizon's distant tiles; TerraForged has none) shows TerraForged's ground and biomes with
   the vanilla surface rule's top blocks, but from the un-eroded height: erosion's regions are too costly to
