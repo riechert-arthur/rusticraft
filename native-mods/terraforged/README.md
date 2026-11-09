@@ -134,7 +134,8 @@ game folder (a dedicated server's own folder, beside `server.properties`, for th
 `level-type=terraforged:normal` makes), written with every setting off the first time, and keeps them in its overworld generator
 (`generator.horizon_settings` in `world_gen_settings.dat`, beside TerraForged's own generator fields),
 so changing the file later leaves existing worlds as they are; Re-Create keeps the world's own. The
-Create World map is drawn with the settings the new world will get, though none of them changes it. A world
+Create World map is drawn with the settings the new world will get; only `rain_shadow` changes it (it moves
+biomes). A world
 made before the settings existed has every setting off. Vanilla worlds never get the block or the file. The game installs a world's
 settings as it opens it (also on a dedicated server running a TerraForged world); clients of a server
 don't generate, so they need none.
@@ -390,13 +391,21 @@ don't generate, so they need none.
   distant tiles, structures and the spawn search see the valleys, the climate and the maps don't.
   With `flow_rivers` too, the channels' water follows the eroded valleys. See "Basin erosion" below.
   Off, generation is unchanged.
+- `rain_shadow`: moisture from the terrain. Air on a prevailing west wind rains out where a range lifts
+  it, so the range's west (windward) side is wetter and its east (lee) side drier, recovering over
+  a couple of kilometres, quickly over the sea. Each biome cell's moisture is TerraForged's times
+  the cell's factor, so whole cells change climate (and biome) where the factor moves them across a
+  climate border: a lee can turn to savanna or desert, a windward slope to forest or jungle. Chunks,
+  `/locate biome`, `/tf preview`, the spawn search and the Create World map all see it. See "Rain
+  shadow" below. Off, generation is unchanged.
 
 ## Drainage map
 
 Horizon's, in neither TerraForged tree (`drainage.rs`): where water flows over the terrain, the base
-the realistic-terrain settings (flow-routed rivers, basin erosion, rain shadow) build on. It has no
+the realistic-terrain settings (flow-routed rivers, basin erosion) build on. It has no
 setting of its own and changes no world by itself; each feature that uses it comes with its own
-setting, off by default (`flow_rivers` and `basin_erosion` so far).
+setting, off by default (`flow_rivers` and `basin_erosion`). The rain shadow doesn't read it: the
+climate must stay cheap (see "Rain shadow").
 
 - The source is TerraForged's un-eroded terrain height without its rivers (`drainage_height`: the
   continent and land noise of `sampleTerrain`, unfloored), with the sea below the sea level. It is
@@ -533,6 +542,40 @@ basins, from the drainage map, then lets the droplets work on the result.
   (see "Flow-routed rivers"), so biomes and the maps are as without the setting.
 - Not yet: rock hardness modulating K (#274), recomputing the routing as the valleys deepen, lateral
   erosion and sediment (an alluvial fill of the floors), and tuning on more seeds.
+
+## Rain shadow
+
+Horizon's `rain_shadow` setting, in neither TerraForged tree (`rain_shadow.rs`). TerraForged's moisture
+is 2D noise only (6dd607eb `ClimateNoise`), so a desert can sit on a range's windward side and a
+rainforest in its lee. This setting moves each biome cell's moisture with the terrain upwind of it,
+in a much simplified form of the linear upslope models of orographic precipitation (Smith 1979,
+"The influence of mountains on the atmosphere"; Smith & Barstad 2004, "A linear theory of orographic
+precipitation").
+
+- Wind: one direction for the whole world, from the west (the mid-latitudes' westerlies), blowing
+  towards +x. A range's west face is its windward side, its east face its lee.
+- Profile: from each biome cell's point (where TerraForged's climate takes the cell's moisture), the
+  un-eroded terrain (TerraForged's `sampleTerrain`, no rivers, no other Horizon setting) every 32
+  blocks for 2048 blocks upwind, the sea counted at the sea level, smoothed over 288 blocks so the air
+  feels ranges and hills, not every bump.
+- Parcel: an air mass starts at the far end with all its moisture and follows the smoothed ground.
+  Where the ground lifts it by Δ blocks it rains out 1 − e^(−Δ/120) of what it holds; past a summit it
+  sinks by 1 block in 8 (or follows the ground if that is higher), so it doesn't rain again until the
+  ground rises above it. Its deficit recovers by 1/e every 256 blocks over the sea and every 1024
+  blocks over land.
+- Factor: what the parcel holds on arrival, plus twice what it rained over the last 256 blocks
+  (the windward bonus). 1 on flat ground and over open sea, exactly; on a 300-block range 1200
+  blocks across about 1.3–1.7 on the windward slope, 0.53 at the crest, 0.44–0.53 just in the lee,
+  back to 0.85 1.5 km downwind. The cell's moisture is TerraForged's times the factor, held to 0–1; the
+  climate type (and so the biome pool) follows. Heights count in blocks, so `height_scale`'s taller
+  ranges cast deeper shadows.
+- Cost and purity: one profile per biome cell (73 terrain samples, about 0.1 ms), memoised in a lossy
+  cache of 4096 cells keyed by the cell and the seed; every biome query in the cell after the first
+  is a lookup. No drainage tiles: the spawn search, `/locate biome` and the maps query the climate
+  far and wide. A value is a function of the seed and the cell alone, so there are no seams; whole
+  cells change, so biome borders stay TerraForged's cell borders.
+- Not yet: winds that vary by latitude band or continent, vegetation density following the moisture
+  (#272's `realistic_vegetation`, in another stack), and rivers raising the moisture beside them.
 
 ## Layers
 

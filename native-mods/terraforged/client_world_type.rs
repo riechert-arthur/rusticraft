@@ -582,6 +582,7 @@ mod tests {
                     ("flow_rivers", Tag::Byte(0)),
                     ("glacial_landforms", Tag::Byte(0)),
                     ("height_scale", Tag::Float(1.0f32.to_bits())),
+                    ("rain_shadow", Tag::Byte(0)),
                     ("realistic_vegetation", Tag::Byte(0)),
                     ("rock_strata", Tag::Byte(0)),
                     ("sparse_forests", Tag::Byte(0)),
@@ -716,6 +717,7 @@ mod tests {
             glacial_landforms: true,
             flow_rivers: true,
             basin_erosion: true,
+            rain_shadow: true,
         };
         let dir = scratch("settings");
         write_terraforged(&dir, 3, WorldGen::default(), None, on).unwrap();
@@ -734,6 +736,7 @@ mod tests {
                 ("flow_rivers", Tag::Byte(1)),
                 ("glacial_landforms", Tag::Byte(1)),
                 ("height_scale", Tag::Float(1.5f32.to_bits())),
+                ("rain_shadow", Tag::Byte(1)),
                 ("realistic_vegetation", Tag::Byte(1)),
                 ("rock_strata", Tag::Byte(1)),
                 ("sparse_forests", Tag::Byte(1)),
@@ -753,11 +756,11 @@ mod tests {
         assert_eq!(settings_file(&file), Settings::default());
         assert_eq!(
             std::fs::read_to_string(&file).unwrap(),
-            "{\n  \"altitude_climate\": false,\n  \"altitude_climate_strength\": 1.0,\n  \"basin_erosion\": false,\n  \"coastal_landforms\": false,\n  \"corrected_biomes\": false,\n  \"deterministic\": false,\n  \"eroded_far_terrain\": false,\n  \"erosion_deposits\": false,\n  \"flow_rivers\": false,\n  \"glacial_landforms\": false,\n  \"height_scale\": 1.0,\n  \"realistic_vegetation\": false,\n  \"rock_strata\": false,\n  \"sparse_forests\": false\n}\n"
+            "{\n  \"altitude_climate\": false,\n  \"altitude_climate_strength\": 1.0,\n  \"basin_erosion\": false,\n  \"coastal_landforms\": false,\n  \"corrected_biomes\": false,\n  \"deterministic\": false,\n  \"eroded_far_terrain\": false,\n  \"erosion_deposits\": false,\n  \"flow_rivers\": false,\n  \"glacial_landforms\": false,\n  \"height_scale\": 1.0,\n  \"rain_shadow\": false,\n  \"realistic_vegetation\": false,\n  \"rock_strata\": false,\n  \"sparse_forests\": false\n}\n"
         );
         std::fs::write(
             &file,
-            "{\"deterministic\": true, \"sparse_forests\": true, \"corrected_biomes\": true, \"height_scale\": 1.5, \"erosion_deposits\": true, \"eroded_far_terrain\": true, \"realistic_vegetation\": true, \"altitude_climate\": true, \"altitude_climate_strength\": 0.5, \"rock_strata\": true, \"coastal_landforms\": true, \"glacial_landforms\": true, \"flow_rivers\": true, \"basin_erosion\": true}",
+            "{\"deterministic\": true, \"sparse_forests\": true, \"corrected_biomes\": true, \"height_scale\": 1.5, \"erosion_deposits\": true, \"eroded_far_terrain\": true, \"realistic_vegetation\": true, \"altitude_climate\": true, \"altitude_climate_strength\": 0.5, \"rock_strata\": true, \"coastal_landforms\": true, \"glacial_landforms\": true, \"flow_rivers\": true, \"basin_erosion\": true, \"rain_shadow\": true}",
         )
         .unwrap();
         assert_eq!(settings_file(&file), on);
@@ -779,6 +782,7 @@ mod tests {
                 glacial_landforms: false,
                 flow_rivers: false,
                 basin_erosion: false,
+                rain_shadow: false,
                 ..on
             }
         );

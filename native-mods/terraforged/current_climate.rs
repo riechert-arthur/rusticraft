@@ -68,6 +68,17 @@ const _: fn() = || {
     shared::<CurrentClimateNoise>();
 };
 
+/// The biome cell a climate sample took its moisture and temperature from: its lattice key and its jittered point in
+/// the climate's input coordinates (block coordinates times the noise levels' frequency; the point is in the biome
+/// warp's space, which is at most the warp's strength away from the unwarped one). Horizon's `rain_shadow` reads it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BiomeCell {
+    pub x: i32,
+    pub z: i32,
+    pub noise_x: f32,
+    pub noise_z: f32,
+}
+
 /// `settings.climate.<axis>.apply(core).warp(first).warp(second)`.
 struct ClimateAxis<T> {
     core: T,
@@ -210,12 +221,27 @@ impl CurrentClimateNoise {
     /// fields. Panics where `BiomeType.get` throws: only NaN climate bounds let a value leave 0..1 (Engine's
     /// `RangeValue` clamps the others into it).
     pub fn sample(&self, seed: i32, x: f32, y: f32, sample: &mut ClimateSample) {
+        self.sample_with(seed, x, y, sample, |_, moisture| moisture);
+    }
+
+    /// [`Self::sample`] with the nearest biome cell's moisture passed through `moisture` (given the cell and
+    /// TerraForged's moisture) before the climate type is picked: Horizon's `rain_shadow` hook. [`Self::sample`]
+    /// passes the moisture through unchanged.
+    pub fn sample_with(
+        &self,
+        seed: i32,
+        x: f32,
+        y: f32,
+        sample: &mut ClimateSample,
+        moisture: impl FnOnce(BiomeCell, f32) -> f32,
+    ) {
         let (mut px, mut py) = warp(&self.warp, seed, x, y);
         px *= self.frequency;
         py *= self.frequency;
         px = CELL_SHAPE.adjust_x(px);
         py = CELL_SHAPE.adjust_y(py);
-        self.sample_biome(seed, px, py, sample);
+        let cell = self.sample_biome(seed, px, py, sample);
+        sample.moisture = moisture(cell, sample.moisture);
         sample.climate_type = BiomeType::at_climate(sample.temperature, sample.moisture);
         if matches!(
             sample.climate_type,
@@ -241,13 +267,14 @@ impl CurrentClimateNoise {
     /// `sampleBiome`: the 4x4 cells `floor - 1 ..= floor + 2` (Java `int` math; the window is empty where the upper
     /// bound wraps, as Java's loop is; `floor` never returns the `Integer.MAX_VALUE - 2` that would make Java loop
     /// forever), nearest and second-nearest by strict `<` (first wins ties, NaN never wins).
-    fn sample_biome(&self, seed: i32, x: f32, y: f32, sample: &mut ClimateSample) {
+    fn sample_biome(&self, seed: i32, x: f32, y: f32, sample: &mut ClimateSample) -> BiomeCell {
         let min_x = floor(x).wrapping_sub(1);
         let min_y = floor(y).wrapping_sub(1);
         let max_x = floor(x).wrapping_add(2);
         let max_y = floor(y).wrapping_add(2);
         let (mut nearest_x, mut nearest_y) = (x, y);
         let mut nearest_hash = 0;
+        let mut nearest_cell = (min_x, min_y);
         let mut distance = f32::MAX;
         let mut distance2 = f32::MAX;
         for cell_y in min_y..=max_y {
@@ -263,6 +290,7 @@ impl CurrentClimateNoise {
                     distance = d2;
                     (nearest_x, nearest_y) = (px, py);
                     nearest_hash = hash;
+                    nearest_cell = (cell_x, cell_y);
                 } else if d2 < distance2 {
                     distance2 = d2;
                 }
@@ -283,6 +311,12 @@ impl CurrentClimateNoise {
             .value(seed, nearest_x, nearest_y, |core, x, y| {
                 core.value_current(x, y)
             });
+        BiomeCell {
+            x: nearest_cell.0,
+            z: nearest_cell.1,
+            noise_x: nearest_x / self.frequency,
+            noise_z: nearest_y / self.frequency,
+        }
     }
 }
 

@@ -29,6 +29,7 @@ use super::{
     terraforged_continent_points::{BEACH, COAST, SHALLOW_OCEAN},
     terraforged_engine::{ControlPoints, Terrain, TerrainProperties},
     terraforged_flow_rivers::FlowRivers,
+    terraforged_rain_shadow::RainShadow,
     terraforged_terrain_blender::{Blender, TerrainBlender},
     terraforged_terrain_data::{NoiseData, NoiseSample},
     terraforged_terrain_levels::{NoiseLevels, TerrainLevels},
@@ -83,6 +84,8 @@ pub struct NoiseGenerator {
     flow: Option<(Arc<FlowRivers>, Terrain)>,
     /// Horizon's `basin_erosion`; `None` without the setting.
     basins: Option<Arc<BasinErosion>>,
+    /// Horizon's `rain_shadow` (the climate sampler reads it); `None` without the setting.
+    rain_shadow: Option<Arc<RainShadow>>,
 }
 
 impl NoiseGenerator {
@@ -100,7 +103,20 @@ impl NoiseGenerator {
             deep_ocean,
             flow: None,
             basins: None,
+            rain_shadow: None,
         }
+    }
+
+    /// The same generator with Horizon's rain shadow: [`super::terraforged_current_biome_sampler::CurrentBiomeSampler`]
+    /// then takes each biome cell's moisture from the terrain upwind.
+    pub fn with_rain_shadow(mut self) -> Self {
+        self.rain_shadow = Some(Arc::new(RainShadow::new()));
+        self
+    }
+
+    /// Horizon's `rain_shadow`, if the setting is on.
+    pub fn rain_shadow(&self) -> Option<&RainShadow> {
+        self.rain_shadow.as_deref()
     }
 
     /// The same generator lowering its raw terrain by Horizon's basin erosion ([`Self::lower_basins`]).

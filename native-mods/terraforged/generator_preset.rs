@@ -179,6 +179,8 @@ pub fn scale_heights(levels: TerrainLevels, scale: f32) -> TerrainLevels {
 /// noise also carves the flow-routed rivers or lowers its terrain along the eroded valleys, both over one drainage map
 /// that samples a second copy of the same noise (with the coasts and glacial troughs of `coastal_landforms` and
 /// `glacial_landforms`, as the chunks have them; without `basin_erosion`, so the map never routes its own valleys).
+/// With `rain_shadow`, the climate sampler takes its moisture from the noise's own un-eroded terrain upwind of each
+/// biome cell.
 pub fn build(levels: TerrainLevels) -> Result<TerraForgedGenerator, String> {
     let settings = super::terraforged_settings::current();
     let mut noise = build_noise_generator(levels)?;
@@ -196,6 +198,9 @@ pub fn build(levels: TerrainLevels) -> Result<TerraForgedGenerator, String> {
         if settings.flow_rivers {
             noise = noise.with_flow_rivers(FlowRivers::over(drainage, basins));
         }
+    }
+    if settings.rain_shadow {
+        noise = noise.with_rain_shadow();
     }
     Ok(TerraForgedGenerator::new(
         levels,

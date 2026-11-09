@@ -2760,6 +2760,71 @@ mod tests {
         assert_eq!(worker.find_closest_biome(&search(&missing, origin)), None);
         assert_eq!(pipeline.generator.cached_chunks(), 0);
     }
+    /// Horizon's `rain_shadow` moves biomes, and every biome reader agrees on where: chunks' noise biomes,
+    /// `/locate biome` and `/tf preview` read the same climate sampler.
+    #[test]
+    fn rain_shadow_biomes_agree_everywhere() {
+        let Some(data) = data() else { return };
+        terraforged_settings::set_for_thread(Some(Settings {
+            rain_shadow: true,
+            ..Settings::default()
+        }));
+        let (on, on_world) = terraforged(&data, 777, false);
+        terraforged_settings::set_for_thread(Some(Settings::default()));
+        let (off, _) = terraforged(&data, 777, false);
+        terraforged_settings::set_for_thread(None);
+        let (on_sampler, off_sampler) = (on.surface_sampler(), off.surface_sampler());
+        let moved: Vec<(i32, i32, BiomeId)> = (0..48 * 48)
+            .map(|i| (-6144 + (i % 48) * 256 + 4, -6144 + (i / 48) * 256 + 8))
+            .filter_map(|(x, z)| {
+                let biome = on.biome_at(&on_sampler, x, z)?;
+                (Some(biome) != off.biome_at(&off_sampler, x, z)).then_some((x, z, biome))
+            })
+            .collect();
+        eprintln!(
+            "rain shadow: {} of {} columns change biome",
+            moved.len(),
+            48 * 48
+        );
+        assert!(!moved.is_empty());
+        let mut worker = on_world.worker();
+        for &(x, z, biome) in moved.iter().take(4) {
+            let name = data.biome_name(biome).to_owned();
+            // The chunk's noise biome at the column's quart.
+            assert_eq!(
+                worker.noise_biomes(&[[x >> 2, 0, z >> 2]])[0].as_deref(),
+                Some(name.as_str())
+            );
+            // `/locate biome` from the column finds it there.
+            let only = |candidate: &str| candidate == name;
+            let found = worker.find_closest_biome(&BiomeSearch {
+                allowed: &only,
+                origin: [x, 80, z],
+                radius: 64,
+                horizontal: 32,
+                vertical: 64,
+                min_y: -64,
+                max_y: 319,
+            });
+            assert!(
+                found
+                    .as_ref()
+                    .is_some_and(|(found, [fx, _, fz])| *found == name && (*fx, *fz) == (x, z)),
+                "{x} {z}: {name} vs {found:?}"
+            );
+            // `/tf preview` colours by the same sample.
+            let sampler = super::super::terraforged_current_biome_sampler::CurrentBiomeSampler::new(
+                on.generator.noise_generator(),
+            );
+            let seed = on.generator.seed();
+            let sample = sampler.get_sample(seed, x, z);
+            assert_eq!(
+                super::super::terraforged_preview::world_color(&sampler, seed, x as f32, z as f32),
+                super::super::terraforged_preview::biome_color(&sample, 0.2)
+            );
+        }
+    }
+
     /// Distant tiles show the chunks' ground: the biome the chunk stores at the surface, the un-eroded height (within
     /// erosion's few blocks of the filled ground), the surface rule's top block, and the level's clipping; sampling
     /// them creates no terrain-cache entry and builds no erosion region.

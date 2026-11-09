@@ -68,6 +68,10 @@ pub struct Settings {
     /// Valleys cut along the drainage map by stream-power incision, with walls and
     /// floors, before TerraForged's droplet erosion (`terraforged_basin_erosion`).
     pub basin_erosion: bool,
+    /// Moisture from the terrain: air on a prevailing west wind rains out where ranges
+    /// lift it, so their windward slopes are wetter and their lee drier
+    /// (`terraforged_rain_shadow`). Biome cells pick their climate from it.
+    pub rain_shadow: bool,
 }
 
 impl Default for Settings {
@@ -92,6 +96,7 @@ pub const FAITHFUL: Settings = Settings {
     glacial_landforms: false,
     flow_rivers: false,
     basin_erosion: false,
+    rain_shadow: false,
 };
 
 /// The range `height_scale` is held to. TerraForged's land reaches at most 476 blocks above
@@ -161,6 +166,7 @@ impl Settings {
             glacial_landforms: flag("glacial_landforms", FAITHFUL.glacial_landforms),
             flow_rivers: flag("flow_rivers", FAITHFUL.flow_rivers),
             basin_erosion: flag("basin_erosion", FAITHFUL.basin_erosion),
+            rain_shadow: flag("rain_shadow", FAITHFUL.rain_shadow),
         }
     }
 
@@ -186,6 +192,7 @@ impl Settings {
         map.insert("glacial_landforms".into(), self.glacial_landforms.into());
         map.insert("flow_rivers".into(), self.flow_rivers.into());
         map.insert("basin_erosion".into(), self.basin_erosion.into());
+        map.insert("rain_shadow".into(), self.rain_shadow.into());
         Value::Object(map)
     }
 }
@@ -211,6 +218,7 @@ mod tests {
             glacial_landforms: true,
             flow_rivers: true,
             basin_erosion: true,
+            rain_shadow: true,
         };
         assert_eq!(Settings::from_json(&on.to_json()), on);
         let strength = |value: Value| Settings::from_json(&value).altitude_climate_strength;
