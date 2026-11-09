@@ -377,6 +377,7 @@ impl TerraForgedGenerator {
         plains: &'a Arc<T>,
     ) -> CurrentSurfaceBiomeSampler<'a, T> {
         CurrentSurfaceBiomeSampler::new(self.noise_generator(), pools, plains)
+            .with_coasts(self.terrain.noise_generator().coasts())
     }
 
     /// TerraForged 6dd607eb's `createBiomes`: `terrainCache.hint(Seeds.get(state), chunk.getPos())` with the captured
@@ -535,10 +536,11 @@ impl TerraForgedGenerator {
     /// level), in TerraForged's levels and unclipped, from ONE un-eroded sample (rivers included). Unlike
     /// [`Self::base_column`] it skips the eroded height: that needs the block's erosion region, whose build takes a
     /// fraction of a second and would push the regions the chunks being generated read out of the 16-region cache. So
-    /// this creates no terrain-cache entry and builds no region; erosion is the only difference from the fill.
+    /// this creates no terrain-cache entry and builds no region; erosion is the only difference from the fill. With
+    /// Horizon's `coastal_landforms` the sample carries the coast's landform, as the fill does.
     /// `Err` as [`Self::base_height`].
     pub fn far_heights(&self, x: i32, z: i32) -> Result<(i32, i32), &'static str> {
-        let sample = self.terrain.noise_sample(self.seed(), x, z)?;
+        let sample = self.terrain.far_sample(self.seed(), x, z)?;
         Ok(column_heights(
             self.levels,
             sample.base_noise,
@@ -588,7 +590,7 @@ impl ErodedFarHeights<'_> {
     /// whether they are the eroded ones. `Err` as [`TerraForgedGenerator::base_height`].
     pub fn heights(&mut self, x: i32, z: i32) -> Result<((i32, i32), bool), &'static str> {
         let generator = self.generator;
-        let sample = generator.terrain.noise_sample(generator.seed(), x, z)?;
+        let sample = generator.terrain.far_sample(generator.seed(), x, z)?;
         let (height_noise, eroded) = match self.eroded.eroded_height_noise(x, z)? {
             Some(eroded) => (eroded, true),
             None => (sample.height_noise, false),

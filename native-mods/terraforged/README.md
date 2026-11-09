@@ -18,7 +18,7 @@ TerraForged (vanilla world types keep 26.3's overworld):
   hydraulic erosion with 6dd607eb's `withErosion` settings and no heightmap smoothing
   (`NoiseGenerator`, `ErodedNoiseGenerator`), also in Horizon's distant tiles (un-eroded, or eroded
   near the player with the `eroded_far_terrain` setting); the `height_scale` setting stretches it
-  vertically;
+  vertically, `coastal_landforms` cuts cliffs and lays tidal flats along the shore;
 - biomes: `ClimateNoise`, `BiomeMapManager`'s climate pools and `BiomeSampler`'s ocean, beach,
   river and lake overrides, also for `/locate biome`, plus TerraForged's own `terraforged:cave`
   and `terraforged:oak_forest` (`ModBiomes`), derived from the player's own 26.3 dripstone caves
@@ -315,6 +315,33 @@ don't generate, so they need none.
   as before. Distant tiles never show the bands; with `eroded_far_terrain` the finest ones stand on the
   strata's eroded ground, the chunks' own (the far erosion thread erodes with the same hardness), and otherwise on
   the un-eroded ground as before. `/tf preview` shows neither. Off, generation is unchanged.
+- `coastal_landforms`: coasts follow their exposure to the waves, with cliffs on exposed shores and
+  tidal flats in sheltered ones. TerraForged has one shore profile everywhere: in continent noise from
+  `BEACH` to `COAST` (`getBlend`) the land rises linearly from the sea level to the land's height, and
+  from `SHALLOW_OCEAN` to `BEACH` the sea floor rises linearly to the sea level. Real coasts sort by the
+  wave energy that reaches them and the strength of their rock. Exposed coasts of resistant rock retreat as
+  steep cliffs (Sunamura 1992, *Geomorphology of Rocky Coasts*, Wiley; Trenhaile 1987, *The Geomorphology
+  of Rock Coasts*, Oxford). Sheltered coasts build wide intertidal mud and sand flats, nearly level and
+  barely awash (Dyer 1998, *Estuaries: A Physical Introduction*, Wiley; Masselink and Hughes 2003,
+  *Introduction to Coastal Processes and Geomorphology*, Arnold). The setting, in neither tree:
+  - an exposure field: two octaves of simplex noise (900 and 250 blocks) of the seed, around 0.5. With
+    `rock_strata` it adds `0.5 × (H − 0.5)`, with `H` the hardness of the rock at the sea level, so
+    granite coasts lean to cliffs and plain stone coasts to flats;
+  - cliffs where the exposure is over 0.55 (full from 0.7): within the first 6% of the coast band the land
+    rises up to 30 blocks more than the faithful ramp (`1 − (1 − a / 0.06)²`, steepest at the foot), never
+    above the land behind it, then follows the ramp up 30 blocks higher. The shore is a wall of rock:
+    TerraForged's `Surface` turns its face to stone, and the beach on its top becomes a stony shore;
+  - tidal flats where it is under 0.42 (full under 0.28): the land rises as `a²`, a low coastal plain. The
+    outer 20% of the shallow sea floor rises to half a block under the sea level (ramping back to the
+    faithful floor over the next 20%), so it lies under one block of water (the sea floor's own blocks, sand
+    or gravel by biome).
+
+  The change is an offset on each column's height, added after the erosion and before the rivers carve
+  (rivers still cut through cliffs). The chunks, structures' base heights (`base_height`, `base_column`)
+  and Horizon's distant tiles all read it. It is a function of the seed, the column's position and its
+  un-eroded continent sample, so chunks agree at their borders, whatever the threads or order. Cliff tops
+  are higher ground, so `altitude_climate` cools them as any other land. `/tf preview` and the Create World
+  map don't show it. Off, generation is unchanged.
 
 ## Layers
 

@@ -64,6 +64,7 @@ pub struct ErodedNoiseGenerator {
     /// Horizon's far erosion (`eroded_far_terrain`), shared by every generator [`Self::sharing`] makes, as the noise is.
     far: Arc<FarErosion>,
     strata: bool,
+    coast: bool,
 }
 
 /// One cached erosion region: the eroded heights (`buildRegion`'s map, which indexing reads) and, with the
@@ -138,6 +139,7 @@ impl ErodedNoiseGenerator {
             deposits: super::terraforged_settings::current().erosion_deposits,
             strata: super::terraforged_settings::current().rock_strata,
             far: Arc::new(FarErosion::new()),
+            coast: super::terraforged_settings::current().coastal_landforms,
         }
     }
 
@@ -156,12 +158,56 @@ impl ErodedNoiseGenerator {
             deposits: self.deposits,
             strata: self.strata,
             far: Arc::clone(&self.far),
+            coast: self.coast,
         }
     }
 
     /// Whether both generators sample the same noise instance ([`Self::sharing`]).
     pub fn shares_noise_with(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.generator, &other.generator)
+    }
+
+    /// The same generator with Horizon's `coastal_landforms` (cliffs and tidal flats, [`Self::coast_offset`]) or not.
+    pub fn with_coast(mut self, coast: bool) -> Self {
+        self.coast = coast;
+        self
+    }
+
+    /// Horizon's `coastal_landforms`: `Some` with it, holding whether `rock_strata` is on too.
+    pub fn coasts(&self) -> Option<bool> {
+        self.coast.then_some(self.strata)
+    }
+
+    /// Not Java's (`coastal_landforms`): the height noise the coast's landform adds to block `(x, z)`'s eroded height,
+    /// from its terrain sample (`sample_terrain`'s, holding the height it is added to); 0 without the setting or off
+    /// the coast. With
+    /// `rock_strata` the landform also follows the hardness of the rock at the sea level (`strata`, an area holding
+    /// the column, made on first use).
+    fn coast_offset(
+        &self,
+        seed: i32,
+        x: i32,
+        z: i32,
+        sample: &NoiseSample,
+        strata: &mut Option<super::terraforged_rock_strata::StrataArea>,
+        area: (i32, i32, i32),
+    ) -> f32 {
+        use super::terraforged_coastal_landforms::Coasts;
+        if !Coasts::reshapes(sample) {
+            return 0.0;
+        }
+        let levels = self.generator.levels();
+        let hardness = self.strata.then(|| {
+            let (x0, z0, size) = area;
+            strata
+                .get_or_insert_with(|| {
+                    super::terraforged_rock_strata::Strata::new(seed).area(x0, z0, size, size)
+                })
+                .rock_at(x, levels.sea_level, z)
+                .hardness()
+        });
+        let coasts = Coasts::new(seed, levels.noise_levels);
+        coasts.offset(sample, coasts.landform(x, z, hardness))
     }
 
     /// The same generator with erosion slowed by the rock's hardness (Horizon's `rock_strata`, see
@@ -219,6 +265,24 @@ impl ErodedNoiseGenerator {
         Ok(sample)
     }
 
+    /// Horizon's distant terrain: [`Self::noise_sample`] (un-eroded, rivers included), with the coast's landform
+    /// (`coastal_landforms`, [`Self::coast_offset`]) added before the rivers carve, as the chunks have it. Without the
+    /// setting it is [`Self::noise_sample`].
+    pub fn far_sample(&self, seed: i32, x: i32, z: i32) -> Result<NoiseSample, &'static str> {
+        if !self.coast {
+            return self.noise_sample(seed, x, z);
+        }
+        let mut sample = NoiseSample::new(&self.generator.continent().context().terrain);
+        let (noise_x, noise_z) = (self.noise_coord(x), self.noise_coord(z));
+        let mut blender = self.generator.blender_resource();
+        self.generator
+            .sample_terrain(seed, noise_x, noise_z, &mut sample, &mut blender)?;
+        sample.height_noise += self.coast_offset(seed, x, z, &sample, &mut None, (x, z, 1));
+        self.generator
+            .sample_river(seed, noise_x, noise_z, &mut sample);
+        Ok(sample)
+    }
+
     /// `sample(seed, x, z, sample)`: the un-eroded generator's [`NoiseGenerator::sample`] into `sample` (not reset
     /// first, as in Java), with a new blender. `Err` where that fails.
     pub fn sample(
@@ -258,6 +322,9 @@ impl ErodedNoiseGenerator {
         self.generator
             .sample_terrain(seed, noise_x, noise_z, &mut sample, &mut blender)?;
         sample.height_noise = eroded()?;
+        if self.coast {
+            sample.height_noise += self.coast_offset(seed, x, z, &sample, &mut None, (x, z, 1));
+        }
         Ok(self
             .generator
             .sample_river(seed, noise_x, noise_z, &mut sample)
@@ -356,6 +423,12 @@ impl ErodedNoiseGenerator {
             let mut blender = self.generator.blender_resource();
             let start_x = chunk_x.wrapping_shl(4);
             let start_z = chunk_z.wrapping_shl(4);
+            let mut strata = None;
+            let area = (
+                start_x.wrapping_add(NoiseData::MIN),
+                start_z.wrapping_add(NoiseData::MIN),
+                NoiseData::MAX - NoiseData::MIN,
+            );
             for dz in NoiseData::MIN..NoiseData::MAX {
                 let noise_z = self.noise_coord(start_z.wrapping_add(dz));
                 let row = offset_z
@@ -373,7 +446,12 @@ impl ErodedNoiseGenerator {
                         &mut sample,
                         &mut blender,
                     )?;
+                    let (x, z) = (start_x.wrapping_add(dx), start_z.wrapping_add(dz));
                     sample.height_noise = region[row.wrapping_add(dx) as usize];
+                    if self.coast {
+                        sample.height_noise +=
+                            self.coast_offset(seed, x, z, &sample, &mut strata, area);
+                    }
                     self.generator
                         .sample_river(seed, noise_x, noise_z, &mut sample);
                     chunk.set_noise(dx, dz, &sample);
@@ -1406,6 +1484,89 @@ chunk 2 2147483647 -3 5 3fba3fdd57ea00f8";
                 });
             }
         });
+    }
+
+    /// `coastal_landforms` (Horizon's): the chunks of a stretch of coast change only in the coast bands, each column by
+    /// its own offset, so a chunk's interior is still `eroded_height_noise` and `far_sample` carries the same offset;
+    /// chunks agree across threads and orders, with and without `rock_strata`.
+    #[test]
+    fn coasts_reshape_only_the_shore_and_ignore_threads() {
+        use super::super::terraforged_biome_sampler::{COAST, SHALLOW_OCEAN};
+        let seed = 91;
+        let off = eroded(0, 1, 50, 25, 0);
+        let coasts = super::super::terraforged_coastal_landforms::Coasts::new(
+            seed,
+            off.generator().levels().noise_levels,
+        );
+        // The first chunk (on a 256-block grid) whose centre lies in the shallow sea or the coast band, on a cliff or a
+        // flat.
+        let (chunk_x, chunk_z) = (-24..24)
+            .flat_map(|i| (-24..24).map(move |j| (i * 16, j * 16)))
+            .find(|&(cx, cz)| {
+                let c = off
+                    .noise_sample(seed, cx * 16 + 8, cz * 16 + 8)
+                    .unwrap()
+                    .continent_noise;
+                let form = coasts.landform(cx * 16 + 8, cz * 16 + 8, None);
+                (SHALLOW_OCEAN..COAST).contains(&c) && form.cliff.max(form.flat) > 0.9
+            })
+            .expect("a coast");
+        for strata in [false, true] {
+            let on = eroded(0, 1, 50, 25, 0).with_strata(strata).with_coast(true);
+            let plain = eroded(0, 1, 50, 25, 0).with_strata(strata);
+            let mut changed = 0;
+            on.generate(seed, chunk_x, chunk_z, |data| {
+                for (dx, dz) in (0..16).flat_map(|dx| (0..16).map(move |dz| (dx, dz))) {
+                    let (x, z) = (chunk_x * 16 + dx, chunk_z * 16 + dz);
+                    let height = data.height().get(dx, dz);
+                    assert_eq!(
+                        height.to_bits(),
+                        on.eroded_height_noise(seed, x, z).unwrap().to_bits()
+                    );
+                    let before = plain.eroded_height_noise(seed, x, z).unwrap();
+                    let sample = on.noise_sample(seed, x, z).unwrap();
+                    if height.to_bits() != before.to_bits() {
+                        changed += 1;
+                        assert!(
+                            (SHALLOW_OCEAN..COAST).contains(&sample.continent_noise),
+                            "{x} {z}"
+                        );
+                    }
+                    let far = on.far_sample(seed, x, z).unwrap().height_noise;
+                    if far.to_bits() != sample.height_noise.to_bits() {
+                        assert!((SHALLOW_OCEAN..COAST).contains(&sample.continent_noise));
+                    }
+                }
+            })
+            .unwrap();
+            assert!(changed > 0, "strata {strata}");
+            let chunks = [
+                (chunk_x, chunk_z),
+                (chunk_x + 1, chunk_z),
+                (chunk_x, chunk_z - 1),
+                (chunk_x - 1, chunk_z + 1),
+            ];
+            let fresh: Vec<u64> = chunks
+                .iter()
+                .map(|&(x, z)| {
+                    let new = eroded(0, 1, 50, 25, 0).with_strata(strata).with_coast(true);
+                    chunk_digest(&new, seed, x, z)
+                })
+                .collect();
+            thread::scope(|scope| {
+                for worker in 0..6 {
+                    let (on, fresh) = (&on, &fresh);
+                    scope.spawn(move || {
+                        let mut order: Vec<usize> = (0..chunks.len()).collect();
+                        order.rotate_left(worker % chunks.len());
+                        for i in order {
+                            let (x, z) = chunks[i];
+                            assert_eq!(chunk_digest(on, seed, x, z), fresh[i]);
+                        }
+                    });
+                }
+            });
+        }
     }
 
     /// Java's `catch (Throwable)`: a consumer that panics is logged, not passed on, and the generator keeps working.

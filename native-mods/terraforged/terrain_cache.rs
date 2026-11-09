@@ -286,6 +286,11 @@ impl TerrainCache<ErodedNoiseGenerator> {
         self.generator.noise_generator().noise_sample(seed, x, z)
     }
 
+    /// Horizon's distant terrain: [`ErodedNoiseGenerator::far_sample`].
+    pub fn far_sample(&self, seed: i32, x: i32, z: i32) -> Result<NoiseSample, &'static str> {
+        self.generator.noise_generator().far_sample(seed, x, z)
+    }
+
     /// `sample(seed, x, z, sample)`: [`ErodedNoiseGenerator::sample`].
     pub fn sample(
         &self,

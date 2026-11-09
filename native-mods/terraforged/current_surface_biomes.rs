@@ -44,6 +44,9 @@ pub struct CurrentSurfaceBiomeSampler<'a, T> {
     noise: &'a NoiseGenerator,
     pools: &'a BiomePools<T>,
     plains: &'a Arc<T>,
+    /// Horizon's `coastal_landforms` (`Some`, holding whether `rock_strata` is on too): beaches on cliff tops are
+    /// stony shores.
+    coasts: Option<bool>,
 }
 
 // TerraForged samples biomes from its worker threads.
@@ -67,7 +70,15 @@ impl<'a, T> CurrentSurfaceBiomeSampler<'a, T> {
             noise,
             pools,
             plains,
+            coasts: None,
         }
+    }
+
+    /// The same sampler with Horizon's `coastal_landforms` (`Some`, holding whether `rock_strata` is on too) or not:
+    /// a beach where the coast is a cliff (`terraforged_coastal_landforms`) is a stony shore.
+    pub fn with_coasts(mut self, coasts: Option<bool>) -> Self {
+        self.coasts = coasts;
+        self
     }
 
     /// The generator whose noise the sampler reads (the climate's continent and rivers).
@@ -87,6 +98,19 @@ impl<'a, T> CurrentSurfaceBiomeSampler<'a, T> {
         override_biome: impl Fn(BiomeOverride) -> Arc<T>,
     ) -> Result<Arc<T>, &'static str> {
         let sample = self.climate.get_sample(seed, x, z);
+        if let Some(strata) = self.coasts
+            && matches!(
+                biome_override(&sample),
+                BiomeOverride::Beach | BiomeOverride::SnowyBeach
+            )
+        {
+            use super::terraforged_coastal_landforms::{Coasts, sea_level_hardness};
+            let levels = self.noise.levels();
+            let hardness = strata.then(|| sea_level_hardness(seed, x, z, levels.sea_level));
+            if Coasts::new(seed, levels.noise_levels).stony_shore(x, z, hardness) {
+                return Ok(override_biome(BiomeOverride::StonyShore));
+            }
+        }
         surface_biome(self.pools, self.plains, &sample, override_biome)
     }
 }
