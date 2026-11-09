@@ -48,7 +48,7 @@ use super::{
     terraforged_terrain_levels::TerrainLevels,
 };
 use serde_json::Value;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 /// `Generator.CODEC`'s `levels` (`TerrainLevels.CODEC`): absent, `TerrainLevels.DEFAULT`; present, a map whose
 /// `min_y`, `max_y`, `base_height`, `sea_level` and `sea_floor` are required ints in `Limits`' ranges (`intRange`)
@@ -185,13 +185,7 @@ pub fn build(levels: TerrainLevels) -> Result<TerraForgedGenerator, String> {
     let settings = super::terraforged_settings::current();
     let mut noise = build_noise_generator(levels)?;
     if settings.flow_rivers || settings.basin_erosion {
-        let drainage = Arc::new(RiverDrainage::with_settings(
-            build_noise_generator(levels)?,
-            settings,
-        ));
-        let basins = settings
-            .basin_erosion
-            .then(|| Arc::new(BasinErosion::new(Arc::clone(&drainage))));
+        let (drainage, basins) = shared_maps(levels, settings)?;
         if let Some(basins) = &basins {
             noise = noise.with_basin_erosion(Arc::clone(basins));
         }
@@ -210,6 +204,56 @@ pub fn build(levels: TerrainLevels) -> Result<TerraForgedGenerator, String> {
             HeightmapSmoothingSettings::default(),
         ),
     ))
+}
+
+/// The drainage map and basin erosion of every live generator built with these levels and settings: a world's
+/// level and its far-decoration threads each build a generator, and without this each would build (and cache) the
+/// same drainage and erosion tiles again, the slowest part of generating with `flow_rivers` or `basin_erosion`.
+type SharedMaps = Vec<(
+    TerrainLevels,
+    super::terraforged_settings::Settings,
+    Weak<RiverDrainage>,
+    Option<Weak<BasinErosion>>,
+)>;
+static SHARED_MAPS: Mutex<SharedMaps> = Mutex::new(Vec::new());
+
+/// The drainage map (and, with `basin_erosion`, the erosion over it) for a generator of `levels` and `settings`: a
+/// live generator's of the same levels and settings, else new ones. Their tiles are pure functions of the seed and
+/// position, so sharing them changes no block; the maps key their tiles by seed.
+fn shared_maps(
+    levels: TerrainLevels,
+    settings: super::terraforged_settings::Settings,
+) -> Result<(Arc<RiverDrainage>, Option<Arc<BasinErosion>>), String> {
+    let mut shared = SHARED_MAPS.lock().unwrap_or_else(PoisonError::into_inner);
+    shared.retain(|(_, _, drainage, _)| drainage.strong_count() > 0);
+    let live = shared.iter().find_map(|(l, s, drainage, basins)| {
+        if *l != levels || *s != settings {
+            return None;
+        }
+        let drainage = drainage.upgrade()?;
+        match basins {
+            Some(basins) => Some((drainage, Some(basins.upgrade()?))),
+            None => Some((drainage, None)),
+        }
+    });
+    if let Some(maps) = live {
+        return Ok(maps);
+    }
+    let drainage = Arc::new(RiverDrainage::with_settings(
+        build_noise_generator(levels)?,
+        settings,
+    ));
+    let basins = settings
+        .basin_erosion
+        .then(|| Arc::new(BasinErosion::new(Arc::clone(&drainage))));
+    shared.retain(|(l, s, _, _)| *l != levels || *s != settings);
+    shared.push((
+        levels,
+        settings,
+        Arc::downgrade(&drainage),
+        basins.as_ref().map(Arc::downgrade),
+    ));
+    Ok((drainage, basins))
 }
 
 /// [`build`]'s un-eroded noise, without Horizon's settings.
@@ -384,6 +428,46 @@ mod tests {
         assert!(height > 0 && height < 320);
         assert_eq!(column.block(height - 1), Some(ColumnBlock::Stone));
         assert_ne!(column.block(height), Some(ColumnBlock::Stone));
+    }
+
+    #[test]
+    fn live_generators_of_one_world_share_their_drainage_map() {
+        use super::super::terraforged_settings::Settings;
+        let levels = terrain_levels(None).unwrap();
+        let on = Settings {
+            basin_erosion: true,
+            ..Settings::default()
+        };
+        let (drainage, basins) = shared_maps(levels, on).unwrap();
+        let (again, basins_again) = shared_maps(levels, on).unwrap();
+        assert!(Arc::ptr_eq(&drainage, &again));
+        assert!(Arc::ptr_eq(
+            basins.as_ref().unwrap(),
+            basins_again.as_ref().unwrap()
+        ));
+        // Other settings or levels get their own map, and so does the next world once these are gone.
+        let rivers = Settings {
+            flow_rivers: true,
+            ..on
+        };
+        let (other, _) = shared_maps(levels, rivers).unwrap();
+        assert!(!Arc::ptr_eq(&drainage, &other));
+        let (rivers_only, none) = shared_maps(
+            levels,
+            Settings {
+                flow_rivers: true,
+                ..Settings::default()
+            },
+        )
+        .unwrap();
+        assert!(none.is_none() && !Arc::ptr_eq(&rivers_only, &drainage));
+        let scaled = scale_heights(levels, 1.5);
+        assert!(!Arc::ptr_eq(&shared_maps(scaled, on).unwrap().0, &drainage));
+        let weak = Arc::downgrade(&drainage);
+        drop((drainage, basins, again, basins_again));
+        assert!(weak.upgrade().is_none());
+        let (fresh, _) = shared_maps(levels, on).unwrap();
+        assert!(weak.upgrade().is_none() && Arc::strong_count(&fresh) == 1);
     }
 
     #[test]

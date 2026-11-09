@@ -420,9 +420,13 @@ climate must stay cheap (see "Rain shadow").
   to the sea follow the flood's order. Water leaves an L0 window through the sea or anywhere
   on its outer ring, an L1 window through the sea or the ring cells whose L0 cell flows out of it.
 - A cell's value comes from the one tile whose core holds it, so every value is a pure function of
-  the seed and the tile: no order, thread or cache dependence (tiles are memoised in lossy caches,
-  16 L0 and 64 L1 tiles, about 3 and 8 MB; in release an L0 tile over TerraForged takes about
-  170 ms, an L1 tile 7.5 ms). An L1 tile takes its boundary from L0: every L0 cell
+  the seed and the tile: no order, thread or cache dependence (tiles are memoised in
+  least-recently-used caches that build each tile once, 16 L0 and 96 L1 tiles, about 3 and 12 MB;
+  in release an L0 tile over TerraForged takes about 170 ms, an L1 tile 7.5 ms). The world's level
+  and its far-decoration threads share one map (one per levels and settings, while any of their
+  generators lives). TerraForged's own lossy cache is not used: it put every tile of one row in
+  one bucket and gave each tile a single slot, so a few tiles rebuilt each other without end (in
+  play at lodDistance 2048, about 300 builds per L0 tile in under three minutes). An L1 tile takes its boundary from L0: every L0 cell
   just outside the window that flows into it brings its accumulation in at the lowest L1 cell of
   the side it enters by (just inside the window's edge), and water leaving the window carries on
   with the L0 distance to the sea. No L1 tile reads another.
@@ -527,8 +531,8 @@ basins, from the drainage map, then lets the droplets work on the result.
   both sides. A cell's change is its owner tile's, blended with the neighbouring tile's view of it
   over the 8 cells before a border (as `Drainage::flow` blends); a block's is the bilinear mix of
   the four nearest cell centres. Every value is a function of the seed and the position: no seam
-  at chunks, regions or tiles, whatever the order or the thread. Tiles are memoised in lossy caches
-  (16 L0 and 64 L1 tiles, about 2 MB more than the drainage map's).
+  at chunks, regions or tiles, whatever the order or the thread. Tiles are memoised as the drainage
+  map's are (16 L0 and 96 L1 tiles, about 3 MB more than the drainage map's), and shared the same way.
 - Application: the raw terrain height (TerraForged's `sampleTerrain`) of every column is lowered by
   the change there, never below a block over the land's base level (where TerraForged's rivers
   stand) or the sea, and never raised. That happens in the plain sample (distant tiles, structures,

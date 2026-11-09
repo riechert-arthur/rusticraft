@@ -11,11 +11,10 @@
 // tile key, so the cache below can drop, recompute or race on tiles without changing a bit.
 
 use super::terraforged_generator_facade::TerraForgedGenerator;
-use super::terraforged_lossy_cache::ConcurrentLossyCache;
 use std::cell::RefCell;
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 /// The D8 neighbours, by direction index: east, then clockwise in Minecraft's axes (+z is south).
 pub const D8: [(i32, i32); 8] = [
@@ -471,22 +470,90 @@ impl FlowTile {
     }
 }
 
-/// The drainage map of one source: L0 and L1 tiles computed on demand and memoised in lossy caches. A tile
-/// computed twice is bit-identical, so eviction and races between threads only cost time.
+/// The drainage map of one source: L0 and L1 tiles computed on demand and memoised in [`TileCache`]s. A tile
+/// computed twice is bit-identical, so eviction only costs time.
 pub struct Drainage<S> {
     seed: i32,
     source: S,
-    l0: ConcurrentLossyCache<FlowTile>,
-    l1: ConcurrentLossyCache<FlowTile>,
+    l0: TileCache<FlowTile>,
+    l1: TileCache<FlowTile>,
 }
 
-fn tile_key(x: i32, z: i32) -> i64 {
-    (i64::from(x) << 32) | i64::from(z as u32)
+/// A cache of tiles that take a long time to build (an L1 tile about 150 ms, an L0 tile more), shared by every
+/// generation thread: least recently used out past `capacity`, each tile built once by its first caller while
+/// callers of the same tile wait for it and callers of other tiles go on. No lock is held during a build, so a build
+/// may look up other tiles (L1 reads L0) and slow tiles never block hits.
+///
+/// TerraForged's lossy cache (`terraforged_lossy_cache`) is no fit here: its bucket is the key's low bits, which for a
+/// tile key are the tile's z alone, so every tile of a row shares one bucket; each tile has a single slot in it, so
+/// two tiles of a working set rebuild each other at every alternation; and it computes under the bucket's lock. In
+/// play (lodDistance 2048, `basin_erosion`) its L0 tiles were built about 300 times each in under three minutes.
+pub struct TileCache<T> {
+    capacity: usize,
+    slots: Mutex<TileSlots<T>>,
 }
 
-/// The tiles one caller has already looked up, by tile: a lossy cache slot can hold one of two tiles that a build
-/// or a run of queries keeps alternating between (L0's 16 tiles share 8 buckets of 2 slots), which would rebuild a
-/// tile at every alternation. Holding the caller's own `Arc`s costs nothing and keeps the values identical.
+/// One tile per key, with the lookup that last used it.
+struct TileSlots<T> {
+    clock: u64,
+    tiles: HashMap<(i32, i32), (u64, Arc<OnceLock<Arc<T>>>)>,
+}
+
+impl<T> TileCache<T> {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            capacity: capacity.max(1),
+            slots: Mutex::new(TileSlots {
+                clock: 0,
+                tiles: HashMap::with_capacity(capacity + 1),
+            }),
+        }
+    }
+
+    /// Tile (`x`, `z`), built by `build` unless it is cached or being built. A `build` that panics leaves the tile
+    /// unbuilt: the next caller (or a waiting one) builds it again.
+    pub fn get_or_build(&self, x: i32, z: i32, build: impl FnOnce() -> T) -> Arc<T> {
+        let slot = {
+            let mut slots = self.slots.lock().unwrap_or_else(PoisonError::into_inner);
+            slots.clock += 1;
+            let clock = slots.clock;
+            if let Some((used, slot)) = slots.tiles.get_mut(&(x, z)) {
+                *used = clock;
+                Arc::clone(slot)
+            } else {
+                if slots.tiles.len() >= self.capacity
+                    && let Some(oldest) = slots
+                        .tiles
+                        .iter()
+                        .min_by_key(|(_, (used, _))| *used)
+                        .map(|(&key, _)| key)
+                {
+                    slots.tiles.remove(&oldest);
+                }
+                let slot = Arc::new(OnceLock::new());
+                slots.tiles.insert((x, z), (clock, Arc::clone(&slot)));
+                slot
+            }
+        };
+        Arc::clone(slot.get_or_init(|| Arc::new(build())))
+    }
+
+    /// The tiles cached or being built.
+    pub fn len(&self) -> usize {
+        self.slots
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .tiles
+            .len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// The tiles one caller has already looked up, by tile: a run of queries then takes the shared cache's lock once per
+/// tile, and its tiles stay alive while it runs even if the cache drops them. Values are the same either way.
 #[derive(Default)]
 pub struct TileMemo {
     tiles: HashMap<(i32, i32), Arc<FlowTile>>,
@@ -494,25 +561,29 @@ pub struct TileMemo {
 
 impl<S: Fn(i32, i32) -> Column> Drainage<S> {
     /// L0 tiles cached (about 190 KB each).
-    pub const L0_TILES: i32 = 16;
-    /// L1 tiles cached (about 130 KB each).
-    pub const L1_TILES: i32 = 64;
+    pub const L0_TILES: usize = 16;
+    /// L1 tiles cached (about 130 KB each): more than the 6x6 tiles distant terrain at 2048 blocks reads, so a
+    /// player's working set stays cached as it moves.
+    pub const L1_TILES: usize = 96;
 
-    /// The map of `source`, which must be a pure function of the position; `seed` keys the caches.
+    /// The map of `source`, which must be a pure function of the position (`seed`'s world's).
     pub fn new(seed: i32, source: S) -> Self {
         Self {
             seed,
             source,
-            l0: ConcurrentLossyCache::new(Self::L0_TILES, 8),
-            l1: ConcurrentLossyCache::new(Self::L1_TILES, 8),
+            l0: TileCache::new(Self::L0_TILES),
+            l1: TileCache::new(Self::L1_TILES),
         }
+    }
+
+    /// The runtime seed the map is of.
+    pub fn seed(&self) -> i32 {
+        self.seed
     }
 
     pub fn l0_tile(&self, x: i32, z: i32) -> Arc<FlowTile> {
         self.l0
-            .compute_if_absent(self.seed, tile_key(x, z), |_, _| {
-                FlowTile::l0(x, z, &self.source)
-            })
+            .get_or_build(x, z, || FlowTile::l0(x, z, &self.source))
     }
 
     /// L0 cell (`x`, `z`), from the tile whose core holds it.
@@ -521,20 +592,19 @@ impl<S: Fn(i32, i32) -> Column> Drainage<S> {
     }
 
     pub fn l1_tile(&self, x: i32, z: i32) -> Arc<FlowTile> {
-        self.l1
-            .compute_if_absent(self.seed, tile_key(x, z), |_, _| {
-                // An L1 window's ring often spans two L0 tiles: look each up once.
-                let memo = RefCell::new(HashMap::new());
-                FlowTile::l1(x, z, &self.source, &|cx, cz| {
-                    let key = (L0.tile_of(cx), L0.tile_of(cz));
-                    let tile = Arc::clone(
-                        memo.borrow_mut()
-                            .entry(key)
-                            .or_insert_with(|| self.l0_tile(key.0, key.1)),
-                    );
-                    tile.cell(cx, cz)
-                })
+        self.l1.get_or_build(x, z, || {
+            // An L1 window's ring often spans two L0 tiles: look each up once.
+            let memo = RefCell::new(HashMap::new());
+            FlowTile::l1(x, z, &self.source, &|cx, cz| {
+                let key = (L0.tile_of(cx), L0.tile_of(cz));
+                let tile = Arc::clone(
+                    memo.borrow_mut()
+                        .entry(key)
+                        .or_insert_with(|| self.l0_tile(key.0, key.1)),
+                );
+                tile.cell(cx, cz)
             })
+        })
     }
 
     /// [`Self::l1_tile`] through `memo`.
@@ -841,6 +911,60 @@ mod tests {
         let cached = shuffled.l1_tile(1, -1);
         assert_eq!(direct.routing.accumulation, cached.routing.accumulation);
         assert_eq!(direct.routing.direction, cached.routing.direction);
+    }
+
+    #[test]
+    fn a_tile_is_built_once_however_many_threads_ask() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let cache = TileCache::new(4);
+        let builds = AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    let tile = cache.get_or_build(3, -2, || {
+                        builds.fetch_add(1, Ordering::SeqCst);
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                        7
+                    });
+                    assert_eq!(*tile, 7);
+                });
+            }
+        });
+        assert_eq!(builds.load(Ordering::SeqCst), 1);
+        // A slow build never blocks a hit on another tile.
+        cache.get_or_build(0, 0, || 1);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                cache.get_or_build(9, 9, || {
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    2
+                })
+            });
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            let started = std::time::Instant::now();
+            assert_eq!(*cache.get_or_build(0, 0, || unreachable!()), 1);
+            assert!(started.elapsed() < std::time::Duration::from_millis(200));
+        });
+    }
+
+    #[test]
+    fn the_least_recently_used_tile_goes_first() {
+        let cache = TileCache::new(3);
+        for x in 0..3 {
+            cache.get_or_build(x, 0, || x);
+        }
+        cache.get_or_build(0, 0, || unreachable!());
+        cache.get_or_build(3, 0, || 3);
+        assert_eq!(cache.len(), 3);
+        // (1, 0) was the least recently used: it is built again, and (0, 0) is still cached.
+        assert_eq!(*cache.get_or_build(1, 0, || 10), 10);
+        assert_eq!(*cache.get_or_build(3, 0, || unreachable!()), 3);
+        // A build that panics leaves the tile to the next caller.
+        let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            cache.get_or_build(5, 5, || panic!("no tile"))
+        }));
+        assert!(failed.is_err());
+        assert_eq!(*cache.get_or_build(5, 5, || 55), 55);
     }
 
     #[test]

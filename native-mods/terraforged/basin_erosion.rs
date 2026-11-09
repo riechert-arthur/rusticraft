@@ -20,10 +20,9 @@
 // no seam at chunks, tiles or L0 borders.
 
 use super::terraforged_drainage::{
-    Column, D8, Drainage, EDGE, L0, L1, Routing, SEA, TileGrid, blend_weights,
+    Column, D8, Drainage, EDGE, L0, L1, Routing, SEA, TileCache, TileGrid, blend_weights,
 };
 use super::terraforged_flow_rivers::{RiverDrainage, Source};
-use super::terraforged_lossy_cache::ConcurrentLossyCache;
 use super::terraforged_terrain_data::NoiseSample;
 use super::terraforged_terrain_levels::TerrainLevels;
 use std::cmp::Reverse;
@@ -321,10 +320,6 @@ pub fn with_thread_memo<R>(f: impl FnOnce(&mut BasinMemo) -> R) -> R {
 /// A unique id per [`BasinMap`], so a memo never mixes two maps' tiles.
 static MAP_IDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-fn tile_key(x: i32, z: i32) -> i64 {
-    (i64::from(x) << 32) | i64::from(z as u32)
-}
-
 /// The value of cell (`cx`, `cz`) of `grid`: its owner tile's, blended with the neighbouring tile's view within
 /// [`super::terraforged_drainage::BLEND`] cells of a border, half and half at the border (as `Drainage::flow`).
 fn blended(grid: TileGrid, cx: i32, cz: i32, mut view: impl FnMut(i32, i32) -> f32) -> f32 {
@@ -357,23 +352,23 @@ fn bilinear(grid: TileGrid, x: i32, z: i32, mut cell: impl FnMut(i32, i32) -> f3
     top + (bottom - top) * tz
 }
 
-/// The erosion over one drainage map: L0 and L1 tiles eroded on demand and memoised in lossy caches. A tile computed
-/// twice is bit-identical, so eviction and races between threads only cost time.
+/// The erosion over one drainage map: L0 and L1 tiles eroded on demand and memoised in [`TileCache`]s. A tile computed
+/// twice is bit-identical, so eviction only costs time.
 pub struct BasinMap<S> {
     id: u64,
     seed: i32,
     sea_level: f32,
     params: Params,
     drainage: Arc<Drainage<S>>,
-    l0: ConcurrentLossyCache<ErosionTile>,
-    l1: ConcurrentLossyCache<ErosionTile>,
+    l0: TileCache<ErosionTile>,
+    l1: TileCache<ErosionTile>,
 }
 
 impl<S: Fn(i32, i32) -> Column> BasinMap<S> {
     /// L0 tiles cached (about 37 KB each).
-    pub const L0_TILES: i32 = 16;
-    /// L1 tiles cached (about 26 KB each).
-    pub const L1_TILES: i32 = 64;
+    pub const L0_TILES: usize = 16;
+    /// L1 tiles cached (about 26 KB each), as many as the drainage map's.
+    pub const L1_TILES: usize = Drainage::<Source>::L1_TILES;
 
     /// The erosion over `drainage`; the sea cuts no deeper than `sea_level`.
     pub fn new(seed: i32, sea_level: f32, params: Params, drainage: Arc<Drainage<S>>) -> Self {
@@ -383,9 +378,14 @@ impl<S: Fn(i32, i32) -> Column> BasinMap<S> {
             sea_level,
             params,
             drainage,
-            l0: ConcurrentLossyCache::new(Self::L0_TILES, 8),
-            l1: ConcurrentLossyCache::new(Self::L1_TILES, 8),
+            l0: TileCache::new(Self::L0_TILES),
+            l1: TileCache::new(Self::L1_TILES),
         }
+    }
+
+    /// The runtime seed the map is of.
+    pub fn seed(&self) -> i32 {
+        self.seed
     }
 
     pub fn drainage(&self) -> &Arc<Drainage<S>> {
@@ -402,26 +402,25 @@ impl<S: Fn(i32, i32) -> Column> BasinMap<S> {
 
     /// L0 tile (`x`, `z`), its window's edge fixed.
     pub fn l0_tile(&self, x: i32, z: i32) -> Arc<ErosionTile> {
-        self.l0
-            .compute_if_absent(self.seed, tile_key(x, z), |_, _| {
-                let flow = self.drainage.l0_tile(x, z);
-                let routing = &flow.routing;
-                let delta = erode(routing, L0.cell as f32, self.params, false, &|i| {
-                    if routing.direction[i] == SEA {
-                        self.sea_root(routing.height[i])
-                    } else {
-                        Root {
-                            base: routing.height[i],
-                            delta: 0.0,
-                        }
+        self.l0.get_or_build(x, z, || {
+            let flow = self.drainage.l0_tile(x, z);
+            let routing = &flow.routing;
+            let delta = erode(routing, L0.cell as f32, self.params, false, &|i| {
+                if routing.direction[i] == SEA {
+                    self.sea_root(routing.height[i])
+                } else {
+                    Root {
+                        base: routing.height[i],
+                        delta: 0.0,
                     }
-                });
-                ErosionTile {
-                    grid: L0,
-                    origin: flow.origin,
-                    delta,
                 }
-            })
+            });
+            ErosionTile {
+                grid: L0,
+                origin: flow.origin,
+                delta,
+            }
+        })
     }
 
     fn l0_tile_in(&self, memo: &mut BasinMemo, x: i32, z: i32) -> Arc<ErosionTile> {
@@ -440,40 +439,39 @@ impl<S: Fn(i32, i32) -> Column> BasinMap<S> {
 
     /// L1 tile (`x`, `z`): the cells water leaves its window by are fixed at L0's change there.
     pub fn l1_tile(&self, x: i32, z: i32) -> Arc<ErosionTile> {
-        self.l1
-            .compute_if_absent(self.seed, tile_key(x, z), |_, _| {
-                let flow = self.drainage.l1_tile(x, z);
-                let routing = &flow.routing;
-                let side = L1.side();
-                let memo = std::cell::RefCell::new(BasinMemo::default());
-                let delta = erode(routing, L1.cell as f32, self.params, true, &|i| {
-                    let height = routing.height[i];
-                    if routing.direction[i] == SEA {
-                        return self.sea_root(height);
-                    }
-                    debug_assert_eq!(routing.direction[i], EDGE);
-                    let (lx, lz) = (i as i32 % side, i as i32 / side);
-                    let ring = lx == 0 || lz == 0 || lx == side - 1 || lz == side - 1;
-                    let delta = if ring {
-                        self.l0_delta(
-                            &mut memo.borrow_mut(),
-                            L1.center(flow.origin.0 + lx),
-                            L1.center(flow.origin.1 + lz),
-                        )
-                    } else {
-                        0.0
-                    };
-                    Root {
-                        base: height + delta,
-                        delta,
-                    }
-                });
-                ErosionTile {
-                    grid: L1,
-                    origin: flow.origin,
+        self.l1.get_or_build(x, z, || {
+            let flow = self.drainage.l1_tile(x, z);
+            let routing = &flow.routing;
+            let side = L1.side();
+            let memo = std::cell::RefCell::new(BasinMemo::default());
+            let delta = erode(routing, L1.cell as f32, self.params, true, &|i| {
+                let height = routing.height[i];
+                if routing.direction[i] == SEA {
+                    return self.sea_root(height);
+                }
+                debug_assert_eq!(routing.direction[i], EDGE);
+                let (lx, lz) = (i as i32 % side, i as i32 / side);
+                let ring = lx == 0 || lz == 0 || lx == side - 1 || lz == side - 1;
+                let delta = if ring {
+                    self.l0_delta(
+                        &mut memo.borrow_mut(),
+                        L1.center(flow.origin.0 + lx),
+                        L1.center(flow.origin.1 + lz),
+                    )
+                } else {
+                    0.0
+                };
+                Root {
+                    base: height + delta,
                     delta,
                 }
-            })
+            });
+            ErosionTile {
+                grid: L1,
+                origin: flow.origin,
+                delta,
+            }
+        })
     }
 
     fn l1_tile_in(&self, memo: &mut BasinMemo, x: i32, z: i32) -> Arc<ErosionTile> {
