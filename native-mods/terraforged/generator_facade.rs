@@ -537,7 +537,8 @@ impl TerraForgedGenerator {
     /// [`Self::base_column`] it skips the eroded height: that needs the block's erosion region, whose build takes a
     /// fraction of a second and would push the regions the chunks being generated read out of the 16-region cache. So
     /// this creates no terrain-cache entry and builds no region; erosion is the only difference from the fill. With
-    /// Horizon's `coastal_landforms` the sample carries the coast's landform, as the fill does.
+    /// Horizon's `coastal_landforms` the sample carries the coast's landform, and with `glacial_landforms` its glacial
+    /// troughs, as the fill does.
     /// `Err` as [`Self::base_height`].
     pub fn far_heights(&self, x: i32, z: i32) -> Result<(i32, i32), &'static str> {
         let sample = self.terrain.far_sample(self.seed(), x, z)?;

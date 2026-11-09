@@ -58,6 +58,9 @@ pub struct Settings {
     /// Coasts follow their wave exposure: cliffs on exposed shores, low tidal flats under a block of water or
     /// less in sheltered ones; with `rock_strata` hard rock holds the cliffs (`terraforged_coastal_landforms`).
     pub coastal_landforms: bool,
+    /// Glaciers' valleys: where the air over the land is cold enough for ice (the climate's temperature, cooled with
+    /// height), river valleys widen into U-shaped troughs (`terraforged_glacial_landforms`).
+    pub glacial_landforms: bool,
 }
 
 impl Default for Settings {
@@ -79,6 +82,7 @@ pub const FAITHFUL: Settings = Settings {
     altitude_climate_strength: 1.0,
     rock_strata: false,
     coastal_landforms: false,
+    glacial_landforms: false,
 };
 
 /// The range `height_scale` is held to. TerraForged's land reaches at most 476 blocks above
@@ -145,6 +149,7 @@ impl Settings {
             ),
             rock_strata: flag("rock_strata", FAITHFUL.rock_strata),
             coastal_landforms: flag("coastal_landforms", FAITHFUL.coastal_landforms),
+            glacial_landforms: flag("glacial_landforms", FAITHFUL.glacial_landforms),
         }
     }
 
@@ -167,6 +172,7 @@ impl Settings {
         );
         map.insert("rock_strata".into(), self.rock_strata.into());
         map.insert("coastal_landforms".into(), self.coastal_landforms.into());
+        map.insert("glacial_landforms".into(), self.glacial_landforms.into());
         Value::Object(map)
     }
 }
@@ -189,6 +195,7 @@ mod tests {
             altitude_climate_strength: 1.5,
             rock_strata: true,
             coastal_landforms: true,
+            glacial_landforms: true,
         };
         assert_eq!(Settings::from_json(&on.to_json()), on);
         let strength = |value: Value| Settings::from_json(&value).altitude_climate_strength;

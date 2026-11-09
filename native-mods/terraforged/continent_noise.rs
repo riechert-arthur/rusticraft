@@ -137,6 +137,30 @@ impl ContinentNoise {
             .sample(seed, x, y, sample, &self.carver, &self.context.terrain);
     }
 
+    /// Not Java's (Horizon's `glacial_landforms`): [`Self::sample_river`] with the rivers' valleys deepened into
+    /// glacial troughs where `glaciation` says ([`RiverNetwork::sample_glacial`]).
+    ///
+    /// [`RiverNetwork::sample_glacial`]: super::terraforged_river_network::RiverNetwork::sample_glacial
+    pub fn sample_river_glacial(
+        &self,
+        seed: i32,
+        x: f32,
+        y: f32,
+        sample: &mut NoiseSample,
+        glaciation: impl FnOnce(f32) -> f32,
+    ) {
+        let (x, y) = self.position(seed, x, y);
+        self.rivers.sample_glacial(
+            seed,
+            x,
+            y,
+            sample,
+            &self.carver,
+            &self.context.terrain,
+            glaciation,
+        );
+    }
+
     /// The spawn offset for `seed` (`getWorldOffset(seed)`, see [`ContinentNoise`]): the first call per seed runs
     /// the spiral search ([`CellGenerator::world_offset`]) outside the lock; concurrent first calls may both run it
     /// and agree.

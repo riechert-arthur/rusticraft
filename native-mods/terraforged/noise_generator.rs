@@ -276,6 +276,21 @@ impl NoiseGenerator {
         sample
     }
 
+    /// Not Java's (Horizon's `glacial_landforms`): [`Self::sample_river`] with glacial troughs
+    /// ([`ContinentNoise::sample_river_glacial`]).
+    pub fn sample_river_glacial<'a>(
+        &self,
+        seed: i32,
+        x: f32,
+        z: f32,
+        sample: &'a mut NoiseSample,
+        glaciation: impl FnOnce(f32) -> f32,
+    ) -> &'a mut NoiseSample {
+        self.continent
+            .sample_river_glacial(seed, x, z, sample, glaciation);
+        sample
+    }
+
     /// `getOcean`: the ocean floor's depth noise; the terrain becomes deep ocean.
     fn ocean(
         &self,

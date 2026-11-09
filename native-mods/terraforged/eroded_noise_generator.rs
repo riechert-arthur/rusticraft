@@ -65,6 +65,8 @@ pub struct ErodedNoiseGenerator {
     far: Arc<FarErosion>,
     strata: bool,
     coast: bool,
+    /// Horizon's `glacial_landforms`: the glaciers whose troughs the rivers' valleys become ([`Self::carve_rivers`]).
+    glaciers: Option<Arc<super::terraforged_glacial_landforms::Glaciers>>,
 }
 
 /// One cached erosion region: the eroded heights (`buildRegion`'s map, which indexing reads) and, with the
@@ -140,6 +142,57 @@ impl ErodedNoiseGenerator {
             strata: super::terraforged_settings::current().rock_strata,
             far: Arc::new(FarErosion::new()),
             coast: super::terraforged_settings::current().coastal_landforms,
+            glaciers: None,
+        }
+        .with_glaciers(super::terraforged_settings::current().glacial_landforms)
+    }
+
+    /// The same generator with Horizon's `glacial_landforms` (U-shaped glacial troughs, [`Self::carve_rivers`]) or
+    /// not; the glaciers follow the thread's settings' `altitude_climate` (`terraforged_glacial_landforms`).
+    pub fn with_glaciers(mut self, on: bool) -> Self {
+        self.glaciers = on.then(|| {
+            Arc::new(super::terraforged_glacial_landforms::Glaciers::new(
+                &self.generator,
+                super::terraforged_settings::current(),
+            ))
+        });
+        self
+    }
+
+    /// The same generator with these glaciers (tests: `Glaciers::with_chill`).
+    pub fn with_these_glaciers(
+        mut self,
+        glaciers: super::terraforged_glacial_landforms::Glaciers,
+    ) -> Self {
+        self.glaciers = Some(Arc::new(glaciers));
+        self
+    }
+
+    /// The world's glaciers, with `glacial_landforms`.
+    pub fn glaciers(&self) -> Option<&super::terraforged_glacial_landforms::Glaciers> {
+        self.glaciers.as_deref()
+    }
+
+    /// `sampleRiver` for block `(x, z)` at noise coordinates `(noise_x, noise_z)`: with Horizon's `glacial_landforms`
+    /// the valleys become troughs by the glaciation over the column's height before the carve
+    /// ([`NoiseGenerator::sample_river_glacial`]), else Java's [`NoiseGenerator::sample_river`].
+    fn carve_rivers(
+        &self,
+        seed: i32,
+        (x, z): (i32, i32),
+        (noise_x, noise_z): (f32, f32),
+        sample: &mut NoiseSample,
+    ) {
+        match &self.glaciers {
+            None => {
+                self.generator.sample_river(seed, noise_x, noise_z, sample);
+            }
+            Some(glaciers) => {
+                self.generator
+                    .sample_river_glacial(seed, noise_x, noise_z, sample, |height| {
+                        glaciers.glaciation(seed, (x, z), (noise_x, noise_z), height)
+                    });
+            }
         }
     }
 
@@ -159,6 +212,7 @@ impl ErodedNoiseGenerator {
             strata: self.strata,
             far: Arc::clone(&self.far),
             coast: self.coast,
+            glaciers: self.glaciers.clone(),
         }
     }
 
@@ -266,10 +320,11 @@ impl ErodedNoiseGenerator {
     }
 
     /// Horizon's distant terrain: [`Self::noise_sample`] (un-eroded, rivers included), with the coast's landform
-    /// (`coastal_landforms`, [`Self::coast_offset`]) added before the rivers carve, as the chunks have it. Without the
-    /// setting it is [`Self::noise_sample`].
+    /// (`coastal_landforms`, [`Self::coast_offset`]) added before the rivers carve, and the rivers' glacial troughs
+    /// (`glacial_landforms`, [`Self::carve_rivers`]), as the chunks have them. Without either setting it is
+    /// [`Self::noise_sample`].
     pub fn far_sample(&self, seed: i32, x: i32, z: i32) -> Result<NoiseSample, &'static str> {
-        if !self.coast {
+        if !self.coast && self.glaciers.is_none() {
             return self.noise_sample(seed, x, z);
         }
         let mut sample = NoiseSample::new(&self.generator.continent().context().terrain);
@@ -277,9 +332,10 @@ impl ErodedNoiseGenerator {
         let mut blender = self.generator.blender_resource();
         self.generator
             .sample_terrain(seed, noise_x, noise_z, &mut sample, &mut blender)?;
-        sample.height_noise += self.coast_offset(seed, x, z, &sample, &mut None, (x, z, 1));
-        self.generator
-            .sample_river(seed, noise_x, noise_z, &mut sample);
+        if self.coast {
+            sample.height_noise += self.coast_offset(seed, x, z, &sample, &mut None, (x, z, 1));
+        }
+        self.carve_rivers(seed, (x, z), (noise_x, noise_z), &mut sample);
         Ok(sample)
     }
 
@@ -325,10 +381,8 @@ impl ErodedNoiseGenerator {
         if self.coast {
             sample.height_noise += self.coast_offset(seed, x, z, &sample, &mut None, (x, z, 1));
         }
-        Ok(self
-            .generator
-            .sample_river(seed, noise_x, noise_z, &mut sample)
-            .height_noise)
+        self.carve_rivers(seed, (x, z), (noise_x, noise_z), &mut sample);
+        Ok(sample.height_noise)
     }
 
     /// Horizon's far terrain's eroded heights (`eroded_far_terrain`; no Java counterpart): a lookup that reads a
@@ -452,8 +506,7 @@ impl ErodedNoiseGenerator {
                         sample.height_noise +=
                             self.coast_offset(seed, x, z, &sample, &mut strata, area);
                     }
-                    self.generator
-                        .sample_river(seed, noise_x, noise_z, &mut sample);
+                    self.carve_rivers(seed, (x, z), (noise_x, noise_z), &mut sample);
                     chunk.set_noise(dx, dz, &sample);
                     if let Some(change) = &region.change {
                         // Not Java's (`erosion_deposits`): the column's change from erosion against the mean of
@@ -1484,6 +1537,91 @@ chunk 2 2147483647 -3 5 3fba3fdd57ea00f8";
                 });
             }
         });
+    }
+
+    /// `glacial_landforms` (Horizon's): with every column glaciated (a chilled climate), river valleys deepen into
+    /// troughs: chunks only lose height, only within reach of a river node, and each column is still
+    /// `eroded_height_noise` (what structures read); `far_sample` carves the same troughs into the raw terrain; chunks
+    /// agree across threads and orders. Unchilled, the glaciation never falls with height.
+    #[test]
+    fn glaciers_deepen_valleys_into_troughs_and_ignore_threads() {
+        use super::super::terraforged_glacial_landforms::Glaciers;
+        use super::super::terraforged_settings::FAITHFUL;
+        let seed = 91;
+        let plain = eroded(0, 1, 50, 25, 0);
+        let on = eroded(0, 1, 50, 25, 0)
+            .with_these_glaciers(Glaciers::new(plain.generator(), FAITHFUL).with_chill(2.0));
+        assert!(eroded(0, 1, 50, 25, 0).glaciers().is_none());
+        // The first chunk (on a 256-block grid) whose centre the trough lowers, from the raw terrain.
+        let (chunk_x, chunk_z) = (-24..24)
+            .flat_map(|i| (-24..24).map(move |j| (i * 16, j * 16)))
+            .find(|&(cx, cz)| {
+                let (x, z) = (cx * 16 + 8, cz * 16 + 8);
+                let far = on.far_sample(seed, x, z).unwrap().height_noise;
+                let raw = plain.noise_sample(seed, x, z).unwrap().height_noise;
+                assert!(far <= raw, "{x} {z}");
+                far < raw - 2.0 * plain.generator().levels().noise_levels.unit
+            })
+            .expect("a glaciated valley");
+        let mut changed = 0;
+        on.generate(seed, chunk_x, chunk_z, |data| {
+            for (dx, dz) in (0..16).flat_map(|dx| (0..16).map(move |dz| (dx, dz))) {
+                let (x, z) = (chunk_x * 16 + dx, chunk_z * 16 + dz);
+                let height = data.height().get(dx, dz);
+                assert_eq!(
+                    height.to_bits(),
+                    on.eroded_height_noise(seed, x, z).unwrap().to_bits()
+                );
+                let before = plain.eroded_height_noise(seed, x, z).unwrap();
+                assert!(height <= before, "{x} {z}");
+                changed += usize::from(height < before);
+            }
+        })
+        .unwrap();
+        assert!(changed > 16, "{changed}");
+        let chunks = [
+            (chunk_x, chunk_z),
+            (chunk_x + 1, chunk_z),
+            (chunk_x, chunk_z - 1),
+            (chunk_x - 1, chunk_z + 1),
+        ];
+        let fresh: Vec<u64> = chunks
+            .iter()
+            .map(|&(x, z)| {
+                let new = eroded(0, 1, 50, 25, 0).with_these_glaciers(
+                    Glaciers::new(plain.generator(), FAITHFUL).with_chill(2.0),
+                );
+                chunk_digest(&new, seed, x, z)
+            })
+            .collect();
+        thread::scope(|scope| {
+            for worker in 0..6 {
+                let (on, fresh) = (&on, &fresh);
+                scope.spawn(move || {
+                    let mut order: Vec<usize> = (0..chunks.len()).collect();
+                    order.rotate_left(worker % chunks.len());
+                    for i in order {
+                        let (x, z) = chunks[i];
+                        assert_eq!(chunk_digest(on, seed, x, z), fresh[i]);
+                    }
+                });
+            }
+        });
+        // The real climate: colder and more glaciated with height, never less.
+        let glaciers = Glaciers::new(plain.generator(), FAITHFUL);
+        let levels = plain.generator().levels().noise_levels;
+        for (x, z) in [(0, 0), (5000, -3000), (-12000, 800)] {
+            let noise = (on.noise_coord(x), on.noise_coord(z));
+            let (mut last_t, mut last_g) = (f32::INFINITY, 0.0);
+            for blocks in (0..520).step_by(20) {
+                let h = levels.height_min + blocks as f32 * levels.unit;
+                let t = glaciers.air_temperature(seed, (x, z), noise, h);
+                let g = glaciers.glaciation(seed, (x, z), noise, h);
+                assert!(t <= last_t && g >= last_g, "{x} {z} {blocks}");
+                (last_t, last_g) = (t, g);
+            }
+            assert!(last_g == 1.0, "{x} {z}: 500 blocks up is under ice");
+        }
     }
 
     /// `coastal_landforms` (Horizon's): the chunks of a stretch of coast change only in the coast bands, each column by

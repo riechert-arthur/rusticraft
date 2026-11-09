@@ -154,6 +154,70 @@ impl RiverCarver {
         )
     }
 
+    /// Not Java's (Horizon's `glacial_landforms`, `terraforged_glacial_landforms`): after [`Self::carve`] cut `sample`
+    /// (whose height, base and continent noise were `before` = `(height, base, continent)` going in), deepens the river
+    /// valley into a glacier's U-shaped trough where `glaciation(before height)` (0 to 1, asked only within reach of
+    /// the widest trough) is above 0. The trough reaches [`trough_radius`] of the valley, with a flat floor at the
+    /// river's bank level out past the banks ([`floor_radius`]); the column keeps the lower of the river's profile and
+    /// the trough's, lerped by the glaciation, and its base noise (the water level) follows the same way, so the
+    /// trough holds no water the river doesn't. Lakes, the river noise and the terrain type stay the river's.
+    ///
+    /// [`trough_radius`]: super::terraforged_glacial_landforms::trough_radius
+    /// [`floor_radius`]: super::terraforged_glacial_landforms::floor_radius
+    pub fn glacial_trough(
+        &self,
+        before: (f32, f32, f32),
+        sample: &mut NoiseSample,
+        carver: &CarverSample,
+        glaciation: impl FnOnce(f32) -> f32,
+    ) {
+        use super::terraforged_glacial_landforms::{
+            WIDEN, floor_radius, trough_height, trough_radius,
+        };
+        // `a < b`, false when either is NaN.
+        let below = |a: f32, b: f32| a.partial_cmp(&b) == Some(std::cmp::Ordering::Less);
+        let (height, base, continent) = before;
+        let node = &carver.river;
+        let config = &self.river_config;
+        if node.is_invalid() {
+            return;
+        }
+        let valley = config.valley_width.at(node.position);
+        // NaN distances and widths fail this test too.
+        if !below(node.distance, valley * (1.0 + WIDEN)) {
+            return;
+        }
+        let g = glaciation(height);
+        if g.is_nan() || g <= 0.0 {
+            return;
+        }
+        let radius = trough_radius(valley, g.min(1.0));
+        if !below(node.distance, radius) {
+            return;
+        }
+        let modifier = map(continent, COAST, 1.0, 1.0 - COAST);
+        let bank_radius = floor_radius(config.bank_width.at(node.position), radius, g.min(1.0));
+        let level = node.level * modifier;
+        let floor = java_min(
+            self.levels.to_height_noise(level, 0.0)
+                + config.bank_depth.at(node.position) * self.levels.unit,
+            height,
+        );
+        let trough = trough_height(floor, height, node.distance, bank_radius, radius);
+        let trough_base = trough_height(level, base * modifier, node.distance, bank_radius, radius);
+        let g = g.min(1.0);
+        sample.height_noise = lerp(
+            sample.height_noise,
+            java_min(sample.height_noise, trough),
+            g,
+        );
+        sample.base_noise = lerp(
+            sample.base_noise,
+            java_min(sample.base_noise, trough_base),
+            g,
+        );
+    }
+
     /// The private `carve(sample, nodeSample, config, baseNoise, baseModifier, erosion)`. `getBaseNoise`'s -1 means
     /// "outside the valley"; a node whose carved base noise really is -1 is skipped too, as in Java.
     fn carve_node(

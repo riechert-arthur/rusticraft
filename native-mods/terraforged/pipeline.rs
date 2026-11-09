@@ -3816,6 +3816,116 @@ mod tests {
         });
     }
 
+    /// `glacial_landforms` on seed 777, across a snowy taiga valley at (2627, -2811): a line of 201 columns along z
+    /// through it. The trough only lowers the ground, by tens of blocks, and lays a flat floor (columns within 2 blocks
+    /// of the lowest) much wider than the river valley's; structures' base heights stay those of the filled chunks
+    /// (frozen oceans' icebergs aside, see `coastal_landforms_cut_cliffs_and_lay_flats`), and chunks are the same on 6
+    /// threads in rotated orders.
+    #[test]
+    #[ignore = "slow in debug: run with --profile fast --include-ignored"]
+    fn glacial_landforms_cut_u_shaped_troughs() {
+        let Some(data) = data() else { return };
+        let make = |on| {
+            terraforged_settings::set_for_thread(Some(Settings {
+                glacial_landforms: on,
+                ..terraforged_settings::FAITHFUL
+            }));
+            let pipeline = terraforged(&data, 777, false);
+            terraforged_settings::set_for_thread(None);
+            pipeline
+        };
+        let ((off, _), (on, overworld)) = (make(false), make(true));
+        let height = |p: &TerraForgedPipeline, x, z| {
+            p.generator
+                .base_height(x, z, TerraHeightmap::OceanFloorWorldgen)
+                .unwrap()
+        };
+        let (x, z0) = (2627, -2811);
+        let line = |p: &TerraForgedPipeline| {
+            (-100..=100)
+                .map(|k| height(p, x, z0 + k))
+                .collect::<Vec<_>>()
+        };
+        let (a, b) = (line(&off), line(&on));
+        let lowered = a.iter().zip(&b).map(|(a, b)| a - b).max().unwrap();
+        assert!(a.iter().zip(&b).all(|(a, b)| b <= a), "{a:?} {b:?}");
+        // The floor: columns within 2 blocks of the line's lowest (a V has few, a U many).
+        let floor = |h: &[i32]| {
+            let low = *h.iter().min().unwrap();
+            h.iter().filter(|&&y| y <= low + 2).count()
+        };
+        let (floor_off, floor_on) = (floor(&a), floor(&b));
+        eprintln!("GLACIER lowered {lowered}, floor off {floor_off} on {floor_on}");
+        eprintln!("GLACIER off {a:?}");
+        eprintln!("GLACIER on {b:?}");
+        assert!(lowered >= 30, "{lowered}");
+        assert!(
+            floor_on >= 30 && floor_on >= 2 * floor_off,
+            "{floor_off} {floor_on}"
+        );
+        // The chunks: their ground is the base height structures read, and threads don't change them.
+        let top_where = |chunk: &ProtoChunk, x: i32, z: i32, skip: &[&str]| {
+            (chunk.terrain.min_y()..chunk.terrain.min_y() + chunk.terrain.height())
+                .rev()
+                .find(|&y| !skip.contains(&chunk.block_name(x, y, z)))
+                .unwrap()
+        };
+        let (open, ground) = (
+            ["minecraft:air", "minecraft:water"].as_slice(),
+            [
+                "minecraft:air",
+                "minecraft:water",
+                "minecraft:packed_ice",
+                "minecraft:snow_block",
+            ]
+            .as_slice(),
+        );
+        let mut worker = overworld.worker();
+        let (cx, cz) = (x >> 4, z0 >> 4);
+        let chunks = [(cx, cz), (cx, cz - 1), (cx + 1, cz), (cx, cz + 2)];
+        let mut icebergs = 0;
+        let fresh: Vec<Vec<i32>> = chunks
+            .iter()
+            .map(|&(cx, cz)| {
+                let chunk = worker.generate_proto(ChunkPos::new(cx, cz)).unwrap();
+                (0..256)
+                    .map(|i| {
+                        let (x, z) = (cx * 16 + i % 16, cz * 16 + i / 16);
+                        let iceberg = (chunk.terrain.min_y()
+                            ..chunk.terrain.min_y() + chunk.terrain.height())
+                            .any(|y| ground[2..].contains(&chunk.block_name(x & 15, y, z & 15)));
+                        if iceberg {
+                            icebergs += 1;
+                        } else {
+                            let floor = top_where(&chunk, x & 15, z & 15, ground);
+                            assert_eq!(floor + 1, height(&on, x, z), "{x} {z}");
+                        }
+                        top_where(&chunk, x & 15, z & 15, open)
+                    })
+                    .collect()
+            })
+            .collect();
+        assert!(icebergs < 256, "{icebergs}");
+        std::thread::scope(|scope| {
+            for thread in 0..6 {
+                let (overworld, fresh, top_where) = (&overworld, &fresh, &top_where);
+                scope.spawn(move || {
+                    let mut worker = overworld.worker();
+                    let mut order: Vec<usize> = (0..chunks.len()).collect();
+                    order.rotate_left(thread % chunks.len());
+                    for i in order {
+                        let (cx, cz) = chunks[i];
+                        let chunk = worker.generate_proto(ChunkPos::new(cx, cz)).unwrap();
+                        let tops: Vec<i32> = (0..256)
+                            .map(|k| top_where(&chunk, k % 16, k / 16, open))
+                            .collect();
+                        assert_eq!(tops, fresh[i]);
+                    }
+                });
+            }
+        });
+    }
+
     /// What a decorated chunk holds on top: per column, its top block (first not air from the level's top down), the
     /// y of that block, and whether a log stands anywhere in the column.
     fn tops(chunk: &ProtoChunk) -> Vec<(String, i32, bool)> {
