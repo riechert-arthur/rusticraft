@@ -97,12 +97,16 @@ impl<T> Bucket<T> {
 ///
 /// The structure is Java's: `smallestEncompassingPowerOfTwo(concurrency)` buckets, each with
 /// `smallestEncompassingPowerOfTwo(NoiseUtil.floor((float) capacity / buckets))` slots; a key's
-/// bucket is `(int) (key ^ (key >>> 16)) & 0x7fffffff` and its slot is fastutil's
-/// `(int) HashCommon.mix(key)`, both masked. A miss computes `function(seed, key)` under the bucket's
+/// slot is fastutil's `(int) HashCommon.mix(key)`, masked. Its bucket is not Java's (see below). A miss computes `function(seed, key)` under the bucket's
 /// write lock (as Java does: other callers of that bucket wait for it, so a function that uses the
 /// same bucket never returns), stores it in the slot and then, after the lock is released, passes
 /// the replaced value to the removal listener. With one seed and one thread, hits, misses, eviction
-/// order and listener calls are Java's (checked by the oracle, see the README).
+/// order and listener calls are Java's with Java's bucket choice (checked by the oracle, see the README).
+///
+/// One difference for speed: Java's bucket is `(int) (key ^ (key >>> 16)) & 0x7fffffff`, masked,
+/// which for a position key `(x << 32) | z` reads only z: a whole row of cells or tiles shared one
+/// bucket and kept evicting each other. The port mixes all 64 bits first ([`spread`]). Values never
+/// depend on where they are cached, so only the hit rate changes.
 ///
 /// Three differences, all so that a value through the cache always equals the direct computation:
 /// - A hit needs the slot's key **and seed** to match. Java's `LongCache` keys by `key` alone and
@@ -123,6 +127,8 @@ pub struct ConcurrentLossyCache<T> {
     mask: usize,
     buckets: Box<[Bucket<T>]>,
     removal_listener: RemovalListener<T>,
+    /// A key's bucket before masking: [`spread`], or Java's for the oracle's traces.
+    spread: fn(i64) -> u32,
 }
 
 impl<T> ConcurrentLossyCache<T> {
@@ -160,6 +166,16 @@ impl<T> ConcurrentLossyCache<T> {
             mask: (concurrency - 1) as usize,
             buckets: (0..concurrency).map(|_| Bucket::new(capacity)).collect(),
             removal_listener,
+            spread,
+        }
+    }
+
+    /// This cache with Java's bucket choice, to replay the oracle's traces.
+    #[cfg(test)]
+    fn with_java_buckets(self) -> Self {
+        Self {
+            spread: java_spread,
+            ..self
         }
     }
 
@@ -171,7 +187,7 @@ impl<T> ConcurrentLossyCache<T> {
         key: i64,
         function: impl FnOnce(i32, i64) -> T,
     ) -> Arc<T> {
-        let bucket = &self.buckets[spread(key) as usize & self.mask];
+        let bucket = &self.buckets[(self.spread)(key) as usize & self.mask];
         let index = hash(key) as u32 as usize & bucket.mask;
         if let Some(value) = bucket.read()[index].hit(seed, key) {
             return value;
@@ -205,9 +221,23 @@ fn smallest_encompassing_power_of_two(value: i32) -> i32 {
     i.wrapping_add(1)
 }
 
-/// `LossyCache.Concurrent.spread`: `(int) (h ^ (h >>> 16)) & HASH_BITS`.
-fn spread(key: i64) -> i32 {
-    ((key ^ ((key as u64) >> 16) as i64) as i32) & 0x7fff_ffff
+/// A key's bucket before masking: the high half of MurmurHash3's 64-bit finaliser (`fmix64`), so every bit of `x`
+/// and `z` in a `(x << 32) | z` key counts. The slot ([`hash`]) reads the low bits of another mix, so keys of one
+/// bucket still spread over all its slots.
+fn spread(key: i64) -> u32 {
+    let mut h = key as u64;
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+    h ^= h >> 33;
+    (h >> 32) as u32
+}
+
+/// `LossyCache.Concurrent.spread`: `(int) (h ^ (h >>> 16)) & HASH_BITS`, Java's bucket choice (the oracle's).
+#[cfg(test)]
+fn java_spread(key: i64) -> u32 {
+    (((key ^ ((key as u64) >> 16) as i64) as i32) & 0x7fff_ffff) as u32
 }
 
 /// `LossyCache.hash`: `(int) HashCommon.mix(key)` (fastutil).
@@ -321,7 +351,7 @@ mod tests {
             let mut fnv = Fnv::new();
             fnv.line(&format!("c {capacity} {concurrency} {buckets} {slots}"));
             for &key in &keys {
-                let bucket = spread(key) as usize & probe.mask;
+                let bucket = java_spread(key) as usize & probe.mask;
                 let slot = hash(key) as u32 as usize & probe.buckets[bucket].mask;
                 fnv.line(&format!("s {key} {bucket} {slot}"));
             }
@@ -341,7 +371,8 @@ mod tests {
                         removed.fetch_add(1, Ordering::Relaxed);
                         fnv.lock().unwrap().line(&format!("r {id}"));
                     })
-                });
+                })
+                .with_java_buckets();
                 let mut counter = 0usize;
                 let mut x = 0x5_deec_e66d_i64 ^ cfg as i64;
                 for _ in 0..4 * keys.len() {
@@ -369,6 +400,48 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Java's bucket reads only z of a `(x << 32) | z` key: a 16x16 block of tile keys lands in 16 of 16 buckets one
+    /// row each, so a row of 16 tiles competes for one bucket's slots. Mixed, every bucket gets some of every row.
+    #[test]
+    fn position_keys_spread_over_all_buckets() {
+        let keys: Vec<i64> = (0..16)
+            .flat_map(|z: i32| {
+                (0..16).map(move |x: i32| (i64::from(x) << 32) | i64::from(z as u32))
+            })
+            .collect();
+        let rows_per_bucket = |spread: fn(i64) -> u32| {
+            let mut rows = vec![std::collections::BTreeSet::new(); 16];
+            for (i, &key) in keys.iter().enumerate() {
+                rows[spread(key) as usize & 15].insert(i / 16);
+            }
+            rows.iter().map(|rows| rows.len()).collect::<Vec<_>>()
+        };
+        assert!(rows_per_bucket(java_spread).iter().all(|&rows| rows == 1));
+        let mixed = rows_per_bucket(spread);
+        assert!(mixed.iter().all(|&rows| rows >= 6), "{mixed:?}");
+        // A 4x4 block of tiles twice through 16 buckets of one slot: with Java's buckets every lookup of the second
+        // pass misses (4 rows in 4 one-slot buckets); mixed, the 6 tiles alone in their bucket hit.
+        let rebuilds = |cache: ConcurrentLossyCache<()>| {
+            let builds = AtomicUsize::new(0);
+            for _ in 0..2 {
+                for z in 0..4_i32 {
+                    for x in 0..4_i32 {
+                        let key = (i64::from(x) << 32) | i64::from(z as u32);
+                        cache.compute_if_absent(0, key, |_, _| {
+                            builds.fetch_add(1, Ordering::Relaxed);
+                        });
+                    }
+                }
+            }
+            builds.into_inner() - 16
+        };
+        assert_eq!(
+            rebuilds(ConcurrentLossyCache::new(16, 16).with_java_buckets()),
+            16
+        );
+        assert_eq!(rebuilds(ConcurrentLossyCache::new(16, 16)), 10);
     }
 
     #[test]

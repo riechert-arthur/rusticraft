@@ -11,16 +11,15 @@
 // TerraForged's `RiverCarver`; the water surface stays stepped, one level per column, as TerraForged's rivers have it.
 //
 // Every value is a pure function of the seed, the settings and the position: channels come from the drainage map's
-// tiles (themselves pure) through fixed 128-block patches, memoised in a lossy cache.
+// tiles (themselves pure) through fixed 128-block patches, memoised in a tile cache.
 
 use super::terraforged::{clamp, lerp};
 use super::terraforged_basin_erosion::{BasinErosion, BasinMap, BasinMemo};
 use super::terraforged_continent_points::BEACH;
-use super::terraforged_drainage::{Column, Drainage, FlowCell, L1, SEA, TileMemo};
+use super::terraforged_drainage::{Column, Drainage, FlowCell, L1, SEA, TileCache, TileMemo};
 use super::terraforged_engine::{Terrain, TerrainProperties};
 use super::terraforged_eroded_noise_generator::shaped_sample;
 use super::terraforged_glacial_landforms::Glaciers;
-use super::terraforged_lossy_cache::ConcurrentLossyCache;
 use super::terraforged_noise_generator::NoiseGenerator;
 use super::terraforged_settings::Settings;
 use super::terraforged_terrain_blender::Blender;
@@ -188,7 +187,7 @@ pub struct Channels<S> {
     drainage: Arc<Drainage<S>>,
     /// Horizon's `basin_erosion` over the same drainage map, if it is on: the water follows the eroded valleys.
     basins: Option<Arc<BasinMap<S>>>,
-    patches: ConcurrentLossyCache<Patch>,
+    patches: TileCache<Patch>,
 }
 
 fn hash(seed: i32, x: i32, z: i32, salt: u32) -> f32 {
@@ -202,7 +201,7 @@ fn hash(seed: i32, x: i32, z: i32, salt: u32) -> f32 {
 
 impl<S: Fn(i32, i32) -> Column> Channels<S> {
     /// Patches cached (a few KB each).
-    pub const PATCHES: i32 = 1024;
+    pub const PATCHES: usize = 1024;
 
     /// The channels over `source`'s drainage map (see [`Drainage::new`]); water never stands below `sea_level`.
     pub fn new(seed: i32, sea_level: i32, source: S) -> Self {
@@ -221,7 +220,7 @@ impl<S: Fn(i32, i32) -> Column> Channels<S> {
             sea_level,
             drainage,
             basins,
-            patches: ConcurrentLossyCache::new(Self::PATCHES, 8),
+            patches: TileCache::new(Self::PATCHES),
         }
     }
 
@@ -337,8 +336,9 @@ impl<S: Fn(i32, i32) -> Column> Channels<S> {
     }
 
     fn patch(&self, x: i32, z: i32) -> Arc<Patch> {
-        let key = (i64::from(x) << 32) | i64::from(z as u32);
-        self.patches.compute_if_absent(self.seed, key, |_, _| {
+        // A tile cache, not TerraForged's lossy one: one slot per key there rebuilt patches about twice each in play
+        // (#305), and a patch takes milliseconds.
+        self.patches.get_or_build(x, z, || {
             let mut memo = Memo::default();
             let mut curves = Vec::new();
             let (cx, cz) = (x * PATCH, z * PATCH);

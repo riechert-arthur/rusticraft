@@ -430,7 +430,7 @@ climate must stay cheap (see "Rain shadow").
   2,096 to 4,584 times).
   The world's level and its far-decoration threads share one map through the noise they share
   (one per seed, levels and settings). TerraForged's own lossy cache is not used: it put every tile
-  of one row in one bucket and gave each tile a single slot, so a few tiles rebuilt each other
+  of one row in one bucket (since fixed, #305) and gave each tile a single slot, so a few tiles rebuilt each other
   without end (in play at lodDistance 2048, about 300 builds per L0 tile in under three minutes).
   An L1 tile takes its boundary from L0: every L0 cell
   just outside the window that flows into it brings its accumulation in at the lowest L1 cell of
@@ -490,7 +490,8 @@ carved, where a river or lake bed is an outlet at its water level, like the sea.
   `/locateterrain`'s search (TerraForged's `find`), which samples rivers at unscaled coordinates, as
   TerraForged does.
 - Purity: the channels near a 128-block patch are extracted together from the drainage map and kept in
-  a lossy cache (1024 patches); every value is a function of the seed and the position. The map
+  a tile cache (1024 patches, least recently used; the lossy cache rebuilt them about twice each in play, #305);
+  every value is a function of the seed and the position. The map
   samples its own copy of the noise, built the same way.
 - With the other landform settings: the map samples the ground the distant tiles have, so with
   `coastal_landforms` it sees the coast's landform and with `glacial_landforms` the troughs. A channel
@@ -2447,11 +2448,14 @@ The bounded concurrent lossy cache (`lossy_cache.rs`, `ConcurrentLossyCache`) po
 without the source's re-check under the write lock (two threads missing one key both compute it); its slot math and
 single-threaded behaviour are the source's. The structure is the source's: `smallestEncompassingPowerOfTwo(concurrency)`
 buckets (`Environment.CORES`, Java's `availableProcessors()`, for `concurrent(capacity)`), each with
-`smallestEncompassingPowerOfTwo(NoiseUtil.floor((float) capacity / buckets))` slots; a key picks its bucket with
-`(int) (key ^ key >>> 16) & 0x7fffffff` and its slot with fastutil's `HashCommon.mix`, and a miss computes
-`function(seed, key)` under the bucket's write lock (as Java does), overwrites the slot and passes the replaced value to
-the removal listener after the lock is released. It differs from Java in three ways, so that a value read through the
-cache always equals the one computed directly, whatever the seeds, threads or core count:
+`smallestEncompassingPowerOfTwo(NoiseUtil.floor((float) capacity / buckets))` slots; a key picks its slot with
+fastutil's `HashCommon.mix`, and a miss computes `function(seed, key)` under the bucket's write lock (as Java does),
+overwrites the slot and passes the replaced value to the removal listener after the lock is released. A key's bucket
+is not Java's: Java takes `(int) (key ^ key >>> 16) & 0x7fffffff`, which for a position key `(x << 32) | z` reads only
+z, so a whole row of cells shares one bucket and its few slots (#305). The port takes the high half of MurmurHash3's
+`fmix64` of the key, so x counts too; where a value is cached never changes the value, only the hit rate. It also
+differs from Java in three ways, so that a value read through the cache always equals the one computed directly,
+whatever the seeds, threads or core count:
 
 - **Hits need the seed too.** Java's `LongCache` matches the `long` key alone, so a slot computed for one seed answers
   every other seed (the source's river-piece cache, keyed by cell, would hand one world's pieces to another). The port
@@ -2476,7 +2480,8 @@ JIT, then the jar's seedless class, whose output is the same) checks nine capaci
 slots per bucket, 1 to 64 buckets, non-power-of-two sizes): the bucket and slot counts, the bucket and slot of 10 to 10,245 keys each (the `long` extremes, keys `i << 16`
 and `i << 32`, negatives), and per pair three single-threaded traces of 4 lookups per key (seeds 0, 12345,
 `Integer.MIN_VALUE`) recording every factory call, listener call and result; the `CORES` factory gives the same traces
-as concurrency 6. The test replays them bit for bit. Rust tests cover what Java can't show deterministically: 16 threads
+as concurrency 6. The test replays them bit for bit, on a cache switched to Java's bucket choice (a test-only
+constructor); another test checks that the mixed choice spreads a block of tile keys over every bucket. Rust tests cover what Java can't show deterministically: 16 threads
 on 48 colliding keys and three seeds always get the directly computed value, values held across evictions stay intact,
 one key under contention is computed once, a panicking function leaves the slot and the listener alone, and the
 listener runs outside the lock.
