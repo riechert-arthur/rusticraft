@@ -277,7 +277,9 @@ impl WorldgenOverrides {
     /// level `level` has with these packs, resolved as [`level_height`](Self::level_height)
     /// resolves it. `None` when no pack gives the level a type, or the packs' type
     /// leaves the attribute out (or gives it a value that is no number): the level
-    /// keeps the vanilla type's value.
+    /// keeps the vanilla type's value. That includes the modifier form vanilla's
+    /// `EnvironmentAttributeMap.Entry` codec also accepts (`{"modifier": "add",
+    /// "argument": 10}`, applied to the 192.33 default), which this doesn't evaluate.
     pub fn level_cloud_height(&self, level: &str) -> Option<f32> {
         let ty = match self.level_type(level)? {
             Value::String(id) => {

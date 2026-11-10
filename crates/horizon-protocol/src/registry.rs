@@ -188,7 +188,8 @@ impl Dynamic {
                 _ => d.default_clock,
             };
             // EnvironmentAttributes.CLOUD_HEIGHT, a float the codec reads from
-            // any number.
+            // any number. A modifier entry (a compound: `modifier`, `argument`)
+            // isn't evaluated and keeps the default.
             if let Some(Tag::Compound(attributes)) = map.get(&JavaString::from("attributes")) {
                 match attributes.get(&JavaString::from("minecraft:visual/cloud_height")) {
                     Some(Tag::Float(v)) => d.cloud_height = f32::from_bits(*v),
