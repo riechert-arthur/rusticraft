@@ -337,6 +337,7 @@ impl NoiseGenerator {
                 .to_height_noise(base_noise, upper_raw);
             let alpha = (sample.continent_noise - BEACH) / (COAST - BEACH);
             sample.height_noise = lerp(lower, upper, alpha);
+            sample.coast_land_height = upper;
             sample.terrain_type = self.land.terrain(blender).clone();
         }
         Ok(())

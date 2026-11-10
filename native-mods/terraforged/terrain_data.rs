@@ -204,6 +204,9 @@ pub struct NoiseSample {
     ///
     /// [`RiverCarver::carve_with_erosion`]: super::terraforged_continent_carver::RiverCarver::carve_with_erosion
     pub water_distance: f32,
+    /// Not TerraForged's (Horizon's `coastal_landforms`): the land's height noise that `getBlend` lerps the coast band
+    /// (`BEACH..COAST`) up to from the sea level; 0 elsewhere. Nothing TerraForged computes reads it.
+    pub coast_land_height: f32,
 }
 
 impl NoiseSample {
@@ -217,6 +220,7 @@ impl NoiseSample {
             river_noise: 1.0,
             terrain_type: terrains.get_by_id(0),
             water_distance: 1.0,
+            coast_land_height: 0.0,
         }
     }
 

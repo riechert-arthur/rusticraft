@@ -2017,9 +2017,24 @@ mod tests {
         );
     }
 
+    /// The same with `coastal_landforms` (and `eroded_far_terrain`) on, around a cliff coast: the far-decoration
+    /// pipelines cut the same cliffs, lay the same flats and turn the same beaches to stony shores as the level's.
+    #[test]
+    fn far_pipelines_make_the_level_chunks_with_coastal_landforms() {
+        far_pipelines_make_the_level_chunks(
+            300_000_300,
+            Settings {
+                coastal_landforms: true,
+                eroded_far_terrain: true,
+                ..terraforged_settings::FAITHFUL
+            },
+        );
+    }
+
     /// The body of the tests above: the live pipelines of `seed` are built with `settings`. The chunks compared are
-    /// around (5, -3), or with `altitude_climate` around the highest point of plains or a colder biome on a 64-block
-    /// grid over 3,000 x 3,000 blocks, so that the snow line and the treeline are in them.
+    /// around (5, -3), with `altitude_climate` around the highest point of plains or a colder biome on a 64-block
+    /// grid over 3,000 x 3,000 blocks, so that the snow line and the treeline are in them, and with `coastal_landforms`
+    /// around the first point of a 128-block grid over 16,000 x 16,000 blocks in the coast band of a full cliff.
     fn far_pipelines_make_the_level_chunks(seed: i64, settings: Settings) {
         use super::super::terraforged_generator_facade::live_generator;
         let Some(data) = data() else { return };
@@ -2064,6 +2079,28 @@ mod tests {
                 .max()
                 .unwrap();
             assert!(height > 200, "{height} at {x} {z}");
+            ChunkPos::new(x >> 4, z >> 4)
+        } else if settings.coastal_landforms {
+            use super::super::terraforged_biome_sampler::{BEACH, COAST};
+            let noise = level.generator.noise_generator();
+            let seed = level.generator.seed();
+            let coasts = super::super::terraforged_coastal_landforms::Coasts::new(
+                seed,
+                noise.levels().noise_levels,
+            );
+            let (x, z) = (-64..64)
+                .flat_map(|i| (-64..64).map(move |j| (i * 128, j * 128)))
+                .find(|&(x, z)| {
+                    let mut sample = super::super::terraforged_terrain_data::NoiseSample::new(
+                        &noise.continent().context().terrain,
+                    );
+                    noise
+                        .sample(seed, x, z, &mut sample, &mut noise.blender_resource())
+                        .unwrap();
+                    (BEACH..COAST).contains(&sample.continent_noise)
+                        && coasts.landform(x, z, None).cliff > 0.9
+                })
+                .expect("a cliff coast");
             ChunkPos::new(x >> 4, z >> 4)
         } else {
             ChunkPos::new(5, -3)
@@ -3624,6 +3661,159 @@ mod tests {
             ores_on * 10 >= ores_off * 8 && ores_off > 0,
             "{ores_off} {ores_on}"
         );
+    }
+
+    /// `coastal_landforms` on seed 777, at a cliff coast (-3693, -5947) and a sheltered one (-5757, -2875), 32x32
+    /// columns each: the cliff stands up to 30 blocks over the faithful shore, as a steep face, with stony shores on
+    /// its top where the faithful shore has beaches; the flat lays more of the sea floor one block under the water;
+    /// structures' base heights stay those of the filled chunks, and chunks are the same on 6 threads in rotated
+    /// orders.
+    #[test]
+    #[ignore = "slow in debug: run with --profile fast --include-ignored"]
+    fn coastal_landforms_cut_cliffs_and_lay_flats() {
+        let Some(data) = data() else { return };
+        let make = |on| {
+            terraforged_settings::set_for_thread(Some(Settings {
+                coastal_landforms: on,
+                ..terraforged_settings::FAITHFUL
+            }));
+            let pipeline = terraforged(&data, 777, false);
+            terraforged_settings::set_for_thread(None);
+            pipeline
+        };
+        let ((off, _), (on, overworld)) = (make(false), make(true));
+        let height = |p: &TerraForgedPipeline, x, z| {
+            p.generator
+                .base_height(x, z, TerraHeightmap::OceanFloorWorldgen)
+                .unwrap()
+        };
+        let biome = |p: &TerraForgedPipeline, x, z| {
+            let sampler = p.surface_sampler();
+            data.biome_name(p.biome_at(&sampler, x, z).unwrap())
+                .to_owned()
+        };
+        let area = |x0: i32, z0: i32| {
+            (0..32).flat_map(move |i| (0..32).map(move |j| (x0 - 16 + i, z0 - 16 + j)))
+        };
+        // The cliff.
+        let (mut raised, mut steep_off, mut steep_on) = (0i32, 0i32, 0i32);
+        let (mut beaches, mut stony) = (0, 0);
+        for (x, z) in area(-3693, -5947) {
+            let (a, b) = (height(&off, x, z), height(&on, x, z));
+            raised = raised.max(b - a);
+            steep_off = steep_off.max(
+                (height(&off, x + 1, z) - a)
+                    .abs()
+                    .max((height(&off, x, z + 1) - a).abs()),
+            );
+            steep_on = steep_on.max(
+                (height(&on, x + 1, z) - b)
+                    .abs()
+                    .max((height(&on, x, z + 1) - b).abs()),
+            );
+            if biome(&off, x, z) == "minecraft:beach" {
+                beaches += 1;
+                stony += usize::from(biome(&on, x, z) == "minecraft:stony_shore");
+            }
+        }
+        eprintln!(
+            "COAST cliff raised {raised}, steepest step off {steep_off} on {steep_on}, beaches {beaches} stony {stony}"
+        );
+        assert!((15..=31).contains(&raised), "{raised}");
+        assert!(
+            steep_on >= 4 && steep_on > 2 * steep_off.max(1),
+            "{steep_off} {steep_on}"
+        );
+        assert!(
+            beaches > 0 && stony * 10 >= beaches * 9,
+            "{beaches} {stony}"
+        );
+        // The flat: sea floor one block under the sea (water up to y 62).
+        let awash = |p: &TerraForgedPipeline| {
+            area(-5757, -2875)
+                .filter(|&(x, z)| height(p, x, z) == 62)
+                .count()
+        };
+        let (flat_off, flat_on) = (awash(&off), awash(&on));
+        eprintln!("COAST flat floor at y 61: off {flat_off} on {flat_on}");
+        assert!(flat_on > flat_off + 200, "{flat_off} {flat_on}");
+        // The chunks: their ground is the base height structures read, and threads don't change them. The ground is
+        // the top block that is not air, water or a frozen ocean's iceberg (vanilla's `frozenOceanExtension` stacks
+        // packed ice and snow blocks on the sea floor in the surface stage, as on any frozen ocean; base heights, like
+        // vanilla's `getBaseHeight`, read the terrain under them). The threads compare the whole top, icebergs too.
+        let top_where = |chunk: &ProtoChunk, x: i32, z: i32, skip: &[&str]| {
+            (chunk.terrain.min_y()..chunk.terrain.min_y() + chunk.terrain.height())
+                .rev()
+                .find(|&y| !skip.contains(&chunk.block_name(x, y, z)))
+                .unwrap()
+        };
+        let (open, ground) = (
+            ["minecraft:air", "minecraft:water"].as_slice(),
+            [
+                "minecraft:air",
+                "minecraft:water",
+                "minecraft:packed_ice",
+                "minecraft:snow_block",
+            ]
+            .as_slice(),
+        );
+        // An iceberg can also replace the floor's own top blocks, so columns holding one are left out of the
+        // base-height check (counted, and few); every other column must match exactly.
+        let mut worker = overworld.worker();
+        let chunks = [(-231, -372), (-231, -371), (-360, -180), (-359, -180)];
+        let mut icebergs = 0;
+        let fresh: Vec<Vec<i32>> = chunks
+            .iter()
+            .map(|&(cx, cz)| {
+                let chunk = worker.generate_proto(ChunkPos::new(cx, cz)).unwrap();
+                (0..256)
+                    .map(|i| {
+                        let (x, z) = (cx * 16 + i % 16, cz * 16 + i / 16);
+                        let column = |y0: i32, y1: i32| {
+                            (y0..y1)
+                                .map(|y| format!("{y}:{}", chunk.block_name(x & 15, y, z & 15)))
+                                .collect::<Vec<_>>()
+                        };
+                        let iceberg = (chunk.terrain.min_y()
+                            ..chunk.terrain.min_y() + chunk.terrain.height())
+                            .any(|y| ground[2..].contains(&chunk.block_name(x & 15, y, z & 15)));
+                        let (floor, base) =
+                            (top_where(&chunk, x & 15, z & 15, ground), height(&on, x, z));
+                        if iceberg {
+                            icebergs += 1;
+                        } else {
+                            assert_eq!(
+                                floor + 1,
+                                base,
+                                "{x} {z}: {:?}",
+                                column(floor.min(base) - 3, floor.max(base) + 3)
+                            );
+                        }
+                        top_where(&chunk, x & 15, z & 15, open)
+                    })
+                    .collect()
+            })
+            .collect();
+        eprintln!("COAST iceberg columns left out: {icebergs} of 1024");
+        assert!(icebergs < 256, "{icebergs}");
+        std::thread::scope(|scope| {
+            for thread in 0..6 {
+                let (overworld, fresh, top_where) = (&overworld, &fresh, &top_where);
+                scope.spawn(move || {
+                    let mut worker = overworld.worker();
+                    let mut order: Vec<usize> = (0..chunks.len()).collect();
+                    order.rotate_left(thread % chunks.len());
+                    for i in order {
+                        let (cx, cz) = chunks[i];
+                        let chunk = worker.generate_proto(ChunkPos::new(cx, cz)).unwrap();
+                        let tops: Vec<i32> = (0..256)
+                            .map(|k| top_where(&chunk, k % 16, k / 16, open))
+                            .collect();
+                        assert_eq!(tops, fresh[i]);
+                    }
+                });
+            }
+        });
     }
 
     /// What a decorated chunk holds on top: per column, its top block (first not air from the level's top down), the
