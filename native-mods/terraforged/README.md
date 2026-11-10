@@ -3194,9 +3194,9 @@ rustc --edition 2024 --test native-mods/terraforged/engine.rs -o /tmp/terraforge
 /tmp/terraforged-engine-tests
 ```
 
-The mixin pins Rusticraft commit `1b6e55d4f3bd14079551bcad173d0fac8f8225bb`, a `main` commit rather than a Nightly:
-no Nightly is close enough (the nearest earlier one, `nightly-source/2026-10-31-d91cab6`, is 795 commits older and
-`generator.rs` differs by 150 lines). The pin moves to a Nightly when the series is rebased onto one.
+The mixin pins Rusticraft commit `3c635021465530dc14aaf219e4f8ebae5caef757` (#281's merge), a `main` commit rather than a Nightly:
+no Nightly is close enough (the nearest earlier one, `nightly-source/2026-10-31-d91cab6`, is 1911 commits older and
+`generator.rs` differs by 73 lines). The pin moves to a Nightly when the series is rebased onto one.
 
 Translation inputs are TerraForged commit `6dd607ebfd41a3b7274e090b1f2cf565d53d1d44` and Engine 0.3.0 bytecode
 shaded into the official `TerraForged-1.18.2-0.3.1-alpha-2.jar`. Tests compare raw `f32` bits with
