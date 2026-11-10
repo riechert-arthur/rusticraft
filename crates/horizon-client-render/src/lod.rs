@@ -1251,19 +1251,7 @@ impl Lod {
                     elevation,
                     self.reduced_detail,
                 );
-                // After a teleport this drops every tile's samples: thousands of
-                // tiles of 256 columns, freed one span list at a time, took the
-                // frame 125 ms. They are freed on a thread of their own.
-                let mut gone = Vec::new();
-                self.ready.retain(|key, samples| {
-                    let keep = self.plan.nodes.contains(key);
-                    if !keep {
-                        gone.push(Arc::clone(samples));
-                    }
-                    keep
-                });
-                let count = gone.len();
-                crate::chunk::free_columns(gone, count);
+                drop_unplanned(&mut self.ready, &self.plan);
                 self.detail_masks
                     .retain(|key, _| self.plan.nodes.contains(key));
                 self.replanned = true;
@@ -1634,6 +1622,23 @@ impl Drop for Lod {
         }
     }
 }
+/// Removes the tiles `plan` no longer holds from `ready`. After a teleport that
+/// is every tile: thousands of tiles of 256 columns, freed one span list at a
+/// time, took the frame 125 ms. Their samples are freed on a thread of their
+/// own (`chunk::free_columns`); a tile a mesh job still holds lives on there.
+fn drop_unplanned(ready: &mut FxHashMap<TileKey, Arc<Vec<Column>>>, plan: &Plan) -> usize {
+    let mut gone = Vec::new();
+    ready.retain(|key, samples| {
+        let keep = plan.nodes.contains(key);
+        if !keep {
+            gone.push(Arc::clone(samples));
+        }
+        keep
+    });
+    let count = gone.len();
+    crate::chunk::free_columns(gone, count);
+    count
+}
 /// Fine retiring stand-ins need actual column detail before `Plan::replaces`
 /// can release their normal meshes. The caller keeps the usual 32-column
 /// request budget and waits for the replacement mesh before changing cutout.
@@ -1860,6 +1865,49 @@ mod tests {
         selected.clear();
         assert!(plan.select(parent, &ready, &mut selected));
         assert_eq!(selected, parent.children());
+    }
+    /// Whether `held` becomes the samples' only owner within 10 s: the freeing
+    /// thread drops its share of a dropped tile when it gets to it.
+    fn sole_owner_soon(held: &Arc<Vec<Column>>) -> bool {
+        let start = std::time::Instant::now();
+        while Arc::strong_count(held) > 1 {
+            if start.elapsed() > std::time::Duration::from_secs(10) {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        true
+    }
+    #[test]
+    fn a_replan_drops_only_unplanned_tiles_and_spares_held_samples() {
+        let plan = Plan::new([8, 8], 2, 64);
+        let planned: Vec<TileKey> = plan.nodes.iter().copied().take(3).collect();
+        let far = |x| TileKey {
+            x: 1_000_000 + x,
+            z: 0,
+            level: 0,
+        };
+        let samples = || Arc::new(vec![Column::default(); CELLS * CELLS]);
+        // 100 unplanned tiles: enough for the freeing thread (`free_columns` takes 64 or more).
+        let mut ready: FxHashMap<TileKey, Arc<Vec<Column>>> = (0..100)
+            .map(|x| (far(x), samples()))
+            .chain(planned.iter().map(|&key| (key, samples())))
+            .collect();
+        let held = Arc::clone(&ready[&far(0)]);
+        let kept = Arc::clone(&ready[&planned[0]]);
+        assert_eq!(drop_unplanned(&mut ready, &plan), 100);
+        assert_eq!(ready.len(), planned.len());
+        assert!(planned.iter().all(|key| ready.contains_key(key)));
+        // The kept tile isn't cloned (its next edit stays in place); the held one stays whole.
+        assert_eq!(Arc::strong_count(&kept), 2);
+        assert!(sole_owner_soon(&held));
+        assert_eq!(held.len(), CELLS * CELLS);
+        // A few dropped tiles are freed in place.
+        let one = samples();
+        ready.insert(far(0), Arc::clone(&one));
+        assert_eq!(drop_unplanned(&mut ready, &plan), 1);
+        assert_eq!(Arc::strong_count(&one), 1);
+        assert_eq!(drop_unplanned(&mut ready, &plan), 0);
     }
     #[test]
     fn a_shrunk_render_distance_keeps_columns_until_their_planned_tiles_are_ready() {
@@ -2545,7 +2593,8 @@ mod tests {
         lod.update([1e6, 64., 1e6], 2, 64, Some(FxHashSet::default()));
         assert!(lod.ready.keys().all(|key| lod.plan.nodes.contains(key)));
         assert!(!lod.ready.contains_key(&first));
-        assert_eq!((Arc::strong_count(&held), held.len()), (1, CELLS * CELLS));
+        assert!(sole_owner_soon(&held));
+        assert_eq!(held.len(), CELLS * CELLS);
         Ok(())
     }
 
