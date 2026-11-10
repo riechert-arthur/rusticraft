@@ -2746,12 +2746,13 @@ mod tests {
         );
     }
 
-    /// A pipeline of seed 7 with `eroded_far_terrain` on.
-    fn eroding(data: &Arc<GeneratorData>) -> (Arc<TerraForgedPipeline>, OverworldGenerator) {
-        terraforged_settings::set_for_thread(Some(Settings {
-            eroded_far_terrain: true,
-            ..terraforged_settings::FAITHFUL
-        }));
+    /// A pipeline of seed 7 with `settings` (`eroded_far_terrain` on).
+    fn eroding(
+        data: &Arc<GeneratorData>,
+        settings: Settings,
+    ) -> (Arc<TerraForgedPipeline>, OverworldGenerator) {
+        assert!(settings.eroded_far_terrain);
+        terraforged_settings::set_for_thread(Some(settings));
         let built = terraforged(data, 7, false);
         terraforged_settings::set_for_thread(None);
         built
@@ -2768,10 +2769,41 @@ mod tests {
     /// heights are the chunks' OCEAN_FLOOR_WG and WORLD_SURFACE_WG heights, and both ways give the same tile.
     #[test]
     fn eroded_far_tiles_stand_on_the_chunks() {
-        let Some(data) = data() else { return };
+        let _ = eroded_far_tiles_stand_on_the_chunks_with(Settings {
+            eroded_far_terrain: true,
+            ..terraforged_settings::FAITHFUL
+        });
+    }
+
+    /// The same with `rock_strata` on: the far erosion thread erodes its regions with the strata's hardness, as the
+    /// chunks' fill does, so the far tiles still stand on the chunks' ground, which the hardness moved.
+    #[test]
+    fn eroded_far_tiles_stand_on_the_chunks_with_rock_strata() {
+        let faithful = eroded_far_tiles_stand_on_the_chunks_with(Settings {
+            eroded_far_terrain: true,
+            ..terraforged_settings::FAITHFUL
+        });
+        let strata = eroded_far_tiles_stand_on_the_chunks_with(Settings {
+            eroded_far_terrain: true,
+            rock_strata: true,
+            ..terraforged_settings::FAITHFUL
+        });
+        let moved = faithful.iter().zip(&strata).filter(|(a, b)| a != b).count();
+        eprintln!("the hardness moved {moved} of 64 far columns");
+        assert!(
+            moved > 0,
+            "the hardness moved no column: the test proves nothing here"
+        );
+    }
+
+    /// The body of the tests above; the refined tile's heights.
+    fn eroded_far_tiles_stand_on_the_chunks_with(settings: Settings) -> Vec<i32> {
+        let Some(data) = data() else {
+            return Vec::new();
+        };
         let column = |index: usize| (50 + (index % 8) as i32 * 4, -30 + (index / 8) as i32 * 4);
         // The far thread: the first tile is un-eroded and queues the region, the thread builds it.
-        let (far, far_overworld) = eroding(&data);
+        let (far, far_overworld) = eroding(&data, settings);
         let mut far_worker = far_overworld.worker();
         let first = fine_tile(&mut far_worker);
         for (index, (sample, _)) in first.iter().enumerate() {
@@ -2810,7 +2842,7 @@ mod tests {
             "far terrain built no fill region"
         );
         // The chunks: their own fill builds the region, which far tiles of their pipeline then read.
-        let (level, level_overworld) = eroding(&data);
+        let (level, level_overworld) = eroding(&data, settings);
         let mut level_worker = level_overworld.worker();
         let chunks: Vec<ProtoChunk> = [(3, -2), (4, -2), (3, -1), (4, -1)]
             .into_iter()
@@ -2857,6 +2889,10 @@ mod tests {
             moved > 0,
             "erosion moved no column: the test proves nothing here"
         );
+        refined
+            .iter()
+            .map(|(sample, _)| sample.unwrap().height)
+            .collect()
     }
 
     /// Far terrain's cost, by part and per tile (run with `--ignored --nocapture` in an optimized build).

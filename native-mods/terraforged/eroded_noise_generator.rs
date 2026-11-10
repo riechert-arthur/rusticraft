@@ -282,6 +282,7 @@ impl ErodedNoiseGenerator {
             erosion: Arc::clone(&self.erosion),
             generator: Arc::clone(&self.generator),
             smoothing: self.smoothing,
+            strata: self.strata,
         });
     }
 
@@ -466,7 +467,8 @@ fn noise_coord(generator: &NoiseGenerator, coord: i32) -> f32 {
 }
 
 /// `buildRegion`'s eroded map ([`ErodedNoiseGenerator::build_region`]), handing the raw map to `raw` before erosion.
-/// With `strata` (Horizon's `rock_strata`) the erosion is [`ErosionFilter::apply_region_with_hardness`].
+/// With `strata` (Horizon's `rock_strata`) the erosion is [`ErosionFilter::apply_region_with_hardness`]; the far
+/// erosion ([`FarErosion`]) builds its regions here too, so far tiles get the chunks' heights either way.
 #[allow(clippy::too_many_arguments)]
 fn eroded_map(
     generator: &NoiseGenerator,
@@ -622,6 +624,8 @@ struct RegionSource {
     erosion: Arc<ErosionFilter>,
     generator: Arc<NoiseGenerator>,
     smoothing: HeightmapSmoothingSettings,
+    /// `rock_strata`: the far regions erode as the chunks' do.
+    strata: bool,
 }
 
 impl FarErosion {
@@ -695,7 +699,7 @@ impl FarErosion {
                             &source.generator,
                             &source.erosion,
                             source.smoothing,
-                            false,
+                            source.strata,
                             seed,
                             region_x,
                             region_z,

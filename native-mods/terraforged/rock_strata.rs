@@ -14,8 +14,8 @@ use super::terraforged_terrain_blend_util::random;
 use crate::heightmap::HeightmapType;
 use crate::registry::{BlockRegistry, BlockStateId};
 
-/// `SOIL_MARGIN`: the bands stop this many blocks under the column's OCEAN_FLOOR_WG height, so the surface rules
-/// still find plain stone to dress.
+/// `SOIL_MARGIN`: the bands stop this many blocks under the column's OCEAN_FLOOR_WG height (its top block over the
+/// floor), so the surface rules still find plain stone to dress.
 pub const SOIL_MARGIN: i32 = 8;
 /// `DEEPSLATE_TOP`: the lowest banded block (the surface rules turn stone into deepslate below it).
 pub const DEEPSLATE_TOP: i32 = 9;
@@ -198,9 +198,10 @@ pub fn faithful_rock(
         .rock_at(y.wrapping_add(tilt(seed, x, z)))
 }
 
-/// `apply`'s loop bounds for a column whose OCEAN_FLOOR_WG height (the first free block over the floor) is
-/// `floor_height`, in a chunk from `min_y`: from `floor_height - SOIL_MARGIN` down to `max(min_y, DEEPSLATE_TOP)`,
-/// or none where that top isn't above the bottom. Only plain stone in it is replaced.
+/// `apply`'s loop bounds for a column whose `chunk.getHeight(OCEAN_FLOOR_WG, …)` is `floor_height` (vanilla's
+/// `ChunkAccess.getHeight`: the heightmap's first free block minus 1, the column's top block), in a chunk from
+/// `min_y`: from `floor_height - SOIL_MARGIN` down to `max(min_y, DEEPSLATE_TOP)`, or none where that top isn't
+/// above the bottom. Only plain stone in it is replaced.
 pub fn banded_range(floor_height: i32, min_y: i32) -> Option<std::ops::RangeInclusive<i32>> {
     let top = floor_height.wrapping_sub(SOIL_MARGIN);
     let bottom = min_y.max(DEEPSLATE_TOP);
@@ -362,7 +363,10 @@ pub fn apply<B: TerrainBlockStates>(
             .heightmap(HeightmapType::OceanFloorWg)
             .ok_or(TerrainError::InvalidState)?;
         for (i, floor) in floors.iter_mut().enumerate() {
-            *floor = heights.first_available((i & 15) as i32, (i >> 4) as i32)?;
+            // `chunk.getHeight(OCEAN_FLOOR_WG, dx, dz)`: `getFirstAvailable - 1`.
+            *floor = heights
+                .first_available((i & 15) as i32, (i >> 4) as i32)?
+                .wrapping_sub(1);
         }
     }
     let area = Strata::new(seed).area(start_x, start_z, 16, 16);

@@ -312,8 +312,9 @@ don't generate, so they need none.
   The bands start 8 blocks under the floor, so they show on cliffs, in caves and in ravines, not on gentle
   ground; TerraForged's `Surface` still turns steep slopes to plain stone at the top, and snow
   (`altitude_climate`), ground cover (`realistic_vegetation`) and deposits (`erosion_deposits`) lie over them
-  as before. Distant tiles and `/tf preview` show neither the bands nor their erosion. Off, generation is
-  unchanged.
+  as before. Distant tiles never show the bands; with `eroded_far_terrain` the finest ones stand on the
+  strata's eroded ground, the chunks' own (the far erosion thread erodes with the same hardness), and otherwise on
+  the un-eroded ground as before. `/tf preview` shows neither. Off, generation is unchanged.
 
 ## Layers
 
