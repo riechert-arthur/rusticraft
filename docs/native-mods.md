@@ -726,7 +726,8 @@ its Identifier order, sent with their data as a pack's entries are; and the comm
 its suggestions from the registry the server sent, as `ClientSuggestionProvider` does. A world the mods
 add nothing to keeps 26.3's table, registry and commands exactly. A vanilla biome keeps its entry over a
 mod's of the same id. The generator reads a mod's biomes from its data pack. Saves and the network refer
-to biomes by name.
+to biomes by name. The client reads a mod biome's effects from its JSON's `attributes`, as 26.3 reads every
+biome's from the registry: its colours, water fog end, ambient particles, background music and ambient sounds.
 
 - Their colours, weather and mob spawns come from the JSON. Horizon reads a biome's water fog distance,
   ambient particles, ambience and music only from vanilla's own files, so a mod's biome gets the defaults
