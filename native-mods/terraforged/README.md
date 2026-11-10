@@ -16,9 +16,9 @@ TerraForged (vanilla world types keep 26.3's overworld):
 
 - terrain: continents, rivers, lakes, the 14 terrain graphs blended by `TerrainBlender`, and
   hydraulic erosion with 6dd607eb's `withErosion` settings and no heightmap smoothing
-  (`NoiseGenerator`, `ErodedNoiseGenerator`), also in Horizon's distant tiles (un-eroded, or eroded near
-  the player with the `eroded_far_terrain` setting); the
-  `height_scale` setting stretches it vertically;
+  (`NoiseGenerator`, `ErodedNoiseGenerator`), also in Horizon's distant tiles (un-eroded, or eroded
+  near the player with the `eroded_far_terrain` setting); the `height_scale` setting stretches it
+  vertically;
 - biomes: `ClimateNoise`, `BiomeMapManager`'s climate pools and `BiomeSampler`'s ocean, beach,
   river and lake overrides, also for `/locate biome`, plus TerraForged's own `terraforged:cave`
   and `terraforged:oak_forest` (`ModBiomes`), derived from the player's own 26.3 dripstone caves
@@ -88,8 +88,8 @@ Differences and gaps:
   the vanilla surface rule's top blocks, but from the un-eroded height: erosion's regions are too costly to
   build for distant tiles (about 20 s per wide tile), so far ground can sit a few blocks (about 2 on average,
   at most about 10) off the real chunks'. The `eroded_far_terrain` setting ([Settings](#settings)) gives the
-  finest tiles, near the player, the eroded ground once a background thread has built their regions. With Reduced far detail (Horizon's video setting, off by default) the
-  surface rule paints only the top two blocks of a far column instead of eight, so the sides of steep far
+  finest tiles, near the player, the eroded ground once a background thread has built their regions.
+  With Reduced far detail (Horizon's video setting, off by default) the surface rule paints only the top two blocks of a far column instead of eight, so the sides of steep far
   columns show stone under them (grey stripes on distant badlands slopes, which Full far detail paints in
   terracotta bands); heights, top blocks, water and biomes are unchanged. It saves 10–35% of a far tile's
   sampling; most of Reduced's speed comes from Horizon merging far tiles. Decorated far chunks
