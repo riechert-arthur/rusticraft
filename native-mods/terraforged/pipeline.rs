@@ -2092,12 +2092,27 @@ mod tests {
         );
     }
 
+    /// The same with `rain_shadow` on, around a column whose biome cell the shadow moves to another climate type
+    /// (level seed 777 + (295 << 32), so no other test's live pipeline shares it): the far-decoration pipelines read
+    /// the same moisture, through the rain-shadow cache they share with the level's noise, as the level's.
+    #[test]
+    fn far_pipelines_make_the_level_chunks_with_rain_shadow() {
+        far_pipelines_make_the_level_chunks(
+            777 + (295 << 32),
+            Settings {
+                rain_shadow: true,
+                ..terraforged_settings::FAITHFUL
+            },
+        );
+    }
+
     /// The body of the tests above: the live pipelines of `seed` are built with `settings`. The chunks compared are
     /// around (5, -3), with `flow_rivers` around a channel (see there), with `basin_erosion` alone around the first
     /// point of a 64-block grid over seed 777's valleys (x 600..1368, z -900..-132) cut by more than 10 blocks, with `altitude_climate` around the highest point of plains or a colder biome on a 64-block
     /// grid over 3,000 x 3,000 blocks, so that the snow line and the treeline are in them, with `glacial_landforms`
-    /// around a glaciated valley (see there), and with `coastal_landforms` alone around the first point of a 128-block
-    /// grid over 16,000 x 16,000 blocks in the coast band of a full cliff.
+    /// around a glaciated valley (see there), with `coastal_landforms` alone around the first point of a 128-block
+    /// grid over 16,000 x 16,000 blocks in the coast band of a full cliff, and with `rain_shadow` around a land column
+    /// whose climate type the shadow moves.
     fn far_pipelines_make_the_level_chunks(seed: i64, settings: Settings) {
         use super::super::terraforged_generator_facade::live_generator;
         let Some(data) = data() else { return };
@@ -2215,6 +2230,27 @@ mod tests {
                         && coasts.landform(x, z, None).cliff > 0.9
                 })
                 .expect("a cliff coast");
+            ChunkPos::new(x >> 4, z >> 4)
+        } else if settings.rain_shadow {
+            // The first land column on a 64-block grid over 3,072 x 3,072 blocks whose climate type the shadow moves.
+            use super::super::terraforged_biome_sampler::COAST;
+            use super::super::terraforged_current_biome_sampler::CurrentBiomeSampler;
+            let noise = level.generator.noise_generator();
+            let seed = level.generator.seed();
+            let faithful =
+                super::super::terraforged_generator_preset::build_noise_generator(noise.levels())
+                    .unwrap();
+            let (on, off) = (
+                CurrentBiomeSampler::new(noise),
+                CurrentBiomeSampler::new(&faithful),
+            );
+            let (x, z) = (-24..24)
+                .flat_map(|i| (-24..24).map(move |j| (i * 64, j * 64)))
+                .find(|&(x, z)| {
+                    let (a, b) = (on.get_sample(seed, x, z), off.get_sample(seed, x, z));
+                    a.noise.continent_noise >= COAST && a.climate_type != b.climate_type
+                })
+                .expect("a column the rain shadow moves");
             ChunkPos::new(x >> 4, z >> 4)
         } else {
             ChunkPos::new(5, -3)
