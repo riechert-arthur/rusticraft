@@ -491,9 +491,10 @@ carved, where a river or lake bed is an outlet at its water level, like the sea.
   `/locateterrain`'s search (TerraForged's `find`), which samples rivers at unscaled coordinates, as
   TerraForged does.
 - Purity: the channels near a 128-block patch are extracted together from the drainage map and kept in
-  a tile cache (1024 patches, least recently used; the lossy cache rebuilt them about twice each in
-  play, #305); every value is a function of the seed and the position. The map samples its own copy
-  of the noise, built the same way.
+  a tile cache (1024 patches, least recently used; even with #305's mixed buckets the lossy cache
+  rebuilt them about twice each in play; with Java's buckets a far sweep out to 4,096 blocks built
+  2,803 patches 3,377 times, where the tile cache builds each once); every value is a function of the seed and the
+  position. The map samples its own copy of the noise, built the same way.
 - With the other landform settings: the map samples the ground the distant tiles have, so with
   `coastal_landforms` it sees the coast's landform and with `glacial_landforms` the troughs. A channel
   then takes its water level from the ground the chunks have, not from ground that a tidal flat or
@@ -583,9 +584,11 @@ precipitation").
   ranges cast deeper shadows.
 - Cost and purity: one profile per biome cell (73 terrain samples, about 0.1 ms), memoised in a lossy
   cache of 4096 cells keyed by the cell and the seed; every biome query in the cell after the first
-  is a lookup. No drainage tiles: the spawn search, `/locate biome` and the maps query the climate
-  far and wide. A value is a function of the seed and the cell alone, so there are no seams; whole
-  cells change, so biome borders stay TerraForged's cell borders.
+  is a lookup (biomes every 32 blocks out to 2,048 blocks, four threads, build each of their 76 cells
+  once; before the bucket fix of #305 they built them 336 times). No drainage tiles: the spawn
+  search, `/locate biome` and the maps query the climate far and wide. A value is a function of the
+  seed and the cell alone, so there are no seams; whole cells change, so biome borders stay
+  TerraForged's cell borders.
 - With the other settings: the profile reads the raw height on purpose, so `flow_rivers`, `basin_erosion`,
   `coastal_landforms` and `glacial_landforms` don't move the shadow (and the climate stays free of their
   drainage tiles); `height_scale` does. The shadow changes moisture only: `glacial_landforms` reads the
