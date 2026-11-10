@@ -3113,7 +3113,7 @@ Commands (`commands.rs`, on Horizon's native command hooks) follow 6dd607eb's `T
 TerraForged one (its saved overworld generator), so other worlds keep vanilla's command tree; TerraForged registers them
 in every world. `/locateterrain` finds the player's level's generator as `GeneratorPreset.getGenerator` does: each
 TerraForged pipeline records its generator by level seed and dimension (`live_generator`, which answers with the
-world's first pipeline, the level's, before the far-decoration ones sharing its noise), so the Nether and the End
+newest pipeline that built its own noise, the level's, before the far-decoration ones sharing it), so the Nether and the End
 answer nothing, as in Java. The terrain is looked up with `TerrainType.get` (ignoring case), then `NoiseGenerator.find`
 searches from the player's block with the radius and `min(100, radius + 50)`; the answer (`Found terrain: … Distance: ….
 Teleport`, `Invalid terrain: …`, `Unable to locate terrain: …`) uses TerraForged's literal texts and colours, and the
