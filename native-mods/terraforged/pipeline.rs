@@ -2092,12 +2092,27 @@ mod tests {
         );
     }
 
+    /// The same with `rain_shadow` on, around a column whose biome cell the shadow moves to another climate type
+    /// (level seed 777 + (295 << 32), so no other test's live pipeline shares it): the far-decoration pipelines read
+    /// the same moisture, through the rain-shadow cache they share with the level's noise, as the level's.
+    #[test]
+    fn far_pipelines_make_the_level_chunks_with_rain_shadow() {
+        far_pipelines_make_the_level_chunks(
+            777 + (295 << 32),
+            Settings {
+                rain_shadow: true,
+                ..terraforged_settings::FAITHFUL
+            },
+        );
+    }
+
     /// The body of the tests above: the live pipelines of `seed` are built with `settings`. The chunks compared are
     /// around (5, -3), with `flow_rivers` around a channel (see there), with `basin_erosion` alone around the first
     /// point of a 64-block grid over seed 777's valleys (x 600..1368, z -900..-132) cut by more than 10 blocks, with `altitude_climate` around the highest point of plains or a colder biome on a 64-block
     /// grid over 3,000 x 3,000 blocks, so that the snow line and the treeline are in them, with `glacial_landforms`
-    /// around a glaciated valley (see there), and with `coastal_landforms` alone around the first point of a 128-block
-    /// grid over 16,000 x 16,000 blocks in the coast band of a full cliff.
+    /// around a glaciated valley (see there), with `coastal_landforms` alone around the first point of a 128-block
+    /// grid over 16,000 x 16,000 blocks in the coast band of a full cliff, and with `rain_shadow` around a land column
+    /// whose climate type the shadow moves.
     fn far_pipelines_make_the_level_chunks(seed: i64, settings: Settings) {
         use super::super::terraforged_generator_facade::live_generator;
         let Some(data) = data() else { return };
@@ -2215,6 +2230,27 @@ mod tests {
                         && coasts.landform(x, z, None).cliff > 0.9
                 })
                 .expect("a cliff coast");
+            ChunkPos::new(x >> 4, z >> 4)
+        } else if settings.rain_shadow {
+            // The first land column on a 64-block grid over 3,072 x 3,072 blocks whose climate type the shadow moves.
+            use super::super::terraforged_biome_sampler::COAST;
+            use super::super::terraforged_current_biome_sampler::CurrentBiomeSampler;
+            let noise = level.generator.noise_generator();
+            let seed = level.generator.seed();
+            let faithful =
+                super::super::terraforged_generator_preset::build_noise_generator(noise.levels())
+                    .unwrap();
+            let (on, off) = (
+                CurrentBiomeSampler::new(noise),
+                CurrentBiomeSampler::new(&faithful),
+            );
+            let (x, z) = (-24..24)
+                .flat_map(|i| (-24..24).map(move |j| (i * 64, j * 64)))
+                .find(|&(x, z)| {
+                    let (a, b) = (on.get_sample(seed, x, z), off.get_sample(seed, x, z));
+                    a.noise.continent_noise >= COAST && a.climate_type != b.climate_type
+                })
+                .expect("a column the rain shadow moves");
             ChunkPos::new(x >> 4, z >> 4)
         } else {
             ChunkPos::new(5, -3)
@@ -2760,6 +2796,71 @@ mod tests {
         assert_eq!(worker.find_closest_biome(&search(&missing, origin)), None);
         assert_eq!(pipeline.generator.cached_chunks(), 0);
     }
+    /// Horizon's `rain_shadow` moves biomes, and every biome reader agrees on where: chunks' noise biomes,
+    /// `/locate biome` and `/tf preview` read the same climate sampler.
+    #[test]
+    fn rain_shadow_biomes_agree_everywhere() {
+        let Some(data) = data() else { return };
+        terraforged_settings::set_for_thread(Some(Settings {
+            rain_shadow: true,
+            ..Settings::default()
+        }));
+        let (on, on_world) = terraforged(&data, 777, false);
+        terraforged_settings::set_for_thread(Some(Settings::default()));
+        let (off, _) = terraforged(&data, 777, false);
+        terraforged_settings::set_for_thread(None);
+        let (on_sampler, off_sampler) = (on.surface_sampler(), off.surface_sampler());
+        let moved: Vec<(i32, i32, BiomeId)> = (0..48 * 48)
+            .map(|i| (-6144 + (i % 48) * 256 + 4, -6144 + (i / 48) * 256 + 8))
+            .filter_map(|(x, z)| {
+                let biome = on.biome_at(&on_sampler, x, z)?;
+                (Some(biome) != off.biome_at(&off_sampler, x, z)).then_some((x, z, biome))
+            })
+            .collect();
+        eprintln!(
+            "rain shadow: {} of {} columns change biome",
+            moved.len(),
+            48 * 48
+        );
+        assert!(!moved.is_empty());
+        let mut worker = on_world.worker();
+        for &(x, z, biome) in moved.iter().take(4) {
+            let name = data.biome_name(biome).to_owned();
+            // The chunk's noise biome at the column's quart.
+            assert_eq!(
+                worker.noise_biomes(&[[x >> 2, 0, z >> 2]])[0].as_deref(),
+                Some(name.as_str())
+            );
+            // `/locate biome` from the column finds it there.
+            let only = |candidate: &str| candidate == name;
+            let found = worker.find_closest_biome(&BiomeSearch {
+                allowed: &only,
+                origin: [x, 80, z],
+                radius: 64,
+                horizontal: 32,
+                vertical: 64,
+                min_y: -64,
+                max_y: 319,
+            });
+            assert!(
+                found
+                    .as_ref()
+                    .is_some_and(|(found, [fx, _, fz])| *found == name && (*fx, *fz) == (x, z)),
+                "{x} {z}: {name} vs {found:?}"
+            );
+            // `/tf preview` colours by the same sample.
+            let sampler = super::super::terraforged_current_biome_sampler::CurrentBiomeSampler::new(
+                on.generator.noise_generator(),
+            );
+            let seed = on.generator.seed();
+            let sample = sampler.get_sample(seed, x, z);
+            assert_eq!(
+                super::super::terraforged_preview::world_color(&sampler, seed, x as f32, z as f32),
+                super::super::terraforged_preview::biome_color(&sample, 0.2)
+            );
+        }
+    }
+
     /// Distant tiles show the chunks' ground: the biome the chunk stores at the surface, the un-eroded height (within
     /// erosion's few blocks of the filled ground), the surface rule's top block, and the level's clipping; sampling
     /// them creates no terrain-cache entry and builds no erosion region.

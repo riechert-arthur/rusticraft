@@ -504,6 +504,13 @@ source = "basin_erosion.rs"
 visibility = "pub"
 
 [[module]]
+id = "rain_shadow"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_rain_shadow"
+source = "rain_shadow.rs"
+visibility = "pub"
+
+[[module]]
 id = "settings"
 file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_settings"

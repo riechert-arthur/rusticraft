@@ -1,7 +1,7 @@
 // Horizon's drainage map (in neither TerraForged tree), for the realistic-terrain settings (#277): where water
 // flows over the un-eroded terrain, on two fixed grids. Only the settings built on it read it (flow-routed rivers,
-// `terraforged_flow_rivers`; basin erosion, `terraforged_basin_erosion`; rain shadow to come), each behind its own
-// setting.
+// `terraforged_flow_rivers`; basin erosion, `terraforged_basin_erosion`), each behind its own setting. The rain shadow
+// (`terraforged_rain_shadow`) doesn't: the climate must stay cheap.
 //
 // Clean-room, from published methods: depressions are filled and flats routed by priority-flood (Barnes, Lehman &
 // Mulla 2014, "Priority-Flood: An optimal depression-filling and watershed-labeling algorithm"), directions are

@@ -356,8 +356,9 @@ render -2147483648 16 16 3f400000 c1080000 40400000 5d3612e4c3b7ce25 12x12
 
     /// The Create World map of seed 777 is `/tf preview`'s picture of the same world: the generator its pipeline
     /// builds (preset levels, `height_scale`), at its runtime seed. The bundled preset's map reads only climate,
-    /// continent and river noise, so no setting changes it (`height_scale` stretches heights, not the map;
-    /// `flow_rivers` and `basin_erosion` change heights, not the climate sample).
+    /// continent and river noise, so no setting but `rain_shadow` changes it (`height_scale` stretches heights, not the
+    /// map; `flow_rivers` and `basin_erosion` change heights, not the climate sample). With `rain_shadow` the map is
+    /// still the made world's preview: both read the same climate sampler.
     #[test]
     fn new_world_maps_are_the_world_s_preview() {
         let view = View {
@@ -401,6 +402,7 @@ render -2147483648 16 16 3f400000 c1080000 40400000 5d3612e4c3b7ce25 12x12
                 glacial_landforms: true,
                 flow_rivers: true,
                 basin_erosion: true,
+                rain_shadow: false,
             },
         ] {
             assert_eq!(
@@ -416,8 +418,25 @@ render -2147483648 16 16 3f400000 c1080000 40400000 5d3612e4c3b7ce25 12x12
         );
         assert_ne!(
             new_world_map(778, Settings::default(), view, &|| false).unwrap(),
-            Some(made)
+            Some(made.clone())
         );
+        // `rain_shadow` moves moisture, so the map changes, and it is the made world's preview.
+        let shadow = Settings {
+            rain_shadow: true,
+            ..Settings::default()
+        };
+        set_for_thread(Some(shadow));
+        let world = build(levels);
+        set_for_thread(None);
+        let world = world.unwrap();
+        world.capture_seed(777);
+        let sampler = CurrentBiomeSampler::new(world.noise_generator());
+        let made_shadow = view.render(|x, y| world_color(&sampler, world.seed(), x, y));
+        assert_eq!(
+            new_world_map(777, shadow, view, &|| false).unwrap(),
+            Some(made_shadow.clone())
+        );
+        assert_ne!(made_shadow, made);
     }
 
     #[test]

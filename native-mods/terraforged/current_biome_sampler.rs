@@ -28,11 +28,14 @@
 // continent noise to its `ClimateNoise`. MIT License, Copyright (c) 2021 TerraForged (above).
 
 use super::{
-    terraforged_biome_sampler::ClimateSample, terraforged_current_climate::CurrentClimateNoise,
+    terraforged_biome_sampler::ClimateSample,
+    terraforged_current_climate::{BiomeCell, CurrentClimateNoise},
     terraforged_noise_generator::NoiseGenerator,
 };
 
-/// `IBiomeSampler.Sampler`: the climate sample of a block column. Block coordinates are scaled by the noise levels'
+/// `IBiomeSampler.Sampler`: the climate sample of a block column. With Horizon's `rain_shadow` on the generator
+/// ([`NoiseGenerator::rain_shadow`]), each biome cell's moisture is TerraForged's times the cell's rain-shadow factor.
+/// Block coordinates are scaled by the noise levels'
 /// frequency (`x * levels.frequency`, an int-to-float conversion then a float product); [`Self::get_sample`] fills a
 /// fresh sample with the continent ([`ContinentNoise::sample_continent`]), then the rivers
 /// ([`ContinentNoise::sample_river`]), then the climate ([`CurrentClimateNoise::sample`]), all at the runtime seed.
@@ -87,7 +90,7 @@ impl<'a> CurrentBiomeSampler<'a> {
         let mut sample = ClimateSample::new(&continent.context().terrain);
         continent.sample_continent(seed, x, z, &mut sample.noise);
         continent.sample_river(seed, x, z, &mut sample.noise);
-        self.climate.sample(seed, x, z, &mut sample);
+        self.climate(seed, x, z, &mut sample);
         sample
     }
 
@@ -101,7 +104,33 @@ impl<'a> CurrentBiomeSampler<'a> {
     /// `sample(seed, x, z, sample)`: the climate alone, into the caller's sample (its terrain fields stay).
     pub fn sample(&self, seed: i32, x: i32, z: i32, sample: &mut ClimateSample) {
         let (x, z) = self.coordinates(x, z);
-        self.climate.sample(seed, x, z, sample);
+        self.climate(seed, x, z, sample);
+    }
+
+    /// The biome cell block (`x`, `z`) takes its climate from.
+    pub fn cell(&self, seed: i32, x: i32, z: i32) -> BiomeCell {
+        let (x, z) = self.coordinates(x, z);
+        let mut sample = ClimateSample::new(&self.noise.continent().context().terrain);
+        let mut found = None;
+        self.climate
+            .sample_with(seed, x, z, &mut sample, |cell, moisture| {
+                found = Some(cell);
+                moisture
+            });
+        found.expect("the climate always reports its cell")
+    }
+
+    /// The climate at noise coordinates: TerraForged's, its moisture under Horizon's `rain_shadow` if the generator
+    /// has it (one factor per biome cell, from the un-eroded terrain upwind; no drainage tiles).
+    fn climate(&self, seed: i32, x: f32, z: f32, sample: &mut ClimateSample) {
+        match self.noise.rain_shadow() {
+            None => self.climate.sample(seed, x, z, sample),
+            Some(shadow) => self
+                .climate
+                .sample_with(seed, x, z, sample, |cell, moisture| {
+                    shadow.moisture(self.noise, seed, cell, moisture)
+                }),
+        }
     }
 
     fn coordinates(&self, x: i32, z: i32) -> (f32, f32) {
