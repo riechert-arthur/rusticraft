@@ -30,6 +30,7 @@
 use super::{
     terraforged_concurrent::{CacheEntry, ThreadPool},
     terraforged_eroded_noise_generator::ErodedNoiseGenerator,
+    terraforged_pipeline::FAR_DECORATION_THREAD,
     terraforged_terrain_data::{FloatMap, NoiseSample, TerrainData},
     terraforged_terrain_generator::{NoiseGenerator, TerrainGenerator, available_processors},
     terraforged_terrain_levels::TerrainLevels,
@@ -37,6 +38,7 @@ use super::{
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard},
+    thread,
 };
 
 /// Java's `CacheKey`: the runtime seed and the chunk position. A hit needs all three.
@@ -178,15 +180,30 @@ pub fn background_threads() -> i32 {
     available_processors().wrapping_sub(1).clamp(1, 255)
 }
 
+/// The [`ThreadPool::shared`] group of a terrain cache made on this thread. Horizon runs its far-decoration threads,
+/// which build their own pipelines, in the idle class (`horizon_threads::idle_current`), and a pool's threads take
+/// the priority of the thread that starts them: in one pool with the level's, far chunks would run at the level's
+/// priority, competing with ticks and frames, or level chunks in the idle class, depending on which pipeline asked
+/// first. So far-decoration pipelines share one set of threads and the level's (and any other) another.
+fn pool_group() -> &'static str {
+    if thread::current().name() == Some(FAR_DECORATION_THREAD) {
+        "far decoration"
+    } else {
+        "level"
+    }
+}
+
 impl<N: NoiseGenerator + 'static> TerrainCache<N> {
     /// `new TerrainCache(levels, noiseGenerator)`: a [`TerrainGenerator`] over `noise_generator`, and generation tasks
     /// on [`background_threads`] task threads (Java's `ThreadPool.EXECUTOR`, Minecraft's background executor; the
-    /// port's [`ThreadPool::create`] makes half its size in threads).
+    /// port's [`ThreadPool::create`] makes half its size in threads). Like Java's one executor, the threads are
+    /// [`ThreadPool::shared`] by the terrain caches alive, one set for those made on Horizon's far-decoration
+    /// threads and one for the others ([`pool_group`]).
     pub fn new(levels: TerrainLevels, noise_generator: N) -> Self {
         Self::with_pool(
             levels,
             noise_generator,
-            ThreadPool::create(background_threads().wrapping_mul(2)),
+            ThreadPool::shared(background_threads().wrapping_mul(2), pool_group()),
         )
     }
 
@@ -430,6 +447,25 @@ call 5 1 1 0
 call 6 5 1 1
 call 7 5 1 2
 ";
+
+    /// Caches made on Horizon's far-decoration threads share one set of task threads and other caches another
+    /// (`pool_group`): a task thread takes the priority of the thread that starts it, idle on those threads.
+    #[test]
+    fn far_decoration_caches_share_their_own_task_threads() {
+        let cache = || TerrainCache::new(TerrainLevels::default(), Recorder::new());
+        let far = || {
+            thread::Builder::new()
+                .name(FAR_DECORATION_THREAD.into())
+                .spawn(cache)
+                .unwrap()
+                .join()
+                .unwrap()
+        };
+        let (level, other_level, far, other_far) = (cache(), cache(), far(), far());
+        assert!(level.pool.shares_threads_with(&other_level.pool));
+        assert!(far.pool.shares_threads_with(&other_far.pool));
+        assert!(!level.pool.shares_threads_with(&far.pool));
+    }
 
     #[test]
     fn terrain_cache_trace_matches_reimagined() {
