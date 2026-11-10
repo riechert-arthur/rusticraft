@@ -658,8 +658,8 @@ const SNOWED_UNDER: [&str; 4] = [
 /// again, column by column at the MOTION_BLOCKING height, with each block's temperature cooled by
 /// `AltitudeClimate::cooling`: open water under the cooled snow line freezes, and the column's top gets a snow layer
 /// where vanilla's `shouldSnow` passes, the block under it turning `snowy`. Grass and ferns ([`SNOWED_UNDER`]) on a
-/// top where it snows are cleared first. Every test reads only the block's biome and position, so neighbouring
-/// chunks agree.
+/// top cold enough to snow are cleared first, and put back if the snow then can't lie there (block light). Every
+/// test reads only the block's biome and position, so neighbouring chunks agree.
 fn altitude_snow(
     world: &mut World<'_>,
     center: ChunkPos,
@@ -724,14 +724,24 @@ fn altitude_snow(
                 FeatureWorld::set_block(world, below, ice, 2).map_err(write)?;
             }
             let mut at_top = cooled(top);
+            // A plant on the top is cleared only where the snow then lies (not under block light, say): the
+            // states it had are kept to put back.
+            let upper = [x, y.wrapping_add(1), z];
+            let mut cleared = None;
             if settings.has_precipitation
                 && at_top.cold_enough_to_snow(BlockPos::new(x, y, z), sea_level)
-                && let Some(lower) = plant(FeatureWorld::block(world, top).map_err(write)?)
             {
-                FeatureWorld::set_block(world, top, air, 2).map_err(write)?;
-                if lower {
-                    FeatureWorld::set_block(world, [x, y.wrapping_add(1), z], air, 2)
-                        .map_err(write)?;
+                let plant_state = FeatureWorld::block(world, top).map_err(write)?;
+                if let Some(lower) = plant(plant_state) {
+                    let upper_state = if lower {
+                        let state = FeatureWorld::block(world, upper).map_err(write)?;
+                        FeatureWorld::set_block(world, upper, air, 2).map_err(write)?;
+                        Some(state)
+                    } else {
+                        None
+                    };
+                    FeatureWorld::set_block(world, top, air, 2).map_err(write)?;
+                    cleared = Some((plant_state, upper_state));
                 }
             }
             if weather
@@ -741,6 +751,11 @@ fn altitude_snow(
                 FeatureWorld::set_block(world, top, snow, 2).map_err(write)?;
                 if let Some(state) = snowy(FeatureWorld::block(world, below).map_err(write)?) {
                     FeatureWorld::set_block(world, below, state, 2).map_err(write)?;
+                }
+            } else if let Some((plant_state, upper_state)) = cleared {
+                FeatureWorld::set_block(world, top, plant_state, 2).map_err(write)?;
+                if let Some(state) = upper_state {
+                    FeatureWorld::set_block(world, upper, state, 2).map_err(write)?;
                 }
             }
         }
