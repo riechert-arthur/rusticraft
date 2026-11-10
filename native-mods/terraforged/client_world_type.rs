@@ -853,7 +853,10 @@ mod tests {
             &biome_bytes()
         ));
         // The missing file was written with every setting off.
-        assert_eq!(settings_file(&file), Settings::default());
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            serde_json::to_string_pretty(&Settings::default().to_json()).unwrap() + "\n"
+        );
         // The file's settings go into the world, and `generate-structures` too.
         std::fs::write(&file, "{\"sparse_forests\": true, \"height_scale\": 1.5}").unwrap();
         let tuned = server.join("tuned");
