@@ -386,6 +386,33 @@ mod tests {
         assert_ne!(column.block(height), Some(ColumnBlock::Stone));
     }
 
+    /// A world's pipelines share one drainage map and basin erosion, so each tile is built once for the world: a far
+    /// pipeline's generator shares the level's noise (`TerraForgedGenerator::sharing`, only for the same seed,
+    /// levels and settings), and the noise holds the maps. A generator built on its own has its own.
+    #[test]
+    fn a_worlds_generators_share_their_drainage_map_through_the_noise() {
+        use super::super::terraforged_settings::{self, Settings};
+        let levels = terrain_levels(None).unwrap();
+        terraforged_settings::set_for_thread(Some(Settings {
+            basin_erosion: true,
+            flow_rivers: true,
+            ..Settings::default()
+        }));
+        let (level, other) = (build(levels).unwrap(), build(levels).unwrap());
+        terraforged_settings::set_for_thread(None);
+        let far = level.sharing();
+        let basins = |generator: &TerraForgedGenerator| {
+            std::ptr::from_ref(generator.noise_generator().basin_erosion().unwrap())
+        };
+        let rivers = |generator: &TerraForgedGenerator| {
+            std::ptr::from_ref(generator.noise_generator().flow_rivers().unwrap())
+        };
+        assert_eq!(basins(&level), basins(&far));
+        assert_eq!(rivers(&level), rivers(&far));
+        assert_ne!(basins(&level), basins(&other));
+        assert_ne!(rivers(&level), rivers(&other));
+    }
+
     #[test]
     fn height_scale_stretches_heights_around_sea_level() {
         use super::super::terraforged_noise_generator::HEIGHT_MULTIPLIER;
