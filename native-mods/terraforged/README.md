@@ -430,8 +430,9 @@ climate must stay cheap (see "Rain shadow").
   2,096 to 4,584 times).
   The world's level and its far-decoration threads share one map through the noise they share
   (one per seed, levels and settings). TerraForged's own lossy cache is not used: it put every tile
-  of one row in one bucket (since fixed, #305) and gave each tile a single slot, so a few tiles rebuilt each other
-  without end (in play at lodDistance 2048, about 300 builds per L0 tile in under three minutes).
+  of one row in one bucket (since fixed, #305) and gave each tile a single slot, so a few tiles
+  rebuilt each other without end (in play at lodDistance 2048, about 300 builds per L0 tile in under
+  three minutes).
   An L1 tile takes its boundary from L0: every L0 cell
   just outside the window that flows into it brings its accumulation in at the lowest L1 cell of
   the side it enters by (just inside the window's edge), and water leaving the window carries on
@@ -490,9 +491,9 @@ carved, where a river or lake bed is an outlet at its water level, like the sea.
   `/locateterrain`'s search (TerraForged's `find`), which samples rivers at unscaled coordinates, as
   TerraForged does.
 - Purity: the channels near a 128-block patch are extracted together from the drainage map and kept in
-  a tile cache (1024 patches, least recently used; the lossy cache rebuilt them about twice each in play, #305);
-  every value is a function of the seed and the position. The map
-  samples its own copy of the noise, built the same way.
+  a tile cache (1024 patches, least recently used; the lossy cache rebuilt them about twice each in
+  play, #305); every value is a function of the seed and the position. The map samples its own copy
+  of the noise, built the same way.
 - With the other landform settings: the map samples the ground the distant tiles have, so with
   `coastal_landforms` it sees the coast's landform and with `glacial_landforms` the troughs. A channel
   then takes its water level from the ground the chunks have, not from ground that a tidal flat or
@@ -2481,7 +2482,8 @@ slots per bucket, 1 to 64 buckets, non-power-of-two sizes): the bucket and slot 
 and `i << 32`, negatives), and per pair three single-threaded traces of 4 lookups per key (seeds 0, 12345,
 `Integer.MIN_VALUE`) recording every factory call, listener call and result; the `CORES` factory gives the same traces
 as concurrency 6. The test replays them bit for bit, on a cache switched to Java's bucket choice (a test-only
-constructor); another test checks that the mixed choice spreads a block of tile keys over every bucket. Rust tests cover what Java can't show deterministically: 16 threads
+constructor); two more check that the mixed choice spreads a block of tile keys, and keys that differ only in high bits
+or a sign, over every bucket. Rust tests cover what Java can't show deterministically: 16 threads
 on 48 colliding keys and three seeds always get the directly computed value, values held across evictions stay intact,
 one key under contention is computed once, a panicking function leaves the slot and the listener alone, and the
 listener runs outside the lock.

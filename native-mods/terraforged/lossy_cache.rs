@@ -97,8 +97,9 @@ impl<T> Bucket<T> {
 ///
 /// The structure is Java's: `smallestEncompassingPowerOfTwo(concurrency)` buckets, each with
 /// `smallestEncompassingPowerOfTwo(NoiseUtil.floor((float) capacity / buckets))` slots; a key's
-/// slot is fastutil's `(int) HashCommon.mix(key)`, masked. Its bucket is not Java's (see below). A miss computes `function(seed, key)` under the bucket's
-/// write lock (as Java does: other callers of that bucket wait for it, so a function that uses the
+/// slot is fastutil's `(int) HashCommon.mix(key)`, masked; its bucket is not Java's (see below). A
+/// miss computes `function(seed, key)` under the bucket's write lock (as Java does: other callers
+/// of that bucket wait for it, so a function that uses the
 /// same bucket never returns), stores it in the slot and then, after the lock is released, passes
 /// the replaced value to the removal listener. With one seed and one thread, hits, misses, eviction
 /// order and listener calls are Java's with Java's bucket choice (checked by the oracle, see the README).
@@ -442,6 +443,51 @@ mod tests {
             16
         );
         assert_eq!(rebuilds(ConcurrentLossyCache::new(16, 16)), 10);
+    }
+
+    /// Keys that differ only in x's or z's high bits, or only in a sign, are the ones Java's bucket puts together (it
+    /// reads z's low 16 bits); the mixed bucket reads every bit. A hit still needs the whole key: none of these keys
+    /// ever returns another's value.
+    #[test]
+    fn high_bits_and_signs_pick_the_bucket() {
+        let pack = |x: i32, z: i32| (i64::from(x) << 32) | i64::from(z as u32);
+        let families: [Vec<i64>; 4] = [
+            (0..64).map(|i| pack(i << 20, 0)).collect(),
+            (0..64).map(|i| pack(0, i << 20)).collect(),
+            (0..64)
+                .flat_map(|i| [pack(-i - 1, 5), pack(i, 5)])
+                .collect(),
+            (0..64).map(|i| pack(3, -(i << 20) - 1)).collect(),
+        ];
+        let buckets = |spread: fn(i64) -> u32, keys: &[i64]| {
+            let mut count = [0usize; 16];
+            for &key in keys {
+                count[spread(key) as usize & 15] += 1;
+            }
+            count
+        };
+        for keys in &families {
+            assert_eq!(
+                buckets(java_spread, keys)
+                    .iter()
+                    .filter(|&&n| n > 0)
+                    .count(),
+                1
+            );
+            let mixed = buckets(spread, keys);
+            assert!(
+                mixed.iter().all(|&n| n > 0 && n <= keys.len() / 4),
+                "{mixed:?}"
+            );
+        }
+        let cache = ConcurrentLossyCache::new(16, 16);
+        for _ in 0..2 {
+            for keys in &families {
+                for &key in keys {
+                    assert_eq!(*cache.compute_if_absent(7, key, |_, key| key), key);
+                }
+            }
+        }
     }
 
     #[test]
