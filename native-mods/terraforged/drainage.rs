@@ -968,6 +968,27 @@ mod tests {
     }
 
     #[test]
+    fn a_caller_waiting_on_a_build_that_panics_builds_the_tile_itself() {
+        let cache = TileCache::new(4);
+        std::thread::scope(|scope| {
+            let failing = scope.spawn(|| {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    cache.get_or_build(1, 1, || -> i32 {
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                        panic!("no tile")
+                    })
+                }))
+                .is_err()
+            });
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            // Waits on the failing build, then builds the tile instead of hanging.
+            assert_eq!(*cache.get_or_build(1, 1, || 11), 11);
+            assert!(failing.join().unwrap());
+        });
+        assert_eq!(*cache.get_or_build(1, 1, || unreachable!()), 11);
+    }
+
+    #[test]
     fn accumulation_is_continuous_across_l1_borders() {
         let drainage = Drainage::new(1, landscape as fn(i32, i32) -> Column);
         let block = |c: i32| L1.center(c);
