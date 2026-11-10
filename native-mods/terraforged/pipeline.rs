@@ -1977,7 +1977,24 @@ mod tests {
         );
     }
 
-    /// The body of the two tests above: the live pipelines of `seed` are built with `settings`.
+    /// The same with `altitude_climate` on (strength 2), around the highest point of plains or a colder biome on a
+    /// 64-block grid over 3,000 x 3,000 blocks: the far-decoration pipelines lay the same snow line and treeline as
+    /// the level's.
+    #[test]
+    fn far_pipelines_make_the_level_chunks_with_altitude_climate() {
+        far_pipelines_make_the_level_chunks(
+            298_000_298,
+            Settings {
+                altitude_climate: true,
+                altitude_climate_strength: 2.0,
+                ..terraforged_settings::FAITHFUL
+            },
+        );
+    }
+
+    /// The body of the tests above: the live pipelines of `seed` are built with `settings`. The chunks compared are
+    /// around (5, -3), or with `altitude_climate` around the highest point of plains or a colder biome on a 64-block
+    /// grid over 3,000 x 3,000 blocks, so that the snow line and the treeline are in them.
     fn far_pipelines_make_the_level_chunks(seed: i64, settings: Settings) {
         use super::super::terraforged_generator_facade::live_generator;
         let Some(data) = data() else { return };
@@ -2004,7 +2021,27 @@ mod tests {
         assert!(!other_seed.generator.shares_noise_with(&level.generator));
         drop(other_seed);
 
-        let center = ChunkPos::new(5, -3);
+        let center = if settings.altitude_climate {
+            // In a biome of vanilla temperature 0.8 or less (plains and colder), which snows from about y 175 at
+            // strength 2; savannas and deserts (2.0) stay warm up to the overworld's top.
+            let sampler = level.surface_sampler();
+            let (height, x, z) = (-24..24)
+                .flat_map(|i| (-24..24).map(move |j| (i * 64, j * 64)))
+                .filter(|&(x, z)| {
+                    level.biome_at(&sampler, x, z).is_some_and(|biome| {
+                        data.temperatures[biome.0 as usize].base_temperature <= 0.8
+                    })
+                })
+                .map(|(x, z)| (level.generator.far_heights(x, z).unwrap().0, x, z))
+                // Under the 384-block overworld's top: no snow lies on land at its last block, y 319.
+                .filter(|&(height, _, _)| height < 300)
+                .max()
+                .unwrap();
+            assert!(height > 200, "{height} at {x} {z}");
+            ChunkPos::new(x >> 4, z >> 4)
+        } else {
+            ChunkPos::new(5, -3)
+        };
         let decorated = |pipeline: &Arc<TerraForgedPipeline>, threads: usize| {
             let overworld = OverworldGenerator {
                 pipeline: Arc::clone(pipeline) as Arc<dyn SeededPipeline>,
@@ -2032,6 +2069,18 @@ mod tests {
             let mut region: [ProtoChunk; 9] = std::array::from_fn(|i| made.remove(&i).unwrap());
             overworld.worker().decorate(&mut region).unwrap();
             assert!(region[4].is_decorated());
+            if settings.altitude_climate {
+                let snow = (0..256)
+                    .filter(|i| {
+                        let (x, z) = (i & 15, i >> 4);
+                        let (min_y, height) =
+                            (region[4].terrain.min_y(), region[4].terrain.height());
+                        (min_y..min_y + height)
+                            .any(|y| region[4].block_name(x, y, z) == "minecraft:snow")
+                    })
+                    .count();
+                assert!(snow > 0, "no snow around the summit {center:?}");
+            }
             let mut out = digest(&region, overworld.level());
             for chunk in &region {
                 for z in 0..16 {
