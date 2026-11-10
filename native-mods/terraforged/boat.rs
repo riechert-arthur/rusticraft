@@ -267,7 +267,7 @@ mod tests {
     #[test]
     fn the_hook_works_only_in_terraforged_worlds() {
         use horizon_client::save::{
-            WorldGen, WorldPreset, terraforged_world_type as world_type, write_world_gen_settings,
+            WorldGen, terraforged_world_type as world_type, write_world_gen_settings,
         };
         // A vanilla world: the hook stays off.
         let vanilla = scratch("vanilla");
@@ -277,12 +277,8 @@ mod tests {
         assert!(!LOCAL_WORLD.load(Ordering::Relaxed));
         // A world the Create screen makes as TerraForged: on.
         let terraforged = scratch("terraforged");
-        let mut preset = WorldPreset::SingleBiomeSurface;
-        assert!(world_type::press(&mut preset, 25).is_break());
-        world_type::arm();
+        world_type::arm_terraforged();
         write_world_gen_settings(&terraforged, 1, WorldGen::default()).unwrap();
-        assert!(world_type::press(&mut preset, 25).is_break());
-        assert!(!world_type::chosen());
         join_local_world(&terraforged);
         assert!(LOCAL_WORLD.load(Ordering::Relaxed));
         // Joining a vanilla world again turns it off.

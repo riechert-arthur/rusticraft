@@ -76,13 +76,21 @@ pub fn label() -> String {
     crate::lang::get_or(LANG_KEY, NAME)
 }
 
-/// A fresh screen starts at Normal; Re-Create keeps the world's own type.
+/// A fresh screen starts at TerraForged, as TerraForged's `CreateWorldScreen.init` hook
+/// (6dd607eb `DatapackHook.selectPreset`) cycles the world-type button to its preset;
+/// Re-Create keeps the world's own type.
 pub fn reset() {
-    let (chosen, settings) = RECREATING.take().unwrap_or((false, None));
+    let (chosen, settings) = opening(RECREATING.take());
     CHOSEN.store(chosen, Ordering::Relaxed);
     *CHOSEN_SETTINGS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = settings;
+}
+
+/// The screen's first choice and Horizon settings: Re-Create's world's, else TerraForged
+/// with the settings file's.
+fn opening(recreating: Option<(bool, Option<Settings>)>) -> (bool, Option<Settings>) {
+    recreating.unwrap_or((true, None))
 }
 
 /// Re-Create: the world's type and Horizon settings, applied when its options' defaults
@@ -98,6 +106,14 @@ pub fn recreate(world: &Path) {
 /// `WorldOptions::world_gen`: the new world's settings are about to be written.
 pub fn arm() {
     CREATING.set(chosen());
+}
+
+/// For tests (the game binary's, so not `cfg(test)` here): arms the next
+/// `write_world_gen_settings_with` on this thread as a TerraForged world, without the shared
+/// [`CHOSEN`], which any test that opens a Create World screen sets to TerraForged.
+#[doc(hidden)]
+pub fn arm_terraforged() {
+    CREATING.set(true);
 }
 
 /// The world-type button.
@@ -475,6 +491,37 @@ mod tests {
         assert!(chosen);
     }
 
+    /// A fresh Create World screen opens on TerraForged (`selectPreset`); Re-Create opens
+    /// on the world's own type. `opening` is `reset`'s choice, without the shared `CHOSEN`.
+    #[test]
+    fn a_fresh_screen_opens_on_terraforged_and_re_create_keeps_the_worlds_type() {
+        vanilla_biomes();
+        assert_eq!(opening(None), (true, None));
+        let vanilla = scratch("open-vanilla");
+        super::super::write_world_gen_settings(&vanilla, 4, WorldGen::default()).unwrap();
+        recreate(&vanilla);
+        assert_eq!(opening(RECREATING.take()), (false, None));
+        let terraforged = scratch("open-terraforged");
+        write_terraforged(
+            &terraforged,
+            4,
+            WorldGen::default(),
+            None,
+            Settings::default(),
+        )
+        .unwrap();
+        recreate(&terraforged);
+        assert_eq!(
+            opening(RECREATING.take()),
+            (true, Some(Settings::default()))
+        );
+        // Only Re-Create's own screen keeps its choice: the next fresh one is TerraForged again.
+        assert_eq!(opening(RECREATING.take()), (true, None));
+        for dir in [vanilla, terraforged] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
     #[test]
     fn a_terraforged_world_saves_and_reloads_as_terraforged() {
         let vanilla_data = vanilla_biomes();
@@ -532,6 +579,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!((height.min_y, height.height), (-64, 1024));
+        // Horizon's level shapes read the world's packs: TerraForged's range and its clouds at 300.
+        let packs = crate::datapack::discover(&dir);
+        let enabled = crate::datapack::enabled_ids(&dir, &packs);
+        let enabled: Vec<_> = enabled
+            .iter()
+            .filter_map(|id| packs.iter().find(|p| &p.id == id))
+            .collect();
+        let (overrides, _) = crate::datapack::worldgen_overrides(&enabled, |_| true);
+        let overworld_height = overrides.level_height("minecraft:overworld");
+        assert_eq!(overworld_height.map(|h| h.height), Some(1024));
+        assert_eq!(
+            overrides.level_cloud_height("minecraft:overworld"),
+            Some(300.0)
+        );
         // It holds TerraForged's biomes for the generator, copied from the game's 26.3 data.
         if vanilla_data {
             let biomes = biome_bytes();

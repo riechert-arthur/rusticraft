@@ -6,8 +6,8 @@ An exact Rust translation of [TerraForged](https://github.com/TerraForged/TerraF
 
 ## Status
 
-Still for development only (see [Status: development only](#status-development-only)). Choose
-**World Type: TerraForged** on Create World's World tab (after Single Biome). The tab then shows,
+Still for development only (see [Status: development only](#status-development-only)). Create World
+opens on **World Type: TerraForged** (its World tab; one press goes on to Normal). The tab then shows,
 under the seed box, the map `/tf preview` gives of the new world: the 4096 blocks around spawn for the
 typed seed, redrawn as the seed changes (a blank seed is random: the map shows once one is typed). The world
 saves TerraForged's overworld stem and a `datapacks/terraforged` pack with TerraForged's
@@ -74,8 +74,7 @@ Differences and gaps:
   noise 0), and on land the noise caves' ceiling stays 8 to 17 blocks under the ground (their
   carving mask, `1 - breach noise * river noise`, stays 1), so they don't breach it.
   `sparse_forests` starts at 1 instead.
-- The Create World screen opens on Normal, not TerraForged, and a dedicated server's
-  `level-type=terraforged:normal` is not recognized.
+- A dedicated server's `level-type=terraforged:normal` is not recognized.
 - TerraForged's biomes `terraforged:cave` and `terraforged:oak_forest` exist in TerraForged worlds
   only; vanilla worlds' biomes, synced registry and commands stay 26.3's. The bundle ships no
   vanilla biome file: the two are derived at runtime from the game's own 26.3 data, as 6dd607eb's
@@ -3065,12 +3064,15 @@ the player's, as TerraForged selects its pack last. Horizon reads the type's bui
 generator is `terraforged:generator` reloads as `terraforged:normal` (`WorldGen::preset`), and Re-Create picks
 TerraForged again. The world screens' decoration preload (`GeneratorData::prepare_decoration`) prepares the two
 decorations the pipeline builds (the stem has no biome source): the vanilla overworld's, for its vanilla half, and
-TerraForged's own over every biome. Differences: TerraForged's
-`CreateWorldScreen.init` hook (`DatapackHook.selectPreset`) opens the screen on TerraForged; here it opens on Normal,
-as vanilla does. A dedicated server's `level-type=terraforged:normal` is not recognized (Horizon falls back to
-`minecraft:normal` with its usual warning). A game built without this bundle opens a TerraForged world as a Normal one
+TerraForged's own over every biome. As TerraForged's `CreateWorldScreen.init` hook (`DatapackHook.selectPreset`)
+cycles the button to its preset, a fresh screen opens on TerraForged (`reset`, at `WorldOptions::default`), so one
+press goes to Normal; Re-Create opens on the world's own type. Differences: that hook runs at every `init` of 1.19's
+screen, so in TerraForged a Re-Created vanilla world and a resized screen go back to TerraForged; here only a fresh
+screen starts there, and the player's choice stays. A dedicated server's `level-type=terraforged:normal` is not
+recognized (Horizon falls back to `minecraft:normal` with its usual warning). A game built without this bundle opens a TerraForged world as a Normal one
 and generates new chunks with vanilla terrain. With the bundle applied, Horizon's own test
-`create_world_tabs_follow_vanilla_and_their_choices_reach_the_action` fails, because it counts vanilla's five presets,
+`create_world_tabs_follow_vanilla_and_their_choices_reach_the_action` fails, because the screen opens on TerraForged
+and the cycle has a sixth preset where the test expects vanilla's five,
 and so does `world_biomes::tests::no_native_biomes_without_a_mod`, because a client of another server is offered
 TerraForged's biomes.
 
@@ -3194,9 +3196,9 @@ rustc --edition 2024 --test native-mods/terraforged/engine.rs -o /tmp/terraforge
 /tmp/terraforged-engine-tests
 ```
 
-The mixin pins Rusticraft commit `1b6e55d4f3bd14079551bcad173d0fac8f8225bb`, a `main` commit rather than a Nightly:
-no Nightly is close enough (the nearest earlier one, `nightly-source/2026-10-31-d91cab6`, is 795 commits older and
-`generator.rs` differs by 150 lines). The pin moves to a Nightly when the series is rebased onto one.
+The mixin pins Rusticraft commit `3c635021465530dc14aaf219e4f8ebae5caef757` (#281's merge), a `main` commit rather than a Nightly:
+no Nightly is close enough (the nearest earlier one, `nightly-source/2026-10-31-d91cab6`, is 1911 commits older and
+`generator.rs` differs by 73 lines). The pin moves to a Nightly when the series is rebased onto one.
 
 Translation inputs are TerraForged commit `6dd607ebfd41a3b7274e090b1f2cf565d53d1d44` and Engine 0.3.0 bytecode
 shaded into the official `TerraForged-1.18.2-0.3.1-alpha-2.jar`. Tests compare raw `f32` bits with
