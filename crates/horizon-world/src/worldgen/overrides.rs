@@ -279,7 +279,9 @@ impl WorldgenOverrides {
     /// leaves the attribute out (or gives it a value that is no number): the level
     /// keeps the vanilla type's value. That includes the modifier form vanilla's
     /// `EnvironmentAttributeMap.Entry` codec also accepts (`{"modifier": "add",
-    /// "argument": 10}`, applied to the 192.33 default), which this doesn't evaluate.
+    /// "argument": 10}`, applied to the 192.33 default), which this doesn't evaluate,
+    /// and a number past `f32`'s range (vanilla's clouds would go to infinity; the
+    /// synced type can't carry that as JSON, so the level keeps 192.33 on every side).
     pub fn level_cloud_height(&self, level: &str) -> Option<f32> {
         let ty = match self.level_type(level)? {
             Value::String(id) => {
@@ -289,6 +291,7 @@ impl WorldgenOverrides {
             _ => return None,
         };
         Some(ty["attributes"]["minecraft:visual/cloud_height"].as_f64()? as f32)
+            .filter(|height| height.is_finite())
     }
     /// The entries packs give `bundle`.
     pub fn entries(&self, bundle: &str) -> impl Iterator<Item = (&str, &str)> {
@@ -505,6 +508,8 @@ mod tests {
         for json in [
             r#"{"min_y":-64,"height":384}"#,
             r#"{"attributes":{"minecraft:visual/cloud_height":"high"}}"#,
+            r#"{"attributes":{"minecraft:visual/cloud_height":{"modifier":"add","argument":10}}}"#,
+            r#"{"attributes":{"minecraft:visual/cloud_height":1e39}}"#,
         ] {
             o.set(DIMENSION_TYPES, "minecraft:overworld", json.into());
             assert_eq!(o.level_cloud_height("minecraft:overworld"), None, "{json}");
