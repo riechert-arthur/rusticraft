@@ -571,6 +571,8 @@ mod tests {
             generator.insert(
                 "horizon_settings".into(),
                 Tag::compound([
+                    ("altitude_climate", Tag::Byte(0)),
+                    ("altitude_climate_strength", Tag::Float(1.0f32.to_bits())),
                     ("corrected_biomes", Tag::Byte(0)),
                     ("deterministic", Tag::Byte(0)),
                     ("eroded_far_terrain", Tag::Byte(0)),
@@ -702,6 +704,8 @@ mod tests {
             erosion_deposits: true,
             eroded_far_terrain: true,
             realistic_vegetation: true,
+            altitude_climate: true,
+            altitude_climate_strength: 0.5,
         };
         let dir = scratch("settings");
         write_terraforged(&dir, 3, WorldGen::default(), None, on).unwrap();
@@ -709,6 +713,8 @@ mod tests {
         assert_eq!(
             generator.get("horizon_settings"),
             Some(&Tag::compound([
+                ("altitude_climate", Tag::Byte(1)),
+                ("altitude_climate_strength", Tag::Float(0.5f32.to_bits())),
                 ("corrected_biomes", Tag::Byte(1)),
                 ("deterministic", Tag::Byte(1)),
                 ("eroded_far_terrain", Tag::Byte(1)),
@@ -732,11 +738,11 @@ mod tests {
         assert_eq!(settings_file(&file), Settings::default());
         assert_eq!(
             std::fs::read_to_string(&file).unwrap(),
-            "{\n  \"corrected_biomes\": false,\n  \"deterministic\": false,\n  \"eroded_far_terrain\": false,\n  \"erosion_deposits\": false,\n  \"height_scale\": 1.0,\n  \"realistic_vegetation\": false,\n  \"sparse_forests\": false\n}\n"
+            "{\n  \"altitude_climate\": false,\n  \"altitude_climate_strength\": 1.0,\n  \"corrected_biomes\": false,\n  \"deterministic\": false,\n  \"eroded_far_terrain\": false,\n  \"erosion_deposits\": false,\n  \"height_scale\": 1.0,\n  \"realistic_vegetation\": false,\n  \"sparse_forests\": false\n}\n"
         );
         std::fs::write(
             &file,
-            "{\"deterministic\": true, \"sparse_forests\": true, \"corrected_biomes\": true, \"height_scale\": 1.5, \"erosion_deposits\": true, \"eroded_far_terrain\": true, \"realistic_vegetation\": true}",
+            "{\"deterministic\": true, \"sparse_forests\": true, \"corrected_biomes\": true, \"height_scale\": 1.5, \"erosion_deposits\": true, \"eroded_far_terrain\": true, \"realistic_vegetation\": true, \"altitude_climate\": true, \"altitude_climate_strength\": 0.5}",
         )
         .unwrap();
         assert_eq!(settings_file(&file), on);
@@ -751,6 +757,8 @@ mod tests {
                 erosion_deposits: false,
                 eroded_far_terrain: false,
                 realistic_vegetation: false,
+                altitude_climate: false,
+                altitude_climate_strength: 1.0,
                 ..on
             }
         );

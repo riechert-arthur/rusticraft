@@ -455,6 +455,13 @@ source = "realistic_vegetation.rs"
 visibility = "pub"
 
 [[module]]
+id = "altitude_climate"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_altitude_climate"
+source = "altitude_climate.rs"
+visibility = "pub"
+
+[[module]]
 id = "settings"
 file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_settings"
