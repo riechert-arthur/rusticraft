@@ -449,8 +449,8 @@ fn worldgen_overrides_of(
 }
 
 /// The shapes of the world's levels: their dimension types, the world's
-/// enabled data packs' over vanilla's. A type the codec refuses keeps the
-/// vanilla shape, with a warning.
+/// enabled data packs' over vanilla's, with their cloud heights. A type the
+/// codec refuses keeps the vanilla shape, with a warning.
 pub(super) fn level_shapes(
     world_root: &std::path::Path,
     biomes: &horizon_client::biome::Biomes,
@@ -474,8 +474,11 @@ pub(super) fn level_shapes(
         "minecraft:the_nether",
         "minecraft:the_end",
     ] {
+        let cloud_height = overrides.level_cloud_height(level);
         let shape = overrides.level_height(level).and_then(|h| {
-            LevelShape::new(h.min_y, h.height, h.logical_height, h.has_skylight).ok()
+            LevelShape::new(h.min_y, h.height, h.logical_height, h.has_skylight)
+                .ok()
+                .map(|shape| cloud_height.map_or(shape, |c| shape.with_cloud_height(c)))
         });
         match shape {
             Some(shape) => *shapes.get_mut(level) = shape,

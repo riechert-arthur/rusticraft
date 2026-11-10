@@ -108,9 +108,12 @@ Differences and gaps:
 - The Create World map is Horizon's: neither TerraForged tree shows a map on that screen (TerraForged
   Reimagined draws its own `PreviewWidget`, with relief shading, render modes and zoom, on its settings
   screen, which is not ported). It is `/tf preview`'s picture, 64 pixels over 4096 blocks.
-- Not ported: TerraForged's dimension effects (clouds at y=300; the pack's Reimagined dimension type
-  asks for the same height, but Horizon draws clouds at vanilla's height in every world) and the
-  unregistered test volcano feature.
+- TerraForged's dimension effects (`DimensionEffects`: clouds at y=300, everything else vanilla's) need no
+  port: 26.3 has no effects registry, and the world pack's dimension type (Reimagined's) sets the same height
+  as its `minecraft:visual/cloud_height` attribute, which Horizon honours. So TerraForged worlds draw their
+  clouds at y=300, on their server thread, for LAN guests and for a dedicated server's players; other worlds
+  keep vanilla's 192.33.
+- Not ported: the unregistered test volcano feature.
 
 ## Settings
 
@@ -3057,8 +3060,8 @@ whatever the preset; here only TerraForged worlds get it (Arthur's choice), so v
 overworld. Worlds made before this keep their height; disabling the pack gives the overworld 26.3's height again. The screen copies the packs its Data Packs screen showed into the world first: a `datapacks/terraforged`
 folder holding exactly this pack (Re-Create's copy) is kept, and any other (the player's own pack of that name) is left
 alone while TerraForged's pack takes the next free name (`terraforged-1`, ...), which Horizon enables as a new pack above
-the player's, as TerraForged selects its pack last. Horizon reads only the type's build range and sky light: its other
-fields (TerraForged's cloud height 300, sky colours) are not used, so clouds stay at vanilla's height. A world whose saved overworld
+the player's, as TerraForged selects its pack last. Horizon reads the type's build range, sky light and cloud height
+(TerraForged's 300): its other fields (the sky, fog and cloud colours) are not used. A world whose saved overworld
 generator is `terraforged:generator` reloads as `terraforged:normal` (`WorldGen::preset`), and Re-Create picks
 TerraForged again. The world screens' decoration preload (`GeneratorData::prepare_decoration`) prepares the two
 decorations the pipeline builds (the stem has no biome source): the vanilla overworld's, for its vanilla half, and
@@ -3084,8 +3087,8 @@ TerraForged worlds (Arthur's choice), and other worlds keep vanilla's boats exac
 its server thread (single player, or a LAN host) checks the world's saved overworld generator
 (`terraforged:generator`) once, when it joins the world (a HEAD hook on `server_packs_world_pack`). A client of another
 server (a LAN guest, a dedicated server) isn't told the generator. It uses the synced overworld dimension type: TerraForged's
-pack gives it min y −64, height 1024 and logical height 1024, and a Horizon server syncs only that shape over vanilla's
-type (TerraForged's cloud height and colours never reach the client). So any other server whose packs give the
+pack gives it min y −64, height 1024 and logical height 1024, and a Horizon server syncs only that shape and the cloud height over
+vanilla's type (TerraForged's colours never reach the client). So any other server whose packs give the
 overworld exactly that shape also floats boats, and a TerraForged world without the pack (made before it existed,
 or with it disabled) does not. The deprecated in-frame path keeps vanilla boats. The hook runs where a ridden boat's physics run: on the rider's client (single
 player on its server thread, LAN guests and dedicated-server players alike), which sends the boat's position to the

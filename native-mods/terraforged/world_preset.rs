@@ -104,4 +104,13 @@ mod tests {
             "minecraft:overworld"
         );
     }
+
+    /// TerraForged's `DimensionEffects` (`CLOUD_HEIGHT = 300`) as 26.3 says it: the type's
+    /// `visual/cloud_height`, which Horizon's level shapes read (vanilla's type says 192.33).
+    #[test]
+    fn the_taller_overworlds_clouds_are_at_terraforgeds_300() {
+        let json: serde_json::Value = serde_json::from_str(overworld_type_json()).unwrap();
+        let height = &json["attributes"]["minecraft:visual/cloud_height"];
+        assert_eq!(height.as_f64(), Some(300.0));
+    }
 }

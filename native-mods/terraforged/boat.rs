@@ -50,8 +50,8 @@ pub(super) const TERRAFORGED_OVERWORLD: (i32, i32, i32) = (-64, 1024, 1024);
 
 /// Whether a server's synced registries come from a TerraForged world. A client isn't told the
 /// world's generator. A TerraForged world's pack gives its overworld TerraForged's shape, and a
-/// Horizon server syncs only that shape over vanilla's dimension type (TerraForged's other
-/// fields, such as its cloud height, never reach the client), so the shape is the signal.
+/// Horizon server syncs only that shape and the cloud height over vanilla's dimension type
+/// (TerraForged's colours never reach the client), so the shape is the signal.
 /// False positives: any other server whose packs give the overworld exactly that shape.
 /// False negatives: a TerraForged world without the pack (made before it existed, or with
 /// it disabled).

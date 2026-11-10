@@ -68,6 +68,10 @@ pub fn cells(radius: i32) -> impl Iterator<Item = (i32, i32)> {
     })
 }
 
+/// `EnvironmentAttributes.CLOUD_HEIGHT`'s default (`visual/cloud_height`), which
+/// vanilla's Overworld type also names.
+pub const DEFAULT_HEIGHT: f32 = 192.33;
+
 /// Per-frame cloud inputs. Resources are immutable for the renderer's lifetime:
 /// resource-pack reloads replace the renderer and its cache together.
 pub struct Input<'a> {
@@ -79,6 +83,8 @@ pub struct Input<'a> {
     pub range: i32,
     pub fast: bool,
     pub color: [f32; 4],
+    /// The clouds' bottom Y: the dimension type's `visual/cloud_height`.
+    pub height: f32,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -110,7 +116,8 @@ impl Input<'_> {
         z -= (z / th).floor() * th;
         let cell_x = (x / 12.0).floor() as i64;
         let cell_z = (z / 12.0).floor() as i64;
-        let bottom = (192.33 - self.camera.y) as f32;
+        // CloudRenderer.prepare: `(float) ((double) bottomY - cameraPosition.y)`.
+        let bottom = (f64::from(self.height) - self.camera.y) as f32;
         let key = MeshKey {
             cell_x,
             cell_z,
@@ -264,6 +271,7 @@ mod tests {
             range: 2,
             fast: false,
             color: [1.0; 4],
+            height: DEFAULT_HEIGHT,
         };
         let mut mesh = Mesh::default();
         assert!(mesh.prepare(&input).0);
@@ -279,7 +287,10 @@ mod tests {
             assert!(!rebuilt);
             assert_eq!(mesh.vertices.as_ptr(), pointer);
             assert_eq!(bytemuck::cast_slice::<_, u8>(&mesh.vertices), vertices);
-            assert_eq!(uniform.offset[1], (192.33 - input.camera.y) as f32);
+            assert_eq!(
+                uniform.offset[1],
+                (f64::from(192.33f32) - input.camera.y) as f32
+            );
             assert_eq!(
                 uniform.colors[1],
                 [0.8 * 0.7, 0.7 * 0.7, 0.6 * 0.7, 0.5].map(|v| (v * 255.0) as u8 as f32 / 255.0)
@@ -291,7 +302,8 @@ mod tests {
         for (x, y, z, range, fast) in [
             (13.0, 101.0, 1.0, 2, false),
             (13.0, 101.0, -5.0, 2, false),
-            (13.0, 192.33, -5.0, 2, false),
+            // Exactly at the clouds' (float) bottom: inside them.
+            (13.0, f64::from(DEFAULT_HEIGHT), -5.0, 2, false),
             (13.0, 196.34, -5.0, 2, false),
             (13.0, 196.34, -5.0, 3, false),
             (13.0, 196.34, -5.0, 3, true),
@@ -385,5 +397,33 @@ mod tests {
     #[test]
     fn nearby_cells_keep_inward_faces_for_camera_inside_clouds() {
         assert_eq!(face_mask(0, 0, 0.0, [false; 4]), 3 | (63 << 6));
+    }
+    #[test]
+    fn the_dimension_types_cloud_height_moves_the_clouds() {
+        let texture = (2, 2, vec![true; 4]);
+        let input = |camera_y: f64, height: f32| Input {
+            texture: &texture,
+            uv: [0.5; 2],
+            camera: glam::DVec3::new(1.0, camera_y, 1.0),
+            time: 0,
+            partial_tick: 0.0,
+            range: 2,
+            fast: false,
+            color: [1.0; 4],
+            height,
+        };
+        // A camera at y 250 is above vanilla's clouds and below a type's at 300
+        // (TerraForged's `minecraft:visual/cloud_height`).
+        let (vanilla_key, vanilla) = input(250.0, DEFAULT_HEIGHT).state();
+        let (tall_key, tall) = input(250.0, 300.0).state();
+        assert_eq!(vanilla.offset[1], (f64::from(192.33f32) - 250.0) as f32);
+        assert_eq!(tall.offset[1], 50.0);
+        assert!(vanilla_key.top && !vanilla_key.bottom);
+        assert!(!tall_key.top && tall_key.bottom);
+        // Below both, only the offset differs: the cells and faces are the same.
+        let (low_vanilla, _) = input(100.0, DEFAULT_HEIGHT).state();
+        let (low_tall, low) = input(100.0, 300.0).state();
+        assert_eq!(low_vanilla, low_tall);
+        assert_eq!(low.offset[1], 200.0);
     }
 }

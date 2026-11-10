@@ -16,14 +16,19 @@ pub const SECTIONS: usize = (HEIGHT / 16) as usize;
 
 /// A level's build range and skylight, from its dimension type (`min_y`,
 /// `height`, `logical_height`, `has_skylight`), as `LevelHeightAccessor` and
-/// `SerializableChunkData.write` read them.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// `SerializableChunkData.write` read them, and the one environment attribute
+/// of the type a world's data packs change that the game honours
+/// (`visual/cloud_height`).
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LevelShape {
     pub sky_light: bool,
     pub min_y: i32,
     pub height: i32,
     /// `DimensionType.logicalHeight`: how high portals and chorus fruit reach.
     pub logical_height: i32,
+    /// The type's `minecraft:visual/cloud_height` attribute
+    /// (`EnvironmentAttributes.CLOUD_HEIGHT`, 192.33 when the type has none).
+    pub cloud_height: f32,
 }
 impl LevelShape {
     pub const OVERWORLD: Self = Self {
@@ -31,18 +36,21 @@ impl LevelShape {
         min_y: MIN_Y,
         height: HEIGHT,
         logical_height: HEIGHT,
+        cloud_height: crate::clouds::DEFAULT_HEIGHT,
     };
     pub const NETHER: Self = Self {
         sky_light: false,
         min_y: 0,
         height: 256,
         logical_height: 128,
+        cloud_height: crate::clouds::DEFAULT_HEIGHT,
     };
     pub const END: Self = Self {
         sky_light: true,
         min_y: 0,
         height: 256,
         logical_height: 256,
+        cloud_height: crate::clouds::DEFAULT_HEIGHT,
     };
     /// A dimension type's shape, checked as its codec checks it.
     pub fn new(
@@ -62,7 +70,15 @@ impl LevelShape {
             min_y,
             height,
             logical_height,
+            cloud_height: crate::clouds::DEFAULT_HEIGHT,
         })
+    }
+    /// This shape with the type's `visual/cloud_height`.
+    pub fn with_cloud_height(self, cloud_height: f32) -> Self {
+        Self {
+            cloud_height,
+            ..self
+        }
     }
     /// One above the highest block (`getMaxY() + 1`).
     pub fn max_y(self) -> i32 {
@@ -87,7 +103,7 @@ impl LevelShape {
 }
 
 /// The shapes of a world's three levels, from its dimension types.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LevelShapes {
     pub overworld: LevelShape,
     pub nether: LevelShape,
