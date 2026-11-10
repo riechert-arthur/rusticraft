@@ -108,6 +108,14 @@ pub fn arm() {
     CREATING.set(chosen());
 }
 
+/// For tests (the game binary's, so not `cfg(test)` here): arms the next
+/// `write_world_gen_settings_with` on this thread as a TerraForged world, without the shared
+/// [`CHOSEN`], which any test that opens a Create World screen sets to TerraForged.
+#[doc(hidden)]
+pub fn arm_terraforged() {
+    CREATING.set(true);
+}
+
 /// The world-type button.
 pub fn press(world_type: &mut WorldPreset, id: u8) -> ControlFlow<()> {
     let mut chosen = chosen();
@@ -571,6 +579,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!((height.min_y, height.height), (-64, 1024));
+        // Horizon's level shapes read the world's packs: TerraForged's range and its clouds at 300.
+        let packs = crate::datapack::discover(&dir);
+        let enabled = crate::datapack::enabled_ids(&dir, &packs);
+        let enabled: Vec<_> = enabled
+            .iter()
+            .filter_map(|id| packs.iter().find(|p| &p.id == id))
+            .collect();
+        let (overrides, _) = crate::datapack::worldgen_overrides(&enabled, |_| true);
+        let overworld_height = overrides.level_height("minecraft:overworld");
+        assert_eq!(overworld_height.map(|h| h.height), Some(1024));
+        assert_eq!(
+            overrides.level_cloud_height("minecraft:overworld"),
+            Some(300.0)
+        );
         // It holds TerraForged's biomes for the generator, copied from the game's 26.3 data.
         if vanilla_data {
             let biomes = biome_bytes();
