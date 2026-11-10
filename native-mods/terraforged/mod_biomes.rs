@@ -26,6 +26,7 @@
 // TerraForged's own biomes (6dd607eb `ModBiomes`): copies of vanilla biomes, built at runtime from the player's own
 // 26.3 data as `ModBiome.create` builds them, so no vanilla biome file is bundled.
 
+use crate::worldgen::overrides::WorldgenOverrides;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
@@ -122,6 +123,38 @@ pub fn mod_biome_files() -> (Vec<(String, Value)>, Vec<String>) {
     }
 }
 
+/// `WorldgenOverrides::finish` (a HEAD hook): each of TerraForged's biomes the world's biome table holds (`known`) and
+/// its packs' entries lack joins them, built by [`mod_biome_files`] as the table's copy is, so the table and the
+/// generator always agree. The table holds them for TerraForged worlds only (the `native_biome_files` hook), so this
+/// changes only a TerraForged world made before its pack held them (#226), or before it had a pack (#215): its GLOBAL
+/// caves get `terraforged:cave` and its UNIQUE pool both biomes, as a new world's. A pack's own file is kept. Nothing
+/// is written to the world (horizon-world has no log: the table's own build warns about a biome it leaves out).
+pub fn join_table_biomes(overrides: &mut WorldgenOverrides, known: &dyn Fn(&str) -> bool) {
+    join_biomes(overrides, known, || mod_biome_files().0);
+}
+
+/// [`join_table_biomes`] over the biomes `files` builds (called only when one is wanted); returns the ids it added.
+fn join_biomes(
+    overrides: &mut WorldgenOverrides,
+    known: &dyn Fn(&str) -> bool,
+    files: impl FnOnce() -> Vec<(String, Value)>,
+) -> Vec<String> {
+    let missing = |overrides: &WorldgenOverrides, id: &str| {
+        known(id) && !overrides.entries("biomes").any(|(have, _)| have == id)
+    };
+    if !MOD_BIOMES.iter().any(|(id, _)| missing(overrides, id)) {
+        return Vec::new();
+    }
+    let mut added = Vec::new();
+    for (id, json) in files() {
+        if missing(overrides, &id) {
+            overrides.set("biomes", &id, json.to_string());
+            added.push(id);
+        }
+    }
+    added
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,6 +189,66 @@ mod tests {
         // A parent with fewer steps still gets UNDERGROUND_DECORATION.
         let short = mod_biome("terraforged:cave", json!({ "features": [] }));
         assert_eq!(short["features"].as_array().unwrap().len(), 8);
+    }
+
+    /// The biomes the table holds and the packs lack join the packs' entries; a pack's own file wins, and a world
+    /// whose table holds none of them (a vanilla world) builds nothing.
+    #[test]
+    fn the_tables_biomes_join_the_packs_that_lack_them() {
+        let files = || {
+            MOD_BIOMES
+                .iter()
+                .map(|(id, _)| (id.to_string(), json!({ "biome": id })))
+                .collect()
+        };
+        // A world made before its pack held the biomes: its packs give only the dimension type.
+        let mut older = WorldgenOverrides::default();
+        older.set("dimension_types", "minecraft:overworld", "{}".into());
+        let all = |_: &str| true;
+        let added = join_biomes(&mut older, &all, files);
+        assert_eq!(added, ["terraforged:cave", "terraforged:oak_forest"]);
+        let biomes: Vec<_> = older.entries("biomes").collect();
+        assert_eq!(
+            biomes,
+            [
+                ("terraforged:cave", r#"{"biome":"terraforged:cave"}"#),
+                (
+                    "terraforged:oak_forest",
+                    r#"{"biome":"terraforged:oak_forest"}"#
+                ),
+            ]
+        );
+        // Again: nothing more (the overrides are the same, so is the generator data they key).
+        let before = older.clone();
+        assert!(join_biomes(&mut older, &all, || unreachable!()).is_empty());
+        assert_eq!(older, before);
+        // A new world's pack holds them: kept as they are, nothing built.
+        let mut fresh = WorldgenOverrides::default();
+        fresh.set("biomes", "terraforged:cave", "pack cave".into());
+        fresh.set("biomes", "terraforged:oak_forest", "pack oak".into());
+        let before = fresh.clone();
+        assert!(join_biomes(&mut fresh, &all, || unreachable!()).is_empty());
+        assert_eq!(fresh, before);
+        // A pack with one: the other joins.
+        let mut half = WorldgenOverrides::default();
+        half.set("biomes", "terraforged:cave", "pack cave".into());
+        assert_eq!(
+            join_biomes(&mut half, &all, files),
+            ["terraforged:oak_forest"]
+        );
+        assert_eq!(half.entries("biomes").next().unwrap().1, "pack cave");
+        // A vanilla world's table holds neither: nothing is built or added.
+        let vanilla = |id: &str| !id.starts_with("terraforged:");
+        let mut plain = WorldgenOverrides::default();
+        assert!(join_biomes(&mut plain, &vanilla, || unreachable!()).is_empty());
+        assert!(plain.is_empty());
+        // A table without one parent's biome (it could not be built): only the other joins.
+        let cave_only = |id: &str| id == "terraforged:cave";
+        let mut some = WorldgenOverrides::default();
+        assert_eq!(
+            join_biomes(&mut some, &cave_only, files),
+            ["terraforged:cave"]
+        );
     }
 
     #[test]

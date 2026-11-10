@@ -746,6 +746,19 @@ bindings = [
   { name = "value", ty = "Vec<(String, Value)>", value = "$value" },
 ]
 
+# The generator of a TerraForged world made before its pack held TerraForged's biomes takes them from the mod, as the
+# world's biome table does: TerraForged's biomes the table holds and the world's packs lack join the packs' entries
+# before `finish` keeps the ones the table holds. Nothing is written; the world's packs stay as they are.
+[[injection]]
+id = "table-biomes-join-the-generator"
+target = "horizon_world::worldgen::overrides::WorldgenOverrides::finish"
+kind = "HEAD"
+helper = "hooks/table_biomes.rs"
+bindings = [
+  { name = "overrides", ty = "&mut WorldgenOverrides", value = "&mut *self" },
+  { name = "known", ty = "&dyn Fn(&str) -> bool", value = "&known" },
+]
+
 [[module]]
 id = "create_preview"
 file = "crates/horizon-client/src/title/create_world.rs"
