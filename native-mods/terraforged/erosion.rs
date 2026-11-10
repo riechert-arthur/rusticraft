@@ -375,6 +375,58 @@ impl ErosionFilter {
         resource: &mut ErosionResource,
         map: &mut [f32],
     ) {
+        self.erode_region(
+            seed,
+            origin_chunk_x,
+            origin_chunk_z,
+            chunks_across,
+            map_size,
+            resource,
+            map,
+            None::<&fn(usize, f32) -> f32>,
+        );
+    }
+
+    /// Not Reimagined's (Horizon's `rock_strata`): [`Self::apply_region`] where the ground resists erosion. Where a
+    /// droplet erodes, it takes `erode_speed * (1 - hardness(index, height))` instead of `erode_speed`, `index` being
+    /// the droplet's map cell and `height` that cell's height before the step. A hardness of 0 everywhere gives
+    /// `apply_region`'s map bit for bit (the rate is multiplied by exactly 1).
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_region_with_hardness(
+        &self,
+        seed: i32,
+        origin_chunk_x: i32,
+        origin_chunk_z: i32,
+        chunks_across: i32,
+        map_size: i32,
+        resource: &mut ErosionResource,
+        map: &mut [f32],
+        hardness: impl Fn(usize, f32) -> f32,
+    ) {
+        self.erode_region(
+            seed,
+            origin_chunk_x,
+            origin_chunk_z,
+            chunks_across,
+            map_size,
+            resource,
+            map,
+            Some(&hardness),
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn erode_region<H: Fn(usize, f32) -> f32>(
+        &self,
+        seed: i32,
+        origin_chunk_x: i32,
+        origin_chunk_z: i32,
+        chunks_across: i32,
+        map_size: i32,
+        resource: &mut ErosionResource,
+        map: &mut [f32],
+        hardness: Option<&H>,
+    ) {
         let max_index = map_size.wrapping_sub(2);
         for iteration in 0..self.iterations {
             let iteration_seed = pack_seed(seed, iteration);
@@ -397,7 +449,7 @@ impl ErosionFilter {
                         1,
                         max_index,
                     );
-                    self.apply_drop(x as f32, z as f32, map, map_size, resource);
+                    self.apply_drop(x as f32, z as f32, map, map_size, resource, hardness);
                 }
             }
         }
@@ -434,19 +486,27 @@ impl ErosionFilter {
                         1,
                         max_index,
                     );
-                    self.apply_drop(x as f32, z as f32, map, size.region_length, resource);
+                    self.apply_drop(
+                        x as f32,
+                        z as f32,
+                        map,
+                        size.region_length,
+                        resource,
+                        None::<&fn(usize, f32) -> f32>,
+                    );
                 }
             }
         }
     }
 
-    fn apply_drop(
+    fn apply_drop<H: Fn(usize, f32) -> f32>(
         &self,
         mut position_x: f32,
         mut position_y: f32,
         map: &mut [f32],
         map_size: i32,
         resource: &mut ErosionResource,
+        hardness: Option<&H>,
     ) {
         let mut direction_x = 0.0_f32;
         let mut direction_y = 0.0_f32;
@@ -513,10 +573,14 @@ impl ErosionFilter {
                 map[index + width] += deposit * (1.0 - cell_offset_x) * cell_offset_y;
                 map[index + width + 1] += deposit * cell_offset_x * cell_offset_y;
             } else {
-                let erosion = java_min(
-                    (sediment_capacity - sediment) * self.erode_speed,
-                    -delta_height,
-                );
+                let rate = match hardness {
+                    None => self.erode_speed,
+                    Some(hardness) => {
+                        let index = droplet_index as usize;
+                        self.erode_speed * (1.0 - hardness(index, map[index]))
+                    }
+                };
+                let erosion = java_min((sediment_capacity - sediment) * rate, -delta_height);
                 let (offsets, weights) = self.brushes.brush(droplet_index as usize);
                 for (&offset, &weight) in offsets.iter().zip(weights) {
                     let index = droplet_index.wrapping_add(offset) as usize;
@@ -1637,6 +1701,72 @@ pub(crate) mod tests {
         filter.apply_tile(7, 0, 0, size, &mut ErosionResource::default(), &mut map);
         let changed = map.iter().zip(&original).filter(|(a, b)| a != b).count();
         assert!(changed > map.len() / 4, "{changed} of {} cells", map.len());
+    }
+
+    /// `rock_strata`'s hardness: 0 everywhere is Reimagined's region erosion bit for bit, over every oracle setting;
+    /// a hard half of the map loses less than the same half erodes without it, and the soft half erodes as much.
+    #[test]
+    fn hardness_slows_erosion_and_zero_hardness_is_the_original() {
+        let (chunks_across, map_size) = (5, 80);
+        for (name, settings) in erosion_filter_settings() {
+            let filter = ErosionFilter::new(map_size, settings);
+            for kind in 0..4 {
+                let original = erosion_map(kind, map_size, 7);
+                let (mut plain, mut zero) = (original.clone(), original.clone());
+                let mut resource = ErosionResource::default();
+                filter.apply_region(7, -2, 3, chunks_across, map_size, &mut resource, &mut plain);
+                filter.apply_region_with_hardness(
+                    7,
+                    -2,
+                    3,
+                    chunks_across,
+                    map_size,
+                    &mut resource,
+                    &mut zero,
+                    |_, _| 0.0,
+                );
+                assert_eq!(
+                    erosion_map_digest(&plain),
+                    erosion_map_digest(&zero),
+                    "{name} {kind}"
+                );
+            }
+        }
+        let filter = ErosionFilter::new(
+            map_size,
+            ErosionFilterSettings {
+                droplet_lifetime: 12,
+                ..ErosionFilterSettings::default()
+            },
+        );
+        let original = erosion_map(0, map_size, 7);
+        let hard = |index: usize| (index as i32 % map_size) < map_size / 2;
+        let (mut plain, mut resisting) = (original.clone(), original.clone());
+        let mut resource = ErosionResource::default();
+        filter.apply_region(7, 0, 0, chunks_across, map_size, &mut resource, &mut plain);
+        filter.apply_region_with_hardness(
+            7,
+            0,
+            0,
+            chunks_across,
+            map_size,
+            &mut resource,
+            &mut resisting,
+            |index, _| if hard(index) { 0.9 } else { 0.0 },
+        );
+        let lost = |map: &[f32], side: bool| -> f64 {
+            (0..map.len())
+                .filter(|&i| hard(i) == side)
+                .map(|i| f64::from((original[i] - map[i]).max(0.0)))
+                .sum()
+        };
+        assert!(
+            lost(&resisting, true) < 0.5 * lost(&plain, true),
+            "{} {}",
+            lost(&resisting, true),
+            lost(&plain, true)
+        );
+        assert!(lost(&resisting, false) > 0.5 * lost(&plain, false));
     }
 
     #[test]

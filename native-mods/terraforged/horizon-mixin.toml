@@ -455,6 +455,13 @@ source = "realistic_vegetation.rs"
 visibility = "pub"
 
 [[module]]
+id = "rock_strata"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_rock_strata"
+source = "rock_strata.rs"
+visibility = "pub"
+
+[[module]]
 id = "altitude_climate"
 file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_altitude_climate"

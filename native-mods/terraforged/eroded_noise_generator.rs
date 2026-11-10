@@ -63,6 +63,7 @@ pub struct ErodedNoiseGenerator {
     deposits: bool,
     /// Horizon's far erosion (`eroded_far_terrain`), shared by every generator [`Self::sharing`] makes, as the noise is.
     far: Arc<FarErosion>,
+    strata: bool,
 }
 
 /// One cached erosion region: the eroded heights (`buildRegion`'s map, which indexing reads) and, with the
@@ -135,6 +136,7 @@ impl ErodedNoiseGenerator {
             regions: ErosionRegionCache::new(),
             river_start: RiverStart::for_settings(super::terraforged_settings::current()),
             deposits: super::terraforged_settings::current().erosion_deposits,
+            strata: super::terraforged_settings::current().rock_strata,
             far: Arc::new(FarErosion::new()),
         }
     }
@@ -152,6 +154,7 @@ impl ErodedNoiseGenerator {
             regions: ErosionRegionCache::new(),
             river_start: self.river_start,
             deposits: self.deposits,
+            strata: self.strata,
             far: Arc::clone(&self.far),
         }
     }
@@ -160,6 +163,19 @@ impl ErodedNoiseGenerator {
     pub fn shares_noise_with(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.generator, &other.generator)
     }
+
+    /// The same generator with erosion slowed by the rock's hardness (Horizon's `rock_strata`, see
+    /// [`Self::build_region`]) or not.
+    pub fn with_strata(mut self, strata: bool) -> Self {
+        self.strata = strata;
+        self
+    }
+
+    /// How much harder than its rock the ground of TerraForged's `plateau` and `badlands` terrains is (Horizon's
+    /// `rock_strata`): their caprock holds, as on real mesas and buttes.
+    pub const HARD_TERRAIN_BONUS: f32 = 0.2;
+    /// The hardest ground `rock_strata` makes: it always wears a little.
+    pub const MAX_HARDNESS: f32 = 0.9;
 
     /// The same generator recording erosion's deposits in its chunks ([`Self::generate`]) or not.
     pub fn with_deposits(mut self, deposits: bool) -> Self {
@@ -266,6 +282,7 @@ impl ErodedNoiseGenerator {
             erosion: Arc::clone(&self.erosion),
             generator: Arc::clone(&self.generator),
             smoothing: self.smoothing,
+            strata: self.strata,
         });
     }
 
@@ -410,7 +427,10 @@ impl ErodedNoiseGenerator {
     /// [`ErosionRegionLayout::TOTAL_CHUNKS`] chunks from the origin chunk, then [`HeightmapSmoothing::apply`]. `Err`
     /// on the first failing sample. With `erosion_deposits` (Horizon's) the region also keeps erosion's change to
     /// every block of the map (the map after erosion and smoothing minus the raw heights); the heights are the same
-    /// either way.
+    /// either way. With `rock_strata` (Horizon's) the erosion is [`ErosionFilter::apply_region_with_hardness`]: the
+    /// hardness of the blended strata's rock at the droplet cell's height (`terraforged_rock_strata`), plus
+    /// [`Self::HARD_TERRAIN_BONUS`] on plateau and badlands columns, at most [`Self::MAX_HARDNESS`]. It is still a
+    /// pure function of the seed and the region.
     fn build_region(
         &self,
         seed: i32,
@@ -422,6 +442,7 @@ impl ErodedNoiseGenerator {
             &self.generator,
             &self.erosion,
             self.smoothing,
+            self.strata,
             seed,
             region_x,
             region_z,
@@ -446,10 +467,14 @@ fn noise_coord(generator: &NoiseGenerator, coord: i32) -> f32 {
 }
 
 /// `buildRegion`'s eroded map ([`ErodedNoiseGenerator::build_region`]), handing the raw map to `raw` before erosion.
+/// With `strata` (Horizon's `rock_strata`) the erosion is [`ErosionFilter::apply_region_with_hardness`]; the far
+/// erosion ([`FarErosion`]) builds its regions here too, so far tiles get the chunks' heights either way.
+#[allow(clippy::too_many_arguments)]
 fn eroded_map(
     generator: &NoiseGenerator,
     erosion: &ErosionFilter,
     smoothing: HeightmapSmoothingSettings,
+    strata: bool,
     seed: i32,
     region_x: i32,
     region_z: i32,
@@ -460,28 +485,69 @@ fn eroded_map(
     let start_z = origin_chunk_z.wrapping_shl(4);
     let map_size = ErosionRegionLayout::MAP_SIZE;
     let mut map = Vec::with_capacity((map_size * map_size) as usize);
-    let mut sample = NoiseSample::new(&generator.continent().context().terrain);
+    let terrains = &generator.continent().context().terrain;
+    let mut sample = NoiseSample::new(terrains);
     let mut blender = generator.blender_resource();
+    // `rock_strata` (Horizon's): which columns are plateau or badlands, the harder terrains.
+    let hard_terrains: Vec<_> = ["plateau", "badlands"]
+        .iter()
+        .filter_map(|name| terrains.get_by_name(name))
+        .collect();
+    let mut hard_columns = Vec::new();
     for z in 0..map_size {
         let noise_z = noise_coord(generator, start_z.wrapping_add(z));
         for x in 0..map_size {
             let noise_x = noise_coord(generator, start_x.wrapping_add(x));
-            let height = generator
-                .sample_terrain(seed, noise_x, noise_z, &mut sample, &mut blender)?
-                .height_noise;
-            map.push(height);
+            let sampled =
+                generator.sample_terrain(seed, noise_x, noise_z, &mut sample, &mut blender)?;
+            map.push(sampled.height_noise);
+            if strata {
+                let terrain = &sampled.terrain_type;
+                hard_columns.push(hard_terrains.iter().any(|hard| terrain.is_same(hard)));
+            }
         }
     }
     raw(&map);
-    erosion.apply_region(
-        seed,
-        origin_chunk_x,
-        origin_chunk_z,
-        ErosionRegionLayout::TOTAL_CHUNKS,
-        map_size,
-        &mut ErosionResource::default(),
-        &mut map,
-    );
+    let mut resource = ErosionResource::default();
+    let chunks = ErosionRegionLayout::TOTAL_CHUNKS;
+    if strata {
+        // Not Java's (`rock_strata`): a droplet erodes the rock at its cell's current height (`floor(height *
+        // max_y)`, the block the fill would place there) less, by that rock's hardness, plus the terrain's.
+        let strata = super::terraforged_rock_strata::Strata::new(seed)
+            .area(start_x, start_z, map_size, map_size);
+        let max_y = generator.levels().max_y as f32;
+        let width = map_size as usize;
+        erosion.apply_region_with_hardness(
+            seed,
+            origin_chunk_x,
+            origin_chunk_z,
+            chunks,
+            map_size,
+            &mut resource,
+            &mut map,
+            |index, height| {
+                let (x, z) = ((index % width) as i32, (index / width) as i32);
+                let y = super::terraforged::floor(height * max_y);
+                let rock = strata.rock_at(start_x.wrapping_add(x), y, start_z.wrapping_add(z));
+                let bonus = if hard_columns[index] {
+                    ErodedNoiseGenerator::HARD_TERRAIN_BONUS
+                } else {
+                    0.0
+                };
+                (rock.hardness() + bonus).min(ErodedNoiseGenerator::MAX_HARDNESS)
+            },
+        );
+    } else {
+        erosion.apply_region(
+            seed,
+            origin_chunk_x,
+            origin_chunk_z,
+            chunks,
+            map_size,
+            &mut resource,
+            &mut map,
+        );
+    }
     HeightmapSmoothing::apply(&mut map, map_size, smoothing);
     Ok(map)
 }
@@ -558,6 +624,8 @@ struct RegionSource {
     erosion: Arc<ErosionFilter>,
     generator: Arc<NoiseGenerator>,
     smoothing: HeightmapSmoothingSettings,
+    /// `rock_strata`: the far regions erode as the chunks' do.
+    strata: bool,
 }
 
 impl FarErosion {
@@ -631,6 +699,7 @@ impl FarErosion {
                             &source.generator,
                             &source.erosion,
                             source.smoothing,
+                            source.strata,
                             seed,
                             region_x,
                             region_z,
@@ -1291,6 +1360,48 @@ chunk 2 2147483647 -3 5 3fba3fdd57ea00f8";
                     for i in order {
                         let (x, z) = chunks[i];
                         assert_eq!(chunk_digest(shared, seed, x, z), fresh[i]);
+                    }
+                });
+            }
+        });
+    }
+
+    /// `rock_strata` (Horizon's): the rock's hardness slows the erosion, so the heights change, by less than the
+    /// erosion's own change (hardness only takes some of it away); chunks still agree across threads and orders.
+    #[test]
+    fn strata_slow_the_erosion_and_ignore_threads() {
+        let seed = -17;
+        let off = eroded(0, 1, 50, 25, 0);
+        let on = eroded(0, 1, 50, 25, 0).with_strata(true);
+        let raw = eroded(0, 1, 0, 25, 0);
+        let (mut changed, mut eroded_less) = (0, 0);
+        for (x, z) in (0..128).flat_map(|z| (0..128).map(move |x| (x * 3 - 200, z * 3 - 150))) {
+            let (a, b, r) = (
+                off.eroded_height(seed, x, z).unwrap(),
+                on.eroded_height(seed, x, z).unwrap(),
+                raw.eroded_height(seed, x, z).unwrap(),
+            );
+            if a.to_bits() != b.to_bits() {
+                changed += 1;
+                eroded_less += usize::from((r - b).abs() < (r - a).abs());
+            }
+        }
+        assert!(changed > 1000, "{changed}");
+        assert!(eroded_less * 3 > changed * 2, "{eroded_less} of {changed}");
+        let chunks = [(0, 0), (7, 3), (-1, 0), (-8, 7)];
+        let fresh: Vec<u64> = chunks
+            .iter()
+            .map(|&(x, z)| chunk_digest(&eroded(0, 1, 50, 25, 0).with_strata(true), seed, x, z))
+            .collect();
+        thread::scope(|scope| {
+            for worker in 0..6 {
+                let (on, fresh) = (&on, &fresh);
+                scope.spawn(move || {
+                    let mut order: Vec<usize> = (0..chunks.len()).collect();
+                    order.rotate_left(worker % chunks.len());
+                    for i in order {
+                        let (x, z) = chunks[i];
+                        assert_eq!(chunk_digest(on, seed, x, z), fresh[i]);
                     }
                 });
             }

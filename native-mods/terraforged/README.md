@@ -25,7 +25,7 @@ TerraForged (vanilla world types keep 26.3's overworld):
   and plains;
 - surfaces: the vanilla surface rules over TerraForged's preliminary heights, then `Surface`; the
   `erosion_deposits` setting lays erosion's sediment over them, `realistic_vegetation` podzol, moss and
-  coarse dirt by slope and water;
+  coarse dirt by slope and water; `rock_strata` bands the stone under them;
 - caves: TerraForged's five noise caves and their biomes (global caves write `terraforged:cave`);
   no vanilla carvers run;
 - structures: vanilla placement over TerraForged's (eroded) base heights and biomes, with terrain
@@ -282,6 +282,39 @@ don't generate, so they need none.
   biome and position, so chunks agree at their borders. Weather in play stays the biome's: rain, not snow,
   falls on a warm biome's snowy summit, and its snow and ice don't melt (only block light melts them).
   Distant tiles don't show the snow line. Off, generation is unchanged.
+- `rock_strata`: bands of granite, diorite, andesite and stone underground, and erosion that wears soft
+  bands faster than hard ones. The bands are TerraForged Reimagined's `StrataDecorator` (its Miscellaneous
+  > Strata Decorator, off by default there too; 6dd607eb has none), with its defaults: regions of 600
+  blocks, each with its own sequence of 4–6 bands 3–14 blocks thick, repeated down to y 9 and tilted up to
+  12 blocks by a 200-block simplex noise, from 8 blocks under the column's floor (so the surface rules
+  still dress plain stone), replacing plain stone only. The palette is always the ore-compatible one
+  (`oreCompatibleStoneOnly`, Reimagined's default): exactly `#minecraft:stone_ore_replaceables`, so ores
+  still generate through the bands. Two departures:
+  - Reimagined's bands change in a vertical wall at a region's border. Here a column's band index (how
+    many bands lie under the block, counted through each band's thickness) is the mean of the four
+    nearest region centres' indices, weighted by distance (bilinear), so every band's floor moves
+    smoothly from one region to the next, at most a block between neighbouring columns up to y 320; at a
+    region's centre the bands are Reimagined's. Each band takes its rock from one of those regions: the
+    heaviest, once each weight is scaled by a factor (0.5–1.5) drawn per region and band, so the bands
+    change rock one at a time between centres, like a lateral change of facies.
+  - New (in neither tree): each rock has a hardness, which the erosion pass reads. Where a droplet erodes,
+    it takes `erode_speed × (1 − H)`, with `H` the hardness of the rock at the droplet cell's height
+    (the block the fill places at that height) plus 0.2 on TerraForged's `plateau` and `badlands`
+    terrains (their caprock), at most 0.9: granite 0.8, diorite 0.75, andesite 0.6, stone 0.2. The order
+    follows measured rock strength (Selby 1980, "A rock mass strength classification for geomorphic
+    purposes", Z. Geomorphologie 24; Sklar and Dietrich 2001, "Sediment and rock strength controls on
+    river incision into bedrock", Geology 29): coarse plutonic rock resists best; plain stone stands for the
+    weaker sedimentary layers between, so they wear back into benches under hard ledges (differential
+    erosion, as in cuestas and mesas). The erosion region keeps its geometry (8×8 chunks and a 4-chunk
+    margin), so this adds no seam beyond the regions' own, and heights stay a pure function of the seed and
+    the region. A hardness of 0 everywhere erodes exactly as without the setting.
+
+  The bands start 8 blocks under the floor, so they show on cliffs, in caves and in ravines, not on gentle
+  ground; TerraForged's `Surface` still turns steep slopes to plain stone at the top, and snow
+  (`altitude_climate`), ground cover (`realistic_vegetation`) and deposits (`erosion_deposits`) lie over them
+  as before. Distant tiles never show the bands; with `eroded_far_terrain` the finest ones stand on the
+  strata's eroded ground, the chunks' own (the far erosion thread erodes with the same hardness), and otherwise on
+  the un-eroded ground as before. `/tf preview` shows neither. Off, generation is unchanged.
 
 ## Layers
 
