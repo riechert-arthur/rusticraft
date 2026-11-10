@@ -397,7 +397,13 @@ fn regen(game: &mut Game<'_>, player: &NativeServerPlayer, radius: i32) {
         return;
     }
     if let Err(error) = horizon_client::save::terraforged_regen::delete_chunks(&game.save, &keys) {
-        // Nothing was deleted: the area stays as it is.
+        // Nothing was deleted: the area stays as it is. The entities of chunks that are not resident stay in
+        // their records, which now hold them, as if those chunks had unloaded: in memory too, they would load
+        // twice with their chunks.
+        let held = held
+            .into_iter()
+            .filter(|(key, _)| game.world.chunks.contains_key(key))
+            .collect();
         restore(game, held);
         failed(game, &error.to_string());
         return;
