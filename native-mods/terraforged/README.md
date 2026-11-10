@@ -523,10 +523,14 @@ basins, from the drainage map, then lets the droplets work on the result.
 - Application: the raw terrain height (TerraForged's `sampleTerrain`) of every column is lowered by
   the change there, never below a block over the land's base level (where TerraForged's rivers
   stand) or the sea, and never raised. That happens in the plain sample (distant tiles, structures,
-  the spawn search) and in the erosion region's map before the droplets, so both agree. Then
-  TerraForged's rivers carve as usual, and with `flow_rivers` the channels' water level follows
-  the eroded cells (filled height plus the change). The climate sample is left alone (see
-  "Flow-routed rivers"), so biomes and the maps are as without the setting.
+  the spawn search), in the distant terrain's sample with `coastal_landforms` or
+  `glacial_landforms`, and in the erosion region's map before the droplets (the chunks' regions and
+  `eroded_far_terrain`'s far regions alike), so they all agree. The coast's landform, TerraForged's
+  rivers and `glacial_landforms`' troughs then shape the lowered ground as usual, and with
+  `flow_rivers` the channels' water level follows the eroded cells (filled height plus the change).
+  The drainage map itself samples the ground before the cut (with the coasts and troughs, as
+  `flow_rivers` has it), so it never routes the valleys it cuts. The climate sample is left alone
+  (see "Flow-routed rivers"), so biomes and the maps are as without the setting.
 - Not yet: rock hardness modulating K (#274), recomputing the routing as the valleys deepen, lateral
   erosion and sediment (an alluvial fill of the floors), and tuning on more seeds.
 
