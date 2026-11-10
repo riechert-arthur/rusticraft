@@ -1251,7 +1251,19 @@ impl Lod {
                     elevation,
                     self.reduced_detail,
                 );
-                self.ready.retain(|key, _| self.plan.nodes.contains(key));
+                // After a teleport this drops every tile's samples: thousands of
+                // tiles of 256 columns, freed one span list at a time, took the
+                // frame 125 ms. They are freed on a thread of their own.
+                let mut gone = Vec::new();
+                self.ready.retain(|key, samples| {
+                    let keep = self.plan.nodes.contains(key);
+                    if !keep {
+                        gone.push(Arc::clone(samples));
+                    }
+                    keep
+                });
+                let count = gone.len();
+                crate::chunk::free_columns(gone, count);
                 self.detail_masks
                     .retain(|key, _| self.plan.nodes.contains(key));
                 self.replanned = true;
@@ -2515,6 +2527,25 @@ mod tests {
         };
         assert_eq!(queued(&mut lod, true), SAMPLE_JOBS);
         assert_eq!(queued(&mut lod, false), SAMPLE_JOBS + 3);
+
+        // A far move drops the tiles the new plan leaves out, freed on a thread of their own when
+        // there are many; a tile a mesh job still holds stays whole.
+        let first = TileKey {
+            x: 0,
+            z: 0,
+            level: 0,
+        };
+        lod.ready = (0..100)
+            .map(|x| {
+                let key = TileKey { x, ..first };
+                (key, Arc::new(vec![Column::default(); CELLS * CELLS]))
+            })
+            .collect();
+        let held = Arc::clone(&lod.ready[&first]);
+        lod.update([1e6, 64., 1e6], 2, 64, Some(FxHashSet::default()));
+        assert!(lod.ready.keys().all(|key| lod.plan.nodes.contains(key)));
+        assert!(!lod.ready.contains_key(&first));
+        assert_eq!((Arc::strong_count(&held), held.len()), (1, CELLS * CELLS));
         Ok(())
     }
 
