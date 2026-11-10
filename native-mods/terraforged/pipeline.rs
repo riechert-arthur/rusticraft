@@ -1955,24 +1955,49 @@ mod tests {
     /// generated on one thread or six and decorated, are the level pipeline's, block for block and height for height.
     #[test]
     fn far_pipelines_share_the_level_noise_and_make_its_chunks() {
+        // A seed no other test builds a live pipeline of.
+        far_pipelines_make_the_level_chunks(267_000_267, terraforged_settings::FAITHFUL);
+    }
+
+    /// The same with `realistic_vegetation` (and `eroded_far_terrain`) on: the far-decoration pipelines weigh the
+    /// trees and lay the ground cover from the same aspects and distances to water as the level's, whichever thread
+    /// generates a chunk and whatever it generated before.
+    #[test]
+    fn far_pipelines_make_the_level_chunks_with_realistic_vegetation() {
+        far_pipelines_make_the_level_chunks(
+            297_000_297,
+            Settings {
+                realistic_vegetation: true,
+                eroded_far_terrain: true,
+                ..terraforged_settings::FAITHFUL
+            },
+        );
+    }
+
+    /// The body of the two tests above: the live pipelines of `seed` are built with `settings`.
+    fn far_pipelines_make_the_level_chunks(seed: i64, settings: Settings) {
         use super::super::terraforged_generator_facade::live_generator;
         let Some(data) = data() else { return };
-        // A seed no other test builds a live pipeline of.
-        const SEED: i64 = 267_000_267;
         const OVERWORLD: &str = "minecraft:overworld";
         let stem = terraforged_stem(&data, PRESET, OVERWORLD).unwrap();
-        let live =
-            |seed: i64| Arc::new(live_pipeline(&data, seed, &stem, OVERWORLD, true).unwrap());
-        let level = live(SEED);
-        let (far, far_threaded) = (live(SEED), live(SEED));
+        let live = |seed: i64| {
+            terraforged_settings::set_for_thread(Some(settings));
+            let pipeline = live_pipeline(&data, seed, &stem, OVERWORLD, true);
+            terraforged_settings::set_for_thread(None);
+            Arc::new(pipeline.unwrap())
+        };
+        let level = live(seed);
+        assert_eq!(level.settings, settings);
+        assert_eq!(level.ground_cover.is_some(), settings.realistic_vegetation);
+        let (far, far_threaded) = (live(seed), live(seed));
         for other in [&far, &far_threaded] {
             assert!(other.generator.shares_noise_with(&level.generator));
             assert!(!Arc::ptr_eq(&other.generator, &level.generator));
         }
-        let found = live_generator(SEED, OVERWORLD).unwrap();
+        let found = live_generator(seed, OVERWORLD).unwrap();
         assert!(Arc::ptr_eq(&found, &level.generator));
         drop(found);
-        let other_seed = live(SEED.wrapping_add(1));
+        let other_seed = live(seed.wrapping_add(1));
         assert!(!other_seed.generator.shares_noise_with(&level.generator));
         drop(other_seed);
 
