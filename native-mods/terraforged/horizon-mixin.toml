@@ -483,6 +483,13 @@ source = "altitude_climate.rs"
 visibility = "pub"
 
 [[module]]
+id = "drainage"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_drainage"
+source = "drainage.rs"
+visibility = "pub"
+
+[[module]]
 id = "settings"
 file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_settings"
