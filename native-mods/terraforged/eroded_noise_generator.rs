@@ -1551,9 +1551,9 @@ chunk 2 2147483647 -3 5 3fba3fdd57ea00f8";
     }
 
     /// `glacial_landforms` (Horizon's): with every column glaciated (a chilled climate), river valleys deepen into
-    /// troughs: chunks only lose height, only within reach of a river node, and each column is still
-    /// `eroded_height_noise` (what structures read); `far_sample` carves the same troughs into the raw terrain; chunks
-    /// agree across threads and orders. Unchilled, the glaciation never falls with height.
+    /// troughs: chunks only lose height and water level, and each column's base and height noise are still
+    /// `eroded_noises` (what structures read) and the eroded far tiles'; `far_sample` carves the same troughs into the
+    /// raw terrain; chunks agree across threads and orders. Unchilled, the glaciation never falls with height.
     #[test]
     fn glaciers_deepen_valleys_into_troughs_and_ignore_threads() {
         use super::super::terraforged_glacial_landforms::Glaciers;
