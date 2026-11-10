@@ -338,8 +338,10 @@ don't generate, so they need none.
 
   The change is an offset on each column's height, added after the erosion and before the rivers carve
   (rivers still cut through cliffs). The chunks, structures' base heights (`base_height`, `base_column`)
-  and Horizon's distant tiles all read it. It is a function of the seed, the column's position and its
-  un-eroded continent sample, so chunks agree at their borders, whatever the threads or order. Cliff tops
+  and Horizon's distant tiles all read it: un-eroded tiles add it to the un-eroded height, and with
+  `eroded_far_terrain` the finest tiles add it to the eroded one, as the chunks do, so they still stand on the
+  chunks' ground. It is a function of the seed, the column's position, its un-eroded continent sample and
+  the height it is added to, so chunks agree at their borders, whatever the threads or order. Cliff tops
   are higher ground, so `altitude_climate` cools them as any other land. `/tf preview` and the Create World
   map don't show it. Off, generation is unchanged.
 

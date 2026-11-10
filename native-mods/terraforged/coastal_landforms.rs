@@ -18,7 +18,8 @@
 //
 // The change is a height offset per column, added to the eroded height before the rivers carve it, both where chunks
 // are filled and where structures and the distant terrain read heights. It is a function of the seed, the column's
-// own position and its un-eroded continent sample, so chunks agree at every border, whatever the threads or order.
+// own position, its un-eroded continent sample and the height it is added to, so chunks agree at every border,
+// whatever the threads or order.
 // Off, nothing calls it and the world is bit-exact.
 
 use super::terraforged::simplex;
