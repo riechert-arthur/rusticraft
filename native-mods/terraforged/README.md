@@ -232,12 +232,12 @@ Engine layers not on 6dd607eb's path: 6dd607eb links Engine 0.3.0 but generates 
 These Engine layers are ported and parity-tested, but no TerraForged world calls them; they stay as reference:
 
 - Engine's `LandForms` (`landforms.rs`), which only 6dd607eb's data generator `ModTerrains` calls (the bundle ships
-  the terrain noises it generated), its `RegionModule`, populators, `StandardTerrainProvider` and heightmap blenders
+  the terrain noises it generated; the noise caves borrow only its `noise_warp` helper), its `RegionModule`, populators, `StandardTerrainProvider` and heightmap blenders
   (`region.rs`, `populator.rs`, `provider.rs`, `blend.rs`);
 - Engine's simple, advanced and fancy continents (`continent.rs`, `advanced_continent.rs`, `fancy.rs`);
 - Engine's river stack (`river.rs`): `GenWarp`, `River`, `RiverCarver`, `LakeCarver`, `WetlandCarver`, networks,
-  river maps, `BaseRiverGenerator` and the simple and fancy river generators, and their river caches. 6dd607eb has
-  no wetlands, so TerraForged worlds have none;
+  river maps, `BaseRiverGenerator` and the simple and fancy river generators, and their river caches. 6dd607eb carves
+  no wetlands (it ships only a `wetland` terrain type), so TerraForged worlds have none;
 - Engine's `Heightmap` (`heightmap.rs`), its tiles, tile generator and tile cache (`tile.rs`, `tile_generator.rs`),
   `WorldFilters` with Engine's own `Erosion`, smoothing, steepness and beach filters (`filters.rs`; the world's
   erosion is Reimagined's, `erosion.rs`, which takes only `FastRandom` from it), and Engine's climate stage
@@ -485,7 +485,7 @@ against a Java oracle for Engine's default levels (256 high, sea level 63), Terr
 level whose `- 1` wraps, with start seeds where the increments and the warp's second axis seed wrap. The other
 landforms come with the LandForms layers below. TerraForged's `RandSeed` (ModTerrains builds its landforms from a
 `SplittableRandom` seed rather than Engine's counter) is not ported: only 6dd607eb's data generators (`ModTerrains`,
-`ModVegetations`) use it, and the bundle ships the terrain noise and vegetation files they generated.
+`ModCaves`, `ModVegetations`) use it, and the bundle ships the terrain noise, cave and vegetation files they generated.
 
 The erosion Ridge layer adds Engine's `Ridge` (`com.terraforged.engine.module.Ridge`, `ErosionRidge` in `noise.rs`;
 not the `RidgeNoise` source) and its `Ridge.Noise` module (`ErosionRidge::wrap`, `Module::erosion_ridge`). For each
@@ -752,7 +752,7 @@ and the banks is lowered toward the bed, the innermost part sets `erosionMask`, 
 edge noise are tagged with the world registry's `wetland` terrain, and cells from the bed up to the mound top move
 toward seeded mound noise, sampled at the terrain coordinates. `recordBounds` adds the segment's box widened by the
 radius. Engine's `TerrainPopulator` base is not ported, as for the river carver and lakes. Only Engine's river networks use
-wetlands, and 6dd607eb has none: TerraForged worlds have no wetlands. Its tests fold every cell field over 1927800 applies of fresh and filled cells
+wetlands, and 6dd607eb carves none: TerraForged worlds have no wetlands. Its tests fold every cell field over 1927800 applies of fresh and filled cells
 (NaN, infinite and -0 values and masks) at points inside, on the edge of and outside wetlands (degenerate, NaN and
 infinite segments; zero, negative, NaN and infinite radii; seeds that wrap) for three `Levels` (TerraForged's swapped
 `Levels(63, 255)` among them), with both plain and warped coordinates, against a Java oracle running Engine's class,
