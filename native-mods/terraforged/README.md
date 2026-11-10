@@ -371,8 +371,10 @@ don't generate, so they need none.
     river's.
 
   The trough is a function of the column's position, its terrain sample and its nearest river node, so
-  chunks agree at their borders whatever the threads or order. The chunks, structures' base heights and
-  Horizon's distant tiles read it; `/tf preview` and the Create World map (biome colours and river beds)
+  chunks agree at their borders whatever the threads or order. The chunks, structures' base heights (ground
+  and water level) and Horizon's distant tiles read it: un-eroded tiles take the glaciation over the
+  un-eroded height, and with `eroded_far_terrain` the finest tiles take it over the eroded one, as the
+  chunks do. `/tf preview` and the Create World map (biome colours and river beds)
   don't change. Rivers carve after `coastal_landforms`, so a trough that reaches a cliff coast cuts a notch
   down to its floor. Not yet: cirques at river sources, fjords where troughs meet the sea, moraines at the
   glaciers' lower limit, and a "past ice age" field for temperate mountains. Off, generation is unchanged.

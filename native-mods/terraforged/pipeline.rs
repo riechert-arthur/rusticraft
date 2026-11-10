@@ -2031,10 +2031,40 @@ mod tests {
         );
     }
 
+    /// The same with `glacial_landforms` (and `eroded_far_terrain`) on, in a glaciated valley: the far-decoration
+    /// pipelines cut the same troughs as the level's.
+    #[test]
+    fn far_pipelines_make_the_level_chunks_with_glacial_landforms() {
+        far_pipelines_make_the_level_chunks(
+            301_000_301,
+            Settings {
+                glacial_landforms: true,
+                eroded_far_terrain: true,
+                ..terraforged_settings::FAITHFUL
+            },
+        );
+    }
+
+    /// The same with `glacial_landforms` and `coastal_landforms` (and `eroded_far_terrain`) on, where a glaciated
+    /// valley reaches the coast band.
+    #[test]
+    fn far_pipelines_make_the_level_chunks_with_glacial_and_coastal_landforms() {
+        far_pipelines_make_the_level_chunks(
+            301_000_302,
+            Settings {
+                glacial_landforms: true,
+                coastal_landforms: true,
+                eroded_far_terrain: true,
+                ..terraforged_settings::FAITHFUL
+            },
+        );
+    }
+
     /// The body of the tests above: the live pipelines of `seed` are built with `settings`. The chunks compared are
     /// around (5, -3), with `altitude_climate` around the highest point of plains or a colder biome on a 64-block
-    /// grid over 3,000 x 3,000 blocks, so that the snow line and the treeline are in them, and with `coastal_landforms`
-    /// around the first point of a 128-block grid over 16,000 x 16,000 blocks in the coast band of a full cliff.
+    /// grid over 3,000 x 3,000 blocks, so that the snow line and the treeline are in them, with `glacial_landforms`
+    /// around a glaciated valley (see there), and with `coastal_landforms` alone around the first point of a 128-block
+    /// grid over 16,000 x 16,000 blocks in the coast band of a full cliff.
     fn far_pipelines_make_the_level_chunks(seed: i64, settings: Settings) {
         use super::super::terraforged_generator_facade::live_generator;
         let Some(data) = data() else { return };
@@ -2079,6 +2109,32 @@ mod tests {
                 .max()
                 .unwrap();
             assert!(height > 200, "{height} at {x} {z}");
+            ChunkPos::new(x >> 4, z >> 4)
+        } else if settings.glacial_landforms {
+            // A river valley at least half under ice (with `coastal_landforms` in the coast band: a trough that reaches
+            // the sea), on a 128-block grid over 24,000 x 24,000 blocks.
+            use super::super::terraforged_biome_sampler::{BEACH, COAST};
+            let noise = level.generator.noise_generator();
+            let seed = level.generator.seed();
+            let glaciers =
+                super::super::terraforged_glacial_landforms::Glaciers::new(noise, settings);
+            let frequency = noise.levels().noise_levels.frequency;
+            let (x, z) = (-96..96)
+                .flat_map(|i| (-96..96).map(move |j| (i * 128, j * 128)))
+                .find(|&(x, z)| {
+                    let mut sample = super::super::terraforged_terrain_data::NoiseSample::new(
+                        &noise.continent().context().terrain,
+                    );
+                    noise
+                        .sample(seed, x, z, &mut sample, &mut noise.blender_resource())
+                        .unwrap();
+                    let at = (x as f32 * frequency, z as f32 * frequency);
+                    sample.river_noise < 0.5
+                        && (!settings.coastal_landforms
+                            || (BEACH..COAST).contains(&sample.continent_noise))
+                        && glaciers.glaciation(seed, (x, z), at, sample.height_noise) > 0.5
+                })
+                .expect("a glaciated valley");
             ChunkPos::new(x >> 4, z >> 4)
         } else if settings.coastal_landforms {
             use super::super::terraforged_biome_sampler::{BEACH, COAST};
@@ -3820,7 +3876,7 @@ mod tests {
     /// through it. The trough only lowers the ground, by tens of blocks, and lays a flat floor (columns within 2 blocks
     /// of the lowest) much wider than the river valley's; structures' base heights stay those of the filled chunks
     /// (frozen oceans' icebergs aside, see `coastal_landforms_cut_cliffs_and_lay_flats`), and chunks are the same on 6
-    /// threads in rotated orders.
+    /// threads in rotated orders. The structures' water surface (`WORLD_SURFACE_WG`) is the chunks' too.
     #[test]
     #[ignore = "slow in debug: run with --profile fast --include-ignored"]
     fn glacial_landforms_cut_u_shaped_troughs() {
@@ -3899,6 +3955,13 @@ mod tests {
                         } else {
                             let floor = top_where(&chunk, x & 15, z & 15, ground);
                             assert_eq!(floor + 1, height(&on, x, z), "{x} {z}");
+                            // The water level too: the trough lowers it in the chunks and for structures alike.
+                            let surface = top_where(&chunk, x & 15, z & 15, &["minecraft:air"]);
+                            let structures = on
+                                .generator
+                                .base_height(x, z, TerraHeightmap::WorldSurfaceWorldgen)
+                                .unwrap();
+                            assert_eq!(surface + 1, structures, "{x} {z}");
                         }
                         top_where(&chunk, x & 15, z & 15, open)
                     })

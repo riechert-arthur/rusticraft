@@ -359,18 +359,25 @@ impl ErodedNoiseGenerator {
     /// seed), then the rivers carve it (`sampleRiver`). `Err` where the terrain sample or the region build fails (a
     /// custom module, see [`NoiseGenerator::sample`]), where Java throws; a failed build is not cached.
     pub fn eroded_height_noise(&self, seed: i32, x: i32, z: i32) -> Result<f32, &'static str> {
-        self.carved_height_noise(seed, x, z, || self.eroded_height(seed, x, z))
+        Ok(self.eroded_noises(seed, x, z)?.1)
     }
 
-    /// [`Self::eroded_height_noise`] with the block's eroded height from `eroded`: the raw terrain sample, its height
-    /// replaced by `eroded`'s, then the rivers.
-    fn carved_height_noise(
+    /// Not Java's: [`Self::eroded_height_noise`] with the base noise of the same sample, `(base, height)`, as the
+    /// chunks hold them. Without `glacial_landforms` the base noise is [`Self::noise_sample`]'s (erosion and the
+    /// coast's landform only change the height); with it the troughs lower it too, by the glaciation over this height.
+    pub fn eroded_noises(&self, seed: i32, x: i32, z: i32) -> Result<(f32, f32), &'static str> {
+        self.carved_noises(seed, x, z, || self.eroded_height(seed, x, z))
+    }
+
+    /// [`Self::eroded_noises`] with the block's eroded height from `eroded`: the raw terrain sample, its height
+    /// replaced by `eroded`'s, then the coast's landform and the rivers.
+    fn carved_noises(
         &self,
         seed: i32,
         x: i32,
         z: i32,
         eroded: impl FnOnce() -> Result<f32, &'static str>,
-    ) -> Result<f32, &'static str> {
+    ) -> Result<(f32, f32), &'static str> {
         let mut sample = NoiseSample::new(&self.generator.continent().context().terrain);
         let noise_x = self.noise_coord(x);
         let noise_z = self.noise_coord(z);
@@ -382,7 +389,7 @@ impl ErodedNoiseGenerator {
             sample.height_noise += self.coast_offset(seed, x, z, &sample, &mut None, (x, z, 1));
         }
         self.carve_rivers(seed, (x, z), (noise_x, noise_z), &mut sample);
-        Ok(sample.height_noise)
+        Ok((sample.base_noise, sample.height_noise))
     }
 
     /// Horizon's far terrain's eroded heights (`eroded_far_terrain`; no Java counterpart): a lookup that reads a
@@ -867,6 +874,12 @@ impl FarHeights<'_> {
     /// [`ErodedNoiseGenerator::eroded_height_noise`] at block `(x, z)` if its region is built (by the chunks or the far
     /// thread); `None`, and the region queued for the far thread, if not. `Err` where the terrain sample fails.
     pub fn eroded_height_noise(&mut self, x: i32, z: i32) -> Result<Option<f32>, &'static str> {
+        Ok(self.eroded_noises(x, z)?.map(|(_, height)| height))
+    }
+
+    /// [`ErodedNoiseGenerator::eroded_noises`] (base and height noise) at block `(x, z)`, as
+    /// [`Self::eroded_height_noise`].
+    pub fn eroded_noises(&mut self, x: i32, z: i32) -> Result<Option<(f32, f32)>, &'static str> {
         let (chunk_x, chunk_z) = (x >> 4, z >> 4);
         let (eroded, seed) = (self.eroded, self.seed);
         let region = self
@@ -890,9 +903,7 @@ impl FarHeights<'_> {
             Some(BuiltRegion::Fill(region)) => region[ErosionRegionLayout::block_index(x, z)],
             Some(BuiltRegion::Far(region)) => region.height(x, z),
         };
-        eroded
-            .carved_height_noise(seed, x, z, || Ok(height))
-            .map(Some)
+        eroded.carved_noises(seed, x, z, || Ok(height)).map(Some)
     }
 }
 
@@ -1563,21 +1574,32 @@ chunk 2 2147483647 -3 5 3fba3fdd57ea00f8";
                 far < raw - 2.0 * plain.generator().levels().noise_levels.unit
             })
             .expect("a glaciated valley");
-        let mut changed = 0;
+        let (mut changed, mut lowered_base) = (0, 0);
+        // `eroded_far_terrain`'s far tiles read the region the chunk built: they get the same troughs.
+        let mut far = on.far_heights(seed);
         on.generate(seed, chunk_x, chunk_z, |data| {
             for (dx, dz) in (0..16).flat_map(|dx| (0..16).map(move |dz| (dx, dz))) {
                 let (x, z) = (chunk_x * 16 + dx, chunk_z * 16 + dz);
-                let height = data.height().get(dx, dz);
+                let (height, base) = (data.height().get(dx, dz), data.base().get(dx, dz));
                 assert_eq!(
                     height.to_bits(),
                     on.eroded_height_noise(seed, x, z).unwrap().to_bits()
                 );
+                // The trough's water level (base noise) is the chunk's too, for structures and far tiles.
+                let bits = |(base, height): (f32, f32)| (base.to_bits(), height.to_bits());
+                let column = bits((base, height));
+                assert_eq!(bits(on.eroded_noises(seed, x, z).unwrap()), column);
+                assert_eq!(far.eroded_noises(x, z).unwrap().map(bits), Some(column));
                 let before = plain.eroded_height_noise(seed, x, z).unwrap();
                 assert!(height <= before, "{x} {z}");
                 changed += usize::from(height < before);
+                let (plain_base, _) = plain.eroded_noises(seed, x, z).unwrap();
+                assert!(base <= plain_base, "{x} {z}");
+                lowered_base += usize::from(base < plain_base);
             }
         })
         .unwrap();
+        eprintln!("GLACIER chunk lowered {changed} heights, {lowered_base} water levels");
         assert!(changed > 16, "{changed}");
         let chunks = [
             (chunk_x, chunk_z),
