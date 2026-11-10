@@ -2060,8 +2060,24 @@ mod tests {
         );
     }
 
+    /// The same with `flow_rivers` (and `eroded_far_terrain`) on, across the channel of runtime seed 777 at
+    /// (736, -672) (the level seed's high bits keep it out of the other tests' live pipelines): the far-decoration
+    /// pipelines carve the same channels, over the drainage map they share through the level's noise, as the level's.
+    #[test]
+    #[ignore = "real terrain: every query builds drainage tiles, too slow in debug; run with --profile fast --ignored"]
+    fn far_pipelines_make_the_level_chunks_with_flow_rivers() {
+        far_pipelines_make_the_level_chunks(
+            777 + (293 << 32),
+            Settings {
+                flow_rivers: true,
+                eroded_far_terrain: true,
+                ..terraforged_settings::FAITHFUL
+            },
+        );
+    }
+
     /// The body of the tests above: the live pipelines of `seed` are built with `settings`. The chunks compared are
-    /// around (5, -3), with `altitude_climate` around the highest point of plains or a colder biome on a 64-block
+    /// around (5, -3), with `flow_rivers` around a channel (see there), with `altitude_climate` around the highest point of plains or a colder biome on a 64-block
     /// grid over 3,000 x 3,000 blocks, so that the snow line and the treeline are in them, with `glacial_landforms`
     /// around a glaciated valley (see there), and with `coastal_landforms` alone around the first point of a 128-block
     /// grid over 16,000 x 16,000 blocks in the coast band of a full cliff.
@@ -2110,6 +2126,17 @@ mod tests {
                 .unwrap();
             assert!(height > 200, "{height} at {x} {z}");
             ChunkPos::new(x >> 4, z >> 4)
+        } else if settings.flow_rivers {
+            let seed = level.generator.seed();
+            let channels = level
+                .generator
+                .noise_generator()
+                .flow_rivers()
+                .unwrap()
+                .channels(seed);
+            let reach = channels.reach(736, -672).expect("seed 777's channel");
+            assert!(reach.distance <= reach.width * 0.5, "{reach:?}");
+            ChunkPos::new(736 >> 4, -672 >> 4)
         } else if settings.glacial_landforms {
             // A river valley at least half under ice (with `coastal_landforms` in the coast band: a trough that reaches
             // the sea), on a 128-block grid over 24,000 x 24,000 blocks.

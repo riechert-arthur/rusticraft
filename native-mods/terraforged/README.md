@@ -378,13 +378,19 @@ don't generate, so they need none.
   don't change. Rivers carve after `coastal_landforms`, so a trough that reaches a cliff coast cuts a notch
   down to its floor. Not yet: cirques at river sources, fjords where troughs meet the sea, moraines at the
   glaciers' lower limit, and a "past ice age" field for temperate mountains. Off, generation is unchanged.
+- `flow_rivers`: streams and rivers where the drainage map (below) collects water, as well as
+  TerraForged's own rivers, which stay as they are. A channel starts where 0.6 km² drains through a
+  16-block cell, follows the water down its valley, joins other channels and ends in the sea or in one
+  of TerraForged's rivers or lakes. It is 2 blocks wide at its head and widens with the area it drains
+  (as its square root, to 20 blocks), its bed 2 to 7 blocks under the water (as the area to the 0.4).
+  See "Flow-routed rivers" below. Off, generation is unchanged.
 
 ## Drainage map
 
 Horizon's, in neither TerraForged tree (`drainage.rs`): where water flows over the terrain, the base
-the realistic-terrain settings (flow-routed rivers, basin erosion, rain shadow) build on. Nothing in
-generation reads it yet, so it changes no world and has no setting of its own; each feature that uses
-it comes with its own setting, off by default.
+the realistic-terrain settings (flow-routed rivers, basin erosion, rain shadow) build on. It has no
+setting of its own and changes no world by itself; each feature that uses it comes with its own
+setting, off by default (`flow_rivers` is the first).
 
 - The source is TerraForged's un-eroded terrain height without its rivers (`drainage_height`: the
   continent and land noise of `sampleTerrain`, unfloored), with the sea below the sea level. It is
@@ -419,6 +425,58 @@ it comes with its own setting, off by default.
   surface never rises downstream inside a tile, but two tiles may fill a depression by their
   border to different levels (0.3 blocks on the synthetic valley), so a channel built on it should
   clamp its profile downstream. Water that leaves an L1 window and comes back in is counted twice.
+
+## Flow-routed rivers
+
+Horizon's `flow_rivers` setting, in neither TerraForged tree (`flow_rivers.rs`). TerraForged's rivers
+run node to node across a continent cell, whatever lies between; these follow the drainage map, so
+they run down valleys and join as a network. TerraForged's main rivers stay, and the new channels
+drain into them: the map's source for this setting is TerraForged's un-eroded terrain with its rivers
+carved, where a river or lake bed is an outlet at its water level, like the sea.
+
+- Network: a channel runs through every L1 cell (16 blocks) that at least 0.6 km² drains through, that
+  flows on to a neighbour, and that lies outside a filled depression (filled height at most a block
+  over the terrain). This is the constant support-area threshold of channel heads (Montgomery &
+  Dietrich 1988; O'Callaghan & Mark 1984). Its line is a quadratic B-spline through the D8 path's cell
+  centres (Chaikin's corner cutting: each curve runs from the middle of one step to the middle of the
+  next, bending through the cell between), each centre moved by up to 5 blocks, seeded per cell, so
+  channels don't follow the grid. The last curve into the sea or one of TerraForged's rivers runs
+  straight to that cell's centre.
+- Size, as downstream hydraulic geometry (Leopold & Maddock 1953), discharge taken as proportional to
+  the drained area A: width 2·(A / 0.6 km²)^0.5 blocks, 2 to 20; bed depth 1 + (A / 0.6 km²)^0.4
+  blocks, at most 7. The valley reaches 4 blocks plus twice the width from the line. Width and depth
+  read `Drainage::flow`'s blended area, so they change smoothly where a channel crosses a tile border.
+- Water: the stepped surface of TerraForged's rivers (each column one level, its base height), 1.5
+  blocks under the map's filled height, never under the sea level. That height is the highest filled
+  height over the cell and the next 8 cells downstream, so the water never rises downstream where two
+  drainage tiles fill a depression by their border to different levels.
+- Cross-section, after TerraForged's `RiverCarver`: a parabolic bed at least a block under the water;
+  beyond the water the ground is lowered towards a block over it, less with the square of the distance,
+  back to the terrain at the valley's edge. A bank within 2 blocks of the water that dips under it (by
+  less than 4 blocks) is raised level with the water, so no water stands beside a lower column. The
+  channel's columns become TerraForged's river terrain with river noise 0 (so they fill with water to
+  the channel's level and get river surfaces); across the valley the river noise is multiplied by
+  TerraForged's valley noise. The sea, beaches and TerraForged's own rivers and lakes are left as they are.
+- Everything that samples the terrain's heights sees the channels: chunks, distant tiles and
+  structures. The climate doesn't: biomes, the spawn search, `/locate biome`, `/tf preview` and the
+  Create World map read TerraForged's climate sample, which the setting leaves alone, so a channel
+  keeps the biome around it (no river biome) and the maps don't show it. Carving the climate sample
+  too made every biome query build drainage tiles: the spawn search alone took minutes. Neither does
+  `/locateterrain`'s search (TerraForged's `find`), which samples rivers at unscaled coordinates, as
+  TerraForged does.
+- Purity: the channels near a 128-block patch are extracted together from the drainage map and kept in
+  a lossy cache (1024 patches); every value is a function of the seed and the position. The map
+  samples its own copy of the noise, built the same way.
+- With the other landform settings: the map samples the ground the distant tiles have, so with
+  `coastal_landforms` it sees the coast's landform and with `glacial_landforms` the troughs. A channel
+  then takes its water level from the ground the chunks have, not from ground that a tidal flat or
+  a trough has since lowered under it (that water would stand as a wall beside the lower columns).
+  The channels carve after both, so a channel that reaches a cliff coast cuts a gorge through it
+  down to its water (the cliff's offset is 0 at the shoreline, so the gorge opens onto the sea). A
+  tributary that reaches a trough runs down its wall into TerraForged's river on the trough floor.
+- Not yet: meanders (sine-generated curves along the channel), deltas and estuaries where a channel
+  reaches the sea, lakes in large filled depressions (a channel stops where it enters one and starts
+  again past its spill point), and sloped water, which needs flowing water.
 
 ## Layers
 

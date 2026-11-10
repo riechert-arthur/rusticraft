@@ -40,6 +40,7 @@ use super::{
     terraforged_engine::TerrainRegistry,
     terraforged_eroded_noise_generator::ErodedNoiseGenerator,
     terraforged_erosion::{ErosionFilterSettings, HeightmapSmoothingSettings},
+    terraforged_flow_rivers::FlowRivers,
     terraforged_generator_facade::TerraForgedGenerator,
     terraforged_noise_generator::{CONTINENT_OFFSET, NoiseGenerator, TERRAIN_OFFSET},
     terraforged_terrain_blender::TerrainBlender,
@@ -173,7 +174,30 @@ pub fn scale_heights(levels: TerrainLevels, scale: f32) -> TerrainLevels {
 /// (`TerrainBlender(TERRAIN_OFFSET, 800, 0.8F, 0.4F, terrain)`) and `createContinentNoise`'s continent. The terrain
 /// types, the continent and the blender's terrains share one registry, Engine 0.3.0's built-ins
 /// ([`TerrainRegistry::new`], as 6dd607eb links Engine 0.3.0), so every identity test sees the same built-ins. `Err` where a bundled resource does not decode.
+/// With Horizon's `flow_rivers` setting (read here, as the world's generators are built), the noise also carves the
+/// flow-routed rivers, over a drainage map that samples a second copy of the same noise (with the coasts and glacial
+/// troughs of `coastal_landforms` and `glacial_landforms`, as the chunks have them).
 pub fn build(levels: TerrainLevels) -> Result<TerraForgedGenerator, String> {
+    let mut noise = build_noise_generator(levels)?;
+    let settings = super::terraforged_settings::current();
+    if settings.flow_rivers {
+        noise = noise.with_flow_rivers(FlowRivers::with_settings(
+            build_noise_generator(levels)?,
+            settings,
+        ));
+    }
+    Ok(TerraForgedGenerator::new(
+        levels,
+        ErodedNoiseGenerator::new(
+            noise,
+            erosion_settings(),
+            HeightmapSmoothingSettings::default(),
+        ),
+    ))
+}
+
+/// [`build`]'s un-eroded noise, without Horizon's settings.
+fn build_noise_generator(levels: TerrainLevels) -> Result<NoiseGenerator, String> {
     let mut registry = TerrainRegistry::new();
     let types = decode_current_terrain_types(&mut registry).map_err(|error| error.to_string())?;
     let noises = decode_current_terrain_noises(&types).map_err(|error| error.to_string())?;
@@ -186,15 +210,7 @@ pub fn build(levels: TerrainLevels) -> Result<TerraForgedGenerator, String> {
         noises.into_values().collect(),
     );
     let continent = ContinentNoise::new(levels, context);
-    let noise = NoiseGenerator::new(levels, continent, land);
-    Ok(TerraForgedGenerator::new(
-        levels,
-        ErodedNoiseGenerator::new(
-            noise,
-            erosion_settings(),
-            HeightmapSmoothingSettings::default(),
-        ),
-    ))
+    Ok(NoiseGenerator::new(levels, continent, land))
 }
 
 /// `withErosion`'s filter settings: 6dd607eb's `ErodedNoiseGenerator` takes Engine 0.3.0's `new FilterSettings.Erosion()`

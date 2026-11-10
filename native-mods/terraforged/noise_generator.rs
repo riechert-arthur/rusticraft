@@ -27,11 +27,13 @@ use super::{
     terraforged_continent_noise::ContinentNoise,
     terraforged_continent_points::{BEACH, COAST, SHALLOW_OCEAN},
     terraforged_engine::{ControlPoints, Terrain, TerrainProperties},
+    terraforged_flow_rivers::FlowRivers,
     terraforged_terrain_blender::{Blender, TerrainBlender},
     terraforged_terrain_data::{NoiseData, NoiseSample},
     terraforged_terrain_levels::{NoiseLevels, TerrainLevels},
     terraforged_util::{pack, unpack_left_float, unpack_right_float},
 };
+use std::sync::Arc;
 
 /// `NoiseGenerator.find`'s `0.75F`: a non-river terrain's candidate needs at least this river noise (away from any
 /// river valley).
@@ -75,6 +77,9 @@ pub struct NoiseGenerator {
     continent: ContinentNoise,
     control_points: ControlPoints,
     deep_ocean: Terrain,
+    /// Horizon's `flow_rivers` carver and the registry's river terrain it marks channels with; `None` without the
+    /// setting.
+    flow: Option<(Arc<FlowRivers>, Terrain)>,
 }
 
 impl NoiseGenerator {
@@ -90,6 +95,27 @@ impl NoiseGenerator {
             continent,
             control_points,
             deep_ocean,
+            flow: None,
+        }
+    }
+
+    /// The same generator carving Horizon's flow-routed rivers after TerraForged's ([`Self::carve_flow_rivers`]).
+    pub fn with_flow_rivers(mut self, flow: FlowRivers) -> Self {
+        let river = self.continent.context().terrain.get_by_id(5);
+        self.flow = Some((Arc::new(flow), river));
+        self
+    }
+
+    /// The `flow_rivers` carver, if the setting is on.
+    pub fn flow_rivers(&self) -> Option<&FlowRivers> {
+        self.flow.as_ref().map(|(flow, _)| &**flow)
+    }
+
+    /// Horizon's `flow_rivers` (not TerraForged's): carves block (`x`, `z`)'s sample, TerraForged's rivers already
+    /// carved, by the flow-routed channels; nothing without the setting.
+    pub fn carve_flow_rivers(&self, seed: i32, x: i32, z: i32, sample: &mut NoiseSample) {
+        if let Some((flow, river)) = &self.flow {
+            flow.carve(seed, x, z, self.levels, river, sample);
         }
     }
 
@@ -223,7 +249,8 @@ impl NoiseGenerator {
         Ok(0)
     }
 
-    /// `sample(seed, x, z, sample, blender)`: [`Self::sample_terrain`] then [`Self::sample_river`] at
+    /// `sample(seed, x, z, sample, blender)`: [`Self::sample_terrain`] then [`Self::sample_river`] (then Horizon's
+    /// [`Self::carve_flow_rivers`] at the block) at
     /// `x * frequency`, `z * frequency` (int to float, then a float multiply). `Err` when a terrain noise the blender
     /// picks has no seed-first form (a custom module): the sample is then partly written (continent fields set).
     /// Panics where Java throws (the blender's cell search on NaN, infinite or huge noise coordinates).
@@ -239,7 +266,9 @@ impl NoiseGenerator {
         let noise_x = x as f32 * frequency;
         let noise_z = z as f32 * frequency;
         self.sample_terrain(seed, noise_x, noise_z, sample, blender)?;
-        Ok(self.sample_river(seed, noise_x, noise_z, sample))
+        self.sample_river(seed, noise_x, noise_z, sample);
+        self.carve_flow_rivers(seed, x, z, sample);
+        Ok(sample)
     }
 
     /// `sampleTerrain(seed, nx, nz, sample, blender)`: the continent, then `getOcean`, `getBlend` or `getInland` by

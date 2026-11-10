@@ -35,6 +35,7 @@ use super::{
         ErosionResource, HeightmapSmoothing, HeightmapSmoothingSettings,
     },
     terraforged_noise_generator::NoiseGenerator,
+    terraforged_terrain_blender::Blender,
     terraforged_terrain_data::{NoiseData, NoiseSample},
     terraforged_terrain_generator::NoiseGenerator as NoiseGeneratorContract,
     terraforged_terrain_levels::{NoiseLevels, TerrainLevels},
@@ -175,7 +176,8 @@ impl ErodedNoiseGenerator {
 
     /// `sampleRiver` for block `(x, z)` at noise coordinates `(noise_x, noise_z)`: with Horizon's `glacial_landforms`
     /// the valleys become troughs by the glaciation over the column's height before the carve
-    /// ([`NoiseGenerator::sample_river_glacial`]), else Java's [`NoiseGenerator::sample_river`].
+    /// ([`NoiseGenerator::sample_river_glacial`]), else Java's [`NoiseGenerator::sample_river`]; then Horizon's
+    /// `flow_rivers` channels ([`NoiseGenerator::carve_flow_rivers`], nothing without the setting).
     fn carve_rivers(
         &self,
         seed: i32,
@@ -183,17 +185,15 @@ impl ErodedNoiseGenerator {
         (noise_x, noise_z): (f32, f32),
         sample: &mut NoiseSample,
     ) {
-        match &self.glaciers {
-            None => {
-                self.generator.sample_river(seed, noise_x, noise_z, sample);
-            }
-            Some(glaciers) => {
-                self.generator
-                    .sample_river_glacial(seed, noise_x, noise_z, sample, |height| {
-                        glaciers.glaciation(seed, (x, z), (noise_x, noise_z), height)
-                    });
-            }
-        }
+        carve_terraforged_rivers(
+            &self.generator,
+            self.glaciers.as_deref(),
+            seed,
+            (x, z),
+            (noise_x, noise_z),
+            sample,
+        );
+        self.generator.carve_flow_rivers(seed, x, z, sample);
     }
 
     /// A generator over the same noise and erosion filter (shared, not copied), with the same settings and an empty
@@ -246,22 +246,15 @@ impl ErodedNoiseGenerator {
         strata: &mut Option<super::terraforged_rock_strata::StrataArea>,
         area: (i32, i32, i32),
     ) -> f32 {
-        use super::terraforged_coastal_landforms::Coasts;
-        if !Coasts::reshapes(sample) {
-            return 0.0;
-        }
-        let levels = self.generator.levels();
-        let hardness = self.strata.then(|| {
-            let (x0, z0, size) = area;
-            strata
-                .get_or_insert_with(|| {
-                    super::terraforged_rock_strata::Strata::new(seed).area(x0, z0, size, size)
-                })
-                .rock_at(x, levels.sea_level, z)
-                .hardness()
-        });
-        let coasts = Coasts::new(seed, levels.noise_levels);
-        coasts.offset(sample, coasts.landform(x, z, hardness))
+        coast_offset_with(
+            &self.generator,
+            self.strata,
+            seed,
+            (x, z),
+            sample,
+            strata,
+            area,
+        )
     }
 
     /// The same generator with erosion slowed by the rock's hardness (Horizon's `rock_strata`, see
@@ -327,15 +320,15 @@ impl ErodedNoiseGenerator {
         if !self.coast && self.glaciers.is_none() {
             return self.noise_sample(seed, x, z);
         }
-        let mut sample = NoiseSample::new(&self.generator.continent().context().terrain);
-        let (noise_x, noise_z) = (self.noise_coord(x), self.noise_coord(z));
-        let mut blender = self.generator.blender_resource();
-        self.generator
-            .sample_terrain(seed, noise_x, noise_z, &mut sample, &mut blender)?;
-        if self.coast {
-            sample.height_noise += self.coast_offset(seed, x, z, &sample, &mut None, (x, z, 1));
-        }
-        self.carve_rivers(seed, (x, z), (noise_x, noise_z), &mut sample);
+        let mut sample = shaped_sample(
+            &self.generator,
+            self.coasts(),
+            self.glaciers.as_deref(),
+            seed,
+            (x, z),
+            &mut self.generator.blender_resource(),
+        )?;
+        self.generator.carve_flow_rivers(seed, x, z, &mut sample);
         Ok(sample)
     }
 
@@ -602,6 +595,96 @@ impl ErodedNoiseGenerator {
 /// `getNoiseCoord(coord)` of `generator`'s levels.
 fn noise_coord(generator: &NoiseGenerator, coord: i32) -> f32 {
     coord as f32 * generator.levels().noise_levels.frequency
+}
+
+/// TerraForged's rivers for block `(x, z)` at noise coordinates `(noise_x, noise_z)`: with Horizon's
+/// `glacial_landforms` (`glaciers`) the valleys become troughs by the glaciation over the column's height before the
+/// carve ([`NoiseGenerator::sample_river_glacial`]), else Java's [`NoiseGenerator::sample_river`]. Without Horizon's
+/// flow-routed channels: [`ErodedNoiseGenerator::carve_rivers`] adds them.
+pub fn carve_terraforged_rivers(
+    generator: &NoiseGenerator,
+    glaciers: Option<&super::terraforged_glacial_landforms::Glaciers>,
+    seed: i32,
+    (x, z): (i32, i32),
+    (noise_x, noise_z): (f32, f32),
+    sample: &mut NoiseSample,
+) {
+    match glaciers {
+        None => {
+            generator.sample_river(seed, noise_x, noise_z, sample);
+        }
+        Some(glaciers) => {
+            generator.sample_river_glacial(seed, noise_x, noise_z, sample, |height| {
+                glaciers.glaciation(seed, (x, z), (noise_x, noise_z), height)
+            });
+        }
+    }
+}
+
+/// [`ErodedNoiseGenerator::coast_offset`] over `generator`, with the rock's hardness when `strata` (`rock_strata`).
+fn coast_offset_with(
+    generator: &NoiseGenerator,
+    strata: bool,
+    seed: i32,
+    (x, z): (i32, i32),
+    sample: &NoiseSample,
+    area_strata: &mut Option<super::terraforged_rock_strata::StrataArea>,
+    area: (i32, i32, i32),
+) -> f32 {
+    use super::terraforged_coastal_landforms::Coasts;
+    if !Coasts::reshapes(sample) {
+        return 0.0;
+    }
+    let levels = generator.levels();
+    let hardness = strata.then(|| {
+        let (x0, z0, size) = area;
+        area_strata
+            .get_or_insert_with(|| {
+                super::terraforged_rock_strata::Strata::new(seed).area(x0, z0, size, size)
+            })
+            .rock_at(x, levels.sea_level, z)
+            .hardness()
+    });
+    let coasts = Coasts::new(seed, levels.noise_levels);
+    coasts.offset(sample, coasts.landform(x, z, hardness))
+}
+
+/// The un-eroded sample of block `(x, z)` as the distant terrain has it ([`ErodedNoiseGenerator::far_sample`]), before
+/// Horizon's flow-routed channels: TerraForged's terrain, the coast's landform with `coasts` (`coastal_landforms`;
+/// `Some(true)` with `rock_strata` too), then TerraForged's rivers, cut into troughs with `glaciers`. `flow_rivers`'
+/// drainage map samples it too, so the channels follow the ground the chunks have. `Err` where the terrain sample
+/// fails.
+pub fn shaped_sample(
+    generator: &NoiseGenerator,
+    coasts: Option<bool>,
+    glaciers: Option<&super::terraforged_glacial_landforms::Glaciers>,
+    seed: i32,
+    (x, z): (i32, i32),
+    blender: &mut Blender,
+) -> Result<NoiseSample, &'static str> {
+    let mut sample = NoiseSample::new(&generator.continent().context().terrain);
+    let (noise_x, noise_z) = (noise_coord(generator, x), noise_coord(generator, z));
+    generator.sample_terrain(seed, noise_x, noise_z, &mut sample, blender)?;
+    if let Some(strata) = coasts {
+        sample.height_noise += coast_offset_with(
+            generator,
+            strata,
+            seed,
+            (x, z),
+            &sample,
+            &mut None,
+            (x, z, 1),
+        );
+    }
+    carve_terraforged_rivers(
+        generator,
+        glaciers,
+        seed,
+        (x, z),
+        (noise_x, noise_z),
+        &mut sample,
+    );
+    Ok(sample)
 }
 
 /// `buildRegion`'s eroded map ([`ErodedNoiseGenerator::build_region`]), handing the raw map to `raw` before erosion.
