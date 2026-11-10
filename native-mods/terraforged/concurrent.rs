@@ -167,7 +167,7 @@ struct TaskThreads {
 /// or [`ThreadPool::create`] (Engine's `BatchingThreadPool`, whose task executor runs the entries).
 ///
 /// Engine's `ThreadPools.create` hands out one shared pool per size and shuts the previous one down;
-/// here every `create` is its own pool, and [`Self::shared`] hands out the live pool of a size. Its
+/// here every `create` is its own pool, and [`Self::shared`] hands out the live pool of a size and group. Its
 /// batch threads are `tile_generator.rs`'s scoped threads, not these. Clones share the task threads;
 /// once the last clone is dropped the threads finish the queued tasks and exit (Engine's daemon
 /// threads outlive an unreferenced pool).
@@ -201,19 +201,24 @@ impl ThreadPool {
         }
     }
 
-    /// [`Self::create`]`(size)`, shared: while a clone of an earlier `shared(size)` pool lives, its
-    /// task threads, else a new pool. Every TerraForged pipeline of the process (a world's level and
-    /// its far-decoration threads) queues its chunks on one set of threads this way, as Java's all go
-    /// to Minecraft's one background executor, instead of starting a pool each (#304). Tasks never
-    /// wait for other tasks of the pool, so sharing it only changes which thread runs a task.
-    pub fn shared(size: i32) -> Self {
-        static SHARED: Mutex<Vec<(i32, Weak<TaskThreads>)>> = Mutex::new(Vec::new());
+    /// [`Self::create`]`(size)`, shared: while a clone of an earlier `shared(size, group)` pool lives,
+    /// its task threads, else a new pool. The TerraForged pipelines of the process queue their chunks
+    /// on one set of threads per group this way, as Java's all go to Minecraft's one background
+    /// executor, instead of starting a pool each (#304). Tasks never wait for other tasks of the pool,
+    /// so sharing it only changes which thread runs a task.
+    ///
+    /// A pool's threads start as tasks are submitted, and a new thread takes the priority of the
+    /// thread that starts it (its nice value and scheduling class on Linux), so callers of different
+    /// priorities pass different groups: otherwise whichever submitted first would set the priority
+    /// of every task.
+    pub fn shared(size: i32, group: &'static str) -> Self {
+        static SHARED: Mutex<Vec<(i32, &'static str, Weak<TaskThreads>)>> = Mutex::new(Vec::new());
         let mut shared = SHARED.lock().unwrap_or_else(PoisonError::into_inner);
-        shared.retain(|(_, tasks)| tasks.strong_count() > 0);
+        shared.retain(|(.., tasks)| tasks.strong_count() > 0);
         let live = shared
             .iter()
-            .find(|(of, _)| *of == size)
-            .and_then(|(_, tasks)| tasks.upgrade());
+            .find(|&&(of, from, _)| of == size && from == group)
+            .and_then(|(.., tasks)| tasks.upgrade());
         let pool = Self::create(size);
         if let Some(tasks) = live {
             return Self {
@@ -225,8 +230,17 @@ impl ThreadPool {
             .tasks
             .as_ref()
             .expect("a created pool has task threads");
-        shared.push((size, Arc::downgrade(tasks)));
+        shared.push((size, group, Arc::downgrade(tasks)));
         pool
+    }
+
+    /// Whether both pools run their tasks on the same threads.
+    #[cfg(test)]
+    pub fn shares_threads_with(&self, other: &Self) -> bool {
+        match (&self.tasks, &other.tasks) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        }
     }
 
     /// `size()`: the task threads plus `max(2, size)` batch threads; 0 for [`Self::NONE`].
@@ -1034,21 +1048,25 @@ w true true 102 2
         assert!(entry.timestamp() > 0);
     }
 
-    /// `shared` pools of one size share their task threads while one lives; other sizes and `create`
-    /// pools have their own; once every clone is gone the next `shared` starts new threads.
+    /// `shared` pools of one size and group share their task threads while one lives; other sizes,
+    /// other groups and `create` pools have their own; once every clone is gone the next `shared`
+    /// starts new threads.
     #[test]
     fn shared_pools_share_task_threads_while_one_lives() {
-        // A size no other test shares, so tests running at once can't hold this pool.
+        // A group of this test's own, so no terrain cache of a test running at once holds this pool
+        // (theirs is 2 * background_threads(), 6 on four cores).
         const SIZE: i32 = 6;
+        const GROUP: &str = "shared_pools_share_task_threads_while_one_lives";
         let tasks = |pool: &ThreadPool| Arc::as_ptr(pool.tasks.as_ref().unwrap());
-        let first = ThreadPool::shared(SIZE);
-        let second = ThreadPool::shared(SIZE);
+        let first = ThreadPool::shared(SIZE, GROUP);
+        let second = ThreadPool::shared(SIZE, GROUP);
         assert_eq!(tasks(&first), tasks(&second));
         assert_eq!(
             (first.size(), second.size()),
             (ThreadPool::create(SIZE).size(), 9)
         );
-        assert_ne!(tasks(&first), tasks(&ThreadPool::shared(SIZE + 2)));
+        assert_ne!(tasks(&first), tasks(&ThreadPool::shared(SIZE + 2, GROUP)));
+        assert_ne!(tasks(&first), tasks(&ThreadPool::shared(SIZE, "another")));
         assert_ne!(tasks(&first), tasks(&ThreadPool::create(SIZE)));
         // Tasks of both run on the pool's 3 threads.
         let names = Arc::new(Mutex::new(std::collections::BTreeSet::new()));
@@ -1078,7 +1096,7 @@ w true true 102 2
         let old = Arc::downgrade(first.tasks.as_ref().unwrap());
         drop((first, second, entries));
         assert_eq!(old.strong_count(), 0);
-        let fresh = ThreadPool::shared(SIZE);
+        let fresh = ThreadPool::shared(SIZE, GROUP);
         assert!(old.upgrade().is_none() && fresh.tasks.is_some());
     }
 

@@ -85,7 +85,7 @@ const REDUCED_PAINT: i32 = 2;
 const ERODED_FAR_WIDTH: i32 = 4;
 
 /// The name of Horizon's far-decoration threads (`vanillagen/lod.rs`), which run at idle priority.
-const FAR_DECORATION_THREAD: &str = "Far decoration";
+pub(super) const FAR_DECORATION_THREAD: &str = "Far decoration";
 
 pub(super) struct TerraForgedPipeline {
     /// `VanillaGen`: the `minecraft:overworld` noise settings' surface rule, fluids, features and carvers, with
