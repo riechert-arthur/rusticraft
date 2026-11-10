@@ -4674,8 +4674,19 @@ impl<G: ChunkGenerator> ChunkGenerator for Persistent<G> {
     fn decorate(&self, worker: &mut G::Worker, region: &mut [crate::streaming::Proto; 9]) {
         self.inner.decorate(worker, region);
     }
+    /// A generated chunk also loads the entities `entities/` holds for it:
+    /// vanilla's `EntityStorage` is separate from the chunk's, so entities
+    /// saved where the chunk's own record was deleted (an editor, TerraForged's
+    /// `/tf regen`) come back with the chunk generated in its place. They
+    /// follow the ones its generation spawned, as in vanilla: those join at
+    /// FULL (`ChunkStatusTasks.postLoadProtoChunk`), the stored ones later,
+    /// when the entity storage's read arrives
+    /// (`PersistentEntitySectionManager.processPendingLoads`).
     fn finish(&self, proto: crate::streaming::Proto) -> Chunk {
-        self.inner.finish(proto)
+        let mut chunk = self.inner.finish(proto);
+        let stored = self.save.load_entities(chunk.x, chunk.z);
+        chunk.entities.extend(stored);
+        chunk
     }
 }
 
@@ -4811,6 +4822,45 @@ mod tests {
             sections(&SaveDir::new(dir.clone(), LevelShape::OVERWORLD)),
             Some(0)
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Entity storage is separate from the chunk's (`EntityStorage`): a chunk
+    /// generated where only `entities/` kept a record loads those entities,
+    /// after the ones its generation spawned.
+    #[test]
+    fn a_generated_chunk_loads_the_entities_saved_for_it() {
+        use crate::streaming::ChunkGenerator;
+        let Some(root) = std::env::var_os("HORIZON_TEST_RESOURCES") else {
+            return;
+        };
+        let root = PathBuf::from(root);
+        let assets = crate::assets::Assets::load(&root).expect("assets");
+        let biomes = Biomes::load(&root).expect("biomes");
+        let dir = std::env::temp_dir().join(format!("horizon-gen-entities-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let save = Arc::new(SaveDir::new(dir.clone(), LevelShape::OVERWORLD));
+        let stand = Tag::compound([
+            ("id", string("minecraft:armor_stand")),
+            ("UUID", Tag::IntArray(vec![1, 2, 3, 4])),
+        ]);
+        save.save_entities(vec![((1, -2), vec![stand.clone()])])
+            .unwrap();
+        let inner = Arc::new(crate::testgen::TestTerrain::new(assets.registry, &biomes).unwrap());
+        let generator = Persistent {
+            inner,
+            save: save.clone(),
+            registry: Arc::new(assets),
+            biomes: Arc::new(biomes),
+        };
+        assert!(generator.load(1, -2).is_none(), "no chunk record");
+        // TestTerrain's worker is `()`.
+        let chunk = generator.finish(generator.proto(&mut (), 1, -2));
+        assert_eq!(chunk.entities, vec![stand]);
+        let chunk = generator.finish(generator.proto(&mut (), 2, -2));
+        assert!(chunk.entities.is_empty());
+        drop(generator);
+        drop(save);
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -103,11 +103,11 @@ Differences and gaps:
 - `/locateterrain`, `/tf export structures`, `/tf regen` and `/tf preview` exist only in TerraForged worlds
   (TerraForged registers its three everywhere); `/locateterrain`'s answer comes a moment later, and a radius
   above 100 answers "Unable to locate" where TerraForged's search never ends.
-- `/tf regen <radius>` deletes the area's entities too (TerraForged keeps them) and takes a radius of at
-  most 32. Its outermost ring is decorated against the chunks kept around it as they were generated, not as
-  they are: what it writes into them lands only where they still hold their generated blocks, without block
-  entities. What the kept chunks' own decoration once spread into the area (leaves of trees rooted next door)
-  is replayed into it; TerraForged's regen loses it.
+- `/tf regen <radius>` takes a radius of at most 32 and keeps the area's entities, as TerraForged does. Its
+  outermost ring is decorated against the chunks kept around it as they were generated, not as they are: what it
+  writes into them lands only where they still hold their generated blocks, without block entities. What the kept
+  chunks' own decoration once spread into the area (leaves of trees rooted next door) is replayed into it;
+  TerraForged's regen loses it.
 - `/tf preview [size] [zoom]` is Horizon's: TerraForged has no in-game preview, only a developer window
   (`Previewer`, never opened by the game). The command draws that window's map of the player's own world to
   `terraforged-preview.png` in the world folder.
@@ -3192,11 +3192,15 @@ level forget the old chunks and are sent the new ones. A regenerated chunk whose
 same as in a new world of that seed (checked in game), except where trees of neighbouring chunks collide: those depend
 on the order chunks are decorated in (see above; exact restoration is issue #257). It answers "Deleting chunks", "Regenerating
 chunks" and "Regen complete!" to the player and the operators (`sendSuccess(.., true)`). Differences:
-- Java keeps the area's entities and POIs (only the `region/` records are deleted, and loaded entities stay in the
-  entity manager). Horizon loads entities only with a chunk read from the save and ticks them by ticket, where a missing
-  chunk reads as air, so kept entities would fall through the area until it comes back, and those of unloaded chunks
-  would be orphaned: the area's entities (mobs, items, vehicles, item frames, armor stands...) and POIs are deleted with
-  it. Players are not entities there and stay where they are, as in Java.
+- The area's entities and POIs are kept, as in Java, where only the `region/` records are deleted and loaded
+  entities stay in the entity manager until their chunks are back. Here the area's loaded entities (mobs, items,
+  vehicles, item frames, armor stands...) are saved to `entities/` and leave the level, as when their chunks
+  unload, and the chunks generated in their place load them again with their UUIDs and positions (Horizon's
+  `Persistent::finish` reads a generated chunk's saved entities, as vanilla's entity storage is separate from the
+  chunk's), as do the entities saved in the area's unloaded chunks. A mob can come back inside the new terrain,
+  as in Java. POIs stay in `poi/`; a new chunk's save keeps only the POIs its blocks hold (a bed that is gone
+  loses its POI), as vanilla revalidates them. Players are not entities there and stay where they are, as in
+  Java.
 - The radius is at most 32 (vanilla's largest view distance); TerraForged's `integer(1)` has no maximum, and a large
   radius holds its server thread until the deletes are queued.
 - Java decorates every regenerated chunk, writing its features into the neighbours outside the area through its
