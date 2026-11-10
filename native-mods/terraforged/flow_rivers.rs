@@ -17,8 +17,11 @@ use super::terraforged::{clamp, lerp};
 use super::terraforged_continent_points::BEACH;
 use super::terraforged_drainage::{Column, Drainage, FlowCell, L1, SEA, TileMemo};
 use super::terraforged_engine::{Terrain, TerrainProperties};
+use super::terraforged_eroded_noise_generator::shaped_sample;
+use super::terraforged_glacial_landforms::Glaciers;
 use super::terraforged_lossy_cache::ConcurrentLossyCache;
 use super::terraforged_noise_generator::NoiseGenerator;
+use super::terraforged_settings::Settings;
 use super::terraforged_terrain_blender::Blender;
 use super::terraforged_terrain_data::NoiseSample;
 use super::terraforged_terrain_levels::TerrainLevels;
@@ -377,39 +380,59 @@ impl<S: Fn(i32, i32) -> Column> Channels<S> {
 /// A boxed drainage source, shareable between generation threads.
 pub type Source = Box<dyn Fn(i32, i32) -> Column + Send + Sync>;
 
-/// The drainage source of [`FlowRivers`]: its own copy of TerraForged's un-eroded generator, rivers included.
+/// The drainage source of [`FlowRivers`]: its own copy of TerraForged's un-eroded generator, rivers included, and
+/// the world's coasts and glaciers, which reshape the ground the channels run over.
 struct RiverSource {
     generator: NoiseGenerator,
     blenders: Mutex<Vec<Blender>>,
+    /// `coastal_landforms` (holding whether `rock_strata` is on) and `glacial_landforms`' glaciers, as the world's
+    /// [`ErodedNoiseGenerator`](super::terraforged_eroded_noise_generator::ErodedNoiseGenerator) has them.
+    coasts: Option<bool>,
+    glaciers: Option<Glaciers>,
 }
 
 impl RiverSource {
-    /// TerraForged's un-eroded sample of block (`x`, `z`), its rivers carved. One of TerraForged's river or lake
+    /// TerraForged's un-eroded sample of block (`x`, `z`), its rivers carved, as the distant terrain has it: with
+    /// `coastal_landforms` the coast's landform, with `glacial_landforms` the troughs (`shaped_sample`), so a channel
+    /// never takes its water level from ground a trough or a tidal flat lowered. One of TerraForged's river or lake
     /// beds is an outlet at its water level, so the channels end in TerraForged's rivers; a failed sample is sea.
     fn column(&self, seed: i32, x: i32, z: i32) -> Column {
         let levels = self.generator.levels();
-        let mut sample = NoiseSample::new(&self.generator.continent().context().terrain);
         let mut blender = self
             .blenders
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .pop()
             .unwrap_or_else(|| self.generator.blender_resource());
-        let sampled = self
-            .generator
-            .sample(seed, x, z, &mut sample, &mut blender)
-            .is_ok();
+        let sampled = if self.coasts.is_none() && self.glaciers.is_none() {
+            let mut sample = NoiseSample::new(&self.generator.continent().context().terrain);
+            let sampled = self
+                .generator
+                .sample(seed, x, z, &mut sample, &mut blender)
+                .is_ok();
+            sampled.then_some(sample)
+        } else {
+            shaped_sample(
+                &self.generator,
+                self.coasts,
+                self.glaciers.as_ref(),
+                seed,
+                (x, z),
+                &mut blender,
+            )
+            .ok()
+        };
         self.blenders
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(blender);
         let sea = levels.sea_level as f32;
-        if !sampled {
+        let Some(sample) = sampled else {
             return Column {
                 height: sea,
                 sea: true,
             };
-        }
+        };
         let height = levels.scaled_height(sample.height_noise);
         if sample.terrain_type.is_river() || sample.terrain_type.is_lake() {
             let water = levels.scaled_base_level(sample.base_noise).floor();
@@ -433,12 +456,23 @@ pub struct FlowRivers {
 
 impl FlowRivers {
     /// The carver over `generator`, a second copy of the world's un-eroded generator (built the same way, without
-    /// this carver): the drainage map samples it.
+    /// this carver): the drainage map samples it, without Horizon's other settings.
     pub fn new(generator: NoiseGenerator) -> Self {
+        Self::with_settings(generator, super::terraforged_settings::FAITHFUL)
+    }
+
+    /// [`Self::new`] with the world's `settings`: the drainage map samples the ground `coastal_landforms` and
+    /// `glacial_landforms` reshape, as the chunks have it.
+    pub fn with_settings(generator: NoiseGenerator, settings: Settings) -> Self {
+        let glaciers = settings
+            .glacial_landforms
+            .then(|| Glaciers::new(&generator, settings));
         Self {
             source: Arc::new(RiverSource {
                 generator,
                 blenders: Mutex::new(Vec::new()),
+                coasts: settings.coastal_landforms.then_some(settings.rock_strata),
+                glaciers,
             }),
             channels: RwLock::new(None),
         }
@@ -727,6 +761,61 @@ mod tests {
             let base = water_base_noise(levels, water);
             assert_eq!(levels.scaled_base_level(base).floor() as i32, water);
         }
+    }
+
+    /// With `coastal_landforms` and `glacial_landforms` the drainage map samples the ground the distant terrain has
+    /// (the coast's landform, the troughs: `shaped_sample`), so a channel never takes its water level from ground
+    /// a tidal flat or a trough lowered under it. Seed 777 on a 256-block grid: every land column of the map is the
+    /// far tiles' height, and the coasts move some of them off TerraForged's.
+    #[test]
+    fn the_drainage_map_samples_the_coasts_and_troughs() {
+        use super::super::terraforged_generator_preset::{build, terrain_levels};
+        use super::super::terraforged_settings::{FAITHFUL, Settings, set_for_thread};
+        let levels = terrain_levels(None).unwrap();
+        let make = |settings: Settings| {
+            set_for_thread(Some(settings));
+            let generator = build(levels).unwrap();
+            set_for_thread(None);
+            generator.capture_seed(777);
+            generator
+        };
+        let shaped = Settings {
+            coastal_landforms: true,
+            glacial_landforms: true,
+            ..FAITHFUL
+        };
+        let (flowing, ground) = (
+            make(Settings {
+                flow_rivers: true,
+                ..shaped
+            }),
+            make(shaped),
+        );
+        let seed = flowing.seed();
+        let source = &flowing.noise_generator().flow_rivers().unwrap().source;
+        assert!(source.coasts == Some(false) && source.glaciers.is_some());
+        let plain = ground.noise_generator();
+        let (mut land, mut moved) = (0, 0);
+        for i in 0..48 * 48 {
+            let (x, z) = ((i % 48 - 24) * 256, (i / 48 - 24) * 256);
+            let column = source.column(seed, x, z);
+            if column.sea {
+                continue;
+            }
+            land += 1;
+            assert_eq!(
+                levels.height(column.height),
+                ground.far_heights(x, z).unwrap().0,
+                "{x} {z}"
+            );
+            let mut sample = NoiseSample::new(&plain.continent().context().terrain);
+            plain
+                .sample(seed, x, z, &mut sample, &mut plain.blender_resource())
+                .unwrap();
+            moved += usize::from(column.height != levels.scaled_height(sample.height_noise));
+        }
+        eprintln!("{land} land columns, {moved} moved by the coasts or troughs");
+        assert!(land > 100 && moved > 0, "{land} {moved}");
     }
 
     /// TerraForged seed 777 with the setting: channels near spawn, carved as river terrain under stepped water; every

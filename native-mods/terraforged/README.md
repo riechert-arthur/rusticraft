@@ -467,6 +467,13 @@ carved, where a river or lake bed is an outlet at its water level, like the sea.
 - Purity: the channels near a 128-block patch are extracted together from the drainage map and kept in
   a lossy cache (1024 patches); every value is a function of the seed and the position. The map
   samples its own copy of the noise, built the same way.
+- With the other landform settings: the map samples the ground the distant tiles have, so with
+  `coastal_landforms` it sees the coast's landform and with `glacial_landforms` the troughs. A channel
+  then takes its water level from the ground the chunks have, not from ground that a tidal flat or
+  a trough has since lowered under it (that water would stand as a wall beside the lower columns).
+  The channels carve after both, so a channel that reaches a cliff coast cuts a gorge through it
+  down to its water (the cliff's offset is 0 at the shoreline, so the gorge opens onto the sea). A
+  tributary that reaches a trough runs down its wall into TerraForged's river on the trough floor.
 - Not yet: meanders (sine-generated curves along the channel), deltas and estuaries where a channel
   reaches the sea, lakes in large filled depressions (a channel stops where it enters one and starts
   again past its spill point), and sloped water, which needs flowing water.

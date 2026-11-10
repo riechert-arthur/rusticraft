@@ -175,11 +175,16 @@ pub fn scale_heights(levels: TerrainLevels, scale: f32) -> TerrainLevels {
 /// types, the continent and the blender's terrains share one registry, Engine 0.3.0's built-ins
 /// ([`TerrainRegistry::new`], as 6dd607eb links Engine 0.3.0), so every identity test sees the same built-ins. `Err` where a bundled resource does not decode.
 /// With Horizon's `flow_rivers` setting (read here, as the world's generators are built), the noise also carves the
-/// flow-routed rivers, over a drainage map that samples a second copy of the same noise.
+/// flow-routed rivers, over a drainage map that samples a second copy of the same noise (with the coasts and glacial
+/// troughs of `coastal_landforms` and `glacial_landforms`, as the chunks have them).
 pub fn build(levels: TerrainLevels) -> Result<TerraForgedGenerator, String> {
     let mut noise = build_noise_generator(levels)?;
-    if super::terraforged_settings::current().flow_rivers {
-        noise = noise.with_flow_rivers(FlowRivers::new(build_noise_generator(levels)?));
+    let settings = super::terraforged_settings::current();
+    if settings.flow_rivers {
+        noise = noise.with_flow_rivers(FlowRivers::with_settings(
+            build_noise_generator(levels)?,
+            settings,
+        ));
     }
     Ok(TerraForgedGenerator::new(
         levels,
