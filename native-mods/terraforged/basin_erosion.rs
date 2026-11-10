@@ -305,8 +305,9 @@ impl BasinMemo {
 }
 
 /// Runs `f` with this thread's memo, for callers that sample one column at a time (`NoiseGenerator::sample` in
-/// `terraforged_noise_generator`): a fresh memo per column would ask the lossy caches for every tile, and two tiles
-/// sharing a slot would then rebuild each other at every column. Values are the same with any memo.
+/// `terraforged_noise_generator`): a fresh memo per column would take the shared caches' locks for every tile of
+/// every column. Values are the same with any memo. The memo stays with its thread (at most 16 tiles of each level
+/// and 16,384 cells, about 1.5 MB) until that thread samples another map.
 pub fn with_thread_memo<R>(f: impl FnOnce(&mut BasinMemo) -> R) -> R {
     thread_local! {
         static MEMO: std::cell::RefCell<BasinMemo> = std::cell::RefCell::default();

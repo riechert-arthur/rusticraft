@@ -511,7 +511,9 @@ impl<T> TileCache<T> {
     }
 
     /// Tile (`x`, `z`), built by `build` unless it is cached or being built. A `build` that panics leaves the tile
-    /// unbuilt: the next caller (or a waiting one) builds it again.
+    /// unbuilt: the next caller (or a waiting one) builds it again. A tile dropped from the cache while it is being
+    /// built may be built a second time by a later caller; the cache never holds more than `capacity` tiles, plus
+    /// the ones being built (one or two per generating thread).
     pub fn get_or_build(&self, x: i32, z: i32, build: impl FnOnce() -> T) -> Arc<T> {
         let slot = {
             let mut slots = self.slots.lock().unwrap_or_else(PoisonError::into_inner);
