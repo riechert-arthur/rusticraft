@@ -669,7 +669,7 @@ pub fn shaped_sample(
     let mut sample = NoiseSample::new(&generator.continent().context().terrain);
     let (noise_x, noise_z) = (noise_coord(generator, x), noise_coord(generator, z));
     generator.sample_terrain(seed, noise_x, noise_z, &mut sample, blender)?;
-    if generator.has_basin_erosion() {
+    if generator.basin_erosion().is_some() {
         with_thread_memo(|memo| generator.lower_basins(memo, seed, x, z, &mut sample));
     }
     if let Some(strata) = coasts {

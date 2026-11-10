@@ -109,9 +109,9 @@ impl NoiseGenerator {
         self
     }
 
-    /// Whether Horizon's `basin_erosion` is on.
-    pub fn has_basin_erosion(&self) -> bool {
-        self.basins.is_some()
+    /// Horizon's `basin_erosion`, if the setting is on.
+    pub fn basin_erosion(&self) -> Option<&BasinErosion> {
+        self.basins.as_deref()
     }
 
     /// Horizon's `basin_erosion` (not TerraForged's): lowers block (`x`, `z`)'s raw terrain `sample`
