@@ -484,10 +484,10 @@ pub struct Drainage<S> {
 /// callers of the same tile wait for it and callers of other tiles go on. No lock is held during a build, so a build
 /// may look up other tiles (L1 reads L0) and slow tiles never block hits.
 ///
-/// TerraForged's lossy cache (`terraforged_lossy_cache`) is no fit here: its bucket is the key's low bits, which for a
-/// tile key are the tile's z alone, so every tile of a row shares one bucket; each tile has a single slot in it, so
-/// two tiles of a working set rebuild each other at every alternation; and it computes under the bucket's lock. In
-/// play (lodDistance 2048, `basin_erosion`) its L0 tiles were built about 300 times each in under three minutes.
+/// TerraForged's lossy cache (`terraforged_lossy_cache`) is no fit here: each key has a single slot, so two tiles of a
+/// working set that share it rebuild each other at every alternation, and it computes under the bucket's lock. Its
+/// bucket also used to read only a tile key's z (#305), putting every tile of a row in one bucket. In play
+/// (lodDistance 2048, `basin_erosion`) its L0 tiles were built about 300 times each in under three minutes.
 pub struct TileCache<T> {
     capacity: usize,
     slots: Mutex<TileSlots<T>>,
