@@ -206,12 +206,18 @@ fn live_pipeline(
         Some(root) => Arc::new(root.sharing()),
         None => TerraForgedPipeline::generator(levels, seed)?,
     };
-    let pipeline =
-        TerraForgedPipeline::with_generator(data, seed, stem, with_structures, generator)?;
+    let pipeline = TerraForgedPipeline::with_generator(
+        data,
+        seed,
+        stem,
+        with_structures,
+        settings,
+        generator,
+    )?;
     register_live(
         seed,
         dimension,
-        pipeline.settings,
+        settings,
         root.is_none(),
         &pipeline.generator,
     );
@@ -262,12 +268,14 @@ impl TerraForgedPipeline {
         stem: &Value,
         with_structures: bool,
     ) -> Result<Self, GeneratorError> {
-        let levels = Self::levels(stem, terraforged_settings::current())?;
+        let settings = terraforged_settings::current();
+        let levels = Self::levels(stem, settings)?;
         Self::with_generator(
             data,
             seed,
             stem,
             with_structures,
+            settings,
             Self::generator(levels, seed)?,
         )
     }
@@ -294,15 +302,16 @@ impl TerraForgedPipeline {
     /// `createState` does, the registry biome bindings and the surface passes' block bindings. The build range is
     /// the stem's dimension type's; TerraForged's levels are not mapped onto it: the fill clips them to it.
     /// `generator` is `GeneratorPreset.build`'s: a new one ([`Self::generator`]) or one sharing a live root's noise,
-    /// built from the same stem and settings.
+    /// built from the same stem and `settings` (the world's, read once by the caller so the generator's levels and
+    /// the rest of the pipeline see the same ones).
     fn with_generator(
         data: &Arc<GeneratorData>,
         seed: i64,
         stem: &Value,
         with_structures: bool,
+        settings: Settings,
         generator: Arc<TerraForgedGenerator>,
     ) -> Result<Self, GeneratorError> {
-        let settings = terraforged_settings::current();
         let biomes =
             LiveBiomeBindings::from_generator_data_with(data, &[], settings.corrected_biomes)
                 .map_err(|error| resource(error.to_string()))?;
