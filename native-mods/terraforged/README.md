@@ -16,8 +16,9 @@ TerraForged (vanilla world types keep 26.3's overworld):
 
 - terrain: continents, rivers, lakes, the 14 terrain graphs blended by `TerrainBlender`, and
   hydraulic erosion with 6dd607eb's `withErosion` settings and no heightmap smoothing
-  (`NoiseGenerator`, `ErodedNoiseGenerator`), also (un-eroded) in Horizon's distant tiles; the
-  `height_scale` setting stretches it vertically;
+  (`NoiseGenerator`, `ErodedNoiseGenerator`), also in Horizon's distant tiles (un-eroded, or eroded
+  near the player with the `eroded_far_terrain` setting); the `height_scale` setting stretches it
+  vertically;
 - biomes: `ClimateNoise`, `BiomeMapManager`'s climate pools and `BiomeSampler`'s ocean, beach,
   river and lake overrides, also for `/locate biome`, plus TerraForged's own `terraforged:cave`
   and `terraforged:oak_forest` (`ModBiomes`), derived from the player's own 26.3 dripstone caves
@@ -86,8 +87,9 @@ Differences and gaps:
 - Far terrain (Horizon's distant tiles; TerraForged has none) shows TerraForged's ground and biomes with
   the vanilla surface rule's top blocks, but from the un-eroded height: erosion's regions are too costly to
   build for distant tiles (about 20 s per wide tile), so far ground can sit a few blocks (about 2 on average,
-  at most about 10) off the real chunks'. With Reduced far detail (Horizon's video setting, off by default) the
-  surface rule paints only the top two blocks of a far column instead of eight, so the sides of steep far
+  at most about 10) off the real chunks'. The `eroded_far_terrain` setting ([Settings](#settings)) gives the
+  finest tiles, near the player, the eroded ground once a background thread has built their regions.
+  With Reduced far detail (Horizon's video setting, off by default) the surface rule paints only the top two blocks of a far column instead of eight, so the sides of steep far
   columns show stone under them (grey stripes on distant badlands slopes, which Full far detail paints in
   terracotta bands); heights, top blocks, water and biomes are unchanged. It saves 10–35% of a far tile's
   sampling; most of Reduced's speed comes from Horizon merging far tiles. Decorated far chunks
@@ -184,6 +186,20 @@ don't generate, so they need none.
   `levels` (where `auto_scale` widens the land too), and TerraForged Reimagined's
   `globalVerticalScale` multiplies only the land terrain's noise through terrain overrides, which this
   port, following 6dd607eb, doesn't apply.
+- `eroded_far_terrain`: Horizon's finest distant tiles (cells of up to 4 blocks, which it draws within its
+  far-decoration radius: about 1024 blocks around the player at Full far detail, 512 at Reduced) stand on the
+  eroded ground, the chunks' own, instead of the un-eroded ground a few blocks off it, so they no longer pop when
+  the chunks replace them. A tile still draws un-eroded first (as fast as without the setting) and queues the
+  erosion regions it reads (128 blocks a side); one background thread per world builds them into a far cache of
+  its own (256 regions, 16 MiB), never into the 16 regions the chunks being generated read, and a region the chunks
+  have built already is read from their cache without building or evicting anything. Tiles sampled after their
+  region is ready are eroded; Horizon keeps a tile it has drawn until its plan changes (the player moves closer or
+  away), so near the spawn the first tiles stay un-eroded until then. The thread is started by the world's first
+  far-decoration pipeline on its thread, and a new thread inherits its creator's scheduling class on Linux (and
+  its quality of service on macOS), so it runs at idle priority like Horizon's far decoration; on Windows it runs
+  at normal priority. Without far decoration no region is built. Wider tiles, farther out, keep the un-eroded
+  heights: erosion's few blocks don't show there, and eroding them would cost a region per 128 blocks. Changes no
+  block of the world; off, distant tiles are as before.
 - `erosion_deposits`: shows where the erosion pass left sediment. Neither TerraForged tree places
   any: Engine 0.3.0's `Erosion` keeps a column's deposits in `Cell.sediment`, but nothing reads it,
   and the erosion this port runs (6dd607eb's, over Reimagined's regions) works on a bare height map
@@ -2946,7 +2962,7 @@ seed 777, against 0.37 s for its noise biomes, and a found cave adds one erosion
 biome checks) already go through `Source.getNoiseBiome` in `structure_queries.rs`. Distant terrain (Horizon's far tiles, `lod_grid` and `surface_sample`) reads the same continent, river and
 climate noise: each column is `getBaseColumn`'s shape from the UN-ERODED height (`far_heights`), with the biome the
 chunk stores at its surface block and the vanilla surface rule over TerraForged's generation context and preliminary
-height painting its top eight blocks (two with Reduced far detail, the `approximate` flag); it too adds no terrain-cache entry and builds no erosion region. A TerraForged world's overworld is TerraForged's taller one (`-64..960`, the
+height painting its top eight blocks (two with Reduced far detail, the `approximate` flag); it too adds no terrain-cache entry and builds no erosion region. With `eroded_far_terrain` the finest tiles (`lod_grid` with cells of up to 4 blocks) read the ERODED height where the column's region is built, in the pipeline's own region cache (`ErosionRegionCache::peek`: no build, no wait, no change to the access order) or in the world's far cache (`FarErosion`, shared with the noise by every pipeline of the world, with its own thread and 256 regions of their 128x128 heights), and queue the region otherwise; such a column is exactly `base_column`'s, the filled ground (`far_eroded_heights`). A TerraForged world's overworld is TerraForged's taller one (`-64..960`, the
 world type below), so the default levels (`max_y` 480) always fit; nothing is rescaled, and in a 26.3-high overworld
 (the generator without the world's pack) the fill clips terrain to the chunk (cut flat at y 319, which the default
 levels seldom reach: the highest un-eroded heights within 32768 blocks of the origin are about 310 to 350), and the
@@ -3193,7 +3209,7 @@ chunks" and "Regen complete!" to the player and the operators (`sendSuccess(.., 
 These layers only add the noise functions, Engine's terrain types, its world levels, its settings, its landforms, its cell model, its terrain populators, its terrain regions, its volcano populator, its standard terrain provider, its heightmap blenders, its position utilities, its simple and advanced continent generators, the fancy continents (island geometry and generator), Engine's river configuration, its river warps, its river geometry, its river carver, its lakes, its wetlands, its river networks, its river maps, its base river generator, the fancy river generator, its river caches, the simple river generator, the continents' river caches, the heightmap's river stage, the heightmap cache (with its tile path), the river-map reuse, the world-erosion cache, the smoothing filter, the steepness filter, the beach detection filter, the hydraulic erosion filter (with its settings, random stream and brushes), the world filter chain, the tile sizes, the tiles' cells with their filter region, the tiles' chunk views, the tile heightmap fill (direct, through the heightmap cache, zoomed, and zoomed through the cache), the tile visitors, the tile generator, its lazy tiles, its batched and striped generation, its builder, the tile cache's entries, the expiring cache, the async cache entries, the tile cache, its cached chunks, tile disposal, the async tile factory, the climate primitives, the biome climate types, the climate settings, the climate module, the climate stage, the continent factory, the generator context, the heightmap, the world generator factory, TerraForged's terrain levels, its terrain data, its terrain generator, its terrain-blend utilities, its terrain blender with its nearest-terrain search (and the newer source's seed-first blender), noise-graph reseeding, the cave noise primitives, the biome viability rules, the biome overrides, the continent control points, the continent cell primitives, the continent configuration, the continent shape blending, the continent cell generator with its spawn-offset search, the continent river nodes, the continent river carver's arithmetic, the continent river networks with their nearest-node sampling and their warped, carved river sampling, the newer source's seed-first noise sources, scalar noise graphs, domain warps, selectors, graph caches, terraces, legacy terraces, advanced terraces, curves, transforms (steps, frequency, gradient and modulation), special sources (boost, cell, cell edge and sine) and lines, and its bounded concurrent lossy cache with the continent's cell and
 river-piece caches on it, the continent noise module that joins the continent layers, the newer source's terrain height sampler with its bordered chunk generation and its nearest-terrain search, its biome chunk fill, cave biome sampler, initial biome selection, surface biome sampler, chunk biome hook and biome registry pools, the erosion tile geometry, and TerraForged Reimagined's heightmap smoothing, erosion brushes, hydraulic erosion filter, eroded-region cache, eroded region build, eroded chunk generation, terrain cache, generator queries, chunk fill, the terrain stage hand-off to it, the current climate noise, the biome sampler bridge, the live biome bindings, the terrain asset decoder, the terrain-type and terrain-noise registries, the bundled terrain types and all 14 bundled terrain noises, the bundled noise caves and their reseeded cave array, and 6dd607eb's structure terrain columns with their
 chunk adapter, piece selection and structure-aware terrain stage, 6dd607eb's surface erosion and water edge smoothing passes, and its preliminary surface-height cache, and the `terraforged:normal` world preset, whose pipeline generates
-TerraForged's terrain, biomes, surfaces, noise caves and structures (placed on Reimagined's eroded heights), and the Create World screen's TerraForged world type with TerraForged's taller overworld, and its `/locateterrain`, `/tf export structures`, `/tf regen` and `/tf preview` commands. A game built with the bundle offers it, with TerraForged's vegetation, but it is still for development (distant tiles show the un-eroded ground); install instructions come once it is.
+TerraForged's terrain, biomes, surfaces, noise caves and structures (placed on Reimagined's eroded heights), and the Create World screen's TerraForged world type with TerraForged's taller overworld, and its `/locateterrain`, `/tf export structures`, `/tf regen` and `/tf preview` commands. A game built with the bundle offers it, with TerraForged's vegetation, but it is still for development (distant tiles show the un-eroded ground unless `eroded_far_terrain` is on); install instructions come once it is.
 
 ## Development
 

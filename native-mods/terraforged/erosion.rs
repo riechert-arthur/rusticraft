@@ -691,6 +691,8 @@ struct RegionCacheInner<T> {
 /// purpose, so that callers of other regions are never blocked behind a region build, and drops in access order.
 pub struct ErosionRegionCache<T> {
     inner: Mutex<RegionCacheInner<T>>,
+    /// Regions kept: [`ErosionRegionLayout::CACHE_SIZE`], Java's, unless [`Self::with_capacity`] says otherwise.
+    capacity: usize,
 }
 
 impl<T> Default for ErosionRegionCache<T> {
@@ -711,12 +713,49 @@ impl<T> ErosionRegionCache<T> {
     }
 
     pub fn new() -> Self {
+        Self::with_capacity(ErosionRegionLayout::CACHE_SIZE)
+    }
+
+    /// A cache keeping the last `capacity` regions instead of Java's 16 (Horizon's far erosion, not Java's).
+    pub fn with_capacity(capacity: usize) -> Self {
         Self {
             inner: Mutex::new(RegionCacheInner {
                 seed: None,
-                entries: HashMap::with_capacity(ErosionRegionLayout::CACHE_SIZE * 2),
-                order: VecDeque::with_capacity(ErosionRegionLayout::CACHE_SIZE + 1),
+                entries: HashMap::with_capacity(capacity * 2),
+                order: VecDeque::with_capacity(capacity + 1),
             }),
+            capacity,
+        }
+    }
+
+    /// Whether the cache holds the chunk's region for this seed, built or building (not Java's).
+    pub fn holds(&self, seed: i32, chunk_x: i32, chunk_z: i32) -> bool {
+        let (region_x, region_z) = ErosionRegionLayout::region(chunk_x, chunk_z);
+        let inner = lock_unpoisoned(&self.inner);
+        inner.seed == Some(seed)
+            && inner
+                .entries
+                .contains_key(&ErosionRegionLayout::key(region_x, region_z))
+    }
+
+    /// The region holding the chunk, if the cache holds it built for this seed (not Java's): never builds, waits or
+    /// changes the access order, so a reader that only looks (Horizon's far terrain) evicts nothing.
+    pub fn peek(&self, seed: i32, chunk_x: i32, chunk_z: i32) -> Option<Arc<T>> {
+        let (region_x, region_z) = ErosionRegionLayout::region(chunk_x, chunk_z);
+        let entry = {
+            let inner = lock_unpoisoned(&self.inner);
+            if inner.seed != Some(seed) {
+                return None;
+            }
+            Arc::clone(
+                inner
+                    .entries
+                    .get(&ErosionRegionLayout::key(region_x, region_z))?,
+            )
+        };
+        match &*lock_unpoisoned(&entry.state) {
+            RegionState::Ready(value) => Some(Arc::clone(value)),
+            _ => None,
         }
     }
 
@@ -766,7 +805,7 @@ impl<T> ErosionRegionCache<T> {
                 let entry = Arc::new(RegionEntry::building());
                 inner.entries.insert(key, Arc::clone(&entry));
                 inner.order.push_back(key);
-                if inner.order.len() > ErosionRegionLayout::CACHE_SIZE
+                if inner.order.len() > self.capacity
                     && let Some(oldest) = inner.order.pop_front()
                 {
                     inner.entries.remove(&oldest);
@@ -1802,6 +1841,30 @@ k 2147483647 -2147483648 7fffffff80000000
             assert_eq!(rust, java);
         }
         assert_eq!(out, REGION_ORACLE);
+    }
+
+    /// `peek` (Horizon's far terrain) sees only built regions of the cache's seed and never moves them in the access
+    /// order; `with_capacity` keeps that many regions instead of 16.
+    #[test]
+    fn peeking_neither_builds_nor_reorders_and_capacity_bounds_the_cache() {
+        let cache = ErosionRegionCache::with_capacity(2);
+        assert!(cache.peek(5, 0, 0).is_none());
+        cache.get_or_build(5, 0, 0, |x, z| (x, z));
+        cache.get_or_build(5, 8, 0, |x, z| (x, z));
+        assert_eq!(cache.peek(5, 7, 7).as_deref(), Some(&(0, 0)));
+        assert!(cache.peek(6, 0, 0).is_none(), "another seed's region");
+        assert!(cache.peek(5, 16, 0).is_none(), "an unbuilt region");
+        assert!(cache.holds(5, 7, 7) && !cache.holds(5, 16, 0) && !cache.holds(6, 0, 0));
+        assert_eq!(cache.len(), 2);
+        // The peek above left region (0, 0) the least recently used: a third region evicts it.
+        cache.get_or_build(5, 16, 0, |x, z| (x, z));
+        assert_eq!(cache.len(), 2);
+        assert!(cache.peek(5, 0, 0).is_none());
+        assert_eq!(cache.peek(5, 8, 0).as_deref(), Some(&(1, 0)));
+        assert_eq!(
+            ErosionRegionCache::<()>::new().capacity,
+            ErosionRegionLayout::CACHE_SIZE
+        );
     }
 
     #[test]

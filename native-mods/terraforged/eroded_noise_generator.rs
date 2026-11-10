@@ -40,8 +40,9 @@ use super::{
     terraforged_terrain_levels::{NoiseLevels, TerrainLevels},
 };
 use std::{
+    collections::{HashMap, VecDeque},
     panic::{AssertUnwindSafe, catch_unwind},
-    sync::Arc,
+    sync::{Arc, Condvar, Mutex, PoisonError, Weak},
 };
 
 /// TerraForged Reimagined 26.3's `ErodedNoiseGenerator` (Romoslayer/TerraForged-Reimagined a24d450): erosion runs
@@ -60,6 +61,8 @@ pub struct ErodedNoiseGenerator {
     regions: ErosionRegionCache<ErodedRegion>,
     river_start: RiverStart,
     deposits: bool,
+    /// Horizon's far erosion (`eroded_far_terrain`), shared by every generator [`Self::sharing`] makes, as the noise is.
+    far: Arc<FarErosion>,
 }
 
 /// One cached erosion region: the eroded heights (`buildRegion`'s map, which indexing reads) and, with the
@@ -132,13 +135,15 @@ impl ErodedNoiseGenerator {
             regions: ErosionRegionCache::new(),
             river_start: RiverStart::for_settings(super::terraforged_settings::current()),
             deposits: super::terraforged_settings::current().erosion_deposits,
+            far: Arc::new(FarErosion::new()),
         }
     }
 
     /// A generator over the same noise and erosion filter (shared, not copied), with the same settings and an empty
     /// region cache of its own: Horizon's far-decoration pipelines generate with the level's noise without evicting
     /// the regions the level's chunks read (`terraforged_generator_facade`'s `TerraForgedGenerator::sharing`). Its
-    /// output is this generator's: every result is a pure function of the seed and the position.
+    /// output is this generator's: every result is a pure function of the seed and the position. The far erosion
+    /// ([`FarErosion`]) is shared too, so a world's far terrain builds each far region once.
     pub fn sharing(&self) -> Self {
         Self {
             erosion: Arc::clone(&self.erosion),
@@ -147,6 +152,7 @@ impl ErodedNoiseGenerator {
             regions: ErosionRegionCache::new(),
             river_start: self.river_start,
             deposits: self.deposits,
+            far: Arc::clone(&self.far),
         }
     }
 
@@ -217,17 +223,63 @@ impl ErodedNoiseGenerator {
     /// seed), then the rivers carve it (`sampleRiver`). `Err` where the terrain sample or the region build fails (a
     /// custom module, see [`NoiseGenerator::sample`]), where Java throws; a failed build is not cached.
     pub fn eroded_height_noise(&self, seed: i32, x: i32, z: i32) -> Result<f32, &'static str> {
+        self.carved_height_noise(seed, x, z, || self.eroded_height(seed, x, z))
+    }
+
+    /// [`Self::eroded_height_noise`] with the block's eroded height from `eroded`: the raw terrain sample, its height
+    /// replaced by `eroded`'s, then the rivers.
+    fn carved_height_noise(
+        &self,
+        seed: i32,
+        x: i32,
+        z: i32,
+        eroded: impl FnOnce() -> Result<f32, &'static str>,
+    ) -> Result<f32, &'static str> {
         let mut sample = NoiseSample::new(&self.generator.continent().context().terrain);
         let noise_x = self.noise_coord(x);
         let noise_z = self.noise_coord(z);
         let mut blender = self.generator.blender_resource();
         self.generator
             .sample_terrain(seed, noise_x, noise_z, &mut sample, &mut blender)?;
-        sample.height_noise = self.eroded_height(seed, x, z)?;
+        sample.height_noise = eroded()?;
         Ok(self
             .generator
             .sample_river(seed, noise_x, noise_z, &mut sample)
             .height_noise)
+    }
+
+    /// Horizon's far terrain's eroded heights (`eroded_far_terrain`; no Java counterpart): a lookup that reads a
+    /// block's region only where it is built already, in this generator's region cache or the [`FarErosion`] cache,
+    /// and queues the region for the far erosion thread otherwise ([`FarHeights::eroded_height_noise`]).
+    pub fn far_heights(&self, seed: i32) -> FarHeights<'_> {
+        FarHeights {
+            eroded: self,
+            seed,
+            regions: HashMap::new(),
+        }
+    }
+
+    /// Starts the world's far erosion thread ([`FarErosion`]), if it is not running yet. The thread inherits the
+    /// caller's scheduling class, so callers start it from a low-priority thread.
+    pub fn start_far_erosion(&self) {
+        self.far.start(RegionSource {
+            erosion: Arc::clone(&self.erosion),
+            generator: Arc::clone(&self.generator),
+            smoothing: self.smoothing,
+        });
+    }
+
+    /// How many far regions the far erosion cache holds (built or building), and how many wait for the thread.
+    #[cfg(test)]
+    pub(crate) fn far_regions(&self) -> (usize, usize) {
+        let pending = self
+            .far
+            .queue
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .pending
+            .len();
+        (self.far.regions.len(), pending)
     }
 
     /// `erodedHeight(seed, x, z)`: the block's height in its cached region ([`ErosionRegionLayout::block_index`]).
@@ -349,7 +401,7 @@ impl ErodedNoiseGenerator {
 
     /// `getNoiseCoord(coord)`: `coord * frequency` (int to float, then a float multiply).
     fn noise_coord(&self, coord: i32) -> f32 {
-        coord as f32 * self.generator.levels().noise_levels.frequency
+        noise_coord(&self.generator, coord)
     }
 
     /// `buildRegion(seed, regionX, regionZ)`: the raw terrain height (`sampleTerrain`, one sample reused for the whole
@@ -365,36 +417,16 @@ impl ErodedNoiseGenerator {
         region_x: i32,
         region_z: i32,
     ) -> Result<ErodedRegion, &'static str> {
-        let (origin_chunk_x, origin_chunk_z) =
-            ErosionRegionLayout::origin_chunk(region_x, region_z);
-        let start_x = origin_chunk_x.wrapping_shl(4);
-        let start_z = origin_chunk_z.wrapping_shl(4);
-        let map_size = ErosionRegionLayout::MAP_SIZE;
-        let mut map = Vec::with_capacity((map_size * map_size) as usize);
-        let mut sample = NoiseSample::new(&self.generator.continent().context().terrain);
-        let mut blender = self.generator.blender_resource();
-        for z in 0..map_size {
-            let noise_z = self.noise_coord(start_z.wrapping_add(z));
-            for x in 0..map_size {
-                let noise_x = self.noise_coord(start_x.wrapping_add(x));
-                let height = self
-                    .generator
-                    .sample_terrain(seed, noise_x, noise_z, &mut sample, &mut blender)?
-                    .height_noise;
-                map.push(height);
-            }
-        }
-        let raw = self.deposits.then(|| map.clone());
-        self.erosion.apply_region(
+        let mut raw = None;
+        let map = eroded_map(
+            &self.generator,
+            &self.erosion,
+            self.smoothing,
             seed,
-            origin_chunk_x,
-            origin_chunk_z,
-            ErosionRegionLayout::TOTAL_CHUNKS,
-            map_size,
-            &mut ErosionResource::default(),
-            &mut map,
-        );
-        HeightmapSmoothing::apply(&mut map, map_size, self.smoothing);
+            region_x,
+            region_z,
+            |map| raw = self.deposits.then(|| map.to_vec()),
+        )?;
         let change = raw.map(|raw| {
             map.iter()
                 .zip(raw)
@@ -406,6 +438,52 @@ impl ErodedNoiseGenerator {
             change,
         })
     }
+}
+
+/// `getNoiseCoord(coord)` of `generator`'s levels.
+fn noise_coord(generator: &NoiseGenerator, coord: i32) -> f32 {
+    coord as f32 * generator.levels().noise_levels.frequency
+}
+
+/// `buildRegion`'s eroded map ([`ErodedNoiseGenerator::build_region`]), handing the raw map to `raw` before erosion.
+fn eroded_map(
+    generator: &NoiseGenerator,
+    erosion: &ErosionFilter,
+    smoothing: HeightmapSmoothingSettings,
+    seed: i32,
+    region_x: i32,
+    region_z: i32,
+    raw: impl FnOnce(&[f32]),
+) -> Result<Vec<f32>, &'static str> {
+    let (origin_chunk_x, origin_chunk_z) = ErosionRegionLayout::origin_chunk(region_x, region_z);
+    let start_x = origin_chunk_x.wrapping_shl(4);
+    let start_z = origin_chunk_z.wrapping_shl(4);
+    let map_size = ErosionRegionLayout::MAP_SIZE;
+    let mut map = Vec::with_capacity((map_size * map_size) as usize);
+    let mut sample = NoiseSample::new(&generator.continent().context().terrain);
+    let mut blender = generator.blender_resource();
+    for z in 0..map_size {
+        let noise_z = noise_coord(generator, start_z.wrapping_add(z));
+        for x in 0..map_size {
+            let noise_x = noise_coord(generator, start_x.wrapping_add(x));
+            let height = generator
+                .sample_terrain(seed, noise_x, noise_z, &mut sample, &mut blender)?
+                .height_noise;
+            map.push(height);
+        }
+    }
+    raw(&map);
+    erosion.apply_region(
+        seed,
+        origin_chunk_x,
+        origin_chunk_z,
+        ErosionRegionLayout::TOTAL_CHUNKS,
+        map_size,
+        &mut ErosionResource::default(),
+        &mut map,
+    );
+    HeightmapSmoothing::apply(&mut map, map_size, smoothing);
+    Ok(map)
 }
 
 /// The change at map block `(x, z)` minus the mean change of the square of [`ErodedNoiseGenerator::DEPOSIT_RADIUS`]
@@ -421,6 +499,201 @@ fn relative_change(change: &[f32], x: i32, z: i32) -> f32 {
     }
     let side = (2 * radius + 1) as f32;
     change[(z * size + x) as usize] - sum / (side * side)
+}
+
+/// Horizon's far erosion (the `eroded_far_terrain` setting; neither TerraForged tree has distant tiles): eroded regions
+/// for distant tiles, in a cache of their own and built on a thread of their own, so the 16 regions the chunks being
+/// generated read are never evicted for far terrain (#221's rule) and no far tile waits for a region build. A world
+/// has one, shared with the noise by every pipeline of the world ([`ErodedNoiseGenerator::sharing`]).
+///
+/// Distant tiles first read the un-eroded height (today's fast path); each region a tile reads and finds unbuilt is
+/// queued ([`FarHeights`]), and the thread builds the queued regions one by one, oldest first, into a cache of
+/// [`Self::REGIONS`]. Tiles sampled once their region is built get the eroded heights. A far region is
+/// [`ErodedNoiseGenerator::build_region`]'s map (a pure function of the seed and the region), so those heights are
+/// exactly the chunks'.
+pub struct FarErosion {
+    regions: ErosionRegionCache<FarRegion>,
+    queue: Mutex<FarQueue>,
+    wake: Condvar,
+}
+
+#[derive(Default)]
+struct FarQueue {
+    /// The regions to build, as `(seed, region x, region z)`, oldest first.
+    pending: VecDeque<(i32, i32, i32)>,
+    /// Whether the thread was started.
+    started: bool,
+}
+
+/// One far region: the eroded heights of the region's own 8x8 chunks (its map without the margin, which no block of
+/// the region reads), a quarter of a fill region's memory.
+pub struct FarRegion(Vec<f32>);
+
+impl FarRegion {
+    /// Blocks per side.
+    const SIZE: i32 = ErosionRegionLayout::REGION_CHUNKS * 16;
+
+    fn from_map(map: &[f32]) -> Self {
+        let (size, margin) = (
+            ErosionRegionLayout::MAP_SIZE,
+            ErosionRegionLayout::MARGIN_BLOCKS,
+        );
+        let rows = (margin..margin + Self::SIZE).flat_map(|z| {
+            let start = (z * size + margin) as usize;
+            map[start..start + Self::SIZE as usize].iter().copied()
+        });
+        Self(rows.collect())
+    }
+
+    /// The eroded height noise of block `(x, z)` of the region (`erodedHeight`'s read of the map).
+    fn height(&self, x: i32, z: i32) -> f32 {
+        let offset =
+            |block| ErosionRegionLayout::block_offset(block) - ErosionRegionLayout::MARGIN_BLOCKS;
+        self.0[(offset(z) * Self::SIZE + offset(x)) as usize]
+    }
+}
+
+/// What the far erosion thread builds regions from: the noise and the filter, shared with the world's generators.
+struct RegionSource {
+    erosion: Arc<ErosionFilter>,
+    generator: Arc<NoiseGenerator>,
+    smoothing: HeightmapSmoothingSettings,
+}
+
+impl FarErosion {
+    /// Far regions kept (64 KiB each, 16 MiB in all): the 128-block regions of a 1024-block radius, about 200, fit.
+    pub const REGIONS: usize = 256;
+    /// How long the idle thread waits before it checks whether its world is gone.
+    const IDLE_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
+
+    fn new() -> Self {
+        Self {
+            regions: ErosionRegionCache::with_capacity(Self::REGIONS),
+            queue: Mutex::new(FarQueue::default()),
+            wake: Condvar::new(),
+        }
+    }
+
+    /// Queues the region for the thread, unless it is queued already; the oldest request goes beyond
+    /// [`Self::REGIONS`] (the player has left it behind).
+    fn request(&self, seed: i32, region_x: i32, region_z: i32) {
+        let mut queue = self.queue.lock().unwrap_or_else(PoisonError::into_inner);
+        let job = (seed, region_x, region_z);
+        if queue.pending.contains(&job) {
+            return;
+        }
+        queue.pending.push_back(job);
+        if queue.pending.len() > Self::REGIONS {
+            queue.pending.pop_front();
+        }
+        self.wake.notify_one();
+    }
+
+    /// Starts the thread once. It holds the cache only weakly between builds, so it ends within [`Self::IDLE_WAIT`]
+    /// (or one build) of the world's last generator.
+    fn start(self: &Arc<Self>, source: RegionSource) {
+        let mut queue = self.queue.lock().unwrap_or_else(PoisonError::into_inner);
+        if queue.started {
+            return;
+        }
+        let far = Arc::downgrade(self);
+        let spawned = std::thread::Builder::new()
+            .name("TF-Far erosion".into())
+            .spawn(move || Self::work(&far, &source));
+        match spawned {
+            Ok(_) => queue.started = true,
+            Err(error) => eprintln!("TerraForged far erosion unavailable: {error}"),
+        }
+    }
+
+    fn work(far: &Weak<Self>, source: &RegionSource) {
+        while let Some(far) = far.upgrade() {
+            let job = {
+                let mut queue = far.queue.lock().unwrap_or_else(PoisonError::into_inner);
+                if queue.pending.is_empty() {
+                    queue = far
+                        .wake
+                        .wait_timeout(queue, Self::IDLE_WAIT)
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .0;
+                }
+                queue.pending.pop_front()
+            };
+            let Some((seed, region_x, region_z)) = job else {
+                continue;
+            };
+            let chunk_x = region_x.wrapping_mul(ErosionRegionLayout::REGION_CHUNKS);
+            let chunk_z = region_z.wrapping_mul(ErosionRegionLayout::REGION_CHUNKS);
+            let built = catch_unwind(AssertUnwindSafe(|| {
+                far.regions
+                    .try_get_or_build(seed, chunk_x, chunk_z, |region_x, region_z| {
+                        let map = eroded_map(
+                            &source.generator,
+                            &source.erosion,
+                            source.smoothing,
+                            seed,
+                            region_x,
+                            region_z,
+                            |_| {},
+                        )?;
+                        Ok(FarRegion::from_map(&map))
+                    })
+                    .map(drop)
+            }));
+            let cause = match built {
+                Ok(Ok(())) => continue,
+                Ok(Err(error)) => error,
+                Err(_) => "panicked",
+            };
+            eprintln!("TerraForged far erosion failed for region {region_x}, {region_z}: {cause}");
+        }
+    }
+}
+
+/// A far tile's eroded heights ([`ErodedNoiseGenerator::far_heights`]): each region is looked up once per lookup.
+pub struct FarHeights<'a> {
+    eroded: &'a ErodedNoiseGenerator,
+    seed: i32,
+    regions: HashMap<(i32, i32), Option<BuiltRegion>>,
+}
+
+enum BuiltRegion {
+    /// A region the generator's chunks built (a read-only peek: the fill's cache order is left as it is).
+    Fill(Arc<ErodedRegion>),
+    Far(Arc<FarRegion>),
+}
+
+impl FarHeights<'_> {
+    /// [`ErodedNoiseGenerator::eroded_height_noise`] at block `(x, z)` if its region is built (by the chunks or the far
+    /// thread); `None`, and the region queued for the far thread, if not. `Err` where the terrain sample fails.
+    pub fn eroded_height_noise(&mut self, x: i32, z: i32) -> Result<Option<f32>, &'static str> {
+        let (chunk_x, chunk_z) = (x >> 4, z >> 4);
+        let (eroded, seed) = (self.eroded, self.seed);
+        let region = self
+            .regions
+            .entry(ErosionRegionLayout::region(chunk_x, chunk_z))
+            .or_insert_with_key(|&(region_x, region_z)| {
+                if let Some(region) = eroded.regions.peek(seed, chunk_x, chunk_z) {
+                    Some(BuiltRegion::Fill(region))
+                } else if let Some(region) = eroded.far.regions.peek(seed, chunk_x, chunk_z) {
+                    Some(BuiltRegion::Far(region))
+                } else {
+                    // A region the far thread is building is not asked for again.
+                    if !eroded.far.regions.holds(seed, chunk_x, chunk_z) {
+                        eroded.far.request(seed, region_x, region_z);
+                    }
+                    None
+                }
+            });
+        let height = match region {
+            None => return Ok(None),
+            Some(BuiltRegion::Fill(region)) => region[ErosionRegionLayout::block_index(x, z)],
+            Some(BuiltRegion::Far(region)) => region.height(x, z),
+        };
+        eroded
+            .carved_height_noise(seed, x, z, || Ok(height))
+            .map(Some)
+    }
 }
 
 /// Reimagined's `INoiseGenerator` methods that `TerrainGenerator` calls. `getLevels`/`getTerrainLevels` and

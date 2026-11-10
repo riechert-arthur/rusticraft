@@ -34,6 +34,11 @@ pub struct Settings {
     /// Show what the erosion pass deposited: gravel and clay in river and lake beds,
     /// gravel on their banks, scree at the foot of slopes.
     pub erosion_deposits: bool,
+    /// Distant tiles near the player (Horizon's far terrain, within its far-decoration
+    /// radius) show the eroded ground, the chunks' own, once a far erosion thread has
+    /// built their regions, instead of the un-eroded ground a few blocks off it. Changes
+    /// no block of the world.
+    pub eroded_far_terrain: bool,
 }
 
 impl Default for Settings {
@@ -49,6 +54,7 @@ pub const FAITHFUL: Settings = Settings {
     corrected_biomes: false,
     height_scale: 1.0,
     erosion_deposits: false,
+    eroded_far_terrain: false,
 };
 
 /// The range `height_scale` is held to. TerraForged's land reaches at most 476 blocks above
@@ -98,6 +104,7 @@ impl Settings {
                     (scale as f32).clamp(*HEIGHT_SCALES.start(), *HEIGHT_SCALES.end())
                 }),
             erosion_deposits: flag("erosion_deposits", FAITHFUL.erosion_deposits),
+            eroded_far_terrain: flag("eroded_far_terrain", FAITHFUL.eroded_far_terrain),
         }
     }
 
@@ -108,6 +115,7 @@ impl Settings {
         map.insert("corrected_biomes".into(), self.corrected_biomes.into());
         map.insert("height_scale".into(), f64::from(self.height_scale).into());
         map.insert("erosion_deposits".into(), self.erosion_deposits.into());
+        map.insert("eroded_far_terrain".into(), self.eroded_far_terrain.into());
         Value::Object(map)
     }
 }
@@ -124,6 +132,7 @@ mod tests {
             corrected_biomes: true,
             height_scale: 1.5,
             erosion_deposits: true,
+            eroded_far_terrain: true,
         };
         assert_eq!(Settings::from_json(&on.to_json()), on);
         assert_eq!(Settings::from_json(&serde_json::json!({})), FAITHFUL);

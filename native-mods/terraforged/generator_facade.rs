@@ -44,7 +44,7 @@ use super::{
     terraforged_biome_sampler::BiomeOverride,
     terraforged_chunk_fill::fill_chunk,
     terraforged_current_surface_biomes::CurrentSurfaceBiomeSampler,
-    terraforged_eroded_noise_generator::ErodedNoiseGenerator,
+    terraforged_eroded_noise_generator::{ErodedNoiseGenerator, FarHeights},
     terraforged_noise_generator::NoiseGenerator,
     terraforged_settings::Settings,
     terraforged_structure_terrain::StructureTerrain,
@@ -546,11 +546,57 @@ impl TerraForgedGenerator {
         ))
     }
 
+    /// Horizon's eroded far terrain (the `eroded_far_terrain` setting): [`Self::far_heights`]' two heights with the
+    /// ERODED height where the block's erosion region is built already, by the chunks (a read-only look into this
+    /// generator's 16 regions, which evicts nothing) or by the world's far erosion thread; there they equal
+    /// [`Self::base_column`]'s, the filled ground. Elsewhere they are the un-eroded ones, and the region is queued for
+    /// the far thread ([`Self::start_far_erosion`]): a tile sampled later gets it. The `bool` says which.
+    pub fn far_eroded_heights(&self) -> ErodedFarHeights<'_> {
+        ErodedFarHeights {
+            generator: self,
+            eroded: self.terrain.noise_generator().far_heights(self.seed()),
+        }
+    }
+
+    /// Starts the world's far erosion thread if it is not running (it inherits the calling thread's priority).
+    pub fn start_far_erosion(&self) {
+        self.terrain.noise_generator().start_far_erosion();
+    }
+
+    /// How many regions the world's far erosion cache holds, and how many are queued.
+    #[cfg(test)]
+    pub(crate) fn cached_far_regions(&self) -> (usize, usize) {
+        self.terrain.noise_generator().far_regions()
+    }
+
     /// The base noise of the un-eroded sample, then the eroded height noise, in Reimagined's `getBaseHeight` order.
     fn base_noises(&self, x: i32, z: i32) -> Result<(f32, f32), &'static str> {
         let seed = self.seed();
         let base_noise = self.terrain.noise_sample(seed, x, z)?.base_noise;
         Ok((base_noise, self.terrain.eroded_height_noise(seed, x, z)?))
+    }
+}
+
+/// [`TerraForgedGenerator::far_eroded_heights`]: one per far tile, so each region is looked up once.
+pub struct ErodedFarHeights<'a> {
+    generator: &'a TerraForgedGenerator,
+    eroded: FarHeights<'a>,
+}
+
+impl ErodedFarHeights<'_> {
+    /// The terrain height and surface at block `(x, z)`, as [`TerraForgedGenerator::far_heights`] gives them, and
+    /// whether they are the eroded ones. `Err` as [`TerraForgedGenerator::base_height`].
+    pub fn heights(&mut self, x: i32, z: i32) -> Result<((i32, i32), bool), &'static str> {
+        let generator = self.generator;
+        let sample = generator.terrain.noise_sample(generator.seed(), x, z)?;
+        let (height_noise, eroded) = match self.eroded.eroded_height_noise(x, z)? {
+            Some(eroded) => (eroded, true),
+            None => (sample.height_noise, false),
+        };
+        Ok((
+            column_heights(generator.levels, sample.base_noise, height_noise),
+            eroded,
+        ))
     }
 }
 
