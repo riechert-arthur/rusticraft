@@ -46,6 +46,7 @@ use super::{
     terraforged_current_surface_biomes::CurrentSurfaceBiomeSampler,
     terraforged_eroded_noise_generator::ErodedNoiseGenerator,
     terraforged_noise_generator::NoiseGenerator,
+    terraforged_settings::Settings,
     terraforged_structure_terrain::StructureTerrain,
     terraforged_surface_height_cache,
     terraforged_terrain_cache::{TerrainCache, TerrainDataHandle, TerrainTask},
@@ -57,28 +58,79 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicI32, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
-/// The TerraForged generators of the pipelines alive in this process, by level seed and dimension (newest last).
-type LiveGenerators = Vec<(i64, String, Weak<TerraForgedGenerator>)>;
-static LIVE: Mutex<LiveGenerators> = Mutex::new(Vec::new());
+/// One live pipeline's generator: its level seed and dimension (`minecraft:overworld`), the Horizon settings it was
+/// built with, and whether it is a root (built its own noise) or [`TerraForgedGenerator::sharing`] a root's.
+struct Live {
+    level_seed: i64,
+    dimension: String,
+    settings: Settings,
+    root: bool,
+    generator: Weak<TerraForgedGenerator>,
+}
 
-/// Records `generator` as the one a pipeline of `dimension` (`minecraft:overworld`) generates `level_seed`'s world
-/// with, for [`live_generator`]. The entry dies with the pipeline: it holds no reference that keeps it alive.
-pub fn register_live(level_seed: i64, dimension: &str, generator: &Arc<TerraForgedGenerator>) {
+/// The TerraForged generators of the pipelines alive in this process (newest last).
+static LIVE: Mutex<Vec<Live>> = Mutex::new(Vec::new());
+
+/// Records `generator` as one a pipeline of `dimension` (`minecraft:overworld`) generates `level_seed`'s world with,
+/// built under `settings`, for [`live_generator`] and [`shareable_generator`]. `root` says it built its own noise
+/// (the level's pipeline, the first of a world) rather than sharing a root's. The entry dies with the pipeline: it
+/// holds no reference that keeps it alive.
+pub fn register_live(
+    level_seed: i64,
+    dimension: &str,
+    settings: Settings,
+    root: bool,
+    generator: &Arc<TerraForgedGenerator>,
+) {
     let mut live = LIVE.lock().unwrap_or_else(PoisonError::into_inner);
-    live.retain(|(_, _, entry)| entry.strong_count() > 0);
-    live.push((level_seed, dimension.to_owned(), Arc::downgrade(generator)));
+    live.retain(|entry| entry.generator.strong_count() > 0);
+    live.push(Live {
+        level_seed,
+        dimension: dimension.to_owned(),
+        settings,
+        root,
+        generator: Arc::downgrade(generator),
+    });
 }
 
 /// `GeneratorPreset.getGenerator(level)`: the TerraForged generator `dimension` of `level_seed`'s world generates
 /// with, or `None` when that level's generator is not TerraForged's (no TerraForged pipeline of that seed and
-/// dimension is alive). Pipelines of one seed and dimension build the same generator from the same stem, so any one
-/// of them answers; the newest is taken.
+/// dimension is alive). Pipelines of one seed and dimension generate the same terrain, so any one of them answers;
+/// the newest root is taken (the level's own pipeline, not a far-decoration one sharing its noise, so a query's
+/// erosion regions go to the level's cache), or the newest sharing one once no root is left.
 pub fn live_generator(level_seed: i64, dimension: &str) -> Option<Arc<TerraForgedGenerator>> {
+    let live = LIVE.lock().unwrap_or_else(PoisonError::into_inner);
+    let of_level = || {
+        live.iter()
+            .rev()
+            .filter(|entry| entry.level_seed == level_seed && entry.dimension == dimension)
+    };
+    of_level()
+        .filter(|entry| entry.root)
+        .find_map(|entry| entry.generator.upgrade())
+        .or_else(|| of_level().find_map(|entry| entry.generator.upgrade()))
+}
+
+/// The newest live root generator of `level_seed`'s `dimension` built from `levels` under `settings`, whose noise a
+/// new pipeline of the same world can share ([`TerraForgedGenerator::sharing`]) instead of building its own: the same
+/// seed, levels and settings give the same noise. `None` when no such root is alive.
+pub fn shareable_generator(
+    level_seed: i64,
+    dimension: &str,
+    levels: TerrainLevels,
+    settings: Settings,
+) -> Option<Arc<TerraForgedGenerator>> {
     let live = LIVE.lock().unwrap_or_else(PoisonError::into_inner);
     live.iter()
         .rev()
-        .filter(|(seed, name, _)| *seed == level_seed && name == dimension)
-        .find_map(|(_, _, entry)| entry.upgrade())
+        .filter(|entry| {
+            entry.root
+                && entry.level_seed == level_seed
+                && entry.dimension == dimension
+                && entry.settings == settings
+        })
+        .filter_map(|entry| entry.generator.upgrade())
+        .find(|generator| generator.levels() == levels && generator.level_seed() == level_seed)
 }
 
 /// `Seeds.get(long)`: the level seed as TerraForged's noise uses it, narrowed to a Java `int` (its low 32 bits).
@@ -153,6 +205,23 @@ impl TerraForgedGenerator {
             seed: AtomicI32::new(0),
             level_seed: AtomicI64::new(0),
         }
+    }
+
+    /// A generator of the same levels and captured seed over the same noise (TerraForged's graphs, climate, continent
+    /// and river caches: [`ErodedNoiseGenerator::sharing`]), with its own terrain cache, task threads and erosion
+    /// regions. Horizon's far-decoration pipelines generate with it: they reuse the level's noise without filling or
+    /// evicting the caches of the level's chunks. Every answer is the same as this generator's.
+    pub fn sharing(&self) -> Self {
+        let shared = Self::new(self.levels, self.terrain.noise_generator().sharing());
+        shared.capture_seed(self.level_seed());
+        shared
+    }
+
+    /// Whether both generators sample the same noise instance ([`Self::sharing`]).
+    pub fn shares_noise_with(&self, other: &Self) -> bool {
+        self.terrain
+            .noise_generator()
+            .shares_noise_with(other.terrain.noise_generator())
     }
 
     /// `createState`'s capture: `seed = Seeds.get(levelSeed)`, `levelSeed = levelSeed` (two volatile writes in Java;
@@ -584,23 +653,77 @@ mod tests {
     fn live_generators_answer_by_seed_and_dimension_while_their_pipeline_lives() {
         // A seed no other test registers.
         const SEED: i64 = -0x7e57_11fe_0219;
+        let settings = Settings::default();
+        let register = |generator: &Arc<TerraForgedGenerator>, root: bool| {
+            register_live(SEED, "minecraft:overworld", settings, root, generator);
+        };
         let first = Arc::new(facade(0, 0, 0, 12, 0));
-        register_live(SEED, "minecraft:overworld", &first);
+        register(&first, true);
         let found = live_generator(SEED, "minecraft:overworld").expect("registered");
         assert!(Arc::ptr_eq(&found, &first));
         drop(found);
         assert!(live_generator(SEED, "minecraft:the_nether").is_none());
         assert!(live_generator(SEED.wrapping_add(1), "minecraft:overworld").is_none());
-        // The newest of one seed and dimension answers; a dropped one never does.
+        // The newest root of one seed and dimension answers, before a newer generator sharing a root's noise; a
+        // dropped one never does.
         let second = Arc::new(facade(0, 0, 0, 12, 0));
-        register_live(SEED, "minecraft:overworld", &second);
+        register(&second, true);
+        let far = Arc::new(second.sharing());
+        register(&far, false);
         let found = live_generator(SEED, "minecraft:overworld").expect("registered");
         assert!(Arc::ptr_eq(&found, &second));
         drop((found, second));
         let found = live_generator(SEED, "minecraft:overworld").expect("the first still lives");
         assert!(Arc::ptr_eq(&found, &first));
         drop((found, first));
+        // With no root left, the sharing one answers.
+        let found = live_generator(SEED, "minecraft:overworld").expect("the far one still lives");
+        assert!(Arc::ptr_eq(&found, &far));
+        drop((found, far));
         assert!(live_generator(SEED, "minecraft:overworld").is_none());
+    }
+
+    /// A new pipeline shares the noise of a live root of the same seed, dimension, levels and settings, never of a
+    /// sharing generator or of another seed, levels or settings; the shared generator has its own caches.
+    #[test]
+    fn only_a_matching_live_root_is_shared() {
+        // A seed no other test registers.
+        const SEED: i64 = 0x5_4a7e_0267;
+        let settings = Settings::default();
+        let root = Arc::new(facade(0, 0, 0, 12, 0));
+        root.capture_seed(SEED);
+        let shareable = |seed: i64, levels: TerrainLevels, settings: Settings| {
+            shareable_generator(seed, "minecraft:overworld", levels, settings)
+        };
+        assert!(
+            shareable(SEED, levels(0), settings).is_none(),
+            "not registered"
+        );
+        register_live(SEED, "minecraft:overworld", settings, true, &root);
+        let found = shareable(SEED, levels(0), settings).expect("the root");
+        assert!(Arc::ptr_eq(&found, &root));
+        let far = found.sharing();
+        assert!(far.shares_noise_with(&root) && far.sharing().shares_noise_with(&root));
+        assert_eq!(
+            (far.seed(), far.level_seed(), far.levels()),
+            (root.seed(), SEED, levels(0))
+        );
+        assert!(!facade(0, 0, 0, 12, 0).shares_noise_with(&root));
+        assert!(shareable(SEED.wrapping_add(1), levels(0), settings).is_none());
+        assert!(shareable(SEED, levels(1), settings).is_none());
+        let other = Settings {
+            sparse_forests: !settings.sparse_forests,
+            ..settings
+        };
+        assert!(shareable(SEED, levels(0), other).is_none());
+        assert!(shareable_generator(SEED, "minecraft:the_nether", levels(0), settings).is_none());
+        // A sharing generator is never shared from: only roots are.
+        drop(found);
+        let far = Arc::new(far);
+        register_live(SEED, "minecraft:overworld", settings, false, &far);
+        drop(root);
+        assert!(shareable(SEED, levels(0), settings).is_none());
+        assert_eq!((far.cached_chunks(), far.cached_regions()), (0, 0));
     }
 
     fn facade(

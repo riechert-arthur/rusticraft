@@ -52,8 +52,10 @@ use std::{
 /// `NoiseGenerator.sampleTerrain`/`sampleRiver` are 6dd607eb's, which [`NoiseGenerator`] ports. Chunks are filled
 /// from the regions ([`Self::generate`]); the plain height and `find` stay on the un-eroded generator.
 pub struct ErodedNoiseGenerator {
-    erosion: ErosionFilter,
-    generator: NoiseGenerator,
+    /// The filter and the noise are immutable after construction (the noise's own caches are thread-safe), so the
+    /// generators [`Self::sharing`] makes share them; each keeps its own region cache.
+    erosion: Arc<ErosionFilter>,
+    generator: Arc<NoiseGenerator>,
     smoothing: HeightmapSmoothingSettings,
     regions: ErosionRegionCache<ErodedRegion>,
     river_start: RiverStart,
@@ -124,13 +126,33 @@ impl ErodedNoiseGenerator {
         smoothing: HeightmapSmoothingSettings,
     ) -> Self {
         Self {
-            erosion: ErosionFilter::new(ErosionRegionLayout::MAP_SIZE, erosion),
-            generator,
+            erosion: Arc::new(ErosionFilter::new(ErosionRegionLayout::MAP_SIZE, erosion)),
+            generator: Arc::new(generator),
             smoothing,
             regions: ErosionRegionCache::new(),
             river_start: RiverStart::for_settings(super::terraforged_settings::current()),
             deposits: super::terraforged_settings::current().erosion_deposits,
         }
+    }
+
+    /// A generator over the same noise and erosion filter (shared, not copied), with the same settings and an empty
+    /// region cache of its own: Horizon's far-decoration pipelines generate with the level's noise without evicting
+    /// the regions the level's chunks read (`terraforged_generator_facade`'s `TerraForgedGenerator::sharing`). Its
+    /// output is this generator's: every result is a pure function of the seed and the position.
+    pub fn sharing(&self) -> Self {
+        Self {
+            erosion: Arc::clone(&self.erosion),
+            generator: Arc::clone(&self.generator),
+            smoothing: self.smoothing,
+            regions: ErosionRegionCache::new(),
+            river_start: self.river_start,
+            deposits: self.deposits,
+        }
+    }
+
+    /// Whether both generators sample the same noise instance ([`Self::sharing`]).
+    pub fn shares_noise_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.generator, &other.generator)
     }
 
     /// The same generator recording erosion's deposits in its chunks ([`Self::generate`]) or not.
@@ -407,7 +429,7 @@ fn relative_change(change: &[f32], x: i32, z: i32) -> f32 {
 /// build, where Java throws; TerraForged's graphs have no custom module, so this never happens for them).
 impl NoiseGeneratorContract for ErodedNoiseGenerator {
     fn levels(&self) -> NoiseLevels {
-        NoiseGeneratorContract::levels(&self.generator)
+        NoiseGeneratorContract::levels(&*self.generator)
     }
 
     fn terrain_levels(&self) -> TerrainLevels {
@@ -415,7 +437,7 @@ impl NoiseGeneratorContract for ErodedNoiseGenerator {
     }
 
     fn height_noise(&self, seed: i32, x: i32, z: i32) -> f32 {
-        NoiseGeneratorContract::height_noise(&self.generator, seed, x, z)
+        NoiseGeneratorContract::height_noise(&*self.generator, seed, x, z)
     }
 
     fn generate(

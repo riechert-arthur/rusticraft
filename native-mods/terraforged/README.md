@@ -91,7 +91,11 @@ Differences and gaps:
   columns show stone under them (grey stripes on distant badlands slopes, which Full far detail paints in
   terracotta bands); heights, top blocks, water and biomes are unchanged. It saves 10–35% of a far tile's
   sampling; most of Reduced's speed comes from Horizon merging far tiles. Decorated far chunks
-  (Horizon's far decoration) are generated in full, eroded.
+  (Horizon's far decoration) are generated in full, eroded. Each far-decoration thread runs its own pipeline (its
+  structure pieces' placement flags can't be shared), but the pipelines of one world share the first one's noise
+  (terrain graphs, climate, continent and river caches; TerraForged has one `Generator` per level), each with its own
+  terrain cache, task threads and erosion regions, so far decoration never evicts the regions the level's chunks
+  read. Results are the same either way: the noise is a pure function of seed and position.
 - The boat hook (boats float up small water steps) works only in TerraForged worlds (Arthur's
   choice); TerraForged's mixin works in every world.
 - `/locateterrain`, `/tf export structures`, `/tf regen` and `/tf preview` exist only in TerraForged worlds
@@ -3108,7 +3112,8 @@ Commands (`commands.rs`, on Horizon's native command hooks) follow 6dd607eb's `T
 `/locateterrain <terrain> [radius]`, `/tf export structures` and `/tf regen <radius>`. They are registered only when the open world is a
 TerraForged one (its saved overworld generator), so other worlds keep vanilla's command tree; TerraForged registers them
 in every world. `/locateterrain` finds the player's level's generator as `GeneratorPreset.getGenerator` does: each
-TerraForged pipeline records its generator by level seed and dimension (`live_generator`), so the Nether and the End
+TerraForged pipeline records its generator by level seed and dimension (`live_generator`, which answers with the
+newest pipeline that built its own noise, the level's, before the far-decoration ones sharing it), so the Nether and the End
 answer nothing, as in Java. The terrain is looked up with `TerrainType.get` (ignoring case), then `NoiseGenerator.find`
 searches from the player's block with the radius and `min(100, radius + 50)`; the answer (`Found terrain: … Distance: ….
 Teleport`, `Invalid terrain: …`, `Unable to locate terrain: …`) uses TerraForged's literal texts and colours, and the
@@ -3202,8 +3207,8 @@ rustc --edition 2024 --test native-mods/terraforged/engine.rs -o /tmp/terraforge
 /tmp/terraforged-engine-tests
 ```
 
-The mixin pins Rusticraft commit `40ed51a25424d8695617460c811eda78108bb420` (#283's merge), a `main` commit rather than a Nightly:
-no Nightly is close enough (the nearest earlier one, `nightly-source/2026-10-31-d91cab6`, is 1919 commits older and
+The mixin pins Rusticraft commit `2a158ddda2aae376d2ff6b514f8ffb8a460413a2` (#284's merge), a `main` commit rather than a Nightly:
+no Nightly is close enough (the nearest earlier one, `nightly-source/2026-10-31-d91cab6`, is 1924 commits older and
 `generator.rs` differs by 73 lines). The pin moves to a Nightly when the series is rebased onto one.
 
 Translation inputs are TerraForged commit `6dd607ebfd41a3b7274e090b1f2cf565d53d1d44` and Engine 0.3.0 bytecode
