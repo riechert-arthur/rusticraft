@@ -574,8 +574,14 @@ precipitation").
   is a lookup. No drainage tiles: the spawn search, `/locate biome` and the maps query the climate
   far and wide. A value is a function of the seed and the cell alone, so there are no seams; whole
   cells change, so biome borders stay TerraForged's cell borders.
+- With the other settings: the profile reads the raw height on purpose, so `flow_rivers`, `basin_erosion`,
+  `coastal_landforms` and `glacial_landforms` don't move the shadow (and the climate stays free of their
+  drainage tiles); `height_scale` does. The shadow changes moisture only: `glacial_landforms` reads the
+  climate's temperature, which stays TerraForged's, and `altitude_climate` cools the temperature of the
+  biome the shadow picked, so its snow line and treeline follow that biome. `realistic_vegetation` weighs
+  trees by slope, aspect and water, not by this moisture.
 - Not yet: winds that vary by latitude band or continent, vegetation density following the moisture
-  (#272's `realistic_vegetation`, in another stack), and rivers raising the moisture beside them.
+  (`realistic_vegetation`), and rivers raising the moisture beside them.
 
 ## Layers
 
@@ -3562,7 +3568,8 @@ there), shown up to 128 GUI pixels under the seed box and hidden on screens too 
 Create World turns into the level seed (a number, else the text's Java `hashCode`, trimmed), and the generator is built
 as the world's pipeline builds it: the preset's levels with `height_scale`, the settings the new world gets (Re-Create's
 source world's, else `config/terraforged/settings.json`), and `Seeds.get` of the level seed. Its colours read only the
-climate, continent and river noise, so no setting changes the map (the tests check every setting). A blank seed shows
+climate, continent and river noise, so of the settings only `rain_shadow`, which moves the climate's moisture, changes
+the map (the tests check every setting). A blank seed shows
 "the map shows once a seed is typed". The picture renders on a thread of its own, never the screen's, in well under a second:
 one render at a time for the latest seed, and a render for a seed already replaced, or for a screen no
 longer drawing the map, stops at its next pixel (TerraForged Reimagined's `PreviewWidget` takes the latest request the
