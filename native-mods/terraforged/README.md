@@ -222,9 +222,10 @@ don't generate, so they need none.
 
 ## Layers
 
-The layers were added in this order; later notes supersede earlier ones, and [Status](#status) is the only
-statement of what TerraForged worlds get and what is missing today. Where an early note said a layer was "not ported
-yet" or that nothing called it yet and a later layer changed that, the note now names the later layer.
+The layers were added in this order; later notes supersede earlier ones, and [Status](#status) sums up what
+TerraForged worlds get and what is missing today. Where an early note said a layer was "not ported yet" or that
+nothing called it yet and a later layer changed that, the note now points to that later layer or says why no
+TerraForged world calls it.
 
 Engine layers not on 6dd607eb's path: 6dd607eb links Engine 0.3.0 but generates with its own `ContinentNoise`
 (`continent_noise.rs`), whose `RiverGenerator` (`river_network.rs`) lays rivers and lakes and whose `RiverCarver`
