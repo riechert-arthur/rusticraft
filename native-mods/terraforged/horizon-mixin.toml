@@ -4,7 +4,7 @@ version = "0.1.0"
 priority = 100
 
 [compatibility]
-horizon_revision = "40ed51a25424d8695617460c811eda78108bb420"
+horizon_revision = "2a158ddda2aae376d2ff6b514f8ffb8a460413a2"
 
 [[module]]
 id = "noise"
