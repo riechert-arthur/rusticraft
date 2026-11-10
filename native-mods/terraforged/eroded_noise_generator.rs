@@ -29,6 +29,7 @@
 // 2020 TerraForged, Copyright (c) 2026 Romoslayer; see `LICENSE-TERRAFORGED-REIMAGINED`.
 
 use super::{
+    terraforged_basin_erosion::{BasinMemo, with_thread_memo},
     terraforged_engine::Terrain,
     terraforged_erosion::{
         ErosionFilter, ErosionFilterSettings, ErosionRegionCache, ErosionRegionLayout,
@@ -315,7 +316,7 @@ impl ErodedNoiseGenerator {
     /// Horizon's distant terrain: [`Self::noise_sample`] (un-eroded, rivers included), with the coast's landform
     /// (`coastal_landforms`, [`Self::coast_offset`]) added before the rivers carve, and the rivers' glacial troughs
     /// (`glacial_landforms`, [`Self::carve_rivers`]), as the chunks have them. Without either setting it is
-    /// [`Self::noise_sample`].
+    /// [`Self::noise_sample`]. Either way `basin_erosion`'s valleys are cut ([`shaped_sample`], [`NoiseGenerator::sample`]).
     pub fn far_sample(&self, seed: i32, x: i32, z: i32) -> Result<NoiseSample, &'static str> {
         if !self.coast && self.glaciers.is_none() {
             return self.noise_sample(seed, x, z);
@@ -561,7 +562,8 @@ impl ErodedNoiseGenerator {
     /// either way. With `rock_strata` (Horizon's) the erosion is [`ErosionFilter::apply_region_with_hardness`]: the
     /// hardness of the blended strata's rock at the droplet cell's height (`terraforged_rock_strata`), plus
     /// [`Self::HARD_TERRAIN_BONUS`] on plateau and badlands columns, at most [`Self::MAX_HARDNESS`]. It is still a
-    /// pure function of the seed and the region.
+    /// pure function of the seed and the region. With `basin_erosion` (Horizon's) the raw heights are lowered first
+    /// ([`NoiseGenerator::lower_basins`]), as [`NoiseGenerator::sample`] lowers them.
     fn build_region(
         &self,
         seed: i32,
@@ -650,10 +652,12 @@ fn coast_offset_with(
 }
 
 /// The un-eroded sample of block `(x, z)` as the distant terrain has it ([`ErodedNoiseGenerator::far_sample`]), before
-/// Horizon's flow-routed channels: TerraForged's terrain, the coast's landform with `coasts` (`coastal_landforms`;
-/// `Some(true)` with `rock_strata` too), then TerraForged's rivers, cut into troughs with `glaciers`. `flow_rivers`'
-/// drainage map samples it too, so the channels follow the ground the chunks have. `Err` where the terrain sample
-/// fails.
+/// Horizon's flow-routed channels: TerraForged's terrain, lowered by `basin_erosion` where `generator` has it
+/// ([`NoiseGenerator::lower_basins`], as the chunks' regions are), the coast's landform with `coasts`
+/// (`coastal_landforms`; `Some(true)` with `rock_strata` too), then TerraForged's rivers, cut into troughs with
+/// `glaciers`. The drainage map (`terraforged_flow_rivers::RiverSource`) samples it too, over a generator without
+/// `basin_erosion`: the map routes the ground before the valleys are cut, never the valleys it cuts. `Err` where the
+/// terrain sample fails.
 pub fn shaped_sample(
     generator: &NoiseGenerator,
     coasts: Option<bool>,
@@ -665,6 +669,9 @@ pub fn shaped_sample(
     let mut sample = NoiseSample::new(&generator.continent().context().terrain);
     let (noise_x, noise_z) = (noise_coord(generator, x), noise_coord(generator, z));
     generator.sample_terrain(seed, noise_x, noise_z, &mut sample, blender)?;
+    if generator.basin_erosion().is_some() {
+        with_thread_memo(|memo| generator.lower_basins(memo, seed, x, z, &mut sample));
+    }
     if let Some(strata) = coasts {
         sample.height_noise += coast_offset_with(
             generator,
@@ -688,8 +695,9 @@ pub fn shaped_sample(
 }
 
 /// `buildRegion`'s eroded map ([`ErodedNoiseGenerator::build_region`]), handing the raw map to `raw` before erosion.
-/// With `strata` (Horizon's `rock_strata`) the erosion is [`ErosionFilter::apply_region_with_hardness`]; the far
-/// erosion ([`FarErosion`]) builds its regions here too, so far tiles get the chunks' heights either way.
+/// With `strata` (Horizon's `rock_strata`) the erosion is [`ErosionFilter::apply_region_with_hardness`], and with
+/// `basin_erosion` the raw map is lowered first ([`NoiseGenerator::lower_basins`]); the far erosion ([`FarErosion`])
+/// builds its regions here too, so far tiles get the chunks' heights either way.
 #[allow(clippy::too_many_arguments)]
 fn eroded_map(
     generator: &NoiseGenerator,
@@ -709,6 +717,7 @@ fn eroded_map(
     let terrains = &generator.continent().context().terrain;
     let mut sample = NoiseSample::new(terrains);
     let mut blender = generator.blender_resource();
+    let mut basins = BasinMemo::default();
     // `rock_strata` (Horizon's): which columns are plateau or badlands, the harder terrains.
     let hard_terrains: Vec<_> = ["plateau", "badlands"]
         .iter()
@@ -721,6 +730,14 @@ fn eroded_map(
             let noise_x = noise_coord(generator, start_x.wrapping_add(x));
             let sampled =
                 generator.sample_terrain(seed, noise_x, noise_z, &mut sample, &mut blender)?;
+            // Horizon's `basin_erosion` cuts the valleys first, so the droplets add their detail on top.
+            generator.lower_basins(
+                &mut basins,
+                seed,
+                start_x.wrapping_add(x),
+                start_z.wrapping_add(z),
+                sampled,
+            );
             map.push(sampled.height_noise);
             if strata {
                 let terrain = &sampled.terrain_type;

@@ -14,6 +14,7 @@
 // tiles (themselves pure) through fixed 128-block patches, memoised in a lossy cache.
 
 use super::terraforged::{clamp, lerp};
+use super::terraforged_basin_erosion::{BasinErosion, BasinMap, BasinMemo};
 use super::terraforged_continent_points::BEACH;
 use super::terraforged_drainage::{Column, Drainage, FlowCell, L1, SEA, TileMemo};
 use super::terraforged_engine::{Terrain, TerrainProperties};
@@ -177,13 +178,16 @@ pub struct Patch {
 struct Memo {
     cells: HashMap<(i32, i32), FlowCell>,
     tiles: TileMemo,
+    basins: BasinMemo,
 }
 
 /// The channel network over a drainage map.
 pub struct Channels<S> {
     seed: i32,
     sea_level: i32,
-    drainage: Drainage<S>,
+    drainage: Arc<Drainage<S>>,
+    /// Horizon's `basin_erosion` over the same drainage map, if it is on: the water follows the eroded valleys.
+    basins: Option<Arc<BasinMap<S>>>,
     patches: ConcurrentLossyCache<Patch>,
 }
 
@@ -202,10 +206,21 @@ impl<S: Fn(i32, i32) -> Column> Channels<S> {
 
     /// The channels over `source`'s drainage map (see [`Drainage::new`]); water never stands below `sea_level`.
     pub fn new(seed: i32, sea_level: i32, source: S) -> Self {
+        Self::over(seed, sea_level, Arc::new(Drainage::new(seed, source)), None)
+    }
+
+    /// The channels over `drainage`, their water lowered with `basins` (whose drainage map must be the same).
+    pub fn over(
+        seed: i32,
+        sea_level: i32,
+        drainage: Arc<Drainage<S>>,
+        basins: Option<Arc<BasinMap<S>>>,
+    ) -> Self {
         Self {
             seed,
             sea_level,
-            drainage: Drainage::new(seed, source),
+            drainage,
+            basins,
             patches: ConcurrentLossyCache::new(Self::PATCHES, 8),
         }
     }
@@ -242,14 +257,18 @@ impl<S: Fn(i32, i32) -> Column> Channels<S> {
             && cell.filled - cell.height <= DEPRESSION
     }
 
-    /// The water level of cell (`x`, `z`) before [`WATER_DROP`]: the highest filled height over it and
-    /// [`LOOKAHEAD`] cells downstream, and at least the sea level plus the drop.
+    /// The water level of cell (`x`, `z`) before [`WATER_DROP`]: the highest filled height (lowered by the basin
+    /// erosion, if on) over it and [`LOOKAHEAD`] cells downstream, and at least the sea level plus the drop.
     fn level(&self, memo: &mut Memo, x: i32, z: i32) -> f32 {
         let (mut x, mut z) = (x, z);
         let mut level = self.sea_level as f32 + WATER_DROP;
         for _ in 0..=LOOKAHEAD {
             let cell = self.cell(memo, x, z);
-            level = level.max(cell.filled);
+            let lowered = match &self.basins {
+                Some(basins) => cell.filled + basins.cell(&mut memo.basins, x, z),
+                None => cell.filled,
+            };
+            level = level.max(lowered);
             let Some((dx, dz)) = cell.downstream() else {
                 break;
             };
@@ -380,9 +399,10 @@ impl<S: Fn(i32, i32) -> Column> Channels<S> {
 /// A boxed drainage source, shareable between generation threads.
 pub type Source = Box<dyn Fn(i32, i32) -> Column + Send + Sync>;
 
-/// The drainage source of [`FlowRivers`]: its own copy of TerraForged's un-eroded generator, rivers included, and
-/// the world's coasts and glaciers, which reshape the ground the channels run over.
-struct RiverSource {
+/// The drainage source of [`FlowRivers`] and Horizon's basin erosion: its own copy of TerraForged's un-eroded
+/// generator (without `basin_erosion`, so the map never routes the valleys it cuts), rivers included, and the world's
+/// coasts and glaciers, which reshape the ground the channels run over.
+pub struct RiverSource {
     generator: NoiseGenerator,
     blenders: Mutex<Vec<Blender>>,
     /// `coastal_landforms` (holding whether `rock_strata` is on) and `glacial_landforms`' glaciers, as the world's
@@ -396,7 +416,7 @@ impl RiverSource {
     /// `coastal_landforms` the coast's landform, with `glacial_landforms` the troughs (`shaped_sample`), so a channel
     /// never takes its water level from ground a trough or a tidal flat lowered. One of TerraForged's river or lake
     /// beds is an outlet at its water level, so the channels end in TerraForged's rivers; a failed sample is sea.
-    fn column(&self, seed: i32, x: i32, z: i32) -> Column {
+    pub fn column(&self, seed: i32, x: i32, z: i32) -> Column {
         let levels = self.generator.levels();
         let mut blender = self
             .blenders
@@ -448,9 +468,68 @@ impl RiverSource {
     }
 }
 
+/// The world's drainage map over [`RiverSource`], shared by the settings that read it (`flow_rivers`,
+/// `basin_erosion`), one per runtime seed.
+pub struct RiverDrainage {
+    source: Arc<RiverSource>,
+    map: RwLock<Option<(i32, Arc<Drainage<Source>>)>>,
+}
+
+impl RiverDrainage {
+    /// The map over `generator`, a second copy of the world's un-eroded generator (built the same way, without
+    /// Horizon's settings), without Horizon's other settings.
+    pub fn new(generator: NoiseGenerator) -> Self {
+        Self::with_settings(generator, super::terraforged_settings::FAITHFUL)
+    }
+
+    /// [`Self::new`] with the world's `settings`: the map samples the ground `coastal_landforms` and
+    /// `glacial_landforms` reshape, as the chunks have it.
+    pub fn with_settings(generator: NoiseGenerator, settings: Settings) -> Self {
+        let glaciers = settings
+            .glacial_landforms
+            .then(|| Glaciers::new(&generator, settings));
+        Self {
+            source: Arc::new(RiverSource {
+                generator,
+                blenders: Mutex::new(Vec::new()),
+                coasts: settings.coastal_landforms.then_some(settings.rock_strata),
+                glaciers,
+            }),
+            map: RwLock::new(None),
+        }
+    }
+
+    pub fn sea_level(&self) -> i32 {
+        self.source.generator.levels().sea_level
+    }
+
+    /// The map for runtime `seed` (a world has one; another seed replaces it).
+    pub fn map(&self, seed: i32) -> Arc<Drainage<Source>> {
+        if let Some((cached, map)) = &*self.map.read().unwrap_or_else(|e| e.into_inner())
+            && *cached == seed
+        {
+            return Arc::clone(map);
+        }
+        let mut slot = self.map.write().unwrap_or_else(|e| e.into_inner());
+        if let Some((cached, map)) = &*slot
+            && *cached == seed
+        {
+            return Arc::clone(map);
+        }
+        let source = Arc::clone(&self.source);
+        let map = Arc::new(Drainage::new(
+            seed,
+            Box::new(move |x, z| source.column(seed, x, z)) as Source,
+        ));
+        *slot = Some((seed, Arc::clone(&map)));
+        map
+    }
+}
+
 /// The `flow_rivers` setting's carver, which [`NoiseGenerator`] runs after TerraForged's rivers.
 pub struct FlowRivers {
-    source: Arc<RiverSource>,
+    drainage: Arc<RiverDrainage>,
+    basins: Option<Arc<BasinErosion>>,
     channels: RwLock<Option<(i32, Arc<Channels<Source>>)>>,
 }
 
@@ -464,16 +543,18 @@ impl FlowRivers {
     /// [`Self::new`] with the world's `settings`: the drainage map samples the ground `coastal_landforms` and
     /// `glacial_landforms` reshape, as the chunks have it.
     pub fn with_settings(generator: NoiseGenerator, settings: Settings) -> Self {
-        let glaciers = settings
-            .glacial_landforms
-            .then(|| Glaciers::new(&generator, settings));
+        Self::over(
+            Arc::new(RiverDrainage::with_settings(generator, settings)),
+            None,
+        )
+    }
+
+    /// The carver over the shared `drainage` map, its water following `basins`' valleys if that setting is on (over
+    /// the same map).
+    pub fn over(drainage: Arc<RiverDrainage>, basins: Option<Arc<BasinErosion>>) -> Self {
         Self {
-            source: Arc::new(RiverSource {
-                generator,
-                blenders: Mutex::new(Vec::new()),
-                coasts: settings.coastal_landforms.then_some(settings.rock_strata),
-                glaciers,
-            }),
+            drainage,
+            basins,
             channels: RwLock::new(None),
         }
     }
@@ -491,12 +572,11 @@ impl FlowRivers {
         {
             return Arc::clone(channels);
         }
-        let source = Arc::clone(&self.source);
-        let sea_level = source.generator.levels().sea_level;
-        let channels = Arc::new(Channels::new(
+        let channels = Arc::new(Channels::over(
             seed,
-            sea_level,
-            Box::new(move |x, z| source.column(seed, x, z)) as Source,
+            self.drainage.sea_level(),
+            self.drainage.map(seed),
+            self.basins.as_ref().map(|basins| basins.map(seed)),
         ));
         *slot = Some((seed, Arc::clone(&channels)));
         channels
@@ -792,7 +872,12 @@ mod tests {
             make(shaped),
         );
         let seed = flowing.seed();
-        let source = &flowing.noise_generator().flow_rivers().unwrap().source;
+        let source = &flowing
+            .noise_generator()
+            .flow_rivers()
+            .unwrap()
+            .drainage
+            .source;
         assert!(source.coasts == Some(false) && source.glaciers.is_some());
         let plain = ground.noise_generator();
         let (mut land, mut moved) = (0, 0);

@@ -30,6 +30,7 @@
 // `eroded_noise_generator.rs`).
 
 use super::{
+    terraforged_basin_erosion::BasinErosion,
     terraforged_climate::ClimateSettings,
     terraforged_context::{GeneratorContext, GeneratorSettings},
     terraforged_continent_config::CONTINENT_SAMPLE_SCALE,
@@ -40,7 +41,7 @@ use super::{
     terraforged_engine::TerrainRegistry,
     terraforged_eroded_noise_generator::ErodedNoiseGenerator,
     terraforged_erosion::{ErosionFilterSettings, HeightmapSmoothingSettings},
-    terraforged_flow_rivers::FlowRivers,
+    terraforged_flow_rivers::{FlowRivers, RiverDrainage},
     terraforged_generator_facade::TerraForgedGenerator,
     terraforged_noise_generator::{CONTINENT_OFFSET, NoiseGenerator, TERRAIN_OFFSET},
     terraforged_terrain_blender::TerrainBlender,
@@ -174,17 +175,27 @@ pub fn scale_heights(levels: TerrainLevels, scale: f32) -> TerrainLevels {
 /// (`TerrainBlender(TERRAIN_OFFSET, 800, 0.8F, 0.4F, terrain)`) and `createContinentNoise`'s continent. The terrain
 /// types, the continent and the blender's terrains share one registry, Engine 0.3.0's built-ins
 /// ([`TerrainRegistry::new`], as 6dd607eb links Engine 0.3.0), so every identity test sees the same built-ins. `Err` where a bundled resource does not decode.
-/// With Horizon's `flow_rivers` setting (read here, as the world's generators are built), the noise also carves the
-/// flow-routed rivers, over a drainage map that samples a second copy of the same noise (with the coasts and glacial
-/// troughs of `coastal_landforms` and `glacial_landforms`, as the chunks have them).
+/// With Horizon's `flow_rivers` or `basin_erosion` settings (read here, as the world's generators are built), the
+/// noise also carves the flow-routed rivers or lowers its terrain along the eroded valleys, both over one drainage map
+/// that samples a second copy of the same noise (with the coasts and glacial troughs of `coastal_landforms` and
+/// `glacial_landforms`, as the chunks have them; without `basin_erosion`, so the map never routes its own valleys).
 pub fn build(levels: TerrainLevels) -> Result<TerraForgedGenerator, String> {
-    let mut noise = build_noise_generator(levels)?;
     let settings = super::terraforged_settings::current();
-    if settings.flow_rivers {
-        noise = noise.with_flow_rivers(FlowRivers::with_settings(
+    let mut noise = build_noise_generator(levels)?;
+    if settings.flow_rivers || settings.basin_erosion {
+        let drainage = Arc::new(RiverDrainage::with_settings(
             build_noise_generator(levels)?,
             settings,
         ));
+        let basins = settings
+            .basin_erosion
+            .then(|| Arc::new(BasinErosion::new(Arc::clone(&drainage))));
+        if let Some(basins) = &basins {
+            noise = noise.with_basin_erosion(Arc::clone(basins));
+        }
+        if settings.flow_rivers {
+            noise = noise.with_flow_rivers(FlowRivers::over(drainage, basins));
+        }
     }
     Ok(TerraForgedGenerator::new(
         levels,
@@ -197,7 +208,7 @@ pub fn build(levels: TerrainLevels) -> Result<TerraForgedGenerator, String> {
 }
 
 /// [`build`]'s un-eroded noise, without Horizon's settings.
-fn build_noise_generator(levels: TerrainLevels) -> Result<NoiseGenerator, String> {
+pub fn build_noise_generator(levels: TerrainLevels) -> Result<NoiseGenerator, String> {
     let mut registry = TerrainRegistry::new();
     let types = decode_current_terrain_types(&mut registry).map_err(|error| error.to_string())?;
     let noises = decode_current_terrain_noises(&types).map_err(|error| error.to_string())?;

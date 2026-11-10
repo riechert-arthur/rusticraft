@@ -2076,8 +2076,25 @@ mod tests {
         );
     }
 
+    /// The same with `basin_erosion` (and `eroded_far_terrain`) on, in one of runtime seed 777's cut valleys (level
+    /// seed 777 + (294 << 32), so no other test's live pipeline shares it): the far-decoration pipelines lower the
+    /// same valleys, over the drainage map and erosion tiles they share through the level's noise, as the level's.
+    #[test]
+    #[ignore = "real terrain: every query builds drainage tiles, too slow in debug; run with --profile fast --ignored"]
+    fn far_pipelines_make_the_level_chunks_with_basin_erosion() {
+        far_pipelines_make_the_level_chunks(
+            777 + (294 << 32),
+            Settings {
+                basin_erosion: true,
+                eroded_far_terrain: true,
+                ..terraforged_settings::FAITHFUL
+            },
+        );
+    }
+
     /// The body of the tests above: the live pipelines of `seed` are built with `settings`. The chunks compared are
-    /// around (5, -3), with `flow_rivers` around a channel (see there), with `altitude_climate` around the highest point of plains or a colder biome on a 64-block
+    /// around (5, -3), with `flow_rivers` around a channel (see there), with `basin_erosion` alone around the first
+    /// point of a 64-block grid over seed 777's valleys (x 600..1368, z -900..-132) cut by more than 10 blocks, with `altitude_climate` around the highest point of plains or a colder biome on a 64-block
     /// grid over 3,000 x 3,000 blocks, so that the snow line and the treeline are in them, with `glacial_landforms`
     /// around a glaciated valley (see there), and with `coastal_landforms` alone around the first point of a 128-block
     /// grid over 16,000 x 16,000 blocks in the coast band of a full cliff.
@@ -2137,6 +2154,20 @@ mod tests {
             let reach = channels.reach(736, -672).expect("seed 777's channel");
             assert!(reach.distance <= reach.width * 0.5, "{reach:?}");
             ChunkPos::new(736 >> 4, -672 >> 4)
+        } else if settings.basin_erosion {
+            let seed = level.generator.seed();
+            let map = level
+                .generator
+                .noise_generator()
+                .basin_erosion()
+                .unwrap()
+                .map(seed);
+            let mut memo = Default::default();
+            let (x, z) = (0..12 * 12)
+                .map(|i| (600 + i % 12 * 64, -900 + i / 12 * 64))
+                .find(|&(x, z)| map.delta(&mut memo, x, z) < -10.0)
+                .expect("a cut valley");
+            ChunkPos::new(x >> 4, z >> 4)
         } else if settings.glacial_landforms {
             // A river valley at least half under ice (with `coastal_landforms` in the coast band: a trough that reaches
             // the sea), on a 128-block grid over 24,000 x 24,000 blocks.
@@ -2928,6 +2959,29 @@ mod tests {
         assert!(
             moved > 0,
             "the hardness moved no column: the test proves nothing here"
+        );
+    }
+
+    /// The same with `basin_erosion` on: the valleys are cut into the raw map of the far thread's regions as into the
+    /// fill's, and into the un-eroded far tiles as into the plain sample, so the far tiles still stand on the chunks'
+    /// ground, which the valleys moved.
+    #[test]
+    #[ignore = "real terrain: every query builds drainage tiles, too slow in debug; run with --profile fast --ignored"]
+    fn eroded_far_tiles_stand_on_the_chunks_with_basin_erosion() {
+        let faithful = eroded_far_tiles_stand_on_the_chunks_with(Settings {
+            eroded_far_terrain: true,
+            ..terraforged_settings::FAITHFUL
+        });
+        let basins = eroded_far_tiles_stand_on_the_chunks_with(Settings {
+            eroded_far_terrain: true,
+            basin_erosion: true,
+            ..terraforged_settings::FAITHFUL
+        });
+        let moved = faithful.iter().zip(&basins).filter(|(a, b)| a != b).count();
+        eprintln!("the valleys moved {moved} of 64 far columns");
+        assert!(
+            moved > 0,
+            "the valleys moved no column: the test proves nothing here"
         );
     }
 
