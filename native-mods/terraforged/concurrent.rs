@@ -26,7 +26,7 @@ use super::terraforged_river::{Rivermap, current_time_millis};
 use std::collections::{HashMap, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, PoisonError, RwLock, mpsc};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, RwLock, Weak, mpsc};
 use std::thread;
 
 /// Engine 0.3.0's `LazyCallable` (`com.terraforged.engine.concurrent.task`), the deferred value
@@ -167,9 +167,10 @@ struct TaskThreads {
 /// or [`ThreadPool::create`] (Engine's `BatchingThreadPool`, whose task executor runs the entries).
 ///
 /// Engine's `ThreadPools.create` hands out one shared pool per size and shuts the previous one down;
-/// here every `create` is its own pool. Its batch threads are `tile_generator.rs`'s scoped threads,
-/// not these. Clones share the task threads; once the last clone is dropped the
-/// threads finish the queued tasks and exit (Engine's daemon threads outlive an unreferenced pool).
+/// here every `create` is its own pool, and [`Self::shared`] hands out the live pool of a size. Its
+/// batch threads are `tile_generator.rs`'s scoped threads, not these. Clones share the task threads;
+/// once the last clone is dropped the threads finish the queued tasks and exit (Engine's daemon
+/// threads outlive an unreferenced pool).
 #[derive(Clone)]
 pub struct ThreadPool {
     size: i32,
@@ -198,6 +199,34 @@ impl ThreadPool {
                 started: Mutex::new(0),
             })),
         }
+    }
+
+    /// [`Self::create`]`(size)`, shared: while a clone of an earlier `shared(size)` pool lives, its
+    /// task threads, else a new pool. Every TerraForged pipeline of the process (a world's level and
+    /// its far-decoration threads) queues its chunks on one set of threads this way, as Java's all go
+    /// to Minecraft's one background executor, instead of starting a pool each (#304). Tasks never
+    /// wait for other tasks of the pool, so sharing it only changes which thread runs a task.
+    pub fn shared(size: i32) -> Self {
+        static SHARED: Mutex<Vec<(i32, Weak<TaskThreads>)>> = Mutex::new(Vec::new());
+        let mut shared = SHARED.lock().unwrap_or_else(PoisonError::into_inner);
+        shared.retain(|(_, tasks)| tasks.strong_count() > 0);
+        let live = shared
+            .iter()
+            .find(|(of, _)| *of == size)
+            .and_then(|(_, tasks)| tasks.upgrade());
+        let pool = Self::create(size);
+        if let Some(tasks) = live {
+            return Self {
+                tasks: Some(tasks),
+                ..pool
+            };
+        }
+        let tasks = pool
+            .tasks
+            .as_ref()
+            .expect("a created pool has task threads");
+        shared.push((size, Arc::downgrade(tasks)));
+        pool
     }
 
     /// `size()`: the task threads plus `max(2, size)` batch threads; 0 for [`Self::NONE`].
@@ -1003,6 +1032,54 @@ w true true 102 2
         }
         let entry = CacheEntry::new(|| 2);
         assert!(entry.timestamp() > 0);
+    }
+
+    /// `shared` pools of one size share their task threads while one lives; other sizes and `create`
+    /// pools have their own; once every clone is gone the next `shared` starts new threads.
+    #[test]
+    fn shared_pools_share_task_threads_while_one_lives() {
+        // A size no other test shares, so tests running at once can't hold this pool.
+        const SIZE: i32 = 6;
+        let tasks = |pool: &ThreadPool| Arc::as_ptr(pool.tasks.as_ref().unwrap());
+        let first = ThreadPool::shared(SIZE);
+        let second = ThreadPool::shared(SIZE);
+        assert_eq!(tasks(&first), tasks(&second));
+        assert_eq!(
+            (first.size(), second.size()),
+            (ThreadPool::create(SIZE).size(), 9)
+        );
+        assert_ne!(tasks(&first), tasks(&ThreadPool::shared(SIZE + 2)));
+        assert_ne!(tasks(&first), tasks(&ThreadPool::create(SIZE)));
+        // Tasks of both run on the pool's 3 threads.
+        let names = Arc::new(Mutex::new(std::collections::BTreeSet::new()));
+        let entries: Vec<_> = (0..24)
+            .map(|i| {
+                let names = Arc::clone(&names);
+                CacheEntry::compute_async(
+                    move || {
+                        let name = thread::current().name().unwrap().to_owned();
+                        names.lock().unwrap().insert(name);
+                        thread::sleep(std::time::Duration::from_millis(2));
+                        i
+                    },
+                    if i % 2 == 0 { &first } else { &second },
+                )
+            })
+            .collect();
+        for (i, entry) in entries.iter().enumerate() {
+            assert_eq!(*entry.get(), i);
+        }
+        let names = names.lock().unwrap();
+        assert!(
+            (1..=3).contains(&names.len())
+                && names.iter().all(|name| name.starts_with("TF-Task-Worker-")),
+            "{names:?}"
+        );
+        let old = Arc::downgrade(first.tasks.as_ref().unwrap());
+        drop((first, second, entries));
+        assert_eq!(old.strong_count(), 0);
+        let fresh = ThreadPool::shared(SIZE);
+        assert!(old.upgrade().is_none() && fresh.tasks.is_some());
     }
 
     /// `CacheEntryOracle.java`'s output (`./run.sh` writes it to `out.txt`).

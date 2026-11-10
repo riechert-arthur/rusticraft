@@ -99,8 +99,9 @@ Differences and gaps:
   (Horizon's far decoration) are generated in full, eroded. Each far-decoration thread runs its own pipeline (its
   structure pieces' placement flags can't be shared), but the pipelines of one world share the first one's noise
   (terrain graphs, climate, continent and river caches; TerraForged has one `Generator` per level), each with its own
-  terrain cache, task threads and erosion regions, so far decoration never evicts the regions the level's chunks
-  read. Results are the same either way: the noise is a pure function of seed and position.
+  terrain cache and erosion regions, so far decoration never evicts the regions the level's chunks read. Every
+  pipeline's terrain cache queues its chunks on the same task threads, one set per process (see the terrain cache
+  below). Results are the same either way: the noise is a pure function of seed and position.
 - The boat hook (boats float up small water steps) works only in TerraForged worlds (Arthur's
   choice); TerraForged's mixin works in every world.
 - `/locateterrain`, `/tf export structures`, `/tf regen` and `/tf preview` exist only in TerraForged worlds
@@ -1528,8 +1529,9 @@ The async-entry layer adds Engine's `CacheEntry.computeAsync` and `then` and the
 (`concurrent.rs`). `ThreadPool::create(size)` is `BatchingThreadPool.of(size)`'s task executor: `max(1, size / 2)`
 threads named `TF-Task-Worker-<n>`, started one per submitted task until all exist, taking tasks in submission order;
 `size()` adds Engine's `max(2, size)` batch threads (those are the tile generator's own scoped threads). Unlike
-`ThreadPools.create`, each call makes its own pool; when the last clone is dropped the threads finish the queued tasks and
-exit. On such a pool `compute_async` starts the task at once on a task thread: `is_done` is `false` until it ends
+`ThreadPools.create`, each call makes its own pool; `ThreadPool::shared(size)` instead hands out the live pool of that
+size while any clone of it lives (the terrain caches use it, see below). When the last clone is dropped the threads
+finish the queued tasks and exit. On such a pool `compute_async` starts the task at once on a task thread: `is_done` is `false` until it ends
 (returning or panicking), `get` and `call` wait for it, and a failure is final, as for a failed Engine `Future`: every
 later `get`/`call` panics without running the task again. On `ThreadPool::NONE` (Engine's `EmptyThreadPool`, the tile
 generator's default) the entry is done at once, the task runs on the thread of the first `get` or `call`, and a task
@@ -2739,9 +2741,12 @@ The terrain cache (`terrain_cache.rs`, `TerrainCache`) is TerraForged Reimagined
 alone and has no seed parameters). The first `get_async`, `get_now` or `hint` of a runtime seed and chunk submits one
 `TerrainGenerator::generate` task to the cache's thread pool (Engine's async `CacheEntry` on the port's `ThreadPool`,
 sized like Minecraft's background executor, `clamp(cores - 1, 1, 255)` threads, in place of Java's
-`Util.backgroundExecutor()`); every later caller of the same seed and chunk shares that task until `remove` (Java's
-`drop`, called once the chunk is decorated) takes it out, waits for it and gives its data back to the generator's pool
-once the last reader lets go. As in Java there is no capacity, expiry or eviction, the seed is part of every key (a hit
+`Util.backgroundExecutor()`). Like that one executor, the threads are shared (`ThreadPool::shared`) by every terrain
+cache alive: a world's level pipeline and its far-decoration pipelines queue on the same 11 threads (on 12 cores),
+where a pool per pipeline started 55 of them that competed with the render thread (#304). Generation tasks never wait
+for each other, so sharing changes only which thread runs a chunk. Every later caller of the same seed and chunk shares
+that task until `remove` (Java's `drop`, called once the chunk is decorated) takes it out, waits for it and gives its
+data back to the generator's pool once the last reader lets go. As in Java there is no capacity, expiry or eviction, the seed is part of every key (a hit
 never returns another seed's chunk), `get_if_ready` never starts a task, a panicked generation panics every reader
 (Java's `join` throws) and is not rerun until removed, and `height`, `eroded_height_noise`, `noise_sample` and `sample`
 are passed straight to the generators, uncached. The map's lock covers only the lookup and the submission, never the

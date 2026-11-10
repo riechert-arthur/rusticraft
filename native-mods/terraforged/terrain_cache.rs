@@ -181,12 +181,13 @@ pub fn background_threads() -> i32 {
 impl<N: NoiseGenerator + 'static> TerrainCache<N> {
     /// `new TerrainCache(levels, noiseGenerator)`: a [`TerrainGenerator`] over `noise_generator`, and generation tasks
     /// on [`background_threads`] task threads (Java's `ThreadPool.EXECUTOR`, Minecraft's background executor; the
-    /// port's [`ThreadPool::create`] makes half its size in threads).
+    /// port's [`ThreadPool::create`] makes half its size in threads). Like Java's one executor, the threads are
+    /// [`ThreadPool::shared`] by every terrain cache alive.
     pub fn new(levels: TerrainLevels, noise_generator: N) -> Self {
         Self::with_pool(
             levels,
             noise_generator,
-            ThreadPool::create(background_threads().wrapping_mul(2)),
+            ThreadPool::shared(background_threads().wrapping_mul(2)),
         )
     }
 
