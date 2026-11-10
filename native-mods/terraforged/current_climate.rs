@@ -225,6 +225,19 @@ impl CurrentClimateNoise {
         }
     }
 
+    /// Not Java's (Horizon's `glacial_landforms`): the temperature field [`Self::sample`] reads, taken at the point
+    /// itself rather than at its biome cell's centre, so it varies smoothly where the biome's temperature steps from
+    /// cell to cell. Same warp, frequency and cell-shape adjustment as `sample`; `x`, `y` as there.
+    pub fn local_temperature(&self, seed: i32, x: f32, y: f32) -> f32 {
+        let (mut px, mut py) = warp(&self.warp, seed, x, y);
+        px *= self.frequency;
+        py *= self.frequency;
+        px = CELL_SHAPE.adjust_x(px);
+        py = CELL_SHAPE.adjust_y(py);
+        self.temperature
+            .value(seed, px, py, |core, x, y| core.value_current(x, y))
+    }
+
     /// `sampleBiome`: the 4x4 cells `floor - 1 ..= floor + 2` (Java `int` math; the window is empty where the upper
     /// bound wraps, as Java's loop is; `floor` never returns the `Integer.MAX_VALUE - 2` that would make Java loop
     /// forever), nearest and second-nearest by strict `<` (first wins ties, NaN never wins).

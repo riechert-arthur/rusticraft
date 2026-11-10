@@ -397,6 +397,7 @@ render -2147483648 16 16 3f400000 c1080000 40400000 5d3612e4c3b7ce25 12x12
                 altitude_climate_strength: 2.0,
                 rock_strata: true,
                 coastal_landforms: true,
+                glacial_landforms: true,
             },
         ] {
             assert_eq!(

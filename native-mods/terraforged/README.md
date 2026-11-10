@@ -18,7 +18,8 @@ TerraForged (vanilla world types keep 26.3's overworld):
   hydraulic erosion with 6dd607eb's `withErosion` settings and no heightmap smoothing
   (`NoiseGenerator`, `ErodedNoiseGenerator`), also in Horizon's distant tiles (un-eroded, or eroded
   near the player with the `eroded_far_terrain` setting); the `height_scale` setting stretches it
-  vertically, `coastal_landforms` cuts cliffs and lays tidal flats along the shore;
+  vertically, `coastal_landforms` cuts cliffs and lays tidal flats along the shore, `glacial_landforms`
+  widens cold valleys into U-shaped troughs;
 - biomes: `ClimateNoise`, `BiomeMapManager`'s climate pools and `BiomeSampler`'s ocean, beach,
   river and lake overrides, also for `/locate biome`, plus TerraForged's own `terraforged:cave`
   and `terraforged:oak_forest` (`ModBiomes`), derived from the player's own 26.3 dripstone caves
@@ -344,6 +345,39 @@ don't generate, so they need none.
   the height it is added to, so chunks agree at their borders, whatever the threads or order. Cliff tops
   are higher ground, so `altitude_climate` cools them as any other land. `/tf preview` and the Create World
   map don't show it. Off, generation is unchanged.
+- `glacial_landforms`: valleys a glacier has filled are troughs. TerraForged cuts every valley with the
+  river's profile (`RiverCarver`), in the tropics as on frozen summits. A glacier widens and deepens its
+  valley into a U: a broad, flat floor and walls that steepen as they rise (Svensson 1959, "Glacial erosion
+  and the U-shaped valley", *Geografiska Annaler* 41; Harbor 1992, "Numerical modeling of the development of
+  U-shaped valleys by glacial erosion", *GSA Bulletin* 104), whose cross-sections fit a power law
+  `y = a·x^b` with `b` near 2 (Graf 1970, "The geomorphology of the glacial valley cross section", *Arctic
+  and Alpine Research* 2). The setting, in neither tree (the first slice of #276):
+  - a glaciation field G, 0 to 1: TerraForged's climate temperature taken at the column itself (the
+    field the biome cells sample at their centres, so it has no steps at their edges), put on vanilla's
+    scale (`1.6 t − 0.15`: the warm edge of TerraForged's tundra on vanilla's snow line 0.15, its
+    temperate middle on a forest's 0.8), cooled with the column's height before the rivers carve it, by
+    vanilla's 0.00125 per block plus `altitude_climate`'s 0.00275 times its strength (strength 1 when that
+    setting is off), from 17 blocks over the sea, and moved ±0.1 (about 25 blocks of height) by a
+    1200-block simplex noise. Ice starts at 0.2 (a little over the snow line: glaciers flow down past it)
+    and is full at −0.1, 75 blocks higher. Cold climates are glaciated down to the sea, temperate ones
+    where their mountains reach the cold;
+  - U-shaped troughs: where G is over 0 the river's valley widens to `(1 + 0.35 G)` times its width,
+    with a flat floor at the river's bank level from the banks `0.4 G` of the way out to the trough's
+    edge, then walls rising as the square of the distance to the terrain at that edge. On seed 777 the
+    floors of snowy valleys lie tens of blocks, up to about 150, under their faithful slopes, and are
+    about 50 to 150 blocks wide. A column takes the lower of the river's profile and the trough's, lerped
+    by G, and the water level (base noise) follows the same rule, so the river bed stays and no trough
+    holds water the river doesn't. Lakes, river noise (biomes, the map) and the terrain type are the
+    river's.
+
+  The trough is a function of the column's position, its terrain sample and its nearest river node, so
+  chunks agree at their borders whatever the threads or order. The chunks, structures' base heights (ground
+  and water level) and Horizon's distant tiles read it: un-eroded tiles take the glaciation over the
+  un-eroded height, and with `eroded_far_terrain` the finest tiles take it over the eroded one, as the
+  chunks do. `/tf preview` and the Create World map (biome colours and river beds)
+  don't change. Rivers carve after `coastal_landforms`, so a trough that reaches a cliff coast cuts a notch
+  down to its floor. Not yet: cirques at river sources, fjords where troughs meet the sea, moraines at the
+  glaciers' lower limit, and a "past ice age" field for temperate mountains. Off, generation is unchanged.
 
 ## Layers
 

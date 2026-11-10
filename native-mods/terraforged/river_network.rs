@@ -195,6 +195,31 @@ impl<Cells: ContinentCells> RiverNetwork<Cells> {
         carver.carve(seed, point_x, point_y, sample, &nodes);
     }
 
+    /// Not Java's (Horizon's `glacial_landforms`): [`Self::sample`], then [`RiverCarver::glacial_trough`] over the same
+    /// nodes, with `glaciation` asked for the height the sample had before the carve.
+    #[allow(clippy::too_many_arguments)]
+    pub fn sample_glacial(
+        &self,
+        seed: i32,
+        x: f32,
+        y: f32,
+        sample: &mut NoiseSample,
+        carver: &RiverCarver,
+        terrains: &TerrainRegistry,
+        glaciation: impl FnOnce(f32) -> f32,
+    ) {
+        let (point_x, point_y) = self.warp(seed, x, y);
+        let mut nodes = CarverSample::new(terrains);
+        self.sample_nodes(seed, point_x, point_y, &mut nodes);
+        let before = (
+            sample.height_noise,
+            sample.base_noise,
+            sample.continent_noise,
+        );
+        carver.carve(seed, point_x, point_y, sample, &nodes);
+        carver.glacial_trough(before, sample, &nodes, glaciation);
+    }
+
     /// The newer source's `RiverGenerator.sample(seed, x, y, NoiseSample)` between the warp and the carver call:
     /// `localRiverSample.get().reset()`, then the private `sample(seed, x, y, CarverSample)`. It takes the
     /// nearest cell of the unadjusted point, adjusts the point for the cell shape, and runs [`sample_node`] over the

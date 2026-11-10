@@ -469,6 +469,13 @@ source = "coastal_landforms.rs"
 visibility = "pub"
 
 [[module]]
+id = "glacial_landforms"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_glacial_landforms"
+source = "glacial_landforms.rs"
+visibility = "pub"
+
+[[module]]
 id = "altitude_climate"
 file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_altitude_climate"

@@ -537,7 +537,8 @@ impl TerraForgedGenerator {
     /// [`Self::base_column`] it skips the eroded height: that needs the block's erosion region, whose build takes a
     /// fraction of a second and would push the regions the chunks being generated read out of the 16-region cache. So
     /// this creates no terrain-cache entry and builds no region; erosion is the only difference from the fill. With
-    /// Horizon's `coastal_landforms` the sample carries the coast's landform, as the fill does.
+    /// Horizon's `coastal_landforms` the sample carries the coast's landform, and with `glacial_landforms` its glacial
+    /// troughs, as the fill does.
     /// `Err` as [`Self::base_height`].
     pub fn far_heights(&self, x: i32, z: i32) -> Result<(i32, i32), &'static str> {
         let sample = self.terrain.far_sample(self.seed(), x, z)?;
@@ -572,8 +573,13 @@ impl TerraForgedGenerator {
     }
 
     /// The base noise of the un-eroded sample, then the eroded height noise, in Reimagined's `getBaseHeight` order.
+    /// With Horizon's `glacial_landforms` both come from the eroded column's sample: the troughs lower its base noise
+    /// (the water level) by the glaciation over the eroded height, as the chunks have it.
     fn base_noises(&self, x: i32, z: i32) -> Result<(f32, f32), &'static str> {
         let seed = self.seed();
+        if self.terrain.noise_generator().glaciers().is_some() {
+            return self.terrain.noise_generator().eroded_noises(seed, x, z);
+        }
         let base_noise = self.terrain.noise_sample(seed, x, z)?.base_noise;
         Ok((base_noise, self.terrain.eroded_height_noise(seed, x, z)?))
     }
@@ -591,12 +597,14 @@ impl ErodedFarHeights<'_> {
     pub fn heights(&mut self, x: i32, z: i32) -> Result<((i32, i32), bool), &'static str> {
         let generator = self.generator;
         let sample = generator.terrain.far_sample(generator.seed(), x, z)?;
-        let (height_noise, eroded) = match self.eroded.eroded_height_noise(x, z)? {
+        // The eroded column's own base noise: `glacial_landforms`' troughs lower it by the glaciation over the
+        // eroded height, as in the chunks (without that setting it is the far sample's).
+        let ((base_noise, height_noise), eroded) = match self.eroded.eroded_noises(x, z)? {
             Some(eroded) => (eroded, true),
-            None => (sample.height_noise, false),
+            None => ((sample.base_noise, sample.height_noise), false),
         };
         Ok((
-            column_heights(generator.levels, sample.base_noise, height_noise),
+            column_heights(generator.levels, base_noise, height_noise),
             eroded,
         ))
     }
