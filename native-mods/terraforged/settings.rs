@@ -39,9 +39,10 @@ pub struct Settings {
     /// built their regions, instead of the un-eroded ground a few blocks off it. Changes
     /// no block of the world.
     pub eroded_far_terrain: bool,
-    /// Trees follow the light and the water: more on shaded north-facing slopes and near
-    /// rivers, lakes and coasts, fewer on sunny south-facing slopes and dry ground far from
-    /// water (`terraforged_realistic_vegetation`).
+    /// Trees and ground cover follow the light and the water: more trees on shaded
+    /// north-facing slopes and near rivers, lakes and coasts, fewer on sunny south-facing
+    /// slopes and dry ground far from water; podzol and moss on shaded slopes, coarse dirt on
+    /// sunny ones (`terraforged_realistic_vegetation`). Changes no height.
     pub realistic_vegetation: bool,
 }
 
