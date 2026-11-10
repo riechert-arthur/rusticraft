@@ -25,7 +25,7 @@
 use super::{
     terraforged::{Source, SourceConfig, SourceKind, clamp, java_max, java_min, lerp, map},
     terraforged_continent_config::{ContinentConfig, RiverConfig},
-    terraforged_continent_points::{BEACH, COAST},
+    terraforged_continent_points::{BEACH, COAST, INLAND},
     terraforged_river_nodes::{CarverSample, NodeSample},
     terraforged_terrain_data::NoiseSample,
     terraforged_terrain_levels::NoiseLevels,
@@ -126,6 +126,32 @@ impl RiverCarver {
         if sample.continent_noise < BEACH {
             sample.river_noise = 1.0;
         }
+        // Not Java's: Horizon's `realistic_vegetation` reads it, nothing TerraForged computes does.
+        sample.water_distance = self.water_distance(sample.continent_noise, carver);
+    }
+
+    /// Horizon's distance to water for `realistic_vegetation` (in neither TerraForged tree), 0 to 1: the least of
+    /// the river's and the lake's (0 on the node's bed, rising across the valley to 1 at its edge; 1 without a
+    /// node) and the coast's (0 at the beach, `BEACH`, and seaward, 1 from `INLAND` on). Every input is the
+    /// position's own sample, so neighbouring chunks agree; it changes nothing the carver writes.
+    pub fn water_distance(&self, continent_noise: f32, carver: &CarverSample) -> f32 {
+        let node = |node: &NodeSample, config: &RiverConfig| {
+            if node.is_invalid() {
+                return 1.0;
+            }
+            let bed = config.bed_width.at(node.position);
+            let valley = config.valley_width.at(node.position);
+            // `alpha` keeps the bed when the valley is no wider.
+            alpha(node.distance, bed, valley)
+        };
+        let coast = alpha(continent_noise, BEACH, INLAND);
+        java_min(
+            coast,
+            java_min(
+                node(&carver.river, &self.river_config),
+                node(&carver.lake, &self.lake_config),
+            ),
+        )
     }
 
     /// The private `carve(sample, nodeSample, config, baseNoise, baseModifier, erosion)`. `getBaseNoise`'s -1 means
@@ -598,6 +624,53 @@ mod tests {
             );
         }
         assert_eq!(carver.blend_radius, 0.7);
+    }
+
+    /// Horizon's distance to water: 0 on a river or lake bed and at the beach and seaward, rising across the valley to
+    /// 1 at its edge and inland; the nearest of the three wins; no node counts as far. Carving sets it on the sample
+    /// and changes nothing else (`carving_spot_checks` holds the carved fields).
+    #[test]
+    fn water_distance_is_zero_on_the_bed_and_one_far_inland() {
+        let terrains = TerrainRegistry::new();
+        let carver = RiverCarver::new(levels(0), config(0));
+        let (river, lake) = (&carver.river_config, &carver.lake_config);
+        let nodes = |river: f32, lake: f32| {
+            let mut nodes = CarverSample::new(&terrains);
+            (nodes.river.position, nodes.river.distance) = (0.6, river);
+            (nodes.lake.position, nodes.lake.distance) = (0.8, lake);
+            nodes
+        };
+        let (bed, valley) = (river.bed_width.at(0.6), river.valley_width.at(0.6));
+        let inland = 0.9;
+        assert_eq!(carver.water_distance(inland, &nodes(NAN, NAN)), 1.0);
+        assert_eq!(carver.water_distance(inland, &nodes(0.0, NAN)), 0.0);
+        assert_eq!(carver.water_distance(inland, &nodes(bed, NAN)), 0.0);
+        assert_eq!(carver.water_distance(inland, &nodes(valley, NAN)), 1.0);
+        let middle = carver.water_distance(inland, &nodes((bed + valley) / 2.0, NAN));
+        assert!((middle - 0.5).abs() < 1e-5, "{middle}");
+        // The lake's own widths, and the nearer of the two.
+        let lake_bed = lake.bed_width.at(0.8);
+        assert_eq!(carver.water_distance(inland, &nodes(valley, lake_bed)), 0.0);
+        assert_eq!(
+            carver.water_distance(inland, &nodes((bed + valley) / 2.0, 1.0e9)),
+            middle
+        );
+        // The coast: 0 at the beach and in the sea, 1 from INLAND on, nearer water wins.
+        assert_eq!(carver.water_distance(BEACH, &nodes(NAN, NAN)), 0.0);
+        assert_eq!(carver.water_distance(0.1, &nodes(NAN, NAN)), 0.0);
+        assert_eq!(carver.water_distance(INLAND, &nodes(NAN, NAN)), 1.0);
+        let shore = carver.water_distance((BEACH + INLAND) / 2.0, &nodes(NAN, NAN));
+        assert!((shore - 0.5).abs() < 1e-5, "{shore}");
+        assert_eq!(carver.water_distance(0.55, &nodes(bed, NAN)), 0.0);
+        // A NaN continent passes through, as Java's min would.
+        assert!(carver.water_distance(NAN, &nodes(NAN, NAN)).is_nan());
+        // Carving writes it.
+        let mut sample = NoiseSample::new(&terrains);
+        sample.continent_noise = inland;
+        sample.base_noise = 0.65;
+        sample.height_noise = 0.85;
+        carver.carve_with_erosion(0.75, &mut sample, &nodes(bed, NAN));
+        assert_eq!(sample.water_distance, 0.0);
     }
 
     /// The carver's erosion (a `RidgeNoise` source, built inline) read seed-first equals the generic seed-first graph

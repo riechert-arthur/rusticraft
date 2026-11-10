@@ -448,6 +448,13 @@ source = "deposits.rs"
 visibility = "pub"
 
 [[module]]
+id = "realistic_vegetation"
+file = "crates/horizon-world/src/worldgen/generator.rs"
+name = "terraforged_realistic_vegetation"
+source = "realistic_vegetation.rs"
+visibility = "pub"
+
+[[module]]
 id = "settings"
 file = "crates/horizon-world/src/worldgen/generator.rs"
 name = "terraforged_settings"

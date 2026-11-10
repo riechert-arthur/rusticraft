@@ -39,6 +39,11 @@ pub struct Settings {
     /// built their regions, instead of the un-eroded ground a few blocks off it. Changes
     /// no block of the world.
     pub eroded_far_terrain: bool,
+    /// Trees and ground cover follow the light and the water: more trees on shaded
+    /// north-facing slopes and near rivers, lakes and coasts, fewer on sunny south-facing
+    /// slopes and dry ground far from water; podzol and moss on shaded slopes, coarse dirt on
+    /// sunny ones (`terraforged_realistic_vegetation`). Changes no height.
+    pub realistic_vegetation: bool,
 }
 
 impl Default for Settings {
@@ -55,6 +60,7 @@ pub const FAITHFUL: Settings = Settings {
     height_scale: 1.0,
     erosion_deposits: false,
     eroded_far_terrain: false,
+    realistic_vegetation: false,
 };
 
 /// The range `height_scale` is held to. TerraForged's land reaches at most 476 blocks above
@@ -105,6 +111,7 @@ impl Settings {
                 }),
             erosion_deposits: flag("erosion_deposits", FAITHFUL.erosion_deposits),
             eroded_far_terrain: flag("eroded_far_terrain", FAITHFUL.eroded_far_terrain),
+            realistic_vegetation: flag("realistic_vegetation", FAITHFUL.realistic_vegetation),
         }
     }
 
@@ -116,6 +123,10 @@ impl Settings {
         map.insert("height_scale".into(), f64::from(self.height_scale).into());
         map.insert("erosion_deposits".into(), self.erosion_deposits.into());
         map.insert("eroded_far_terrain".into(), self.eroded_far_terrain.into());
+        map.insert(
+            "realistic_vegetation".into(),
+            self.realistic_vegetation.into(),
+        );
         Value::Object(map)
     }
 }
@@ -133,6 +144,7 @@ mod tests {
             height_scale: 1.5,
             erosion_deposits: true,
             eroded_far_terrain: true,
+            realistic_vegetation: true,
         };
         assert_eq!(Settings::from_json(&on.to_json()), on);
         assert_eq!(Settings::from_json(&serde_json::json!({})), FAITHFUL);
