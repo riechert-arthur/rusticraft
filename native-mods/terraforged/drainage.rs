@@ -886,21 +886,28 @@ mod tests {
         // The source is the un-eroded height without rivers: floored, it is far_heights' terrain height wherever
         // TerraForged carves no river.
         let (mut same, mut land, mut sea) = (0, 0, 0);
+        let mut shore = None;
         for i in 0..400 {
             let (x, z) = ((i % 20 - 10) * 211 + 3, (i / 20 - 10) * 197 - 5);
             let column = source(x, z);
             same +=
                 usize::from(column.height.floor() as i32 == generator.far_heights(x, z).unwrap().0);
             land += usize::from(!column.sea);
+            // A failed sample reads as sea at exactly the sea level: this counts only real sea.
             sea += usize::from(column.sea && column.height < generator.sea_level() as f32);
+            if column.sea && shore.is_none() {
+                shore = Some((x, z));
+            }
         }
         assert!(
-            same > 200 && land > 40 && land + sea == 400,
+            same > 200 && land > 40 && sea > 0 && land + sea == 400,
             "{same} {land} {sea}"
         );
-        // A 40x40 grid of 64-block cells around spawn (debug builds sample slowly; full tiles: the benchmark).
+        // A 40x40 grid of 64-block cells around the first sea sample, so it holds land and sea (debug builds
+        // sample slowly; full tiles: the benchmark).
+        let (sx, sz) = shore.unwrap();
         let columns: Vec<Column> = (0..1600)
-            .map(|i| source((i % 40 - 20) * 64, (i / 40 - 20) * 64))
+            .map(|i| source(sx + (i % 40 - 20) * 64, sz + (i / 40 - 20) * 64))
             .collect();
         let runoff = vec![4096.0; 1600];
         let routing = route(&Dem {
@@ -915,9 +922,21 @@ mod tests {
         check_paths(&routing, 1600.0 * 4096.0);
         let sea_cells = routing.direction.iter().filter(|&&d| d == SEA).count();
         let biggest = routing.accumulation.iter().copied().fold(0.0, f64::max);
+        // Land cells whose water reaches the sea inside the grid, rather than leaving through its edge.
+        let to_sea = (0..1600)
+            .filter(|&start| {
+                let mut index = start;
+                while let Some((dx, dz)) = routing.cell(index).downstream() {
+                    index = (index as i32 + dx + dz * 40) as usize;
+                }
+                routing.direction[start] != SEA && routing.direction[index] == SEA
+            })
+            .count();
         eprintln!(
-            "seed 777: {sea_cells} sea cells of 1600, biggest catchment {biggest} square blocks"
+            "seed 777: {sea_cells} sea cells of 1600, {to_sea} land cells drain to them, biggest catchment \
+             {biggest} square blocks"
         );
+        assert!(sea_cells > 0 && to_sea > 100, "{sea_cells} {to_sea}");
         assert!(biggest > 50.0 * 4096.0);
     }
 

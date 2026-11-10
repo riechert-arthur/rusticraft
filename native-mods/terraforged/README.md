@@ -388,7 +388,8 @@ it comes with its own setting, off by default.
 
 - The source is TerraForged's un-eroded terrain height without its rivers (`drainage_height`: the
   continent and land noise of `sampleTerrain`, unfloored), with the sea below the sea level. It is
-  one noise sample per column (about 1.3 µs), never the eroded height. An L0 cell is the mean of 2x2
+  one noise sample per column (about 4.7 µs in release, most of it building a new blender each
+  call), never the eroded height. An L0 cell is the mean of 2x2
   columns, one every 64 blocks.
 - Two fixed grids: L0 tiles of 8192 blocks at 128-block cells (64x64, plus a 2048-block halo on
   every side) and L1 tiles of 1024 blocks at 16-block cells (64x64, plus 128 blocks, one L0 cell).
