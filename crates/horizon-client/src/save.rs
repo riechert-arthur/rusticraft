@@ -4677,14 +4677,15 @@ impl<G: ChunkGenerator> ChunkGenerator for Persistent<G> {
     /// A generated chunk also loads the entities `entities/` holds for it:
     /// vanilla's `EntityStorage` is separate from the chunk's, so entities
     /// saved where the chunk's own record was deleted (an editor, TerraForged's
-    /// `/tf regen`) come back with the chunk generated in its place.
+    /// `/tf regen`) come back with the chunk generated in its place. They
+    /// follow the ones its generation spawned, as in vanilla: those join at
+    /// FULL (`ChunkStatusTasks.postLoadProtoChunk`), the stored ones later,
+    /// when the entity storage's read arrives
+    /// (`PersistentEntitySectionManager.processPendingLoads`).
     fn finish(&self, proto: crate::streaming::Proto) -> Chunk {
         let mut chunk = self.inner.finish(proto);
-        let mut stored = self.save.load_entities(chunk.x, chunk.z);
-        if !stored.is_empty() {
-            stored.append(&mut chunk.entities);
-            chunk.entities = stored;
-        }
+        let stored = self.save.load_entities(chunk.x, chunk.z);
+        chunk.entities.extend(stored);
         chunk
     }
 }
@@ -4824,9 +4825,9 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// Entity storage is the chunk's own (`EntityStorage`): a chunk generated
-    /// where only `entities/` kept a record loads those entities, after them
-    /// the ones its generation spawned.
+    /// Entity storage is separate from the chunk's (`EntityStorage`): a chunk
+    /// generated where only `entities/` kept a record loads those entities,
+    /// after the ones its generation spawned.
     #[test]
     fn a_generated_chunk_loads_the_entities_saved_for_it() {
         use crate::streaming::ChunkGenerator;
