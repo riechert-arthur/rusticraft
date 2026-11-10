@@ -2003,6 +2003,20 @@ mod tests {
         );
     }
 
+    /// The same with `rock_strata` (and `eroded_far_terrain`) on: the far-decoration pipelines band the stone and
+    /// erode with the strata's hardness as the level's does.
+    #[test]
+    fn far_pipelines_make_the_level_chunks_with_rock_strata() {
+        far_pipelines_make_the_level_chunks(
+            299_000_299,
+            Settings {
+                rock_strata: true,
+                eroded_far_terrain: true,
+                ..terraforged_settings::FAITHFUL
+            },
+        );
+    }
+
     /// The body of the tests above: the live pipelines of `seed` are built with `settings`. The chunks compared are
     /// around (5, -3), or with `altitude_climate` around the highest point of plains or a colder biome on a 64-block
     /// grid over 3,000 x 3,000 blocks, so that the snow line and the treeline are in them.
@@ -2020,6 +2034,7 @@ mod tests {
         let level = live(seed);
         assert_eq!(level.settings, settings);
         assert_eq!(level.ground_cover.is_some(), settings.realistic_vegetation);
+        assert_eq!(level.strata.is_some(), settings.rock_strata);
         let (far, far_threaded) = (live(seed), live(seed));
         for other in [&far, &far_threaded] {
             assert!(other.generator.shares_noise_with(&level.generator));
