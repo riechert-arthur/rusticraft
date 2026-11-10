@@ -178,11 +178,11 @@ impl ErodedNoiseGenerator {
         self.coast.then_some(self.strata)
     }
 
-    /// Not Java's (`coastal_landforms`): the height noise the coast's landform adds to block `(x, z)`'s eroded height,
-    /// from its terrain sample (`sample_terrain`'s, holding the height it is added to); 0 without the setting or off
-    /// the coast. With
-    /// `rock_strata` the landform also follows the hardness of the rock at the sea level (`strata`, an area holding
-    /// the column, made on first use).
+    /// Not Java's (`coastal_landforms`): the height noise the coast's landform adds to block `(x, z)`'s height, from
+    /// its terrain sample (`sample_terrain`'s, holding the height it is added to: the eroded one, or the raw one in
+    /// [`Self::far_sample`]); 0 off the coast. With `rock_strata` the landform also follows the hardness of the rock at
+    /// the sea level (`strata`, an area holding the column, made on first use). Chunks, [`Self::eroded_height_noise`]
+    /// and the eroded far tiles ([`FarHeights`]) all add it after the region's height, before the rivers.
     fn coast_offset(
         &self,
         seed: i32,
@@ -1515,6 +1515,8 @@ chunk 2 2147483647 -3 5 3fba3fdd57ea00f8";
             let on = eroded(0, 1, 50, 25, 0).with_strata(strata).with_coast(true);
             let plain = eroded(0, 1, 50, 25, 0).with_strata(strata);
             let mut changed = 0;
+            // `eroded_far_terrain`'s far tiles read the region the chunk built: they get the coast's landform too.
+            let mut far = on.far_heights(seed);
             on.generate(seed, chunk_x, chunk_z, |data| {
                 for (dx, dz) in (0..16).flat_map(|dx| (0..16).map(move |dz| (dx, dz))) {
                     let (x, z) = (chunk_x * 16 + dx, chunk_z * 16 + dz);
@@ -1522,6 +1524,10 @@ chunk 2 2147483647 -3 5 3fba3fdd57ea00f8";
                     assert_eq!(
                         height.to_bits(),
                         on.eroded_height_noise(seed, x, z).unwrap().to_bits()
+                    );
+                    assert_eq!(
+                        far.eroded_height_noise(x, z).unwrap().map(f32::to_bits),
+                        Some(height.to_bits())
                     );
                     let before = plain.eroded_height_noise(seed, x, z).unwrap();
                     let sample = on.noise_sample(seed, x, z).unwrap();

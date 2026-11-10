@@ -2017,9 +2017,24 @@ mod tests {
         );
     }
 
+    /// The same with `coastal_landforms` (and `eroded_far_terrain`) on, around a cliff coast: the far-decoration
+    /// pipelines cut the same cliffs, lay the same flats and turn the same beaches to stony shores as the level's.
+    #[test]
+    fn far_pipelines_make_the_level_chunks_with_coastal_landforms() {
+        far_pipelines_make_the_level_chunks(
+            300_000_300,
+            Settings {
+                coastal_landforms: true,
+                eroded_far_terrain: true,
+                ..terraforged_settings::FAITHFUL
+            },
+        );
+    }
+
     /// The body of the tests above: the live pipelines of `seed` are built with `settings`. The chunks compared are
-    /// around (5, -3), or with `altitude_climate` around the highest point of plains or a colder biome on a 64-block
-    /// grid over 3,000 x 3,000 blocks, so that the snow line and the treeline are in them.
+    /// around (5, -3), with `altitude_climate` around the highest point of plains or a colder biome on a 64-block
+    /// grid over 3,000 x 3,000 blocks, so that the snow line and the treeline are in them, and with `coastal_landforms`
+    /// around the first point of a 128-block grid over 16,000 x 16,000 blocks in the coast band of a full cliff.
     fn far_pipelines_make_the_level_chunks(seed: i64, settings: Settings) {
         use super::super::terraforged_generator_facade::live_generator;
         let Some(data) = data() else { return };
@@ -2064,6 +2079,28 @@ mod tests {
                 .max()
                 .unwrap();
             assert!(height > 200, "{height} at {x} {z}");
+            ChunkPos::new(x >> 4, z >> 4)
+        } else if settings.coastal_landforms {
+            use super::super::terraforged_biome_sampler::{BEACH, COAST};
+            let noise = level.generator.noise_generator();
+            let seed = level.generator.seed();
+            let coasts = super::super::terraforged_coastal_landforms::Coasts::new(
+                seed,
+                noise.levels().noise_levels,
+            );
+            let (x, z) = (-64..64)
+                .flat_map(|i| (-64..64).map(move |j| (i * 128, j * 128)))
+                .find(|&(x, z)| {
+                    let mut sample = super::super::terraforged_terrain_data::NoiseSample::new(
+                        &noise.continent().context().terrain,
+                    );
+                    noise
+                        .sample(seed, x, z, &mut sample, &mut noise.blender_resource())
+                        .unwrap();
+                    (BEACH..COAST).contains(&sample.continent_noise)
+                        && coasts.landform(x, z, None).cliff > 0.9
+                })
+                .expect("a cliff coast");
             ChunkPos::new(x >> 4, z >> 4)
         } else {
             ChunkPos::new(5, -3)
