@@ -766,7 +766,7 @@ mod tests {
     /// With `coastal_landforms` and `glacial_landforms` the drainage map samples the ground the distant terrain has
     /// (the coast's landform, the troughs: `shaped_sample`), so a channel never takes its water level from ground
     /// a tidal flat or a trough lowered under it. Seed 777 on a 256-block grid: every land column of the map is the
-    /// far tiles' height, and the coasts move some of them off TerraForged's.
+    /// far tiles' height, and the coasts and troughs move some of them off TerraForged's.
     #[test]
     fn the_drainage_map_samples_the_coasts_and_troughs() {
         use super::super::terraforged_generator_preset::{build, terrain_levels};
