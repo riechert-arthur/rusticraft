@@ -253,6 +253,9 @@ Every question has a flag (`--eula`, `--world`, `--seed`, `--port`, `--whitelist
 The owner edits only `server.toml`. The supervisor writes `server.properties` from it before every engine
 start, so the engine stays exactly vanilla. The file is short: typed sections for what owners change, and
 a `[properties]` table that passes any other vanilla key through unchanged.
+The world type is one of them: `level-type = "minecraft:large_biomes"`, or a native mod's own preset such as
+`level-type = "terraforged:normal"` (the mod writes the new world, `native_level_type_world_gen`). It applies when
+the world is first created.
 
 ```toml
 # Horizon server settings (docs/server.md). The server writes them into server.properties before

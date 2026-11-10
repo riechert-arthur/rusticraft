@@ -481,32 +481,51 @@ fn parse_identifier(text: &str) -> Option<String> {
     (valid(namespace, &[]) && valid(path, &['/'])).then(|| format!("{namespace}:{path}"))
 }
 
+/// `level-type`'s preset: a preset id, else a legacy name, else Normal with
+/// the warning vanilla logs.
+fn level_type_preset(level_type: &str) -> (horizon_client::save::WorldPreset, Option<String>) {
+    let preset = parse_identifier(level_type)
+        .as_deref()
+        .and_then(horizon_client::save::WorldPreset::of_id)
+        .or_else(|| {
+            LEGACY_PRESET_NAMES
+                .iter()
+                .find(|(name, _)| *name == level_type)
+                .map(|(_, preset)| *preset)
+        });
+    match preset {
+        Some(preset) => (preset, None),
+        None => (
+            horizon_client::save::WorldPreset::Normal,
+            Some(format!(
+                "Failed to parse level-type {level_type}, defaulting to minecraft:normal"
+            )),
+        ),
+    }
+}
+
 impl Game<'_> {
     /// DedicatedServerProperties.createDimensions for a world that doesn't
     /// exist yet: `level-type`'s preset, a flat world's `generator-settings`
     /// and `generate-structures`, written before the world opens so that
-    /// streaming reads them.
+    /// streaming reads them. A native mod's own `level-type` (`native_level_type_world_gen`) writes
+    /// the world itself.
     fn write_world_gen(&self, dir: &std::path::Path, props: &ServerProperties) -> Result<()> {
-        let level_type = &props.level_type;
-        let preset = parse_identifier(level_type)
-            .as_deref()
-            .and_then(horizon_client::save::WorldPreset::of_id)
-            .or_else(|| {
-                LEGACY_PRESET_NAMES
-                    .iter()
-                    .find(|(name, _)| *name == level_type)
-                    .map(|(_, preset)| *preset)
-            })
-            .unwrap_or_else(|| {
-                log_from(
-                    "Worker-Main-1",
-                    "WARN",
-                    &format!(
-                        "Failed to parse level-type {level_type}, defaulting to minecraft:normal"
-                    ),
-                );
-                horizon_client::save::WorldPreset::Normal
-            });
+        let mut written = None;
+        self.native_level_type_world_gen(
+            dir,
+            &props.level_type,
+            props.seed,
+            props.generate_structures,
+            &mut written,
+        );
+        if let Some(result) = written {
+            return result.map_err(Into::into);
+        }
+        let (preset, warning) = level_type_preset(&props.level_type);
+        if let Some(warning) = warning {
+            log_from("Worker-Main-1", "WARN", &warning);
+        }
         let flat = preset == horizon_client::save::WorldPreset::Flat;
         let settings = if flat {
             let biomes = self.res.biomes();
@@ -1866,6 +1885,34 @@ mod tests {
             }
             assert_log_lines(&fs::read_to_string(home.join("logs/latest.log")).unwrap());
             fs::remove_dir_all(home).unwrap();
+        }
+    }
+
+    /// `level-type` reads as vanilla's: preset ids and the legacy names, and
+    /// any other name (a mod's preset no mod claimed) falls back to Normal
+    /// with vanilla's warning.
+    #[test]
+    fn level_types_resolve_or_fall_back_with_vanillas_warning() {
+        use super::level_type_preset;
+        use horizon_client::save::WorldPreset as P;
+        assert_eq!(level_type_preset("minecraft:normal"), (P::Normal, None));
+        assert_eq!(level_type_preset("flat"), (P::Flat, None));
+        assert_eq!(
+            level_type_preset("minecraft:large_biomes"),
+            (P::LargeBiomes, None)
+        );
+        assert_eq!(level_type_preset("largebiomes"), (P::LargeBiomes, None));
+        assert_eq!(level_type_preset("default"), (P::Normal, None));
+        for unknown in ["terraforged:normal", "no such preset!"] {
+            assert_eq!(
+                level_type_preset(unknown),
+                (
+                    P::Normal,
+                    Some(format!(
+                        "Failed to parse level-type {unknown}, defaulting to minecraft:normal"
+                    ))
+                )
+            );
         }
     }
 }

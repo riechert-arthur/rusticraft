@@ -572,6 +572,19 @@ helper = "hooks/arm_world_type.rs"
 bindings = []
 
 [[injection]]
+id = "level-type-world-gen"
+target = "horizon_client::game::native_hooks::Game<'_>::native_level_type_world_gen"
+kind = "HEAD"
+helper = "hooks/level_type_world_gen.rs"
+bindings = [
+  { name = "dir", ty = "&Path", value = "dir" },
+  { name = "level_type", ty = "&str", value = "level_type" },
+  { name = "seed", ty = "i64", value = "seed" },
+  { name = "structures", ty = "bool", value = "structures" },
+  { name = "written", ty = "&mut Option<Result<(), String>>", value = "&mut *written" },
+]
+
+[[injection]]
 id = "write-world-type"
 target = "horizon_client::save::write_world_gen_settings_with"
 kind = "HEAD"

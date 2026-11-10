@@ -684,6 +684,29 @@ impl Game<'_> {
     pub(super) fn native_server_about_to_start(&mut self, dedicated: bool) {
         let _ = dedicated;
     }
+    /// A dedicated server's new world, before it writes the world's
+    /// `world_gen_settings` from server.properties (vanilla's
+    /// `DedicatedServerProperties.createDimensions`, where `level-type` names
+    /// any `world_preset`, a mod's too). `level_type` is the property's text,
+    /// lower-cased as vanilla reads it; `seed` is the world's seed (`level-seed`'s,
+    /// or a random one when it is empty) and `structures` is `generate-structures`.
+    /// A mod whose preset `level_type` names writes the world's settings (and any
+    /// data pack it needs) into `dir` and sets `written` to how that went;
+    /// Horizon then writes nothing. Left `None`, vanilla's presets apply, and a
+    /// name none of them has falls back to `minecraft:normal` with vanilla's
+    /// warning. Runs before `native_server_about_to_start`; an existing world
+    /// never gets it.
+    /// API @API:level_type_world_gen@.
+    pub(super) fn native_level_type_world_gen(
+        &self,
+        dir: &Path,
+        level_type: &str,
+        seed: i64,
+        structures: bool,
+        written: &mut Option<Result<(), String>>,
+    ) {
+        let _ = (dir, level_type, seed, structures, written);
+    }
     /// The server begins an orderly stop (NeoForge's `ServerStoppingEvent`):
     /// the start of vanilla's `MinecraftServer.stopServer`, with the worlds
     /// still loaded and the players still connected and not yet saved, so a

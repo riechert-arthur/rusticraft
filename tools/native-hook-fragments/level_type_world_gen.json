@@ -1,0 +1,10 @@
+{
+  "hooks": [
+    {
+      "name": "level_type_world_gen",
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_level_type_world_gen"
+    }
+  ],
+  "rust_summary": "a dedicated server's new world for a mod's own `level-type`\n(`native_level_type_world_gen`).",
+  "doc_summary": "`native_level_type_world_gen(dir, level_type, seed, structures, written)`, a dedicated server's new world\nbefore it writes `world_gen_settings` from server.properties: vanilla's `level-type` names any world preset, so a mod\nwhose preset it names writes the world's settings (and its data pack) into `dir` and sets `written`; left `None`,\nvanilla's presets apply as before. Bundles that use it need `\"hooks\": @API:level_type_world_gen@`."
+}
