@@ -79,7 +79,9 @@ Differences and gaps:
   vanilla biome file: the two are derived at runtime from the game's own 26.3 data, as 6dd607eb's
   `ModBiome.create` derives them. `oak_forest` copies plains with no `minecraft:` tag, as in 6dd607eb;
   TerraForged Reimagined copies forest and tags it `minecraft:is_overworld` (a surface biome) and
-  `minecraft:is_forest`, which this port does not follow.
+  `minecraft:is_forest`, which this port does not follow. As in Java, a mod biome keeps its parent's
+  music, ambient sounds, water fog and ambient particles: `terraforged:cave` plays dripstone caves'
+  `music.overworld.dripstone_caves` (Horizon reads those from the world's biome table, #266).
 - TerraForged's pack makes every overworld taller; here only TerraForged worlds get it.
 - Far terrain (Horizon's distant tiles; TerraForged has none) shows TerraForged's ground and biomes with
   the vanilla surface rule's top blocks, but from the un-eroded height: erosion's regions are too costly to
@@ -3200,8 +3202,8 @@ rustc --edition 2024 --test native-mods/terraforged/engine.rs -o /tmp/terraforge
 /tmp/terraforged-engine-tests
 ```
 
-The mixin pins Rusticraft commit `3c635021465530dc14aaf219e4f8ebae5caef757` (#281's merge), a `main` commit rather than a Nightly:
-no Nightly is close enough (the nearest earlier one, `nightly-source/2026-10-31-d91cab6`, is 1911 commits older and
+The mixin pins Rusticraft commit `40ed51a25424d8695617460c811eda78108bb420` (#283's merge), a `main` commit rather than a Nightly:
+no Nightly is close enough (the nearest earlier one, `nightly-source/2026-10-31-d91cab6`, is 1919 commits older and
 `generator.rs` differs by 73 lines). The pin moves to a Nightly when the series is rebased onto one.
 
 Translation inputs are TerraForged commit `6dd607ebfd41a3b7274e090b1f2cf565d53d1d44` and Engine 0.3.0 bytecode

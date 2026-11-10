@@ -25,6 +25,11 @@ pub struct AmbientSounds {
     pub additions: Vec<(String, f64)>,
 }
 impl AmbientSounds {
+    /// A dimension type's or biome's `audio/ambient_sounds` attribute, if it sets one.
+    fn of(json: &Value) -> Option<Self> {
+        let v = &json["attributes"]["minecraft:audio/ambient_sounds"];
+        (!v.is_null()).then(|| Self::parse(v))
+    }
     fn parse(v: &Value) -> Self {
         let mood = &v["mood"];
         let addition =
@@ -63,8 +68,7 @@ impl AmbientTables {
                     let path = e.path();
                     let name = path.file_stem()?.to_str()?.to_owned();
                     let json: Value = serde_json::from_slice(&fs::read(&path).ok()?).ok()?;
-                    let v = &json["attributes"]["minecraft:audio/ambient_sounds"];
-                    (!v.is_null()).then(|| (format!("minecraft:{name}"), AmbientSounds::parse(v)))
+                    Some((format!("minecraft:{name}"), AmbientSounds::of(&json)?))
                 })
                 .collect()
         };
@@ -72,6 +76,20 @@ impl AmbientTables {
             dimensions: read("dimension_type"),
             biomes: read("worldgen/biome"),
         }
+    }
+    /// These tables for a world whose native mods add `native` (`(id, biome JSON)`, the
+    /// world's table's `Biomes::native`): each of those biomes' ambient sounds beside
+    /// vanilla's, which they never replace (`Biomes::with_native` keeps vanilla's ids too).
+    pub fn with_native(&self, native: &[(String, Value)]) -> Self {
+        let mut out = self.clone();
+        for (id, json) in native {
+            if !out.biomes.contains_key(id)
+                && let Some(sounds) = AmbientSounds::of(json)
+            {
+                out.biomes.insert(id.clone(), sounds);
+            }
+        }
+        out
     }
     /// `EnvironmentAttributes.AMBIENT_SOUNDS` at a position.
     pub fn get(&self, dimension: &str, biome: &str) -> AmbientSounds {
@@ -473,5 +491,54 @@ mod tests {
         assert!((5990..=6010).contains(&ticks), "{ticks}");
         assert_eq!(engine.notifications[0].identifier, "minecraft:ambient.cave");
         assert_eq!(a.moodiness, 0.0);
+    }
+
+    #[test]
+    fn a_native_biome_gets_its_own_ambient_sounds_and_never_replaces_vanilla() {
+        let sounds = |s: &str| {
+            serde_json::json!({"attributes": {"minecraft:audio/ambient_sounds": {
+                "loop": s, "mood": {"sound": "minecraft:ambient.cave", "tick_delay": 6000,
+                                    "block_search_extent": 8, "offset": 2.0}}}})
+        };
+        let mut vanilla = AmbientTables::default();
+        let basalt = AmbientSounds::of(&sounds("minecraft:ambient.basalt_deltas.loop")).unwrap();
+        vanilla
+            .biomes
+            .insert("minecraft:basalt_deltas".to_owned(), basalt.clone());
+        let world = vanilla.with_native(&[
+            ("mod:deltas".to_owned(), sounds("mod:loop")),
+            ("minecraft:basalt_deltas".to_owned(), sounds("mod:loop")),
+            (
+                "mod:quiet".to_owned(),
+                serde_json::json!({"attributes": {}}),
+            ),
+        ]);
+        let ours = world.get("minecraft:the_nether", "mod:deltas");
+        assert_eq!(ours.r#loop.as_deref(), Some("mod:loop"));
+        assert_eq!(
+            ours.mood.map(|m| m.sound).as_deref(),
+            Some("minecraft:ambient.cave")
+        );
+        assert_eq!(world.get("", "minecraft:basalt_deltas"), basalt);
+        // A biome without the attribute takes its dimension's.
+        assert_eq!(world.get("", "mod:quiet"), AmbientSounds::default());
+        assert_eq!(vanilla.get("", "mod:deltas"), AmbientSounds::default());
+    }
+
+    #[test]
+    fn a_copy_of_dripstone_caves_sounds_like_dripstone_caves() {
+        let Some(root) = crate::music::tests::resources() else {
+            eprintln!("no prepared resources: skipped");
+            return;
+        };
+        let dripstone = "data/minecraft/worldgen/biome/dripstone_caves.json";
+        let json: Value = serde_json::from_slice(&fs::read(root.join(dripstone)).unwrap()).unwrap();
+        let vanilla = AmbientTables::load(&root);
+        let world = vanilla.with_native(&[("terraforged:cave".to_owned(), json)]);
+        let dim = "minecraft:overworld";
+        assert_eq!(
+            world.get(dim, "terraforged:cave"),
+            vanilla.get(dim, "minecraft:dripstone_caves")
+        );
     }
 }

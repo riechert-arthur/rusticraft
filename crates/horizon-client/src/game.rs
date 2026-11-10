@@ -1555,7 +1555,6 @@ struct WorldRest {
     providers: Providers,
     block_entity_render: horizon_client::block_entity_render::BlockEntityRenderer,
     animate: horizon_client::animate_tick::AnimateTables,
-    fog: horizon_client::fog::FogTables,
     music: horizon_client::music::MusicTables,
     ambient: horizon_client::ambience::AmbientTables,
     nether_environment: Environment,
@@ -1633,9 +1632,6 @@ impl Resources {
     }
     fn animate(&self) -> &horizon_client::animate_tick::AnimateTables {
         &self.rest().animate
-    }
-    fn fog(&self) -> &horizon_client::fog::FogTables {
-        &self.rest().fog
     }
     fn music(&self) -> &horizon_client::music::MusicTables {
         &self.rest().music
@@ -1872,6 +1868,9 @@ struct Game<'a> {
     /// The open world's biome table (`Resources::biomes`) for what borrows it as long as
     /// `self`: taken when the world opens and when a server sends its registries.
     world_biomes: Arc<Biomes>,
+    /// The open world's music and ambient sound tables when its table holds native mods'
+    /// biomes (`music::WorldSounds`), built on first use; None: `Resources`' vanilla ones.
+    world_sounds: std::cell::OnceCell<Option<Box<music::WorldSounds>>>,
     rest_loader: Option<WorldRestLoader>,
     pending_entry: Option<PendingWorldEntry>,
     world_loader: Option<world_loading::WorldLoader>,
@@ -10768,7 +10767,7 @@ impl Game<'_> {
             locator,
         } = prepared;
         let dim = Dim::from_id(&level.dimension);
-        self.world_biomes = self.res.biomes();
+        self.adopt_world_biomes();
         self.level_shapes = shapes;
         self.world_root = save_root.clone();
         horizon_client::crash::set_detail(
@@ -16185,6 +16184,7 @@ impl<'a> Game<'a> {
         Ok(Game {
             res: res.clone(),
             world_biomes: res.biomes(),
+            world_sounds: Default::default(),
             rest_loader: None,
             pending_entry: None,
             world_loader: None,
@@ -17447,11 +17447,11 @@ fn load_world_rest(
     };
     let load_animate = || -> Result<_> {
         let animate = if draws {
-            horizon_client::animate_tick::AnimateTables::load(root, registry, &biomes)?
+            horizon_client::animate_tick::AnimateTables::load(root, registry)?
         } else {
             Default::default()
         };
-        Ok((animate, horizon_client::fog::FogTables::load(root, &biomes)))
+        Ok(animate)
     };
     let load_mobs = || -> Result<_> {
         let mob_types: HashMap<_, _> = MobTypes::load(root)?
@@ -17507,7 +17507,7 @@ fn load_world_rest(
         )
     };
     let (items, recipes, stations) = items?;
-    let (animate, fog) = animate?;
+    let animate = animate?;
     let (mob_types, mob_data) = mobs?;
     let (transformers, (player_type, player_arm, player_arm_slim, spin_attack)) = transformers?;
     log::info!(
@@ -17527,7 +17527,6 @@ fn load_world_rest(
         providers: Providers::load(root),
         block_entity_render: block_entity_render?,
         animate,
-        fog,
         music: horizon_client::music::MusicTables::load(root),
         ambient: horizon_client::ambience::AmbientTables::load(root),
         nether_environment: Environment::load_dimension(root, "the_nether", false)?,

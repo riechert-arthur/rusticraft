@@ -1,6 +1,6 @@
 //! Biome colours from the pinned biome definitions and colormaps
 //! (`Biome.getGrassColor`/`getFoliageColor`/..., `BlockTintSources`).
-use crate::Result;
+use crate::{Result, particles::ParticleType};
 use horizon_core::{noise::SimplexNoise, position::BlockPos, random::LegacyRandom};
 use serde_json::Value;
 use std::{
@@ -107,6 +107,10 @@ pub struct BiomeInfo {
     /// The biome's own fog colour attribute; otherwise the dimension's applies.
     pub fog: Option<u32>,
     pub water_fog: u32,
+    /// The `visual/water_fog_end_distance` multiplier (1 without one).
+    pub water_fog_end: f32,
+    /// `visual/ambient_particles`: each particle and its per-block chance.
+    pub ambient_particles: Vec<(ParticleType, f32)>,
     /// `BiomeGenerationSettings.features`: the placed feature ids of each
     /// `GenerationStep.Decoration` step, in order.
     pub features: Vec<Vec<String>>,
@@ -275,6 +279,8 @@ impl BiomeInfo {
             sky: color(&attributes["minecraft:visual/sky_color"]),
             fog: color(&attributes["minecraft:visual/fog_color"]),
             water_fog: color(&attributes["minecraft:visual/water_fog_color"]).unwrap_or(0x050533),
+            water_fog_end: water_fog_end(&attributes["minecraft:visual/water_fog_end_distance"]),
+            ambient_particles: ambient_particles(&attributes["minecraft:visual/ambient_particles"]),
             features: v["features"]
                 .as_array()
                 .into_iter()
@@ -291,6 +297,29 @@ impl BiomeInfo {
             name,
         }
     }
+}
+/// A `visual/water_fog_end_distance` attribute's multiplier: the biome's `multiply` modifier
+/// over the dimension's end distance, 1 for anything else.
+fn water_fog_end(v: &Value) -> f32 {
+    match (v["modifier"].as_str(), v["argument"].as_f64()) {
+        (Some("multiply"), Some(f)) => f as f32,
+        _ => 1.0,
+    }
+}
+/// A `visual/ambient_particles` attribute (a list, or a modifier object over one): the
+/// particles a client knows, with their probabilities (0 when left out).
+fn ambient_particles(list: &Value) -> Vec<(ParticleType, f32)> {
+    let entries = list["argument"].as_array().or_else(|| list.as_array());
+    entries
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let ty = entry["particle"]["type"]
+                .as_str()
+                .and_then(ParticleType::from_name)?;
+            Some((ty, entry["probability"].as_f64().unwrap_or(0.0) as f32))
+        })
+        .collect()
 }
 /// `Identifier.compareTo`: the path first, then the namespace.
 pub fn identifier_order(a: &str, b: &str) -> std::cmp::Ordering {
@@ -637,6 +666,73 @@ mod pack_tests {
         assert_eq!(vanilla.list.len(), 2);
         assert!(vanilla.native().is_empty());
         assert_eq!(vanilla.id("mod:cave"), vanilla.id("minecraft:plains"));
+    }
+
+    #[test]
+    fn a_native_biome_keeps_its_water_fog_end_and_ambient_particles() {
+        let base = builtin(&["minecraft:plains"]);
+        let cave = json!({"attributes": {
+            "minecraft:visual/water_fog_end_distance": {"modifier": "multiply", "argument": 0.85},
+            "minecraft:visual/ambient_particles": [
+                {"particle": {"type": "minecraft:white_ash"}, "probability": 0.1},
+                {"particle": {"type": "mod:unknown"}, "probability": 0.5},
+            ],
+        }});
+        let world = base.with_native(vec![("mod:cave".to_owned(), cave)]);
+        let ours = world.get(world.id("mod:cave"));
+        assert_eq!(ours.water_fog_end, 0.85);
+        assert_eq!(ours.ambient_particles, [(ParticleType::WhiteAsh, 0.1)]);
+        // A biome without the attributes: the dimension's fog end, no particles.
+        let plains = world.get(world.id("minecraft:plains"));
+        assert_eq!(plains.water_fog_end, 1.0);
+        assert!(plains.ambient_particles.is_empty());
+    }
+
+    #[test]
+    fn a_copy_of_a_vanilla_biome_reads_as_that_biome() {
+        // terraforged:cave copies dripstone caves (`ModBiome.create` keeps the parent's
+        // effects); check every biome with the attributes these tables read.
+        let root = std::env::var_os("HORIZON_TEST_RESOURCES")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../.local/horizon-client")
+                    .join(horizon_core::VANILLA_VERSION)
+            });
+        let Ok(vanilla) = Biomes::load(&root) else {
+            eprintln!("no prepared resources: skipped");
+            return;
+        };
+        let dir = root.join("data/minecraft/worldgen/biome");
+        for name in [
+            "dripstone_caves",
+            "swamp",
+            "basalt_deltas",
+            "crimson_forest",
+        ] {
+            let json: Value =
+                serde_json::from_slice(&fs::read(dir.join(format!("{name}.json"))).unwrap())
+                    .unwrap();
+            let world = vanilla.with_native(vec![(format!("mod:{name}"), json)]);
+            let ours = world.get(world.id(&format!("mod:{name}")));
+            let theirs = vanilla.get(vanilla.id(&format!("minecraft:{name}")));
+            assert_eq!(ours.water_fog_end, theirs.water_fog_end, "{name}");
+            assert_eq!(ours.ambient_particles, theirs.ambient_particles, "{name}");
+            assert_eq!(
+                (ours.sky, ours.fog, ours.water_fog),
+                (theirs.sky, theirs.fog, theirs.water_fog)
+            );
+        }
+        // The values vanilla's files hold.
+        assert_eq!(
+            vanilla.get(vanilla.id("minecraft:swamp")).water_fog_end,
+            0.85
+        );
+        let deltas = vanilla.get(vanilla.id("minecraft:basalt_deltas"));
+        assert_eq!(
+            deltas.ambient_particles,
+            [(ParticleType::WhiteAsh, 0.118093334)]
+        );
     }
 
     #[test]

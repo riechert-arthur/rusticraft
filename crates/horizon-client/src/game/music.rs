@@ -2,10 +2,51 @@
 //! the local player's ambient sound handlers and the sound engine tick.
 use super::Game;
 use horizon_client::{
+    ambience::AmbientTables,
     blocks::Fluid,
-    music::{BackgroundMusic, Music, MusicFrequency, Situation},
+    music::{BackgroundMusic, Music, MusicFrequency, MusicTables, Situation},
     sound_engine::{SoundEngine, SoundInstance, Sounds, TickContext},
 };
+
+/// A world's music and ambient sound tables when native mods add biomes to it: vanilla's
+/// with those biomes' attributes, read from the world's biome table (`Biomes::native`), as
+/// 26.3 reads every biome's from the biome registry.
+pub(super) struct WorldSounds {
+    music: MusicTables,
+    ambient: AmbientTables,
+}
+
+impl Game<'_> {
+    /// Takes the open world's biome table (`Resources::biomes`): when the world opens and when
+    /// a server sends its registries. A table with native mods' biomes gets music and ambient
+    /// sound tables of its own (built on first use, once `Resources` has loaded vanilla's); a
+    /// vanilla one reads `Resources`' unchanged.
+    pub(super) fn adopt_world_biomes(&mut self) {
+        self.world_biomes = self.res.biomes();
+        self.world_sounds = Default::default();
+    }
+    fn world_sounds(&self) -> Option<&WorldSounds> {
+        self.world_sounds
+            .get_or_init(|| {
+                let native = self.world_biomes.native();
+                (!native.is_empty()).then(|| {
+                    Box::new(WorldSounds {
+                        music: self.res.music().with_native(native),
+                        ambient: self.res.ambient().with_native(native),
+                    })
+                })
+            })
+            .as_deref()
+    }
+    fn music_tables(&self) -> &MusicTables {
+        self.world_sounds()
+            .map_or_else(|| self.res.music(), |w| &w.music)
+    }
+    fn ambient_tables(&self) -> &AmbientTables {
+        self.world_sounds()
+            .map_or_else(|| self.res.ambient(), |w| &w.ambient)
+    }
+}
 
 impl Game<'_> {
     /// `Minecraft.tick` -> `MusicManager.tick`, once per client tick.
@@ -188,7 +229,7 @@ impl Game<'_> {
         let (background, probe_volume) = match eye {
             Some(eye) => {
                 let (dimension, biome) = (self.dim.id(), self.biome_at(eye));
-                let tables = self.res.music();
+                let tables = self.music_tables();
                 (
                     tables.background(dimension, biome),
                     tables.volume(dimension, biome),
@@ -253,7 +294,9 @@ impl Game<'_> {
         };
         let feet = [p.position.x, p.position.y, p.position.z];
         let eye_y = feet[1] + f64::from(p.dimensions.eye_height);
-        let sounds = self.res.ambient().get(self.dim.id(), self.biome_at(feet));
+        let sounds = self
+            .ambient_tables()
+            .get(self.dim.id(), self.biome_at(feet));
         let underwater = self.eye_in_water(feet[0], eye_y, feet[2]);
         let world = &self.world;
         let light = |b: [i32; 3]| {
