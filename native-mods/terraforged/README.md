@@ -3657,7 +3657,7 @@ rustc --edition 2024 --test native-mods/terraforged/engine.rs -o /tmp/terraforge
 /tmp/terraforged-engine-tests
 ```
 
-The mixin pins Rusticraft commit `a446cdd041b4d411919d7181a3313c3bf6490a79` (#288's merge; `horizon_revision` in `horizon-mixin.toml`), a `main` commit rather than a Nightly:
+The mixin pins Rusticraft commit `8f758cb654884f102c2bcc573fbfc54bfef657e5` (#309's merge; `horizon_revision` in `horizon-mixin.toml`), a `main` commit rather than a Nightly:
 no Nightly is close enough (the nearest earlier one, `nightly-source/2026-10-31-d91cab6`, is 1941 commits older and
 `generator.rs` differs by 73 lines). The pin moves to a Nightly when the series is rebased onto one.
 
